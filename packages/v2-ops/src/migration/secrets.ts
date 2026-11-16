@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { Cell, Row } from "./snapshot.ts";
 
-/** Marks a column whose value moved into `pim.secret_envelopes`; the row keeps this reference, never the secret. */
+/** Marks a column whose value moved into `pim_ops.secret_envelopes`; the row keeps this reference, never the secret. */
 export type SecretRef = { readonly $secret: string };
 export const isSecretRef = (cell: unknown): cell is SecretRef => typeof cell === "object" && cell !== null && "$secret" in cell;
 

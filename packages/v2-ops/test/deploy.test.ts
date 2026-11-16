@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { describe, expect, it } from "vitest";
 import { parse, parseAllDocuments } from "yaml";
+import { DEFAULT_POOL_BUDGETS } from "@pim/v2-contracts/db";
+import { loadProcessConfig } from "@pim/v2-contracts/platform";
 import { createPimMetrics } from "../src/observability/signals.ts";
 
 const ROOT = new URL("../../../", import.meta.url).pathname;
@@ -16,7 +18,7 @@ const metricsIn = (expr: string) => [...expr.matchAll(/\b(pim_[a-z0-9_]+|cnpg_[a
 describe("the Compose homelab profile", () => {
 	const compose = parse(read("deploy/compose/compose.yaml"), { merge: true }) as any;
 	const text = read("deploy/compose/compose.yaml");
-	const env = read("deploy/compose/.env.example");
+	const env = read("deploy/compose/env.example");
 
 	it("is self-contained: no Kubernetes, no Temporal, nothing from Cloudflare, no AWS service", () => {
 		// What the stack runs (not the comments that say what it avoids).
@@ -67,11 +69,34 @@ describe("the Compose homelab profile", () => {
 		expect(conf).toMatch(/^synchronous_commit = on$/m);
 		for (const file of ["deploy/compose/compose.yaml", "deploy/compose/postgres/postgresql.conf", "deploy/k8s/base/postgres.yaml"]) expect(read(file), file).not.toMatch(/fsync\s*=\s*off|full_page_writes\s*=\s*off|synchronous_commit\s*=\s*(off|local)|synchronous_commit:\s*"?(off|local)|unlogged/i);
 		const init = read("deploy/compose/postgres/init/00-roles.sh");
-		for (const role of ["pim_migrator", "pim_app_role", "pim_runtime_role", "pim_readonly_role"]) expect(init, role).toMatch(new RegExp(`CREATE ROLE ${role} LOGIN .*NOSUPERUSER NOBYPASSRLS`));
+		// The roles are the ones @pim/v2-contracts' 0001_foundation.sql defines, and every login is a member of exactly its own.
+		const foundation = read("packages/v2-contracts/migrations/0001_foundation.sql");
+		for (const role of ["pim_gate", "pim_runtime", "pim_live", "pim_forge", "pim_maintenance"]) {
+			expect(foundation, role).toContain(`'${role}'`);
+			expect(init, role).toMatch(new RegExp(`CREATE ROLE ${role} NOLOGIN`));
+			expect(init, role).toMatch(new RegExp(`CREATE ROLE ${role}_login LOGIN .*IN ROLE ${role} NOSUPERUSER NOBYPASSRLS`));
+		}
+		expect(init).toMatch(/CREATE ROLE pim_migrator LOGIN .*NOSUPERUSER NOBYPASSRLS/);
 		expect(init).not.toMatch(/\bSUPERUSER\b(?<!NOSUPERUSER)/);
-		const roles = read("packages/v2-ops/sql/0502_roles.sql");
-		expect(roles).toContain("pim_readonly_role");
-		expect(roles).toMatch(/REVOKE ALL ON pim\.secret_envelopes FROM pim_readonly_role/);
+		expect(init).not.toMatch(/pim_app_role|pim_runtime_role|pim_readonly_role/);
+		// Statement timeouts equal the contracts' pool budgets.
+		for (const [role, pool] of [["gate", "foreground"], ["live", "foreground"], ["runtime", "runtime"], ["forge", "forge"], ["maintenance", "maintenance"]] as const) expect(init, role).toContain(`ALTER ROLE pim_${role}_login SET statement_timeout = '${DEFAULT_POOL_BUDGETS[pool].statementTimeoutMs / 1000}s'`);
+		const grants = read("packages/v2-ops/sql/0502_grants.sql").replace(/^--.*$/gm, "");
+		expect(grants).not.toMatch(/TO PUBLIC/);
+		expect(grants).toMatch(/GRANT SELECT[^;]*secret_envelopes TO pim_gate/);
+		expect(grants).not.toMatch(/secret_envelopes[^;]*TO[^;]*pim_live/);
+	});
+
+	it("gives every role an environment that @pim/v2-contracts' loadProcessConfig accepts, and a role it names", () => {
+		const filled = (value: unknown) => String(value).replace(/\$\{([A-Z0-9_]+)(?::[-?][^}]*)?\}/g, (_m, name: string) => (name === "PIM_PUBLIC_URL" ? "https://pim.example.test" : `value-of-${name}`));
+		for (const [service, role] of [["gate", "gate"], ["live", "live"], ["runner", "runner"], ["forge", "forge"], ["maintenance", "maintenance"], ["canvas", "canvas"], ["relay", "relay"]] as const) {
+			const env = Object.fromEntries(Object.entries<unknown>(compose.services[service].environment).map(([k, v]) => [k, filled(v)]));
+			const config = loadProcessConfig(env);
+			expect(config.role, service).toBe(role);
+			expect(config.natsUrl).toBe("nats://nats:4222");
+		}
+		// The migrator is the SQL runner, not a process role.
+		expect(compose.services.migrator.environment.PIM_ROLE).toBeUndefined();
 	});
 
 	it("pools connections in transaction mode with bounded per-role pools; the migrator and maintenance bypass the pooler", () => {
@@ -80,10 +105,12 @@ describe("the Compose homelab profile", () => {
 		expect(ini).toMatch(/^max_user_connections = \d+$/m);
 		expect(ini).toMatch(/^max_db_connections = \d+$/m);
 		expect(ini).toMatch(/^auth_type = scram-sha-256$/m);
-		expect(compose.services.gate.environment.PIM_DATABASE_URL).toContain("@pgbouncer:6432/");
-		expect(compose.services.runner.environment.PIM_DATABASE_URL).toContain("pim_runtime_role");
+		expect(compose.services.gate.environment.PIM_DATABASE_URL).toMatch(/pim_gate_login:.*@pgbouncer:6432\//);
+		expect(compose.services.runner.environment.PIM_DATABASE_URL).toContain("pim_runtime_login");
+		expect(compose.services.live.environment.PIM_DATABASE_URL).toContain("pim_live_login");
+		expect(compose.services.forge.environment.PIM_DATABASE_URL).toContain("pim_forge_login");
 		expect(compose.services.migrator.environment.PIM_DATABASE_URL).toMatch(/pim_migrator:.*@postgres:5432/);
-		expect(compose.services.maintenance.environment.PIM_DATABASE_URL).toMatch(/@postgres:5432/);
+		expect(compose.services.maintenance.environment.PIM_DATABASE_URL).toMatch(/pim_maintenance_login:.*@postgres:5432/);
 	});
 
 	it("scales Runners, drains them on stop, and routes the paths the audit lists to the right role", () => {
@@ -97,10 +124,10 @@ describe("the Compose homelab profile", () => {
 		expect(caddy).toContain("header_up X-Pim-Ingress-Secret {env.PIM_INGRESS_SECRET}");
 	});
 
-	it("takes every required variable from .env.example, with no real secret committed, and hardens every Pim container", () => {
+	it("takes every required variable from env.example, with no real secret committed, and hardens every Pim container", () => {
 		const required = new Set([...text.matchAll(/\$\{([A-Z0-9_]+):\?/g)].map((m) => m[1]!));
 		const defined = new Set([...env.matchAll(/^([A-Z0-9_]+)=/gm)].map((m) => m[1]!));
-		for (const name of required) expect(defined.has(name), `${name} is in .env.example`).toBe(true);
+		for (const name of required) expect(defined.has(name), `${name} is in env.example`).toBe(true);
 		for (const line of env.split("\n").filter((l) => /(PASSWORD|SECRET|KEY|TOKEN)[A-Z_0-9]*=/.test(l))) expect(line, line).toMatch(/=(CHANGE_ME|)$|=k1$|=pim-objects$/);
 		for (const role of ["gate", "live", "runner", "forge", "maintenance", "migrator"]) {
 			const s = compose.services[role];
@@ -150,6 +177,31 @@ describe("the Kubernetes manifests (Kustomize)", () => {
 		for (const p of kind("PodDisruptionBudget")) expect(p.spec.minAvailable !== undefined || p.spec.maxUnavailable !== undefined).toBe(true);
 	});
 
+	it("gives every role an environment that loadProcessConfig accepts, from the ConfigMap, literals and Secret references", () => {
+		const cm = kind("ConfigMap").find((c) => c.metadata.name === "pim-config").data as Record<string, string>;
+		for (const role of ["gate", "live", "runner", "forge", "canvas", "relay", "maintenance"]) {
+			const deployment = kind("Deployment").find((d) => d.metadata.name === `pim-${role}`);
+			const container = deployment.spec.template.spec.containers[0];
+			const env: Record<string, string> = { ...cm };
+			for (const e of container.env) env[e.name] = e.value ?? (e.valueFrom.secretKeyRef ? (/endpoint$/.test(e.valueFrom.secretKeyRef.key) ? "https://s3.example.test" : `secret:${e.valueFrom.secretKeyRef.name}/${e.valueFrom.secretKeyRef.key}`) : `pod-name-of-${role}`);
+			const config = loadProcessConfig(env);
+			expect(config.role).toBe(role);
+			expect(config.natsUrl).toBe("nats://pim-nats:4222");
+			if (role === "runner") expect(config.runnerHolderId).toMatch(/^pod-name/);
+			// The login's secret key names its role: a Runner gets the runtime login, never the migrator's.
+			expect(env.PIM_DATABASE_URL).not.toContain("migrator");
+		}
+		const keys = Object.fromEntries(kind("Deployment").map((d) => [d.metadata.name, d.spec.template.spec.containers[0].env.find((e: any) => e.name === "PIM_DATABASE_URL").valueFrom.secretKeyRef.key]));
+		expect(keys).toMatchObject({ "pim-gate": "gate-url", "pim-live": "live-url", "pim-runner": "runtime-url", "pim-forge": "forge-url", "pim-maintenance": "maintenance-url" });
+		const cluster = kind("Cluster")[0];
+		const roles = new Map<string, any>(cluster.spec.managed.roles.map((r: any) => [r.name, r]));
+		for (const r of ["gate", "runtime", "live", "forge", "maintenance"]) {
+			expect(roles.get(`pim_${r}`).login).toBe(false);
+			expect(roles.get(`pim_${r}_login`)).toMatchObject({ login: true, inRoles: [`pim_${r}`], superuser: false, bypassrls: false });
+		}
+		for (const r of roles.values()) expect(r.superuser).toBe(false);
+	});
+
 	it("drains a Runner: SIGTERM and a preStop hook leave time to hand leases back, bounded below the grace period", () => {
 		const runner = kind("Deployment").find((d) => d.metadata.name === "pim-runner");
 		const spec = runner.spec.template.spec;
@@ -173,7 +225,7 @@ describe("the Kubernetes manifests (Kustomize)", () => {
 				expect(c.securityContext.capabilities.drop, `${d.metadata.name}/${c.name}`).toEqual(["ALL"]);
 				expect(c.image, c.name).not.toMatch(/:latest$|^[^:]+$/);
 				expect(c.resources.limits.memory, c.name).toBeDefined();
-				for (const e of c.env ?? []) if (/KEY|SECRET|TOKEN|PASSWORD|URL/.test(e.name) && e.value !== undefined) expect(e.name, `${d.metadata.name} ${e.name} must come from a Secret`).toMatch(/^(PIM_KEK_DIR|PIM_ROLE|PIM_HTTP_PORT|PIM_KEK_CURRENT|PIM_DRAIN_WINDOW_SECONDS)$/);
+				for (const e of c.env ?? []) if (/KEY|SECRET|TOKEN|PASSWORD|URL/.test(e.name) && e.value !== undefined) expect(e.name, `${d.metadata.name} ${e.name} must come from a Secret`).toMatch(/^(PIM_KEK_DIR|PIM_ROLE|PIM_HTTP_PORT|PIM_KEK_CURRENT|PIM_DRAIN_WINDOW_SECONDS|PIM_S3_REGION)$/);
 			}
 			if (d.kind === "Deployment" && d.metadata.name !== "pim-migrate") for (const c of pod.containers) expect(c.readinessProbe && c.livenessProbe && c.startupProbe, c.name).toBeTruthy();
 		}

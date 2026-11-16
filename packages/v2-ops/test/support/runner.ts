@@ -21,14 +21,14 @@ export async function runPendingOperations(pool: Pool, provider: FakeProvider): 
 		const client = await pool.connect();
 		try {
 			await client.query("BEGIN");
-			const { rows } = await client.query("SELECT id, idempotency_key FROM pim.external_operations WHERE status = 'pending' ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED");
+			const { rows } = await client.query("SELECT id, idempotency_key FROM pim_ops.external_operations WHERE status = 'pending' ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED");
 			if (rows.length === 0) {
 				await client.query("COMMIT");
 				return done;
 			}
-			await client.query("UPDATE pim.external_operations SET status = 'in_flight' WHERE id = $1", [rows[0].id]);
+			await client.query("UPDATE pim_ops.external_operations SET status = 'in_flight' WHERE id = $1", [rows[0].id]);
 			provider.execute(rows[0].idempotency_key);
-			await client.query("UPDATE pim.external_operations SET status = 'succeeded', updated_at = now() WHERE id = $1", [rows[0].id]);
+			await client.query("UPDATE pim_ops.external_operations SET status = 'succeeded', updated_at = now() WHERE id = $1", [rows[0].id]);
 			await client.query("COMMIT");
 			done.push(rows[0].idempotency_key);
 		} finally {

@@ -1,6 +1,6 @@
 import { afterAll, beforeAll } from "vitest";
 import pg from "pg";
-import { loadMigrations, migrate } from "../../src/pg/migrate.ts";
+import { loadAllMigrations, migrate } from "../../src/pg/migrate.ts";
 import { type EmbeddedPostgres, startEmbeddedPostgres } from "../../src/pg/embedded.ts";
 
 let server: EmbeddedPostgres | undefined;
@@ -26,7 +26,7 @@ export function usePostgres() {
 			const pool = new pg.Pool({ connectionString: server!.url(name), max: 8 });
 			pool.on("error", () => undefined);
 			pools.push(pool);
-			if (options.migrated !== false) await migrate(pool, await loadMigrations());
+			if (options.migrated !== false) await migrate(pool, await loadAllMigrations());
 			return pool;
 		},
 	};

@@ -18,6 +18,7 @@
     "@opentelemetry/otlp-transformer": "0.223.0",
     "@opentelemetry/resources": "2.12.0",
     "@opentelemetry/sdk-trace": "2.12.0",
+    "@pim/v2-contracts": "workspace:*",
     "nats": "2.29.3",
     "pg": "^8.13.0",
     "ws": "^8.18.0",

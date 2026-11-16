@@ -11,7 +11,7 @@ import { importSnapshot } from "../migration/import.ts";
 import { FsObjectStore } from "../migration/objects.ts";
 import { buildReport, reportMarkdown } from "../migration/report.ts";
 import { SnapshotReader, SnapshotWriter } from "../migration/snapshot.ts";
-import { loadMigrations, migrate } from "../pg/migrate.ts";
+import { loadAllMigrations, migrate } from "../pg/migrate.ts";
 import { startEmbeddedPostgres } from "../pg/embedded.ts";
 import { cryptoFromEnv, need } from "./common.ts";
 
@@ -62,7 +62,7 @@ async function main() {
 		try {
 			let summary;
 			if (command === "import") {
-				await migrate(pool, await loadMigrations());
+				await migrate(pool, await loadAllMigrations());
 				summary = (await importSnapshot(pool, reader, { cutoverId, crypto: cryptoFromEnv(), objects, appCredentialsKey: process.env.APP_CREDENTIALS_KEY, legacyRpId: values["legacy-rp-id"], newRpId: values["new-rp-id"] })).summary;
 			}
 			const audit = await auditImport(pool, reader, objects, { cutoverId });
@@ -87,7 +87,7 @@ async function main() {
 		try {
 			await server.createDatabase("rehearsal");
 			const pool = new pg.Pool({ connectionString: server.url("rehearsal"), max: 4 });
-			await migrate(pool, await loadMigrations());
+			await migrate(pool, await loadAllMigrations());
 			const reader = new SnapshotReader(join(out, "snapshot"));
 			const objects = new FsObjectStore(join(out, "objects"));
 			const { summary } = await importSnapshot(pool, reader, { cutoverId: "rehearsal", crypto: cryptoFromEnv({ PIM_KEK_CURRENT: "r1", PIM_KEK_r1: Buffer.alloc(32, 1).toString("base64") }), objects, appCredentialsKey: info.keys.appCredentialsKey.toString("base64") });

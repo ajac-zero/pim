@@ -1,6 +1,6 @@
 # Pim, portable: one Docker Compose stack with no Kubernetes, no Temporal and nothing from Cloudflare or AWS.
 #
-#   cp .env.example .env     # then replace every CHANGE_ME
+#   cp env.example .env     # then replace every CHANGE_ME
 #   docker compose up -d                        # core: caddy, postgres, pgbouncer, nats, seaweedfs, migrator, gate, live, runner, forge, maintenance
 #   docker compose up -d --scale runner=3       # more Runners; partitions are leased between them
 #   docker compose --profile canvas up -d       # shared-notes canvas server (/api/notes/live)
@@ -27,13 +27,15 @@ x-pim: &pim
     PIM_PUBLIC_URL: ${PIM_PUBLIC_URL:?set PIM_PUBLIC_URL in .env}
     PIM_CONTENT_ORIGIN: ${PIM_CONTENT_ORIGIN:-}
     PIM_APPS_ORIGIN: ${PIM_APPS_ORIGIN:-}
+    # Each role connects as its own login (a member of @pim/v2-contracts' pim_gate, pim_runtime, pim_live, pim_forge or pim_maintenance role), set per service below.
     # Application traffic goes through PgBouncer in transaction mode; only the migrator and maintenance connect to PostgreSQL directly.
-    PIM_DATABASE_URL: postgres://pim_runtime_role:${PIM_RUNTIME_DB_PASSWORD:?}@pgbouncer:6432/pim
     PIM_NATS_URL: nats://nats:4222
-    PIM_OBJECTS_ENDPOINT: http://seaweedfs:8333
-    PIM_OBJECTS_BUCKET: ${PIM_OBJECTS_BUCKET:-pim-objects}
-    PIM_OBJECTS_ACCESS_KEY: ${SEAWEED_ACCESS_KEY:?}
-    PIM_OBJECTS_SECRET_KEY: ${SEAWEED_SECRET_KEY:?}
+    # loadProcessConfig (@pim/v2-contracts) reads the first three; the credentials are read by the object store adapter.
+    PIM_S3_ENDPOINT: http://seaweedfs:8333
+    PIM_S3_BUCKET: ${PIM_S3_BUCKET:-pim-objects}
+    PIM_S3_REGION: us-east-1
+    PIM_S3_ACCESS_KEY: ${SEAWEED_ACCESS_KEY:?}
+    PIM_S3_SECRET_KEY: ${SEAWEED_SECRET_KEY:?}
     # Envelope-encryption key ring: PIM_KEK_<id> is a base64 32-byte key, PIM_KEK_CURRENT names the one that wraps new keys.
     PIM_KEK_CURRENT: ${PIM_KEK_CURRENT:-k1}
     PIM_KEK_k1: ${PIM_KEK_K1:?}
@@ -78,9 +80,11 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:?}
       POSTGRES_DB: pim
       PIM_MIGRATOR_DB_PASSWORD: ${PIM_MIGRATOR_DB_PASSWORD:?}
-      PIM_APP_DB_PASSWORD: ${PIM_APP_DB_PASSWORD:?}
+      PIM_GATE_DB_PASSWORD: ${PIM_GATE_DB_PASSWORD:?}
       PIM_RUNTIME_DB_PASSWORD: ${PIM_RUNTIME_DB_PASSWORD:?}
-      PIM_READONLY_DB_PASSWORD: ${PIM_READONLY_DB_PASSWORD:?}
+      PIM_LIVE_DB_PASSWORD: ${PIM_LIVE_DB_PASSWORD:?}
+      PIM_FORGE_DB_PASSWORD: ${PIM_FORGE_DB_PASSWORD:?}
+      PIM_MAINTENANCE_DB_PASSWORD: ${PIM_MAINTENANCE_DB_PASSWORD:?}
       PGBOUNCER_AUTH_PASSWORD: ${PGBOUNCER_AUTH_PASSWORD:?}
     volumes:
       - postgres-data:/var/lib/postgresql/data
@@ -147,7 +151,7 @@ services:
     # Creates the bucket through SeaweedFS's own shell; idempotent (an existing bucket is left alone).
     entrypoint: ["/bin/sh", "-c", "echo \"s3.bucket.create -name $$BUCKET\" | weed shell -master=seaweedfs:9333 || true; echo s3.bucket.list | weed shell -master=seaweedfs:9333 | grep -q \"$$BUCKET\""]
     environment:
-      BUCKET: ${PIM_OBJECTS_BUCKET:-pim-objects}
+      BUCKET: ${PIM_S3_BUCKET:-pim-objects}
     networks: [internal]
     depends_on:
       seaweedfs: { condition: service_healthy }
@@ -158,7 +162,7 @@ services:
     command: ["migrate"]
     environment:
       <<: *pim-env
-      PIM_ROLE: migrator
+      # No PIM_ROLE: the migrator is the one-shot SQL runner (foundation 0001, then each workstream's band), not a process role of @pim/v2-contracts.
       # The migrator owns the schema, so it connects to PostgreSQL directly (advisory locks and DDL do not belong in transaction pooling).
       PIM_DATABASE_URL: postgres://pim_migrator:${PIM_MIGRATOR_DB_PASSWORD:?}@postgres:5432/pim
     depends_on:
@@ -167,7 +171,7 @@ services:
   gate:
     <<: *pim
     command: ["gate"]
-    environment: { <<: *pim-env, PIM_ROLE: gate, PIM_HTTP_PORT: "8080" }
+    environment: { <<: *pim-env, PIM_ROLE: gate, PIM_HTTP_PORT: "8080", PIM_DATABASE_URL: "postgres://pim_gate_login:${PIM_GATE_DB_PASSWORD:?}@pgbouncer:6432/pim" }
     depends_on: *pim-deps
     healthcheck: &http-health
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:${PIM_HTTP_PORT_CHECK:-8080}/healthz"]
@@ -179,7 +183,7 @@ services:
   live:
     <<: *pim
     command: ["live"]
-    environment: { <<: *pim-env, PIM_ROLE: live, PIM_HTTP_PORT: "8080" }
+    environment: { <<: *pim-env, PIM_ROLE: live, PIM_HTTP_PORT: "8080", PIM_DATABASE_URL: "postgres://pim_live_login:${PIM_LIVE_DB_PASSWORD:?}@pgbouncer:6432/pim" }
     depends_on: *pim-deps
     healthcheck: *http-health
 
@@ -188,7 +192,7 @@ services:
     command: ["runner"]
     # Scale with --scale runner=N. A stop gives a Runner time to hand its partition leases back before it is killed.
     stop_grace_period: 120s
-    environment: { <<: *pim-env, PIM_ROLE: runner, PIM_HTTP_PORT: "8080", PIM_DRAIN_WINDOW_SECONDS: "90" }
+    environment: { <<: *pim-env, PIM_ROLE: runner, PIM_HTTP_PORT: "8080", PIM_DRAIN_WINDOW_SECONDS: "90", PIM_DATABASE_URL: "postgres://pim_runtime_login:${PIM_RUNTIME_DB_PASSWORD:?}@pgbouncer:6432/pim" }
     depends_on: *pim-deps
     healthcheck: *http-health
     deploy:
@@ -197,7 +201,7 @@ services:
   forge:
     <<: *pim
     command: ["forge"]
-    environment: { <<: *pim-env, PIM_ROLE: forge, PIM_HTTP_PORT: "8080" }
+    environment: { <<: *pim-env, PIM_ROLE: forge, PIM_HTTP_PORT: "8080", PIM_DATABASE_URL: "postgres://pim_forge_login:${PIM_FORGE_DB_PASSWORD:?}@pgbouncer:6432/pim" }
     depends_on: *pim-deps
     healthcheck: *http-health
 
@@ -205,7 +209,7 @@ services:
     <<: *pim
     command: ["maintenance"]
     # Retention, vacuum helpers, lease sweeps and export jobs; one instance, connecting to PostgreSQL directly for long statements.
-    environment: { <<: *pim-env, PIM_ROLE: maintenance, PIM_HTTP_PORT: "8080", PIM_DATABASE_URL: "postgres://pim_app_role:${PIM_APP_DB_PASSWORD:?}@postgres:5432/pim" }
+    environment: { <<: *pim-env, PIM_ROLE: maintenance, PIM_HTTP_PORT: "8080", PIM_DATABASE_URL: "postgres://pim_maintenance_login:${PIM_MAINTENANCE_DB_PASSWORD:?}@postgres:5432/pim" }
     depends_on: *pim-deps
     healthcheck: *http-health
 
@@ -213,7 +217,7 @@ services:
     <<: *pim
     profiles: [canvas]
     command: ["canvas"]
-    environment: { <<: *pim-env, PIM_ROLE: canvas, PIM_HTTP_PORT: "8080" }
+    environment: { <<: *pim-env, PIM_ROLE: canvas, PIM_HTTP_PORT: "8080", PIM_DATABASE_URL: "postgres://pim_gate_login:${PIM_GATE_DB_PASSWORD:?}@pgbouncer:6432/pim" }
     depends_on: *pim-deps
     healthcheck: *http-health
 
@@ -221,7 +225,7 @@ services:
     <<: *pim
     profiles: [computer]
     command: ["relay"]
-    environment: { <<: *pim-env, PIM_ROLE: relay, PIM_HTTP_PORT: "8080", PIM_TURN_URL: "turn:${PIM_DOMAIN}:3478" }
+    environment: { <<: *pim-env, PIM_ROLE: relay, PIM_HTTP_PORT: "8080", PIM_DATABASE_URL: "postgres://pim_gate_login:${PIM_GATE_DB_PASSWORD:?}@pgbouncer:6432/pim", PIM_TURN_URL: "turn:${PIM_DOMAIN}:3478" }
     depends_on: *pim-deps
     healthcheck: *http-health
 

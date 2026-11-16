@@ -1,6 +1,8 @@
 import { monitorEventLoopDelay } from "node:perf_hooks";
 import { createServer, type Server } from "node:http";
-import type { Pool } from "pg";
+import { POOL_NAMES, type PoolName } from "@pim/v2-contracts/db";
+import type { ProcessConfig } from "@pim/v2-contracts/platform";
+import pg, { type Pool } from "pg";
 import { Registry } from "./metrics.ts";
 
 /** Every signal Pim's services report, by the name the dashboards and alert rules use. Nothing here is labelled by a person, a chat or any content. */
@@ -56,7 +58,7 @@ const statementKind = (sql: string) => /^\s*(\w+)/.exec(sql)?.[1]?.toLowerCase()
  * Wraps a pg Pool: connection wait time, query duration by statement kind, and pool gauges at every scrape. The SQL text and parameters are never
  * recorded, only the statement's first keyword.
  */
-export function instrumentPool(pool: Pool, metrics: PimMetrics, service: string, name = "main"): Pool {
+export function instrumentPool(pool: Pool, metrics: PimMetrics, service: string, name: PoolName = "foreground"): Pool {
 	const connect = pool.connect.bind(pool) as (...args: unknown[]) => Promise<unknown>;
 	(pool as unknown as { connect: typeof connect }).connect = async (...args: unknown[]) => {
 		const start = performance.now();
@@ -94,4 +96,18 @@ export function serveMetrics(registry: Registry, port: number, host = "127.0.0.1
 		else res.writeHead(404).end();
 	});
 	return new Promise((resolve) => server.listen(port, host, () => resolve(server)));
+}
+
+/**
+ * Opens the pools a process needs, one per name in @pim/v2-contracts' POOL_NAMES, each bounded by the process config's budget (max connections, idle timeout, statement
+ * timeout), each instrumented under its own `pool` label. A pool that is never used holds no connection.
+ */
+export function openPools(config: ProcessConfig, metrics: PimMetrics, service: string): Record<PoolName, Pool> {
+	return Object.fromEntries(
+		POOL_NAMES.map((name) => {
+			const budget = config.pools[name];
+			const pool = new pg.Pool({ connectionString: config.databaseUrl, max: budget.max, idleTimeoutMillis: budget.idleTimeoutMs, statement_timeout: budget.statementTimeoutMs, application_name: `pim-${service}-${name}` });
+			return [name, instrumentPool(pool, metrics, service, name)];
+		}),
+	) as Record<PoolName, Pool>;
 }

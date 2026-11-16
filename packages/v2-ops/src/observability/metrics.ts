@@ -3,7 +3,7 @@ import { redactText } from "./redact.ts";
 export type Labels = Readonly<Record<string, string>>;
 
 /** Label names a metric may never carry: they would put people, content or credentials into a time series. */
-const FORBIDDEN_LABELS = /^(tenant|tenant_id|user|user_id|owner|owner_id|username|email|prompt|message|content|body|token|key|secret|cookie|authorization|conversation|conversation_id|chat|chat_id|path_raw|url)$/i;
+const FORBIDDEN_LABELS = /^(tenant|owner_id|user|user_id|owner|owner_id|username|email|prompt|message|content|body|token|key|secret|cookie|authorization|conversation|conversation_id|chat|chat_id|path_raw|url)$/i;
 const MAX_SERIES = 2000;
 
 const escapeLabel = (v: string) => v.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n");

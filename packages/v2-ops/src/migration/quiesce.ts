@@ -2,6 +2,7 @@ import { nextCronAfter, cronOccurrencesBetween } from "./cron.ts";
 import { type DoDump, type SnapshotReader, rowsOf } from "./snapshot.ts";
 import { canonical } from "./secrets.ts";
 import { sha256 } from "./snapshot.ts";
+import { ownerIdOf } from "./ids.ts";
 import { readPi } from "./split.ts";
 
 export type PlannedOperation = {
@@ -46,8 +47,9 @@ export async function planQuiescence(reader: SnapshotReader, cutoverAt: number):
 	const taskHolds: { tenantId: string; taskId: number; reason: string }[] = [];
 	const resumable: Record<string, number> = {};
 
-	for (const owner of await reader.names("Pim")) {
-		const dump = await reader.dump("Pim", owner);
+	for (const legacyOwner of await reader.names("Pim")) {
+		const owner = ownerIdOf(legacyOwner);
+		const dump = await reader.dump("Pim", legacyOwner);
 		const pi = readPi(dump);
 		const approvals = rowsOf(dump, "pim_approvals");
 		const approvalByCall = new Map(approvals.filter((a) => a.call_id).map((a) => [String(a.call_id), a]));
@@ -134,7 +136,7 @@ export async function planQuiescence(reader: SnapshotReader, cutoverAt: number):
 	for (const name of await reader.names("CodingThread")) {
 		const dump: DoDump = await reader.dump("CodingThread", name);
 		for (const thread of rowsOf(dump, "coding_thread")) {
-			const owner = String(thread.space);
+			const owner = ownerIdOf(String(thread.space));
 			const state = String(thread.state);
 			const orb = json(thread.orb);
 			if (thread.provider_kind === "agent-hosted" && orb?.threadId) {

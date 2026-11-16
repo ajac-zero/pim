@@ -11,7 +11,7 @@ import { buildLegacySnapshot } from "../src/migration/fixture.ts";
 import { importSnapshot } from "../src/migration/import.ts";
 import { FsObjectStore } from "../src/migration/objects.ts";
 import { SnapshotReader } from "../src/migration/snapshot.ts";
-import { loadMigrations, migrate } from "../src/pg/migrate.ts";
+import { loadAllMigrations, migrate } from "../src/pg/migrate.ts";
 import { type EmbeddedPostgres, startEmbeddedPostgres } from "../src/pg/embedded.ts";
 import { FakeProvider, runPendingOperations } from "./support/runner.ts";
 
@@ -31,7 +31,7 @@ describe("backup, restore and the post-restore safety pass (real PostgreSQL, phy
 	const restored: EmbeddedPostgres[] = [];
 
 	const op = (id: string, key: string, status: string) =>
-		pool.query("INSERT INTO pim.external_operations (id, tenant_id, kind, idempotency_key, status, origin) VALUES ($1, 'own_ada', 'http_request', $2, $3, 'runner')", [id, key, status]);
+		pool.query("INSERT INTO pim_ops.external_operations (id, owner_id, kind, idempotency_key, status, origin) VALUES ($1, 'o_own_ada', 'http_request', $2, $3, 'runner')", [id, key, status]);
 
 	beforeAll(async () => {
 		root = await mkdtemp(join(tmpdir(), "pim-backup-"));
@@ -40,7 +40,7 @@ describe("backup, restore and the post-restore safety pass (real PostgreSQL, phy
 		objects = new FsObjectStore(join(root, "s3"));
 		live = await startEmbeddedPostgres({ dataDir: join(root, "live"), archiveDir });
 		pool = new pg.Pool({ connectionString: live.url(), max: 4 });
-		await migrate(pool, await loadMigrations());
+		await migrate(pool, await loadAllMigrations());
 		await buildLegacySnapshot(join(root, "snapshot"));
 		reader = new SnapshotReader(join(root, "snapshot"));
 		await importSnapshot(pool, reader, { cutoverId: "cut-1", crypto, objects });
@@ -82,8 +82,8 @@ describe("backup, restore and the post-restore safety pass (real PostgreSQL, phy
 
 	it("restores the base backup alone: data intact, the pending operation is back, and without the safety pass it would run twice", async () => {
 		const r = await restore("restore-base", { targetImmediate: true });
-		expect((await r.pool.query("SELECT status FROM pim.external_operations WHERE id IN ('op_x','op_y') ORDER BY id")).rows.map((x) => x.status)).toEqual(["in_flight", "pending"]);
-		expect((await r.pool.query("SELECT count(*) n FROM pim.external_operations WHERE id = 'op_z'")).rows[0].n).toBe("0");
+		expect((await r.pool.query("SELECT status FROM pim_ops.external_operations WHERE id IN ('op_x','op_y') ORDER BY id")).rows.map((x) => x.status)).toEqual(["in_flight", "pending"]);
+		expect((await r.pool.query("SELECT count(*) n FROM pim_ops.external_operations WHERE id = 'op_z'")).rows[0].n).toBe("0");
 		expect((await auditImport(r.pool, reader, r.objects, { cutoverId: "cut-1" })).ok).toBe(true);
 		expect(r.manifest.keyMaterial.map((k) => k.name)).toEqual(["APP_CREDENTIALS_KEY", "directory.cookie_key"]);
 		expect(r.manifest.objects).toHaveLength(5);
@@ -97,10 +97,10 @@ describe("backup, restore and the post-restore safety pass (real PostgreSQL, phy
 		void copy;
 		await runPendingOperations(r.pool, control);
 		expect(control.duplicates).toEqual(["http:order-7"]);
-		await r.pool.query("UPDATE pim.external_operations SET status = 'pending' WHERE id = 'op_y'"); // put the control back
+		await r.pool.query("UPDATE pim_ops.external_operations SET status = 'pending' WHERE id = 'op_y'"); // put the control back
 
 		// The pass, told which effects the outside world remembers.
-		const summary = await postRestoreSafetyPass(r.pool, { restoreId: "restore-base", backupId: "b1", knownEffects: [{ tenantId: "own_ada", idempotencyKey: "http:order-7" }], now: Date.now() });
+		const summary = await postRestoreSafetyPass(r.pool, { restoreId: "restore-base", backupId: "b1", knownEffects: [{ tenantId: "o_own_ada", idempotencyKey: "http:order-7" }], now: Date.now() });
 		expect(summary.inFlightQuarantined).toBe(1);
 		expect(summary.knownEffectsRecorded).toBe(1);
 		expect(summary.toolTasksHeld).toBe(0); // the import already held them
@@ -108,19 +108,19 @@ describe("backup, restore and the post-restore safety pass (real PostgreSQL, phy
 		expect(await runPendingOperations(r.pool, provider)).toEqual([]);
 		expect(provider.executions.get("http:order-7")).toBe(1);
 		expect(provider.duplicates).toEqual([]);
-		expect((await r.pool.query("SELECT id, status FROM pim.external_operations WHERE id IN ('op_x','op_y') ORDER BY id")).rows).toEqual([
+		expect((await r.pool.query("SELECT id, status FROM pim_ops.external_operations WHERE id IN ('op_x','op_y') ORDER BY id")).rows).toEqual([
 			{ id: "op_x", status: "needs_reconciliation" },
 			{ id: "op_y", status: "needs_reconciliation" },
 		]);
 		// Idempotent, and nothing is left armed in the past.
 		expect(await postRestoreSafetyPass(r.pool, { restoreId: "restore-base" })).toMatchObject({ inFlightQuarantined: 0, pendingQuarantined: 0 });
-		expect((await r.pool.query("SELECT count(*) n FROM pim.due_work WHERE state = 'armed' AND next_due_at_ms <= $1", [Date.now()])).rows[0].n).toBe("0");
+		expect((await r.pool.query("SELECT count(*) n FROM pim_ops.due_work WHERE state = 'armed' AND next_due_at_ms <= $1", [Date.now()])).rows[0].n).toBe("0");
 		await r.pool.end();
 	});
 
 	it("point-in-time recovery to just after the effect: the effect is remembered, later work is gone, and the pass quarantines only what is unsettled", async () => {
 		const r = await restore("restore-pitr", { targetTime: tY });
-		expect((await r.pool.query("SELECT id, status FROM pim.external_operations WHERE id IN ('op_x','op_y','op_z') ORDER BY id")).rows).toEqual([
+		expect((await r.pool.query("SELECT id, status FROM pim_ops.external_operations WHERE id IN ('op_x','op_y','op_z') ORDER BY id")).rows).toEqual([
 			{ id: "op_x", status: "in_flight" },
 			{ id: "op_y", status: "succeeded" },
 		]);
@@ -130,7 +130,7 @@ describe("backup, restore and the post-restore safety pass (real PostgreSQL, phy
 		expect(summary).toMatchObject({ inFlightQuarantined: 1, pendingQuarantined: 0 });
 		expect(await runPendingOperations(r.pool, provider)).toEqual([]);
 		expect(provider.duplicates).toEqual([]);
-		expect((await r.pool.query("SELECT status FROM pim.external_operations WHERE id = 'op_y'")).rows[0].status).toBe("succeeded");
+		expect((await r.pool.query("SELECT status FROM pim_ops.external_operations WHERE id = 'op_y'")).rows[0].status).toBe("succeeded");
 		await r.pool.end();
 	});
 

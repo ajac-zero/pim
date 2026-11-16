@@ -39,10 +39,19 @@ spec:
       owner: pim_migrator
       secret: { name: pim-pg-roles }
   managed:
+    # The five process roles of @pim/v2-contracts (0001_foundation.sql would create any that are missing; creating them here first keeps the logins' membership declarative),
+    # then one login per process kind that is a member of its role. No role is superuser or BYPASSRLS.
     roles:
-      - { name: pim_app_role, ensure: present, login: true, superuser: false, bypassrls: false, createdb: false, createrole: false, connectionLimit: 40, passwordSecret: { name: pim-pg-app-role } }
-      - { name: pim_runtime_role, ensure: present, login: true, superuser: false, bypassrls: false, createdb: false, createrole: false, connectionLimit: 80, passwordSecret: { name: pim-pg-runtime-role } }
-      - { name: pim_readonly_role, ensure: present, login: true, superuser: false, bypassrls: false, createdb: false, createrole: false, connectionLimit: 10, passwordSecret: { name: pim-pg-readonly-role } }
+      - { name: pim_gate, ensure: present, login: false, superuser: false, bypassrls: false, createdb: false, createrole: false }
+      - { name: pim_runtime, ensure: present, login: false, superuser: false, bypassrls: false, createdb: false, createrole: false }
+      - { name: pim_live, ensure: present, login: false, superuser: false, bypassrls: false, createdb: false, createrole: false }
+      - { name: pim_forge, ensure: present, login: false, superuser: false, bypassrls: false, createdb: false, createrole: false }
+      - { name: pim_maintenance, ensure: present, login: false, superuser: false, bypassrls: false, createdb: false, createrole: false }
+      - { name: pim_gate_login, ensure: present, login: true, superuser: false, bypassrls: false, createdb: false, createrole: false, connectionLimit: 60, inRoles: [pim_gate], passwordSecret: { name: pim-pg-gate-login } }
+      - { name: pim_runtime_login, ensure: present, login: true, superuser: false, bypassrls: false, createdb: false, createrole: false, connectionLimit: 80, inRoles: [pim_runtime], passwordSecret: { name: pim-pg-runtime-login } }
+      - { name: pim_live_login, ensure: present, login: true, superuser: false, bypassrls: false, createdb: false, createrole: false, connectionLimit: 40, inRoles: [pim_live], passwordSecret: { name: pim-pg-live-login } }
+      - { name: pim_forge_login, ensure: present, login: true, superuser: false, bypassrls: false, createdb: false, createrole: false, connectionLimit: 30, inRoles: [pim_forge], passwordSecret: { name: pim-pg-forge-login } }
+      - { name: pim_maintenance_login, ensure: present, login: true, superuser: false, bypassrls: false, createdb: false, createrole: false, connectionLimit: 8, inRoles: [pim_maintenance], passwordSecret: { name: pim-pg-maintenance-login } }
   storage: { size: 100Gi }
   walStorage: { size: 20Gi }
   affinity:

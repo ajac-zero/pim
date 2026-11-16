@@ -35,102 +35,102 @@
       "synchronous_commit": "on",
       "wal_level": "replica"
     },
-    "fsyncMedianMs": 0.448
+    "fsyncMedianMs": 0.427
   },
   "measuredSeconds": 25,
   "foreground": {
     "baseline": {
       "sidebar": {
-        "n": 1384,
-        "p50": 1.19,
-        "p95": 1.86,
-        "p99": 2.39,
-        "max": 8.65,
-        "mean": 1.25
+        "n": 1314,
+        "p50": 1.72,
+        "p95": 2.88,
+        "p99": 5.6,
+        "max": 17.21,
+        "mean": 1.88
       },
       "session": {
-        "n": 1386,
-        "p50": 1.45,
-        "p95": 2.3,
-        "p99": 2.94,
-        "max": 13.22,
-        "mean": 1.55
+        "n": 1312,
+        "p50": 1.99,
+        "p95": 3.24,
+        "p99": 8.96,
+        "max": 17.66,
+        "mean": 2.19
       },
       "errors": 0
     },
     "underLoad": {
       "sidebar": {
-        "n": 4258,
-        "p50": 1.29,
-        "p95": 2.25,
-        "p99": 3.95,
-        "max": 19.23,
-        "mean": 1.43
+        "n": 4170,
+        "p50": 1.42,
+        "p95": 2.79,
+        "p99": 8.11,
+        "max": 28.65,
+        "mean": 1.69
       },
       "session": {
-        "n": 4259,
-        "p50": 1.7,
-        "p95": 2.68,
-        "p99": 4.96,
-        "max": 19.02,
-        "mean": 1.82
+        "n": 4169,
+        "p50": 1.83,
+        "p95": 3.25,
+        "p99": 7.8,
+        "max": 40.04,
+        "mean": 2.09
       },
       "errors": 0
     },
     "slo": {
-      "sidebarP95Ms": 2.25,
-      "sessionP95Ms": 2.68,
+      "sidebarP95Ms": 2.79,
+      "sessionP95Ms": 3.25,
       "absoluteUnder250ms": true,
-      "sidebarRegressionPct": 21.2,
-      "sessionRegressionPct": 16.6,
-      "relativeWithin20pct": false,
-      "passesBoth": false,
+      "sidebarRegressionPct": -3.3,
+      "sessionRegressionPct": 0.3,
+      "relativeWithin20pct": true,
+      "passesBoth": true,
       "note": "The relative test compares warm p95 under load with warm p95 at baseline, measured in the same run."
     }
   },
   "write": {
-    "commits": 6545,
-    "commitsPerSecondInWindow": 212,
-    "commitsPerSecondPerActiveRun": 4.24,
+    "commits": 6516,
+    "commitsPerSecondInWindow": 210.9,
+    "commitsPerSecondPerActiveRun": 4.22,
     "commitLatencyMsByRunner": [
       {
-        "n": 3269,
-        "p50": 1.22,
-        "p95": 2.01,
-        "p99": 2.94,
-        "max": 13.95,
-        "mean": 1.32
+        "n": 3262,
+        "p50": 1.06,
+        "p95": 1.78,
+        "p99": 4.12,
+        "max": 39.94,
+        "mean": 1.25
       },
       {
-        "n": 3276,
-        "p50": 1.22,
-        "p95": 2,
-        "p99": 2.92,
-        "max": 15.25,
-        "mean": 1.32
+        "n": 3254,
+        "p50": 1.08,
+        "p95": 1.87,
+        "p99": 3.81,
+        "max": 28.08,
+        "mean": 1.23
       }
     ],
-    "partialsPerSecondPerRun": 3.21,
+    "partialsPerSecondPerRun": 3.19,
     "fencingRejects": 0,
-    "providerErrors": 8,
-    "turnsCompleted": 378,
+    "providerErrors": 6,
+    "turnsCompleted": 377,
     "turnsMuchLaterThanTwiceExpected": 0,
     "expectedTurnMs": 3900,
-    "codingFloodRows": 25600
+    "codingFloodRows": 25680
   },
   "postgres": {
-    "transactionsPerSecondIncludingReads": 587.1,
-    "rowsInsertedPerSecond": 831.2,
-    "rowsUpdatedPerSecond": 399,
-    "walFsyncsPerSecond": 224,
-    "walFsyncMeanMs": 0.266,
+    "transactionsPerSecondIncludingReads": 580.2,
+    "rowsInsertedPerSecond": 831.3,
+    "rowsUpdatedPerSecond": 399.2,
+    "walFsyncsPerSecond": 224.3,
+    "walFsyncMeanMs": 0.251,
     "rollbacks": 0
   },
   "resources": {
-    "machineCpuBusyPct": 25.1,
-    "postgresRssMbMax": 587,
-    "nodeProcessesRssMbMax": 826,
-    "maxEventLoopDelayMs": 29.6,
+    "machineCpuBusyPct": 27.4,
+    "postgresRssMbMax": 658,
+    "nodeProcessesRssMbMax": 896,
+    "maxEventLoopDelayMs": 39.3,
     "gatePool": {
       "total": 4,
       "idle": 4,
@@ -140,26 +140,26 @@
   "live": {
     "websocketsOpen": 32,
     "websocketsRequested": 32,
-    "eventsReceived": 19635,
+    "eventsReceived": 19554,
     "deliveryLagMs": {
-      "n": 19635,
+      "n": 19554,
       "p50": 0,
       "p95": 1,
-      "p99": 1,
-      "max": 8,
-      "mean": 0.47
+      "p99": 2,
+      "max": 16,
+      "mean": 0.45
     },
     "coalesced": 0,
     "overflowDisconnects": 0,
-    "liveEventLoopMaxMs": 15.4
+    "liveEventLoopMaxMs": 22.6
   },
   "saturation": {
     "fractionOfTurnsMuchLate": 0,
-    "commitP99Ms": 2.94,
+    "commitP99Ms": 4.12,
     "verdict": "keeping up"
   },
   "dataRows": {
-    "entries": "42712",
-    "flood": "25600"
+    "entries": "42711",
+    "flood": "25680"
   }
 }

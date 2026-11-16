@@ -9,6 +9,7 @@
 import { createServer } from "node:http";
 import { monitorEventLoopDelay } from "node:perf_hooks";
 import { connect as natsConnect, StringCodec } from "nats";
+import { type SqlPool, withTenantTransaction } from "@pim/v2-contracts/db";
 import pg from "pg";
 import { WebSocket, WebSocketServer } from "ws";
 import type { Workload } from "./profiles.ts";
@@ -66,15 +67,32 @@ async function provider() {
 /** ---------------------------------------------------------------- gate */
 async function gate() {
 	const pool = new pg.Pool({ connectionString: config.dbUrl, max: config.pool ?? 10 });
+	// Foreground reads run as the Gate does: in a transaction that sets pim.owner_id with set_config(..., true), so row-level security and PgBouncer transaction mode both work.
+	const sql: SqlPool = {
+		async transaction(fn) {
+			const client = await pool.connect();
+			try {
+				await client.query("BEGIN");
+				const result = await fn(client);
+				await client.query("COMMIT");
+				return result;
+			} catch (error) {
+				await client.query("ROLLBACK").catch(() => undefined);
+				throw error;
+			} finally {
+				client.release();
+			}
+		},
+	};
 	const server = createServer(async (req, res) => {
 		const url = new URL(req.url ?? "/", "http://x");
 		const tenant = url.searchParams.get("tenant") ?? "";
 		try {
 			if (url.pathname === "/api/sidebar") {
-				const { rows } = await pool.query("SELECT public_id, title, updated_at_ms FROM pim.chats WHERE tenant_id = $1 AND deleted_at_ms IS NULL ORDER BY updated_at_ms DESC LIMIT 50", [tenant]);
+				const { rows } = (await withTenantTransaction(sql, tenant, (c) => c.query("SELECT public_id, title, updated_at_ms FROM pim_ops.chats WHERE owner_id = $1 AND deleted_at_ms IS NULL ORDER BY updated_at_ms DESC LIMIT 50", [tenant]))) as { rows: unknown[] };
 				res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(rows));
 			} else if (url.pathname === "/api/session") {
-				const { rows } = await pool.query("SELECT e.record FROM pim.chats c JOIN pim.pi_entries e ON e.tenant_id = c.tenant_id AND e.conversation_id = c.conversation_id WHERE c.tenant_id = $1 AND c.public_id = $2 ORDER BY e.id DESC LIMIT 50", [tenant, url.searchParams.get("chat")]);
+				const { rows } = (await withTenantTransaction(sql, tenant, (c) => c.query("SELECT e.record FROM pim_ops.chats c JOIN pim_ops.pi_entries e ON e.owner_id = c.owner_id AND e.conversation_id = c.conversation_id WHERE c.owner_id = $1 AND c.public_id = $2 ORDER BY e.id DESC LIMIT 50", [tenant, url.searchParams.get("chat")]))) as { rows: unknown[] };
 				res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(rows));
 			} else if (url.pathname === "/stats") res.end(JSON.stringify({ loop: loopSummary(), pool: { total: pool.totalCount, idle: pool.idleCount, waiting: pool.waitingCount } }));
 			else res.writeHead(404).end();
@@ -163,15 +181,15 @@ async function runner() {
 	const commitLatency = new Samples();
 	const stats = { commits: 0, partials: 0, turns: 0, providerErrors: 0, fencingRejects: 0, lateTurns: 0, floodEvents: 0 };
 	const epoch = 1;
-	await pool.query("INSERT INTO pim.bench_leases (partition_id, owner, epoch) SELECT p, $1, $2 FROM unnest($3::text[]) p ON CONFLICT (partition_id) DO UPDATE SET owner = EXCLUDED.owner, epoch = pim.bench_leases.epoch + 1", [owner, epoch, runs.map((r) => r.partition)]);
+	await pool.query("INSERT INTO pim_ops.bench_leases (partition_id, owner, epoch) SELECT p, $1, $2 FROM unnest($3::uuid[]) p ON CONFLICT (partition_id) DO UPDATE SET owner = EXCLUDED.owner, epoch = pim_ops.bench_leases.epoch + 1", [owner, epoch, runs.map((r) => r.partition)]);
 
 	// One commit: a single statement, so a single implicit transaction and a single WAL flush. It checks the lease epoch (fencing), takes the next commit
 	// sequence of the partition, writes the entry, and updates the chat's last activity when asked.
-	const COMMIT = `WITH fence AS (SELECT 1 FROM pim.bench_leases WHERE partition_id = $1 AND owner = $2 AND epoch >= $3 FOR SHARE),
-		seq AS (UPDATE pim.partitions SET next_commit_seq = next_commit_seq + 1 WHERE tenant_id = $4 AND partition_id = $1 AND EXISTS (SELECT 1 FROM fence) RETURNING next_commit_seq - 1 AS s),
-		ins AS (INSERT INTO pim.pi_entries (tenant_id, id, partition_id, conversation_id, commit_seq, record) SELECT $4, $5, $1, $6, s, $7::jsonb FROM seq
-			ON CONFLICT (tenant_id, id) DO UPDATE SET record = EXCLUDED.record, commit_seq = EXCLUDED.commit_seq RETURNING 1),
-		chat AS (UPDATE pim.chats SET updated_at_ms = $8 WHERE $9::boolean AND tenant_id = $4 AND public_id = $10 RETURNING 1)
+	const COMMIT = `WITH fence AS (SELECT 1 FROM pim_ops.bench_leases WHERE partition_id = $1 AND owner = $2 AND epoch >= $3 FOR SHARE),
+		seq AS (UPDATE pim_ops.partitions SET next_commit_seq = next_commit_seq + 1 WHERE owner_id = $4 AND partition_id = $1 AND EXISTS (SELECT 1 FROM fence) RETURNING next_commit_seq - 1 AS s),
+		ins AS (INSERT INTO pim_ops.pi_entries (owner_id, id, partition_id, conversation_id, commit_seq, record) SELECT $4, $5, $1, $6, s, $7::jsonb FROM seq
+			ON CONFLICT (owner_id, id) DO UPDATE SET record = EXCLUDED.record, commit_seq = EXCLUDED.commit_seq RETURNING 1),
+		chat AS (UPDATE pim_ops.chats SET updated_at_ms = $8 WHERE $9::boolean AND owner_id = $4 AND public_id = $10 RETURNING 1)
 		SELECT (SELECT s FROM seq) AS s`;
 	const params = (r: Run, id: number, record: unknown, touch: boolean) => [r.partition, owner, epoch, r.tenant, id, r.conversation, JSON.stringify(record), Date.now(), touch, r.chat];
 
@@ -242,7 +260,7 @@ async function runner() {
 		while (!stopping && !stop()) {
 			const turnStart = performance.now();
 			// Growing history: read the latest 40 entries as context before each model request, like building a prompt.
-			await pool.query("SELECT record FROM pim.pi_entries WHERE tenant_id = $1 AND conversation_id = $2 ORDER BY id DESC LIMIT 40", [run.tenant, run.conversation]);
+			await pool.query("SELECT record FROM pim_ops.pi_entries WHERE owner_id = $1 AND conversation_id = $2 ORDER BY id DESC LIMIT 40", [run.tenant, run.conversation]);
 			await commit(run, nextId++, { id: nextId, kind: "message", model: [{ role: "user", content: [{ type: "text", text: "next question" }] }] });
 			const partialId = nextId++;
 			let produced = 0;
@@ -288,7 +306,7 @@ async function runner() {
 		let seq = 0;
 		while (!stopping && !stop()) {
 			const rows = Array.from({ length: 40 }, () => ({ s: ++seq, k: "output", b: JSON.stringify({ line: "build output ".repeat(8) }) }));
-			await pool.query("INSERT INTO pim.bench_coding_events (thread_id, seq, kind, body) SELECT $1, s, k, b::jsonb FROM unnest($2::bigint[], $3::text[], $4::text[]) x(s, k, b) ON CONFLICT DO NOTHING", [`flood-${config.index}-${i}`, rows.map((r) => r.s), rows.map((r) => r.k), rows.map((r) => r.b)]);
+			await pool.query("INSERT INTO pim_ops.bench_coding_events (thread_id, seq, kind, body) SELECT $1, s, k, b::jsonb FROM unnest($2::bigint[], $3::text[], $4::text[]) x(s, k, b) ON CONFLICT DO NOTHING", [`flood-${config.index}-${i}`, rows.map((r) => r.s), rows.map((r) => r.k), rows.map((r) => r.b)]);
 			stats.floodEvents += rows.length;
 			await sleep(100);
 		}

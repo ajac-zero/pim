@@ -41,13 +41,16 @@ spec:
             - { name: PIM_ROLE, value: runner }
             - { name: PIM_HTTP_PORT, value: "8080" }
             - { name: PIM_DATABASE_URL, valueFrom: { secretKeyRef: { name: pim-db, key: runtime-url } } }
-            - { name: PIM_OBJECTS_ENDPOINT, valueFrom: { secretKeyRef: { name: pim-objects, key: endpoint } } }
-            - { name: PIM_OBJECTS_BUCKET, valueFrom: { secretKeyRef: { name: pim-objects, key: bucket } } }
-            - { name: PIM_OBJECTS_ACCESS_KEY, valueFrom: { secretKeyRef: { name: pim-objects, key: access-key } } }
-            - { name: PIM_OBJECTS_SECRET_KEY, valueFrom: { secretKeyRef: { name: pim-objects, key: secret-key } } }
+            - { name: PIM_S3_ENDPOINT, valueFrom: { secretKeyRef: { name: pim-objects, key: endpoint } } }
+            - { name: PIM_S3_REGION, value: us-east-1 }
+            - { name: PIM_S3_BUCKET, valueFrom: { secretKeyRef: { name: pim-objects, key: bucket } } }
+            - { name: PIM_S3_ACCESS_KEY, valueFrom: { secretKeyRef: { name: pim-objects, key: access-key } } }
+            - { name: PIM_S3_SECRET_KEY, valueFrom: { secretKeyRef: { name: pim-objects, key: secret-key } } }
             - { name: PIM_INGRESS_SECRET, valueFrom: { secretKeyRef: { name: pim-ingress, key: secret } } }
             # Envelope keys are mounted as files, one per key id, and read from here: they are never environment variables and never in a ConfigMap.
             - { name: PIM_KEK_DIR, value: /run/secrets/pim-kek }
+            # The holder id of this Runner's partition leases: unique per pod.
+            - { name: PIM_RUNNER_HOLDER_ID, valueFrom: { fieldRef: { fieldPath: metadata.name } } }
             - { name: PIM_DRAIN_WINDOW_SECONDS, value: "90" }
           resources:
             requests: { cpu: 500m, memory: 1Gi }

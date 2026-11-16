@@ -5,7 +5,8 @@ import pg from "pg";
 import { describe, expect, it } from "vitest";
 import { Registry } from "../src/observability/metrics.ts";
 import { REDACTED, redactText, redactValue, redactedLogLine } from "../src/observability/redact.ts";
-import { createPimMetrics, instrumentPool, monitorEventLoop } from "../src/observability/signals.ts";
+import { loadProcessConfig } from "@pim/v2-contracts/platform";
+import { createPimMetrics, instrumentPool, monitorEventLoop, openPools } from "../src/observability/signals.ts";
 import { createTracerProvider } from "../src/observability/tracing.ts";
 import { usePostgres } from "./support/pg.ts";
 
@@ -79,7 +80,7 @@ describe("metrics", () => {
 		expect(text).toContain('pim_http_request_duration_seconds_count{service="gate",route="/api/chats",method="GET",status_class="2xx"} 2');
 		expect(text).toContain('pim_model_errors_total{provider="example",class="timeout_524"} 1');
 		const r = new Registry();
-		for (const label of ["tenant_id", "user", "prompt", "token", "conversation_id", "email"]) expect(() => r.counter(`c_${label}`, "x", [label]), label).toThrow(/may not have/);
+		for (const label of ["owner_id", "user", "prompt", "token", "conversation_id", "email"]) expect(() => r.counter(`c_${label}`, "x", [label]), label).toThrow(/may not have/);
 	});
 
 	it("scrubs credential-looking label values and bounds the number of series", () => {
@@ -115,8 +116,22 @@ describe("PostgreSQL pool instrumentation", () => {
 		await Promise.all([slow, waiting]);
 		const text = m.registry.render();
 		expect(m.pgQuery.count({ service: "runner", op: "select" })).toBe(2);
-		expect(text).toMatch(/pim_pg_pool_connections\{service="runner",pool="main",state="total"\} \d/);
+		expect(text).toMatch(/pim_pg_pool_connections\{service="runner",pool="foreground",state="total"\} \d/);
 		expect(text).not.toContain("secret-looking-literal");
 		await pool.end();
+	});
+
+	it("opens one bounded, instrumented pool per contracts pool name, with the statement timeout of its budget", async () => {
+		const m = createPimMetrics();
+		const config = loadProcessConfig({ PIM_ROLE: "runner", PIM_PUBLIC_URL: "https://pim.example.test", PIM_DATABASE_URL: db.server.url(), PIM_NATS_URL: "nats://x:4222", PIM_S3_ENDPOINT: "http://s3.example.test", PIM_S3_BUCKET: "b", PIM_POOL_RUNTIME_MAX: "3" });
+		const pools = openPools(config, m, "runner");
+		expect(Object.keys(pools).sort()).toEqual(["foreground", "forge", "maintenance", "runtime", "tools"]);
+		expect((pools.runtime as unknown as { options: { max: number } }).options.max).toBe(3);
+		expect((await pools.foreground.query("SHOW statement_timeout")).rows[0].statement_timeout).toBe("10s");
+		expect((await pools.maintenance.query("SHOW statement_timeout")).rows[0].statement_timeout).toBe("10min");
+		await pools.runtime.query("SELECT 1");
+		expect(m.pgQuery.count({ service: "runner", op: "show" })).toBe(2);
+		expect(m.registry.render()).toContain('pool="runtime"');
+		await Promise.all(Object.values(pools).map((p) => p.end()));
 	});
 });

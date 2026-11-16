@@ -3,7 +3,7 @@ import { closeSync, existsSync, fsyncSync, openSync, readFileSync, readdirSync, 
 import { cpus, totalmem, tmpdir } from "node:os";
 import { join } from "node:path";
 import pg from "pg";
-import { loadMigrations, migrate } from "../pg/migrate.ts";
+import { loadAllMigrations, migrate } from "../pg/migrate.ts";
 import { startEmbeddedPostgres } from "../pg/embedded.ts";
 import { DEFAULT_PHASES, DEFAULT_WORKLOAD, type PhaseTimes, type Profile, type Workload } from "./profiles.ts";
 import { seed } from "./schema.ts";
@@ -94,7 +94,7 @@ export async function runBenchmark(options: RunOptions) {
 		await server.createDatabase("bench");
 		const dbUrl = server.url("bench");
 		const admin = new pg.Pool({ connectionString: dbUrl, max: 4 });
-		await migrate(admin, await loadMigrations());
+		await migrate(admin, await loadAllMigrations());
 		const t0 = performance.now();
 		const seeded = await seed(admin, { tenants: profile.tenants, activeRuns: profile.activeRuns, idleChatsPerTenant: profile.idleChatsPerTenant, entriesPerIdleChat: options.entriesPerIdleChat ?? 20 });
 		log(`seeded ${seeded.tenants.length} tenants, ${seeded.idleChats} idle chats, ${seeded.idleEntries} idle entries, ${seeded.runs.length} active runs in ${((performance.now() - t0) / 1000).toFixed(1)} s`);
@@ -160,7 +160,7 @@ export async function runBenchmark(options: RunOptions) {
 		const browserStats = await ask(browsers);
 		const settings = Object.fromEntries((await admin.query("SELECT name, setting FROM pg_settings WHERE name IN ('fsync','synchronous_commit','full_page_writes','shared_buffers','max_connections','wal_level')")).rows.map((r) => [r.name, r.setting]));
 		const version = (await admin.query("SHOW server_version")).rows[0].server_version;
-		const rows = (await admin.query("SELECT (SELECT count(*) FROM pim.pi_entries) AS entries, (SELECT count(*) FROM pim.bench_coding_events) AS flood")).rows[0];
+		const rows = (await admin.query("SELECT (SELECT count(*) FROM pim_ops.pi_entries) AS entries, (SELECT count(*) FROM pim_ops.bench_coding_events) AS flood")).rows[0];
 		browsers.send({ type: "phase", phase: "stop" });
 		runners.forEach((r) => r.send({ type: "stop" }));
 		await admin.end();

@@ -35,118 +35,118 @@
       "synchronous_commit": "on",
       "wal_level": "replica"
     },
-    "fsyncMedianMs": 0.46
+    "fsyncMedianMs": 0.364
   },
   "measuredSeconds": 25,
   "foreground": {
     "baseline": {
       "sidebar": {
-        "n": 1294,
-        "p50": 1.79,
-        "p95": 2.84,
-        "p99": 5.07,
-        "max": 16.22,
-        "mean": 1.95
+        "n": 1359,
+        "p50": 1.37,
+        "p95": 2.29,
+        "p99": 4.31,
+        "max": 28.18,
+        "mean": 1.54
       },
       "session": {
-        "n": 1294,
-        "p50": 2.13,
-        "p95": 3.25,
-        "p99": 7.14,
-        "max": 16.64,
-        "mean": 2.29
+        "n": 1357,
+        "p50": 1.62,
+        "p95": 2.61,
+        "p99": 6.16,
+        "max": 28.89,
+        "mean": 1.82
       },
       "errors": 0
     },
     "underLoad": {
       "sidebar": {
-        "n": 1790,
-        "p50": 7.44,
-        "p95": 46.32,
-        "p99": 70.16,
-        "max": 124.86,
-        "mean": 13.36
+        "n": 1979,
+        "p50": 6.99,
+        "p95": 38.29,
+        "p99": 74.7,
+        "max": 121.21,
+        "mean": 11.69
       },
       "session": {
-        "n": 1788,
-        "p50": 7.8,
-        "p95": 45.96,
-        "p99": 67.26,
-        "max": 111.88,
-        "mean": 13.53
+        "n": 1979,
+        "p50": 7.84,
+        "p95": 37.9,
+        "p99": 67.53,
+        "max": 107.2,
+        "mean": 12.16
       },
       "errors": 0
     },
     "slo": {
-      "sidebarP95Ms": 46.32,
-      "sessionP95Ms": 45.96,
+      "sidebarP95Ms": 38.29,
+      "sessionP95Ms": 37.9,
       "absoluteUnder250ms": true,
-      "sidebarRegressionPct": 1528.3,
-      "sessionRegressionPct": 1315,
+      "sidebarRegressionPct": 1569.5,
+      "sessionRegressionPct": 1353.5,
       "relativeWithin20pct": false,
       "passesBoth": false,
       "note": "The relative test compares warm p95 under load with warm p95 at baseline, measured in the same run."
     }
   },
   "write": {
-    "commits": 100321,
-    "commitsPerSecondInWindow": 3313.1,
-    "commitsPerSecondPerActiveRun": 3.31,
+    "commits": 106784,
+    "commitsPerSecondInWindow": 3472.7,
+    "commitsPerSecondPerActiveRun": 3.47,
     "commitLatencyMsByRunner": [
       {
-        "n": 24951,
-        "p50": 156.8,
-        "p95": 471.76,
-        "p99": 577.49,
-        "max": 665.65,
-        "mean": 191.44
+        "n": 27110,
+        "p50": 58.16,
+        "p95": 272.63,
+        "p99": 337.74,
+        "max": 459.09,
+        "mean": 88.41
       },
       {
-        "n": 24513,
-        "p50": 178.39,
-        "p95": 1373.03,
-        "p99": 1554.41,
-        "max": 1667.15,
-        "mean": 349.76
+        "n": 27121,
+        "p50": 64.94,
+        "p95": 230.81,
+        "p99": 288.73,
+        "max": 367.82,
+        "mean": 83.17
       },
       {
-        "n": 25107,
-        "p50": 103.35,
-        "p95": 459.65,
-        "p99": 663.9,
-        "max": 764.82,
-        "mean": 154.46
+        "n": 25713,
+        "p50": 108.91,
+        "p95": 580.13,
+        "p99": 706.14,
+        "max": 858.68,
+        "mean": 174.69
       },
       {
-        "n": 25750,
-        "p50": 143.91,
-        "p95": 602.02,
-        "p99": 793.08,
-        "max": 941.09,
-        "mean": 205.55
+        "n": 26840,
+        "p50": 57.91,
+        "p95": 287.8,
+        "p99": 422.06,
+        "max": 522.69,
+        "mean": 91.47
       }
     ],
-    "partialsPerSecondPerRun": 2.72,
+    "partialsPerSecondPerRun": 2.86,
     "fencingRejects": 0,
-    "providerErrors": 45,
-    "turnsCompleted": 3208,
-    "turnsMuchLaterThanTwiceExpected": 2876,
+    "providerErrors": 48,
+    "turnsCompleted": 4136,
+    "turnsMuchLaterThanTwiceExpected": 219,
     "expectedTurnMs": 3900,
-    "codingFloodRows": 67560
+    "codingFloodRows": 87720
   },
   "postgres": {
-    "transactionsPerSecondIncludingReads": 3611.8,
-    "rowsInsertedPerSecond": 2434.8,
-    "rowsUpdatedPerSecond": 6348.6,
-    "walFsyncsPerSecond": 811.8,
-    "walFsyncMeanMs": 1.009,
+    "transactionsPerSecondIncludingReads": 3811.6,
+    "rowsInsertedPerSecond": 3078.8,
+    "rowsUpdatedPerSecond": 6560.7,
+    "walFsyncsPerSecond": 893.4,
+    "walFsyncMeanMs": 0.887,
     "rollbacks": 0
   },
   "resources": {
-    "machineCpuBusyPct": 98.3,
-    "postgresRssMbMax": 5716,
-    "nodeProcessesRssMbMax": 1354,
-    "maxEventLoopDelayMs": 155.3,
+    "machineCpuBusyPct": 99.7,
+    "postgresRssMbMax": 6739,
+    "nodeProcessesRssMbMax": 1523,
+    "maxEventLoopDelayMs": 138.3,
     "gatePool": {
       "total": 4,
       "idle": 4,
@@ -156,26 +156,26 @@
   "live": {
     "websocketsOpen": 310,
     "websocketsRequested": 310,
-    "eventsReceived": 301305,
+    "eventsReceived": 320408,
     "deliveryLagMs": {
-      "n": 301305,
-      "p50": 11,
-      "p95": 59,
-      "p99": 87,
+      "n": 320408,
+      "p50": 7,
+      "p95": 52,
+      "p99": 85,
       "max": 118,
-      "mean": 17.99
+      "mean": 14.05
     },
     "coalesced": 0,
     "overflowDisconnects": 0,
-    "liveEventLoopMaxMs": 110.5
+    "liveEventLoopMaxMs": 107.5
   },
   "saturation": {
-    "fractionOfTurnsMuchLate": 0.897,
-    "commitP99Ms": 1554.41,
-    "verdict": "saturated: runs fall behind or the event loop stalls"
+    "fractionOfTurnsMuchLate": 0.053,
+    "commitP99Ms": 706.14,
+    "verdict": "keeping up"
   },
   "dataRows": {
-    "entries": "441528",
-    "flood": "68160"
+    "entries": "444294",
+    "flood": "88320"
   }
 }

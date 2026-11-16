@@ -171,6 +171,8 @@ CREATE TABLE app.execution_grants (
 	pools text[] NOT NULL DEFAULT '{}',
 	repos text[] NOT NULL DEFAULT '{}',
 	standing boolean NOT NULL DEFAULT false,
+	-- Whether an agent that was itself delegated to may use this authority on the person's behalf.
+	allow_delegates boolean NOT NULL DEFAULT false,
 	quota_runs integer,
 	spend_cap_cents bigint,
 	spent_cents bigint NOT NULL DEFAULT 0,
@@ -189,6 +191,8 @@ CREATE TABLE app.approvals (
 	conversation_id bigint NOT NULL,
 	task_id bigint,
 	call_id text NOT NULL,
+	-- For an approval of a coding, compute or repository action: the digest of exactly that action and resource.
+	action_digest text,
 	status text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'denied', 'expired')),
 	decided_by text,
 	decided_at timestamptz,

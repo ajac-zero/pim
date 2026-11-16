@@ -44,10 +44,15 @@ export interface HostDeps {
 	onReleased?(lease: Lease): void;
 }
 
-/** What keeps an owner: anything pi must still run, a queued or placed input, or work the host has yet to deliver. */
+/**
+ * What keeps an owner: work pi will run by itself (running, ready or completing tasks), or an input that no live task
+ * of its conversation is holding. A task `waiting` on others only moves when they do, and `suspended` or `blocked`
+ * ones wait for a person, a signal or a deployment, so a family whose live tasks are all of those holds no invocation.
+ */
 export function needsOwner(inspection: HarnessInspection): boolean {
-	if (inspection.submissions.length > 0) return true;
-	return inspection.tasks.some((task) => task.state.kind !== "suspended" && task.state.kind !== "blocked");
+	if (inspection.tasks.some((task) => task.state.kind === "running" || task.state.kind === "ready" || task.state.kind === "completing")) return true;
+	const held = new Set(inspection.tasks.map((task) => task.record.conversationId));
+	return inspection.submissions.some((submission) => !held.has(submission.conversationId));
 }
 
 /**

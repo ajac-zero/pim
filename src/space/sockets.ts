@@ -9,7 +9,7 @@ import { PiHarness, ROOT_SESSION } from "agents/harness/pi";
 import { ArtifactStore } from "../artifacts";
 import { userInput } from "../images";
 import type { CanvasAnswer } from "../extensions/canvas";
-import { COMPUTER_PATH, COMPUTER_SCREEN_PATH, COMPUTER_TAG, Computer, type FileEvent, SCREEN_CLIPBOARD, SCREEN_PING, SCREEN_TAG } from "../computer";
+import { COMPUTER_PATH, COMPUTER_SCREEN_PATH, COMPUTER_TAG, Computer, type FileEvent, SCREEN_CLIPBOARD, SCREEN_PING, SCREEN_TAG, type WatchState } from "../computer";
 import { FILES_ROOT, Files, filesPath } from "../files";
 import { LegacyFiles } from "../legacy-files";
 import { NOTE_LIVE_PATH, NOTE_TAG, type NotePeer, NoteStore } from "../notes";
@@ -531,7 +531,15 @@ export class Sockets {
 	async #watchFile(connection: Connection<SocketState>, requested: unknown): Promise<void> {
 		const path = filesPath(requested);
 		if (path === null) throw new HttpError(400, `path must be an absolute path under ${FILES_ROOT}`);
-		const state = await this.host.computer.watch(path);
+		let state: WatchState;
+		try {
+			state = await this.host.computer.watch(path);
+		} catch (error) {
+			// A computer from before watching can't tell of changes: the file opens, and stays as it was read.
+			if ((error as { code?: unknown }).code !== "ENOSYS") throw error;
+			this.send(connection, { type: "file_changed", path, kind: "unwatched", sha256: null, size: null });
+			return;
+		}
 		const holds = this.host.fileHolds.get(connection.id) ?? new Map<string, number>();
 		if (connection.readyState !== WebSocket.OPEN) {
 			// Gone while the computer answered: its holds were let go already, and this one never was.

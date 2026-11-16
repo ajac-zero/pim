@@ -205,6 +205,49 @@ it("opens markdown rendered, and keeps the unsaved buffer when toggling to the e
   ).toBe("# Changed\n");
 });
 
+it("shows why a save failed when the status is hovered", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () =>
+      Response.json(
+        { error: "If-Match must be one file hash" },
+        { status: 400 },
+      ),
+    ),
+  );
+  read.mockResolvedValue({ bytes: new TextEncoder().encode("x"), sha256: "h" });
+  const client = new QueryClient({
+    defaultOptions: { queries: { staleTime: Infinity } },
+  });
+  client.setQueryData(filesQuery("/workspace").queryKey, {
+    path: "/workspace",
+    entries: [
+      {
+        name: "a.cu",
+        path: "/workspace/a.cu",
+        type: "file",
+        size: 1,
+        updatedAt: "",
+      },
+    ],
+  });
+  render(
+    <QueryClientProvider client={client}>
+      <FileView path="/workspace/a.cu" />
+    </QueryClientProvider>,
+  );
+  fireEvent.change(await screen.findByLabelText("source"), {
+    target: { value: "y" },
+  });
+  const status = await screen.findByText(
+    "Couldn't save",
+    {},
+    { timeout: 5000 },
+  );
+  expect(status.getAttribute("title")).toBeTruthy();
+  expect(status.getAttribute("title")).toContain("If-Match");
+});
+
 it("shows how to connect a computer, and no error, where there is none", () => {
   vi.stubGlobal(
     "fetch",

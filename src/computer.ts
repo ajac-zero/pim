@@ -50,6 +50,16 @@ export const SCREEN_PING = '{"type":"pim_ping"';
 export const SCREEN_CLIPBOARD = '{"type":"pim_clipboard"';
 /** The close code an old connection gets when another one replaces it (pim-computer's `REPLACED`). */
 const REPLACED = 4409;
+/** The close code that asks a computer running an older protocol to update itself (pim-computer's `OUTDATED`). */
+const OUTDATED = 4410;
+/** The protocol revision of this space's calls (pim-computer's `PROTOCOL_VERSION`); a computer that says less is older. */
+const PROTOCOL_VERSION = 2;
+/** How long after asking a computer to update the space doesn't ask again: one that can't update stays connected, on the older protocol. */
+const OUTDATED_RETRY_MS = 10 * 60_000;
+/** The most bytes of a file whose sha256 is kept (pim-computer's `HASH_MAX_BYTES`). */
+/** How long after a call the space waits to see the computer idle before asking it to update. */
+const UPDATE_DELAY_MS = 1_000;
+const HASH_MAX_BYTES = 5 * 1_048_576;
 /** The most bytes the computer gives in one read (pim-computer's `MAX_READ_BYTES`), and the most this sends in one write. */
 const CHUNK_BYTES = 1_048_576;
 /** How long a file call may take. */
@@ -67,6 +77,8 @@ const MACHINE_KEY = "computer_machine";
 const SETUP_ERROR_KEY = "computer_setup_error";
 const PAIRED_AT_KEY = "computer_paired_at";
 const INFO_KEY = "computer_info";
+/** When the computer was last asked to update, kept so a space that hibernated doesn't ask again at once. */
+const UPDATE_ASKED_KEY = "computer_update_asked_at";
 /** How long one of Cua Driver's tools may take: it waits for windows and pages itself. */
 const DRIVER_CALL_MS = 120_000;
 /** How long the computer may take to answer a ping before it counts as no answer. */
@@ -92,8 +104,14 @@ export type ComputerInfo = {
 	readonly screen: boolean;
 	/** Whether its agents can use its desktop's apps, with Cua Driver's tools. */
 	readonly desktop: boolean;
+	/** The protocol revision it speaks: 1 for a computer that doesn't say, which is how the first ones were. */
+	readonly protocol?: number;
 	readonly connectedAt: number;
 };
+
+async function sha256Bytes(bytes: Uint8Array): Promise<string> {
+	return [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
 
 export type ComputerState = "none" | "offline" | "online";
 
@@ -170,6 +188,10 @@ export class Computer {
 	readonly #watching = new Map<string, number>();
 	/** Watch operations that must not overlap: a reconnect's asking again and a person's `watch`. */
 	#queue: Promise<void> = Promise.resolve();
+	/** The desktop streams open now, by channel. */
+	readonly #screens = new Set<number>();
+	/** Set while the space waits to ask the computer to update. */
+	#updateTimer: ReturnType<typeof setTimeout> | undefined;
 	/** While a reconnect asks for the watches again: how many of each path's the computer has been asked for so far. */
 	readonly #resuming = new Map<string, number>();
 	readonly #fileListeners = new Set<(event: FileEvent) => void>();
@@ -211,6 +233,39 @@ export class Computer {
 		return this.#sockets().find((socket) => socket.readyState === WebSocket.OPEN);
 	}
 
+	/** The protocol revision the connected computer speaks: 1 for one that connected before it was said, and the current one while nothing is known. */
+	#protocol(): number {
+		const info = this.#meta.meta(INFO_KEY);
+		return info ? ((JSON.parse(info) as ComputerInfo).protocol ?? 1) : PROTOCOL_VERSION;
+	}
+
+	/**
+	 * Asks a connected computer that speaks an older protocol to update, by closing its connection with
+	 * `OUTDATED`: pim-computer then fetches the newer script and restarts, where it's supervised. It asks
+	 * once in a while, so a computer that can't update reconnects and stays, working through the fallbacks
+	 * here. Never while calls are waiting, which the close would fail.
+	 */
+	#askUpdate(): boolean {
+		// Not while a browser automation or a desktop stream is live: the close would cut it, and the update waits for it to end.
+		if (this.#protocol() >= PROTOCOL_VERSION || this.#pending.size > 0 || this.#browsers.size > 0 || this.#screens.size > 0) return false;
+		const asked = Number(this.#meta.meta(UPDATE_ASKED_KEY) ?? 0);
+		if (Date.now() - asked < OUTDATED_RETRY_MS) return false;
+		const socket = this.#socket();
+		if (!socket) return false;
+		this.#meta.setMeta(UPDATE_ASKED_KEY, String(Date.now()));
+		socket.close(OUTDATED, "pim-computer is older than this Pim; update it");
+		return true;
+	}
+
+	/** Asks for the update a moment after a call, so the calls that follow it, such as a save's write after its stat, run first. */
+	#askUpdateSoon(): void {
+		if (this.#updateTimer !== undefined || this.#protocol() >= PROTOCOL_VERSION) return;
+		this.#updateTimer = setTimeout(() => {
+			this.#updateTimer = undefined;
+			this.#askUpdate();
+		}, UPDATE_DELAY_MS);
+	}
+
 	status(): ComputerStatus {
 		if (!this.paired()) return { state: "none", managed: false, pairedAt: null, computer: null, error: null };
 		const info = this.#meta.meta(INFO_KEY);
@@ -230,6 +285,7 @@ export class Computer {
 		this.#meta.setMeta(TOKEN_KEY, await digestHex(token));
 		this.#meta.setMeta(PAIRED_AT_KEY, String(now));
 		this.#meta.deleteMeta(INFO_KEY);
+		this.#meta.deleteMeta(UPDATE_ASKED_KEY);
 		this.#meta.deleteMeta(MACHINE_KEY);
 		this.#meta.deleteMeta(SETUP_ERROR_KEY);
 		this.disconnect("A new computer was paired");
@@ -254,6 +310,7 @@ export class Computer {
 		this.#meta.deleteMeta(TOKEN_KEY);
 		this.#meta.deleteMeta(PAIRED_AT_KEY);
 		this.#meta.deleteMeta(INFO_KEY);
+		this.#meta.deleteMeta(UPDATE_ASKED_KEY);
 		this.#meta.deleteMeta(MACHINE_KEY);
 		this.#meta.deleteMeta(SETUP_ERROR_KEY);
 		this.disconnect("The computer was removed");
@@ -261,6 +318,7 @@ export class Computer {
 
 	disconnect(reason: string): void {
 		for (const socket of this.#sockets()) socket.close(REPLACED, reason);
+		this.#stopAsking();
 		this.#failPending();
 	}
 
@@ -291,10 +349,17 @@ export class Computer {
 	/** The connection closed: calls waiting on it fail now rather than at their timeouts. */
 	disconnected(): void {
 		if (this.#socket()) return;
+		this.#stopAsking();
 		this.#failPending();
 	}
 
+	#stopAsking(): void {
+		clearTimeout(this.#updateTimer);
+		this.#updateTimer = undefined;
+	}
+
 	#failPending(): void {
+		this.#screens.clear();
 		for (const thread of [...this.#browsers.keys()]) this.#browserClosed(thread);
 		for (const [id, pending] of this.#pending) {
 			clearTimeout(pending.timer);
@@ -328,11 +393,17 @@ export class Computer {
 				browser: typeof hello.browser === "string" ? hello.browser : null,
 				screen: hello.screen === true,
 				desktop: hello.desktop === true,
+				protocol: typeof hello.version === "number" && Number.isInteger(hello.version) && hello.version > 0 ? hello.version : 1,
 				connectedAt: Date.now(),
 			};
 			this.#meta.setMeta(INFO_KEY, JSON.stringify(info));
+			if (info.protocol! >= PROTOCOL_VERSION) {
+				this.#meta.deleteMeta(UPDATE_ASKED_KEY);
+				this.#stopAsking();
+			}
 			this.#meta.deleteMeta(SETUP_ERROR_KEY);
-			void this.#rewatch();
+			// Asked to update, it reconnects and says hello again, and the watches are asked for then.
+			if (!this.#askUpdate()) void this.#rewatch();
 			return;
 		}
 		if (message.type === "event") {
@@ -347,7 +418,10 @@ export class Computer {
 		if (message.type === "screen" || message.type === "screen_closed") {
 			const { channel, data } = message as { channel?: unknown; data?: unknown };
 			if (typeof channel !== "number") return;
-			if (message.type === "screen_closed") this.#screen(channel, null);
+			if (message.type === "screen_closed") {
+				this.#screens.delete(channel);
+				this.#screen(channel, null);
+			}
 			else if (typeof data === "string") this.#screen(channel, data);
 			return;
 		}
@@ -399,7 +473,7 @@ export class Computer {
 			}, timeoutMs);
 			this.#pending.set(id, { resolve: resolve as (value: unknown) => void, reject, timer });
 			socket.send(JSON.stringify({ type: "call", id, op, args }));
-		});
+		}).finally(() => this.#askUpdateSoon());
 	}
 
 	/**
@@ -409,6 +483,7 @@ export class Computer {
 	 */
 	async openScreen(channel: number, display?: string): Promise<void> {
 		await this.call("screen_open", { channel, ...(display ? { display } : {}) });
+		this.#screens.add(channel);
 	}
 
 	/** The computer's per-thread displays, and the threads queued for one; the primary desktop isn't among them. */
@@ -543,6 +618,7 @@ export class Computer {
 
 	/** Closes a stream of the desktop. */
 	closeScreen(channel: number): void {
+		this.#screens.delete(channel);
 		if (this.#socket()) void this.call("screen_close", { channel }).catch(() => undefined);
 	}
 
@@ -636,14 +712,43 @@ export class Computer {
 		return this.call<ExecResult>("exec", args, timeoutMs + 15_000);
 	}
 
+	/** What a write gave back, or, from a computer from before writes did, the file as it is after it. */
+	async #written(path: string, bytes: Uint8Array, result: WriteResult | null): Promise<WriteResult> {
+		if (result) return result;
+		const stat = await this.call<{ size: number; mtime: number }>("stat", { path });
+		return { path, sha256: bytes.byteLength <= HASH_MAX_BYTES ? await sha256Bytes(bytes) : null, size: stat.size, mtime: stat.mtime };
+	}
+
+	/** Throws the conflict a conditional write would have met on a computer that checks it itself. */
+	async #checkLegacyCondition(path: string, expectedHash: string): Promise<void> {
+		const existing = await this.fs.stat(path).catch((error: { code?: string }) => {
+			if (error.code === "ENOENT") return null;
+			throw error;
+		});
+		const conflict = (code: FileConflict["code"], currentHash: string | null) =>
+			new FileConflictError({ error: "conflict", code, path, expectedHash, currentHash, currentSize: existing?.size ?? null, currentMtime: existing?.mtime ?? null });
+		if (existing === null) {
+			if (expectedHash !== "absent") throw conflict("missing", null);
+			return;
+		}
+		if (!existing.isFile) return;
+		if (expectedHash === "absent") throw conflict("exists", existing.sha256);
+		let currentHash = existing.sha256;
+		if (currentHash === null && existing.size <= HASH_MAX_BYTES) currentHash = await sha256Bytes(new Uint8Array(await new Response(await this.fs.readFile(path)).arrayBuffer()));
+		if (currentHash !== expectedHash) throw conflict("hash_mismatch", currentHash);
+	}
+
 	/**
 	 * The computer's `/workspace` as the file tools of `@cloudflare/computer`
 	 * use a Workspace's (its `WorkspaceLike`): each call goes to the computer,
 	 * and large files go in parts.
 	 */
 	readonly fs = {
-		stat: (path: string) =>
-			this.call<{ size: number; mtime: number; mode: number; sha256: string | null; isFile: boolean; isDirectory: boolean; isSymbolicLink: boolean }>("stat", { path }),
+		stat: async (path: string) => {
+			const stat = await this.call<{ size: number; mtime: number; mode: number; sha256?: string | null; isFile: boolean; isDirectory: boolean; isSymbolicLink: boolean }>("stat", { path });
+			// A computer from before hashes left it out: that is no hash, not an undefined one.
+			return { ...stat, sha256: typeof stat.sha256 === "string" ? stat.sha256 : null };
+		},
 		readFile: async (path: string, options: { byteOffset?: number; byteLength?: number } = {}): Promise<ReadableStream<Uint8Array>> => {
 			let offset = options.byteOffset ?? 0;
 			const end = options.byteLength === undefined ? Number.POSITIVE_INFINITY : offset + options.byteLength;
@@ -678,8 +783,11 @@ export class Computer {
 			const bytes = typeof content === "string" ? new TextEncoder().encode(content) : content;
 			const mode = options.mode === undefined ? {} : { mode: options.mode };
 			const condition = options.expectedHash === undefined ? {} : { expectedHash: options.expectedHash };
+			const legacy = this.#protocol() < PROTOCOL_VERSION;
+			// A computer from before conditional writes ignores the condition: the space checks it, as far as one caller at a time goes.
+			if (legacy && options.expectedHash !== undefined) await this.#checkLegacyCondition(path, options.expectedHash);
 			if (bytes.byteLength <= CHUNK_BYTES) {
-				return this.#wrote(path, await this.call<WriteResult>("write", { path, data: Buffer.from(bytes).toString("base64"), ...mode, ...condition }));
+				return this.#wrote(path, await this.#written(path, bytes, await this.call<WriteResult | null>("write", { path, data: Buffer.from(bytes).toString("base64"), ...mode, ...condition })));
 			}
 			// In parts, to a file beside it that takes its place once whole.
 			const slash = path.lastIndexOf("/");
@@ -689,7 +797,12 @@ export class Computer {
 					const data = Buffer.from(bytes.subarray(start, start + CHUNK_BYTES)).toString("base64");
 					await this.call("write", { path: temporary, data, append: start > 0, ...mode });
 				}
-				return this.#wrote(path, await this.call<WriteResult>("write", { path, from: temporary, ...mode, ...condition }));
+				if (legacy) {
+					// Before `write` took `from`, a file in parts was renamed into place.
+					await this.call("rename", { from: temporary, to: path });
+					return this.#wrote(path, await this.#written(path, bytes, null));
+				}
+				return this.#wrote(path, await this.#written(path, bytes, await this.call<WriteResult | null>("write", { path, from: temporary, ...mode, ...condition })));
 			} catch (error) {
 				await this.call("rm", { path: temporary, force: true }).catch(() => undefined);
 				throw error;

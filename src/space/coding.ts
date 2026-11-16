@@ -193,6 +193,11 @@ export class SpaceCoding {
 		return HARNESSES.map((harness) => vault.status(harness));
 	}
 
+	/** Whether the space has saved an Amp token: Amp threads run in Amp's cloud and need no workspace sandbox. */
+	hasAmpToken(): boolean {
+		return this.#codingVault().status("amp").connected;
+	}
+
 	async codingVaultRead(harness: CodingVaultKey): Promise<VaultRecord> {
 		return this.#codingVault(harness).read(harness);
 	}

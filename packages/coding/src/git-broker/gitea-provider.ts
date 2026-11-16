@@ -1,8 +1,8 @@
-import { type RepoRef, GitBrokerError, repoAllowed } from "./broker";
+import { type RepoRef, GitBrokerError, listBranchesOverGit, readCapped, repoAllowed } from "./broker";
 import { type BrokerPolicy } from "./config";
 import { GiteaConnection } from "./gitea-connection";
 import type { Fetch } from "./github-app";
-import type { GitAccess, GitCredential, GitProvider, ProviderInstance, PullRequestInput } from "./provider";
+import { MAX_COMPARE_CHARS, type GitAccess, type GitCredential, type GitProvider, type ProviderInstance, type PullRequestInput } from "./provider";
 
 /**
  * A Gitea instance, through the one account Pim is connected as
@@ -80,6 +80,40 @@ export class GiteaProvider implements GitProvider {
 		const { default_branch: name } = (await response.json()) as { default_branch?: unknown };
 		if (typeof name !== "string" || name === "") throw new GitBrokerError(502, `Gitea didn't say ${repo.fullName}'s default branch`);
 		return name;
+	}
+
+	async listBranches(repo: RepoRef): Promise<ReadonlyMap<string, string>> {
+		return listBranchesOverGit(this.#fetch, this.gitUrl(repo), await this.credential(repo, "read"));
+	}
+
+	async resolveCommit(repo: RepoRef, ref: string): Promise<string | null> {
+		const response = await this.#api(repo, `/commits/${encodeURIComponent(ref)}?stat=false&verification=false&files=false`);
+		if (response.status === 404 || response.status === 422) {
+			await response.body?.cancel().catch(() => {});
+			return null;
+		}
+		if (!response.ok) throw new GitBrokerError(502, `Gitea answered HTTP ${response.status} when looking up ${ref} on ${repo.fullName}`);
+		const { sha } = (await response.json()) as { sha?: unknown };
+		return typeof sha === "string" && /^[0-9a-f]{40}$/i.test(sha) ? sha.toLowerCase() : null;
+	}
+
+	/** The diff comes from Gitea's own page for a comparison, which has a raw form, as the API's comparison is only JSON. */
+	async compareDiff(repo: RepoRef, base: string, head: string): Promise<{ baseSha: string; headSha: string; diff: string } | null> {
+		const [baseSha, headSha] = [await this.resolveCommit(repo, base), await this.resolveCommit(repo, head)];
+		if (!baseSha || !headSha) return null;
+		const { token } = (await this.credential(repo, "read"))!;
+		let response: Response;
+		try {
+			response = await this.#fetch(`${this.instance.baseUrl}/${repo.owner}/${repo.name}/compare/${baseSha}...${headSha}.diff`, { headers: { Authorization: `Bearer ${token}` }, redirect: "manual", signal: AbortSignal.timeout(30_000) });
+		} catch {
+			throw new GitBrokerError(502, "Gitea couldn't be reached");
+		}
+		if (response.status === 404) {
+			await response.body?.cancel().catch(() => {});
+			return null;
+		}
+		if (!response.ok) throw new GitBrokerError(502, `Gitea answered HTTP ${response.status} when comparing commits of ${repo.fullName}`);
+		return { baseSha, headSha, diff: await readCapped(response, MAX_COMPARE_CHARS) };
 	}
 
 	/**

@@ -36,10 +36,11 @@ export type AmpConnect = (url: string, init: { headers: Record<string, string> }
 const DEFAULT_BASE = "https://ampcode.com";
 /** Upper bound on a response body read, and on one transcript message's text. */
 export const AMP_MAX_RESPONSE_BYTES = 2_000_000;
-export const AMP_MAX_MESSAGE_CHARS = 8_000;
+export const AMP_MAX_MESSAGE_CHARS = 64_000;
 export const AMP_MAX_TOOL_VALUE_CHARS = 500;
-export const AMP_MAX_TOOL_OUTPUT_CHARS = 8_000;
-const TAIL_LIMIT = 200;
+export const AMP_MAX_TOOL_OUTPUT_CHARS = 32_000;
+/** The windows of a thread's tail tried in turn, while a response is over the size cap. */
+const TAIL_WINDOWS = [200, 80, 30, 10];
 const AGENT_MODES = new Set(["low", "medium", "high", "ultra"]);
 
 /** Stored in the thread DO. claim must atomically insert only when absent. */
@@ -328,17 +329,33 @@ export class AmpHttpOrbClient implements OrbClient {
 	}
 
 	async messages(id: string, o: { after?: string } = {}): Promise<readonly OrbMessage[]> {
-		// The caller's cursor is a message id. Only the tail of the transcript is
-		// read, and a smaller window is tried when the response is over the cap.
-		let tail: { messages: unknown[] };
-		try { tail = await this.#tail(id, TAIL_LIMIT); } catch (error) {
-			if (!(error instanceof AmpTooLargeError)) throw error;
-			tail = await this.#tail(id, 20);
+		// The caller's cursor is a message id.
+		const all = (await this.#read(id)).messages;
+		const index = o.after ? all.findIndex((m) => m.id === o.after) : -1;
+		return all.slice(index + 1);
+	}
+
+	/** A thread's latest messages and state read in one call, whoever started it: for reading an Amp thread that Pim holds no record of. */
+	async readThread(id: string): Promise<{ threadId: string; url: string; title: string | null; state: OrbStatus["state"]; updatedAt: number | null; messages: readonly OrbMessage[] }> {
+		const { thread, messages } = await this.#read(id);
+		const agent = object(object(object(thread.data).meta).lastKnownAgentState);
+		const state: OrbStatus["state"] = agent.state === "idle" ? "idle" : agent.state === "awaiting_approval" ? "awaiting_approval" : agent.state === "error" ? "error" : "working";
+		const title = [thread.title, object(thread.data).title].find((each): each is string => typeof each === "string" && each !== "");
+		return { threadId: id, url: `${this.#base}/threads/${id}`, title: title ?? null, state, updatedAt: timestamp(agent.updatedAt), messages };
+	}
+
+	/** The tail of the transcript as messages; a smaller window is tried when the response is over the size cap. */
+	async #read(id: string): Promise<{ thread: Record<string, unknown>; messages: OrbMessage[] }> {
+		let tail: { thread: Record<string, unknown>; messages: unknown[] } | undefined;
+		for (const [index, limit] of TAIL_WINDOWS.entries()) {
+			try { tail = await this.#tail(id, limit); break; } catch (error) {
+				if (!(error instanceof AmpTooLargeError) || index === TAIL_WINDOWS.length - 1) throw error;
+			}
 		}
 		const all: OrbMessage[] = [];
 		const seen = new Set<string>();
 		const names = new Map<string, string>();
-		for (const value of tail.messages) {
+		for (const value of tail!.messages) {
 			const message = object(value);
 			const messageId = typeof message.messageId === "string" ? message.messageId : typeof message.messageId === "number" ? String(message.messageId) : null;
 			if (messageId === null || seen.has(messageId)) continue;
@@ -346,8 +363,7 @@ export class AmpHttpOrbClient implements OrbClient {
 			const { text, parts } = messageContent(message.content, names);
 			all.push({ id: messageId, role: message.role === "user" ? "user" : "assistant", at: timestamp(message.createdAt) ?? 0, text, ...(parts.some((part) => part.type !== "text") ? { parts } : {}) });
 		}
-		const index = o.after ? all.findIndex((m) => m.id === o.after) : -1;
-		return all.slice(index + 1);
+		return { thread: tail!.thread, messages: all };
 	}
 
 	async #tail(id: string, limit: number): Promise<{ thread: Record<string, unknown>; messages: unknown[] }> {

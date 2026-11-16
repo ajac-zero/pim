@@ -838,6 +838,9 @@ describe("git provider instances", () => {
 		gitUrl: (repo) => `https://gitea.example.test/${repo.fullName}.git`,
 		credential: async () => null,
 		defaultBranch: async () => "main",
+		listBranches: async () => new Map(),
+		resolveCommit: async () => null,
+		compareDiff: async () => null,
 		createPullRequest: async () => ({ url: "https://gitea.example.test/o/n/pulls/1", number: 1 }),
 	};
 

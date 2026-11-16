@@ -62,11 +62,12 @@ import {
 import { DEFAULT_SPACE_CAP, type ManagerHealth } from "@pim/coding/provider-capacity";
 import { IDLE_SLOT_GRACE_MS, PREEMPT_RESUME_PRIORITY, type QueueEntry, type QueuePlace, type Released, type SlotActivity } from "@pim/coding/scheduler";
 import { codingScheduler, codingThreadsChanged } from "./scheduler-do";
-import { BranchMovedError, checkBranch, checkBranchName, GitBrokerError, issueBrokerToken, parseRepoUrl, preparePush, type PushApprovalRequest, pushApprovalRequest, pushBranch, type PushResult, repoDefaultBranch } from "@pim/coding/git-broker/broker";
+import { BranchMovedError, type RepoRef, checkBranch, checkBranchName, GitBrokerError, issueBrokerToken, parseRepoUrl, preparePush, type PushApprovalRequest, pushApprovalRequest, pushBranch, type PushResult, repoDefaultBranch } from "@pim/coding/git-broker/broker";
 import { brokerPolicy, GitBrokerNotConfiguredError } from "@pim/coding/git-broker/config";
 import { WORKSPACE_GIT_AUTH_DIR, workspaceCredentialHelper } from "@pim/coding/git-broker/workspace-credential";
 import { GiteaNotConnectedError } from "@pim/coding/git-broker/gitea-connection";
-import { GITHUB_INSTANCE_ID } from "@pim/coding/git-broker/provider";
+import { GITHUB_INSTANCE_ID, type GitProvider } from "@pim/coding/git-broker/provider";
+import { transcriptText } from "@pim/coding/transcript";
 import type { Fetch, GitHubApp } from "@pim/coding/git-broker/github-app";
 import { GIT_BROKER_PATH } from "@pim/coding/git-broker/routes";
 import { brokerTokenKey, deploymentGitHubApp, deploymentProviders } from "./git-broker/worker";
@@ -1183,7 +1184,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 			placementReason: thread.placementReason,
 			placement: thread.placement,
 			providerKind: thread.providerKind,
-			orb: thread.orb === null ? null : { url: thread.orb.url },
+			orb: thread.orb === null ? null : { threadId: thread.orb.threadId, url: thread.orb.url },
 			cost: thread.providerKind === "agent-hosted" ? thread.orbCostUsd : thread.spentUsd,
 			costNote: thread.providerKind === "agent-hosted" ? thread.orbCostNote : null,
 			slot: thread.slot,
@@ -1453,10 +1454,12 @@ export class CodingThreadDO extends DurableObject<Env> {
 	 * What changed since `since` (the commit the thread started from, unless
 	 * given) up to the latest checkpoint, as `git diff`, at most 256 KiB.
 	 * Each is kept once made, so the diff of a checkpoint is there after its
-	 * workspace is gone; another needs the workspace.
+	 * workspace is gone; another needs the workspace. An agent-hosted thread
+	 * has no workspace: its diff is read from the git host (`#remoteDiff`).
 	 */
-	async diff(since?: string): Promise<CodingDiff> {
+	async diff(since?: string, headOverride?: string): Promise<CodingDiff> {
 		await this.lifecycle.start();
+		if (this.store.required().providerKind === "agent-hosted") return this.#remoteDiff(since, headOverride);
 		const thread = this.store.required();
 		const head = this.store.latestCheckpoint()?.sha ?? thread.baseSha;
 		const from = since ?? thread.baseSha;
@@ -1467,6 +1470,90 @@ export class CodingThreadDO extends DurableObject<Env> {
 		const ready = await this.#ensureWorkspace();
 		if (!ready.ok) throw new Error(ready.message);
 		return { since: from, head, ...(await this.#makeDiff(from, head)) };
+	}
+
+	/**
+	 * The diff of an agent-hosted thread, which has no workspace of Pim's and
+	 * no checkpoints: its work is whatever the agent pushed to the git host.
+	 * Compares `since` (the thread's base commit by default) with `head`, a
+	 * branch or commit of the host, or by default the thread's own branch,
+	 * or else a branch or commit the agent said it pushed. Null `head` and
+	 * `unpushedOrb` say that nothing of it is on the host yet.
+	 */
+	async #remoteDiff(since?: string, headOverride?: string): Promise<CodingDiff> {
+		await this.#syncIdleOrb();
+		const thread = this.store.required();
+		const provider = this.#providers().get(thread.providerInstance);
+		const repo = provider.parseRepoUrl(thread.repoUrl, brokerPolicy(this.env));
+		const branches = await provider.listBranches(repo).catch((error: unknown) => {
+			throw new Error(`Pim couldn't read ${repo.fullName} on the git host (${errorText(error)}): a private repository needs the GitHub App installed on it`);
+		});
+		const isSha = (ref: string) => /^[0-9a-f]{40}$/i.test(ref);
+		const resolve = async (ref: string) => (isSha(ref) ? ref.toLowerCase() : (branches.get(ref) ?? (await provider.resolveCommit(repo, ref))));
+		const from = await resolve(since ?? thread.baseSha ?? thread.baseRef);
+		if (!from) throw new Error(`${since ?? thread.baseRef} isn't a branch or commit of ${repo.fullName}`);
+		if (since === undefined && thread.baseSha === null) this.store.update({ baseSha: from });
+		let head: string | null = null;
+		if (headOverride !== undefined) {
+			head = await resolve(headOverride);
+			if (!head) throw new Error(`${headOverride} isn't a branch or commit of ${repo.fullName}`);
+		} else {
+			const own = branches.get(thread.branch);
+			head = own && own !== from ? own : await this.#pushedByAgent(thread, provider, repo, branches, from);
+		}
+		if (!head) return { since: from, head: null, diff: "", truncated: false, unpushedOrb: true };
+		if (head === from) return { since: from, head, diff: "", truncated: false };
+		const cached = this.store.cachedDiff(from, head);
+		if (cached) return { since: from, head, ...cached };
+		const compared = await provider.compareDiff(repo, from, head);
+		if (!compared) throw new Error(`${repo.fullName}'s host has no comparison of ${from.slice(0, 12)} and ${head.slice(0, 12)}`);
+		const truncated = compared.diff.length > MAX_DIFF_CHARS;
+		const diff = truncated ? compared.diff.slice(0, MAX_DIFF_CHARS) : compared.diff;
+		this.store.cacheDiff(compared.baseSha, compared.headSha, diff, truncated);
+		return { since: compared.baseSha, head: compared.headSha, diff, truncated };
+	}
+
+	/**
+	 * What the agent of an agent-hosted thread said it pushed, newest first: a
+	 * branch the host has, other than the one the thread started from (the
+	 * default branch only when the agent showed a push to it), or a commit
+	 * the host has, of the few the messages name. Null when there is none.
+	 */
+	async #pushedByAgent(thread: CodingThreadRow, provider: GitProvider, repo: RepoRef, branches: ReadonlyMap<string, string>, from: string): Promise<string | null> {
+		const messages = projectEntries(await this.harness.messages()).filter((message) => message.role !== "user").slice(-60).reverse();
+		const names = [...branches.keys()].sort((a, b) => b.length - a.length);
+		const mentions = (text: string, name: string) => text.includes(name) && new RegExp(`(?<![A-Za-z0-9._/-])${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![A-Za-z0-9._/-])`).test(text);
+		let defaultBranch: string | undefined;
+		const texts = messages.map((message) => transcriptText(message).slice(0, 20_000));
+		for (const text of texts) {
+			for (const name of names) {
+				if (branches.get(name) === from || !mentions(text, name)) continue;
+				defaultBranch ??= await provider.defaultBranch(repo).catch(() => "");
+				if ((name === defaultBranch || name === thread.baseRef) && !text.includes(`-> ${name}`)) continue;
+				return branches.get(name)!;
+			}
+		}
+		let checked = 0;
+		for (const text of texts) {
+			if (!/push|origin|HEAD/i.test(text)) continue;
+			for (const candidate of text.match(/(?<![0-9A-Za-z])[0-9a-f]{7,40}(?![0-9A-Za-z])/g) ?? []) {
+				if (!/\d/.test(candidate) || from.startsWith(candidate) || checked >= 3) continue;
+				checked++;
+				const sha = await provider.resolveCommit(repo, candidate).catch(() => null);
+				if (sha && sha !== from) return sha;
+			}
+		}
+		return null;
+	}
+
+	/** Whether the git host has the thread's own branch, which an agent-hosted thread's agent may have pushed itself. */
+	async #branchOnHost(thread: CodingThreadRow): Promise<boolean> {
+		try {
+			const provider = this.#providers().get(thread.providerInstance);
+			return (await provider.listBranches(provider.parseRepoUrl(thread.repoUrl, brokerPolicy(this.env)))).has(thread.branch);
+		} catch {
+			return false;
+		}
 	}
 
 	async tests(): Promise<TestRun[]> {
@@ -1573,6 +1660,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 	async preparePush(branch?: string): Promise<PushPreparation> {
 		await this.lifecycle.start();
 		const thread = this.store.required();
+		if (thread.providerKind === "agent-hosted") return { ok: false, code: "conflict", message: AGENT_HOSTED_PUSHES };
 		const blocker = await this.#pushBlocker(thread);
 		if (blocker) return { ok: false, ...blocker };
 		const target = branch ?? thread.branch;
@@ -1640,6 +1728,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 	async prepareMerge(): Promise<MergePreparation> {
 		await this.lifecycle.start();
 		const thread = this.store.required();
+		if (thread.providerKind === "agent-hosted") return { ok: false, code: "conflict", message: AGENT_HOSTED_PUSHES };
 		const blocker = await this.#pushBlocker(thread);
 		if (blocker) return { ok: false, ...blocker };
 		if (thread.state === "archived") return { ok: false, code: "archived", message: "This coding thread is archived" };
@@ -1737,7 +1826,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 		const blocker = await this.#pushBlocker(thread);
 		if (blocker) return { ok: false, ...blocker };
 		if (thread.state === "archived") return { ok: false, code: "archived", message: "This coding thread is archived" };
-		if (!this.store.hasPushed(thread.branch)) return { ok: false, code: "not_pushed", message: `${thread.branch} hasn't been pushed: push the thread's branch first, then open the pull request` };
+		if (!this.store.hasPushed(thread.branch) && !(thread.providerKind === "agent-hosted" && (await this.#branchOnHost(thread)))) return { ok: false, code: "not_pushed", message: `${thread.branch} hasn't been pushed: push the thread's branch first, then open the pull request` };
 		try {
 			const provider = this.#providers().get(thread.providerInstance);
 			const repo = provider.parseRepoUrl(thread.repoUrl, brokerPolicy(this.env)).fullName;
@@ -1763,7 +1852,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 		const blocker = await this.#pushBlocker(thread);
 		if (blocker) return { ok: false, message: blocker.message };
 		if (thread.state === "archived") return { ok: false, message: "This coding thread is archived" };
-		if (!this.store.hasPushed(thread.branch)) return { ok: false, message: `${thread.branch} hasn't been pushed: push the thread's branch first, then open the pull request` };
+		if (!this.store.hasPushed(thread.branch) && !(thread.providerKind === "agent-hosted" && (await this.#branchOnHost(thread)))) return { ok: false, message: `${thread.branch} hasn't been pushed: push the thread's branch first, then open the pull request` };
 		try {
 			const provider = this.#providers().get(thread.providerInstance);
 			const repo = provider.parseRepoUrl(thread.repoUrl, brokerPolicy(this.env));
@@ -2058,6 +2147,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 						createdAt: thread.createdAt,
 						updatedAt: thread.updatedAt,
 						lastTurnEndedAt: this.store.lastTurnEndedAt(),
+						orbId: thread.orb?.threadId ?? null,
+						orbUrl: thread.orb?.url ?? null,
 					});
 					await codingThreadsChanged(this.env, thread.space);
 				} while (this.#indexAgain);
@@ -3393,8 +3484,10 @@ export class CodingThreadDO extends DurableObject<Env> {
 			const text = message.parts
 				.flatMap((part) => (part.type === "text" ? [part.text] : []))
 				.join("\n")
+				.replace(/<suggested-replies>[\s\S]*?(?:<\/suggested-replies>|$)/g, "")
 				.trim();
-			if (text) return text.length > SAID_CHARS ? `…${text.slice(-SAID_CHARS)}` : text;
+			// The summary, commit and test counts are at the start of a reply and its question at the end: keep both.
+			if (text) return text.length > SAID_CHARS ? `${text.slice(0, SAID_HEAD)}\n… [${text.length - SAID_HEAD - SAID_TAIL} characters omitted; read the full reply with coding_transcript(tail=true) / coding_transcript_output] …\n${text.slice(-SAID_TAIL)}` : text;
 		}
 		return null;
 	}
@@ -4483,7 +4576,7 @@ export type CodingThreadStatus = {
 	/** What kind of provider runs the thread: a workspace Pim made and execs into, or an agent-hosted orb in the agent's own cloud. */
 	readonly providerKind: CodingThreadRow["providerKind"];
 	/** The agent-hosted thread the thread runs on, where the person can watch it on the agent's own site; null for a workspace thread. */
-	readonly orb: { readonly url: string } | null;
+	readonly orb: { readonly threadId?: string; readonly url: string } | null;
 	/**
 	 * What the thread has cost: what Pim measured of it in a workspace, or
 	 * what its agent's cloud reported for an agent-hosted one — the agent's
@@ -4521,7 +4614,14 @@ export type CodingThreadStatus = {
 /** A session as the status tells it. `maxMin` and `expiresAt` are null for a provider without a cap, `keepAlive` is whether the thread pings the provider while a turn runs. */
 export type CodingSessionStatus = CodingSession & { readonly maxMin: number | null; readonly expiresAt: number | null; readonly keepAlive: boolean };
 
-export type CodingDiff = { readonly since: string | null; readonly head: string | null; readonly diff: string; readonly truncated: boolean };
+export type CodingDiff = {
+	readonly since: string | null;
+	readonly head: string | null;
+	readonly diff: string;
+	readonly truncated: boolean;
+	/** For an agent-hosted thread: nothing of its work is on the git host yet. */
+	readonly unpushedOrb?: boolean;
+};
 
 /** How a turn ended, from pi or a CLI harness: answered, or why not, with what to tell the person. */
 type TurnResult = { readonly status: "done" | "unanswered"; readonly reason?: string; readonly detail?: string };
@@ -4650,7 +4750,11 @@ export type MergePreparation =
 export type MergeResult = PushResult & { readonly rebased: boolean; readonly threadBranch: string | null };
 
 /** The most of the coding agent's last words a turn's end carries. */
-const SAID_CHARS = 1000;
+/** Why an agent-hosted thread isn't pushed or merged from Pim: its agent does that from its own cloud. */
+const AGENT_HOSTED_PUSHES = "This thread runs in Amp's cloud and holds no workspace in Pim, so Pim can't push or merge it. Tell it to push its pim/ branch or merge with coding_steer, then use coding_open_pull_request once its branch is pushed.";
+const SAID_CHARS = 4_000;
+const SAID_HEAD = 2_400;
+const SAID_TAIL = 1_400;
 
 const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error));
 

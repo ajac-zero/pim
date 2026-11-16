@@ -13,6 +13,7 @@ import {
 import { DEFAULT_POOLS } from "@pim/coding/pools-default";
 import { type SandboxPool, resolvePools } from "@pim/coding/pools";
 import { workspaceBackends } from "../src/coding/workspace/registry";
+import { codingVault } from "../src/coding/vault/worker";
 import type { Pim } from "../src/pim";
 import { OWNER, ROOT, say, toolUse } from "./helpers";
 import { faux } from "./worker";
@@ -486,6 +487,19 @@ describe("coding tools", () => {
 			const without = await turn();
 			expect(names(without.tools)).toEqual([]);
 			expect(without.line).toContain(NO_CODING_SANDBOX_LINE);
+
+			// An Amp login runs and reads threads in Amp's cloud with no sandbox, so saving one brings the tools back; removing it takes them away again.
+			await codingVault(env).saveApiKey(OWNER, "amp", "sgamp_compute_test");
+			try {
+				const amp = await turn();
+				expect(names(amp.tools)).toContain("coding_transcript");
+				expect(amp.line).toBeNull();
+			} finally {
+				await codingVault(env).delete(OWNER, "amp");
+			}
+			const gone = await turn();
+			expect(names(gone.tools)).toEqual([]);
+			expect(gone.line).toContain(NO_CODING_SANDBOX_LINE);
 
 			// The admin sets a provider up: the next turn has them again. No flag, no deploy.
 			await shared.putComputeProvider(null, { kind: "compose", settings: { managerUrl: MANAGER }, credentials: { token: TOKEN } });

@@ -9,7 +9,7 @@ import { brokerPolicy } from "@pim/coding/git-broker/config";
 import { MAX_SETUP_SCRIPT_BYTES } from "@pim/coding/environment-cache";
 import { codingScheduler, codingThreadsChanged } from "./scheduler-do";
 import { codingThread } from "./thread-do";
-import { calling, CodingError, listThreads, liveThread, ownedThread, startThread, threadView, viewOf } from "./threads";
+import { BRANCH_OR_COMMIT, calling, CodingError, listThreads, liveThread, ownedThread, startThread, threadView, viewOf } from "./threads";
 
 /**
  * The coding threads API, `/api/coding/threads` (docs/coding-api.md), for
@@ -108,8 +108,10 @@ function codingRoutes(env: Env, space: string): Route[] {
 			const { threadId } = await thread(id!);
 			const since = url.searchParams.get("since") ?? undefined;
 			if (since !== undefined && !/^[0-9a-zA-Z]{4,64}$/.test(since)) throw new CodingError(400, "since must be a commit", "invalid");
+			const head = url.searchParams.get("head") ?? undefined;
+			if (head !== undefined && !BRANCH_OR_COMMIT.test(head)) throw new CodingError(400, "head must be a branch or a commit", "invalid");
 			try {
-				return await codingThread(env, threadId).diff(since);
+				return await codingThread(env, threadId).diff(since, head);
 			} catch (error) {
 				throw new CodingError(409, error instanceof Error ? error.message : String(error), "workspace_not_running");
 			}

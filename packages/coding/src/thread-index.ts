@@ -37,13 +37,16 @@ export type IndexedThread = {
 	readonly lastTurnEndedAt: number | null;
 	/** When the person last viewed it; null if never. A thread is unread while its last turn ended after this. */
 	readonly lastSeenAt: number | null;
+	/** An agent-hosted thread's id and page on the agent's site, such as an Amp thread's `T-…`; null for a thread with none, and for one started before this was kept. */
+	readonly orbId?: string | null;
+	readonly orbUrl?: string | null;
 };
 
 /** What a thread enters before it starts. */
 export type ThreadRegistration = Pick<IndexedThread, "threadId" | "createdBy" | "parent" | "chat" | "harness" | "task" | "repo" | "ref" | "budgetUsd" | "createdAt">;
 
 /** What the thread's object says of itself as its state changes. */
-export type ThreadRecord = Pick<IndexedThread, "threadId" | "repo" | "ref" | "branch" | "state" | "stateReason" | "spentUsd" | "budgetUsd" | "createdAt" | "updatedAt" | "lastTurnEndedAt" | "resolvedProfile">;
+export type ThreadRecord = Pick<IndexedThread, "threadId" | "repo" | "ref" | "branch" | "state" | "stateReason" | "spentUsd" | "budgetUsd" | "createdAt" | "updatedAt" | "lastTurnEndedAt" | "resolvedProfile" | "orbId" | "orbUrl">;
 
 /** The most of a task the list keeps. */
 export const MAX_TASK_CHARS = 2000;
@@ -82,6 +85,8 @@ export class CodingThreadIndex {
 		if (!columns.has("chat")) sql.exec("ALTER TABLE pim_coding_threads ADD COLUMN chat TEXT");
 		if (!columns.has("harness")) sql.exec("ALTER TABLE pim_coding_threads ADD COLUMN harness TEXT NOT NULL DEFAULT 'pi'");
 		if (!columns.has("last_turn_ended_at")) sql.exec("ALTER TABLE pim_coding_threads ADD COLUMN last_turn_ended_at INTEGER");
+		if (!columns.has("orb_id")) sql.exec("ALTER TABLE pim_coding_threads ADD COLUMN orb_id TEXT");
+		if (!columns.has("orb_url")) sql.exec("ALTER TABLE pim_coding_threads ADD COLUMN orb_url TEXT");
 		if (!columns.has("last_seen_at")) sql.exec("ALTER TABLE pim_coding_threads ADD COLUMN last_seen_at INTEGER");
 	}
 
@@ -110,7 +115,7 @@ export class CodingThreadIndex {
 	/** Brings a thread's row up to date, unless it has a newer one already. A thread never entered stays out. */
 	record(thread: ThreadRecord): void {
 		this.#sql.exec(
-			`UPDATE pim_coding_threads SET resolved_profile = ?, repo = ?, ref = ?, branch = ?, state = ?, state_reason = ?, spent_usd = ?, budget_usd = ?, created_at = ?, updated_at = ?, last_turn_ended_at = COALESCE(?, last_turn_ended_at)
+			`UPDATE pim_coding_threads SET resolved_profile = ?, repo = ?, ref = ?, branch = ?, state = ?, state_reason = ?, spent_usd = ?, budget_usd = ?, created_at = ?, updated_at = ?, last_turn_ended_at = COALESCE(?, last_turn_ended_at), orb_id = COALESCE(?, orb_id), orb_url = COALESCE(?, orb_url)
 			WHERE thread_id = ? AND updated_at <= ?`,
 			thread.resolvedProfile == null ? null : JSON.stringify(thread.resolvedProfile),
 			thread.repo,
@@ -123,9 +128,22 @@ export class CodingThreadIndex {
 			thread.createdAt,
 			thread.updatedAt,
 			thread.lastTurnEndedAt,
+			thread.orbId ?? null,
+			thread.orbUrl ?? null,
 			thread.threadId,
 			thread.updatedAt,
 		);
+	}
+
+	/** Notes the agent-hosted thread an older row never said it has. */
+	recordOrb(threadId: string, orbId: string, orbUrl: string): void {
+		this.#sql.exec("UPDATE pim_coding_threads SET orb_id = ?, orb_url = ? WHERE thread_id = ? AND orb_id IS NULL", orbId, orbUrl, threadId);
+	}
+
+	/** The space's thread that runs on the agent's thread `orbId`, if it has one. */
+	getByOrb(orbId: string): IndexedThread | null {
+		const row = this.#sql.exec("SELECT * FROM pim_coding_threads WHERE orb_id = ? ORDER BY created_at DESC LIMIT 1", orbId).toArray()[0];
+		return row ? indexedOf(row) : null;
 	}
 
 	/** The person viewed the thread at `at`; false for a thread that isn't in the list. */
@@ -165,5 +183,7 @@ function indexedOf(row: Record<string, SqlStorageValue>): IndexedThread {
 		updatedAt: Number(row.updated_at),
 		lastTurnEndedAt: row.last_turn_ended_at === null ? null : Number(row.last_turn_ended_at),
 		lastSeenAt: row.last_seen_at === null ? null : Number(row.last_seen_at),
+		orbId: row.orb_id == null ? null : String(row.orb_id),
+		orbUrl: row.orb_url == null ? null : String(row.orb_url),
 	};
 }

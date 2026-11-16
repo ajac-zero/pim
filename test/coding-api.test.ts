@@ -579,6 +579,16 @@ describe("opening a pull request from a coding thread", () => {
 		});
 	});
 
+	it("let agents read the tail of a transcript, and diff to a pushed branch", async () => {
+		await runInDurableObject(env.Pim.getByName(OWNER), async (pim: Pim) => {
+			const tools = pim.abilities.get("coding")!.tools!;
+			const props = (name: string) => Object.keys((tools.find((candidate) => candidate.name === name)!.parameters as unknown as { properties: Record<string, unknown> }).properties).sort();
+			expect(props("coding_transcript")).toEqual(["limit", "offset", "role", "summary", "tail", "thread_id"]);
+			expect(props("coding_diff")).toEqual(["head", "since", "thread_id"]);
+			expect(tools.find((candidate) => candidate.name === "coding_transcript")!.description).toMatch(/never steer a thread just to ask what it did/);
+		});
+	});
+
 	it("tells agents to retry a transiently failed thread once, then tell the person", async () => {
 		await runInDurableObject(env.Pim.getByName(OWNER), async (pim: Pim) => {
 			const tool = pim.abilities.get("coding")!.tools!.find((candidate) => candidate.name === "coding_start")!;
@@ -965,6 +975,16 @@ describe("what an agent hears of a coding thread's failure", () => {
 		expect(CODING_EVENT.test(message)).toBe(true);
 		expect(message).toContain("Detail: manager answered 502");
 		expect(message).toContain("retry once by starting a fresh thread with the same task");
+	});
+
+	it("points at the transcript and ends on one line the web chat strips", () => {
+		const message = turnEndedMessage({ ...ended, outcome: "completed", state: "idle", said: "All done." }, null);
+		const line = message.slice(message.lastIndexOf("\nLook with coding_"));
+		expect(line.slice(1)).not.toContain("\n");
+		expect(line).toContain("coding_transcript (use tail=true");
+		expect(line).toContain("coding_transcript_output");
+		expect(line).toContain("Never steer a thread just to ask for a summary");
+		expect(message.replace(/\nLook with coding_[^\n]*$/, "").endsWith("All done.")).toBe(true);
 	});
 
 	it("has neither for a turn that didn't fail", () => {

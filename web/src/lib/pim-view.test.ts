@@ -1290,7 +1290,7 @@ describe("a coding thread's turn ending", () => {
     "Fixed the bug.",
     "",
     "Tests pass.",
-    "Look with coding_status, coding_diff or coding_tests; tell it more with coding_steer.",
+    'Look with coding_transcript (use tail=true or role="assistant", then coding_transcript_output for full messages), coding_status, coding_diff or coding_tests; tell it more with coding_steer. Never steer a thread just to ask for a summary or diff printout. Tell the person what matters.',
   ].join("\n");
 
   it("is a notice with its parts, not the person's message", () => {

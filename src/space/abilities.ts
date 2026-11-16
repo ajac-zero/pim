@@ -42,6 +42,7 @@ export interface AbilitiesHost {
 	readonly env: Env;
 	codingSandboxes: boolean | undefined;
 	readonly environmentWorkspaceIds: () => string[];
+	readonly hasAmpToken: () => boolean;
 	readonly abilities: Map<string, Ability>;
 	readonly registry: import("@earendil-works/pi-durable").Registry<import("@earendil-works/pi-durable").ToolRegistration>;
 	readonly visits: VisitStore;
@@ -100,6 +101,11 @@ export class Abilities {
 	/** Whether coding threads can get a workspace: what `#refreshCompute` last found. */
 	hasCodingSandbox(): boolean {
 		return (this.host.codingSandboxes ??= this.host.environmentWorkspaceIds().length > 0);
+	}
+
+	/** Whether coding tools are of use: a workspace sandbox can run a thread, or the space has an Amp token, which reads and runs Amp threads with no sandbox at all. */
+	hasCodingBackend(): boolean {
+		return this.hasCodingSandbox() || this.host.hasAmpToken();
 	}
 
 	installAbilities(services: PimServices): void {

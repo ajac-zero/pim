@@ -2,7 +2,7 @@ import { base64UrlDecode, base64UrlEncode } from "@pim/shared/encoding";
 import { HttpError } from "@pim/shared/http";
 import { type BrokerPolicy, GitBrokerNotConfiguredError } from "./config";
 import { apiHeaders, type Fetch, GITHUB_API, type GitHubApp } from "./github-app";
-import { GITHUB_INSTANCE, type GitProvider, type ProviderInstance, type ProviderRegistry, basicAuth } from "./provider";
+import { GITHUB_INSTANCE, type GitCredential, type GitProvider, type ProviderInstance, type ProviderRegistry, basicAuth } from "./provider";
 
 /**
  * The git broker: how a coding thread's workspace works with a GitHub
@@ -231,6 +231,35 @@ export function parseAdvertisement(bytes: Uint8Array): { refs: Map<string, strin
 		if (ref !== "capabilities^{}") refs.set(ref, sha);
 	}
 	return { refs, capabilities };
+}
+
+/** The branches a host's git smart HTTP advertises for `git` (a repository's `.git` URL), by name, each at its commit. */
+export async function listBranchesOverGit(fetchIt: Fetch, git: string, credential: GitCredential | null): Promise<Map<string, string>> {
+	let response: Response;
+	try {
+		response = await fetchIt(`${git}/info/refs?service=git-upload-pack`, { headers: { ...(credential ? { Authorization: basicAuth(credential) } : {}), "User-Agent": "git/pim-git-broker" }, redirect: "manual", signal: AbortSignal.timeout(30_000) });
+	} catch {
+		throw new GitBrokerError(502, "The git host couldn't be reached");
+	}
+	if (!response.ok) throw new GitBrokerError(response.status === 404 || response.status === 401 ? 404 : 502, `The git host answered HTTP ${response.status} when listing branches`);
+	const branches = new Map<string, string>();
+	for (const [ref, sha] of parseAdvertisement(new Uint8Array(await response.arrayBuffer())).refs) if (ref.startsWith("refs/heads/")) branches.set(ref.slice("refs/heads/".length), sha);
+	return branches;
+}
+
+/** Reads at most `max` characters of a response's body, so a huge diff can't exhaust memory. */
+export async function readCapped(response: Response, max: number): Promise<string> {
+	const reader = response.body?.getReader();
+	if (!reader) return "";
+	const decoder = new TextDecoder();
+	let out = "";
+	while (out.length < max) {
+		const { done, value } = await reader.read();
+		if (done) break;
+		out += decoder.decode(value, { stream: true });
+	}
+	await reader.cancel().catch(() => {});
+	return out.slice(0, max);
 }
 
 // Pushes from a workspace

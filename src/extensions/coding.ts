@@ -6,7 +6,7 @@ import { deploymentSettings } from "../deployment";
 import { type CodingThreadView, threadPath } from "../coding/api";
 import { cliHarness } from "@pim/coding/harness/index";
 import { codingThread } from "../coding/thread-do";
-import { CodingError, calling, listThreads, liveThread, ownedThread, startThread, threadView } from "../coding/threads";
+import { BRANCH_OR_COMMIT, CodingError, calling, listThreads, liveThread, ownedThread, readableThread, startThread, threadView } from "../coding/threads";
 import { OUTPUT_LINES, pageTranscript, TRANSCRIPT_MAX_PAGE, TRANSCRIPT_PAGE, transcriptOutput } from "@pim/coding/transcript";
 import { outsideTrace } from "../telemetry";
 import type { TranscriptMessage } from "@pim/shared/transcript";
@@ -40,12 +40,20 @@ async function threadTranscript(env: Env, threadId: string): Promise<TranscriptM
 	return await stub.transcript();
 }
 
+/** The transcript of a thread of the space, or of an Amp thread the space's Amp login can read that Pim didn't start. */
+async function readTranscript(space: string, input: string): Promise<TranscriptMessage[]> {
+	const found = await readableThread(env, space, input);
+	return "external" in found ? found.external.transcript : await threadTranscript(env, found.owned.threadId);
+}
+
 /** What the model reads of a thread: enough to decide what to do next. */
 function brief(view: CodingThreadView) {
 	return {
 		thread_id: view.id,
 		url: link(view.id),
 		status: view.state,
+		harness: view.harness,
+		...(view.orb ? { orb: { ...(view.orb.threadId ? { thread_id: view.orb.threadId } : {}), url: view.orb.url } } : {}),
 		...(view.stateReason ? { reason: view.stateReason } : {}),
 		...(view.stateDetail ? { detail: view.stateDetail } : {}),
 		...(view.queue ? { position: view.queue.position, waiting_for: view.queue.reason } : {}),
@@ -81,21 +89,21 @@ async function answer(work: () => Promise<ReturnType<typeof text>>) {
 	}
 }
 
-const ThreadId = Type.String({ description: "The thread's ID, as coding_start or coding_status gave it." });
+const ThreadId = Type.String({ description: "The thread's ID, as coding_start or coding_status gave it; also its /coding/<id> page, an Amp thread's ID (T-…) or an https://ampcode.com/threads/T-… URL." });
 
 export const coding = definePimExtension({
 	id: "coding",
 	name: "Coding threads",
 	description: "Coding agents that work on GitHub and Gitea repositories in workspaces of their own.",
 	ability: ({ space, conversationOf, compute }) => ({
-		// The tools follow the configuration: with no coding sandbox provider they aren't offered, and the prompt says so in one line.
-		offeredTo: () => compute.codingSandbox(),
-		sections: [section("coding_unavailable", () => (compute.codingSandbox() ? undefined : NO_CODING_SANDBOX_LINE))],
+		// The tools follow the configuration: with no coding sandbox provider and no Amp token (which needs no sandbox) they aren't offered, and the prompt says so in one line.
+		offeredTo: () => compute.codingBackend(),
+		sections: [section("coding_unavailable", () => (compute.codingBackend() ? undefined : NO_CODING_SANDBOX_LINE))],
 		tools: [
 			defineTool({
 				name: "coding_start",
 				description:
-					"Start a coding thread: a coding agent that works on a Git repository (GitHub or Gitea) in a workspace of its own, on a new branch (pim/…), on the task you give it. Use it for changes to a codebase: fixing a bug, adding a feature, writing tests. Write the task as you would for a capable engineer who knows nothing of this conversation: what to change, why, and how to check it. It returns at once, often queued while a workspace is made ready; don't wait for it. You are told in this chat when each of its turns ends. Then read its work with coding_diff and coding_tests, say more with coding_steer, and push it with coding_push or ship it to the default branch with coding_merge, which need no approval: check its diff and tests first. After a push, coding_open_pull_request opens a pull request, also with no approval. If a thread fails with a transient error (workspace, manager, harness or provider), retry once by starting a fresh thread with the same task; if that fails too, stop and tell the person what happened.",
+					"Start a coding thread: a coding agent that works on a Git repository (GitHub or Gitea) in a workspace of its own, on a new branch (pim/…), on the task you give it. Use it for changes to a codebase: fixing a bug, adding a feature, writing tests. Write the task as you would for a capable engineer who knows nothing of this conversation: what to change, why, and how to check it. It returns at once, often queued while a workspace is made ready; don't wait for it. You are told in this chat when each of its turns ends. Then read what it did with coding_transcript (tail=true, or role=\"assistant\" for its replies; coding_transcript_output reads one whole) and its work with coding_diff and coding_tests; never steer it just to ask what it did or to print a diff. Say more with coding_steer, and push it with coding_push or ship it to the default branch with coding_merge, which need no approval: check its diff and tests first. After a push, coding_open_pull_request opens a pull request, also with no approval. If a thread fails with a transient error (workspace, manager, harness or provider), retry once by starting a fresh thread with the same task; if that fails too, stop and tell the person what happened.",
 				parameters: Type.Object({
 					repo: Type.String({ description: "The repository's address, such as https://github.com/<owner>/<name> or the same on the deployment's Gitea." }),
 					ref: Type.Optional(Type.String({ description: "The branch, tag or commit to start from; main by default." })),
@@ -156,16 +164,25 @@ export const coding = definePimExtension({
 			}),
 			defineTool({
 				name: "coding_status",
-				description: "How a coding thread is doing: its state, its latest checkpoint, its prepared environment (the toolchains and dependencies the repository pins and how each install went, the commands it checks itself with, what its setup script did, and whether it was restored from a cached snapshot) and what it has spent. Without a thread_id, lists the space's coding threads, newest first.",
+				description: "How a coding thread is doing: its state, its harness and, for an Amp Orb thread, its Amp thread (orb.thread_id, orb.url), its latest checkpoint, its prepared environment (the toolchains and dependencies the repository pins and how each install went, the commands it checks itself with, what its setup script did, and whether it was restored from a cached snapshot) and what it has spent. Without a thread_id, lists the space's coding threads, newest first. Also reads an Amp thread (T-… or its ampcode.com URL) that Pim didn't start, through the space's Amp login.",
 				parameters: Type.Object({ thread_id: Type.Optional(ThreadId) }),
 				replay: "safe",
 				async execute({ thread_id }) {
 					return answer(async () => {
-						if (thread_id) return json(brief(await threadView(env, space, thread_id)));
+						if (thread_id) {
+							const found = await readableThread(env, space, thread_id);
+							if ("external" in found) {
+								const { external } = found;
+								return json({ thread_id: external.threadId, orb: { thread_id: external.threadId, url: external.url }, harness: "amp", provider: "amp-orbs", status: { working: "running", idle: "idle", awaiting_approval: "waiting_input", error: "failed", unknown: "running" }[external.state], title: external.title, external_amp_thread: true });
+							}
+							return json(brief(await threadView(env, space, found.owned.threadId, found.owned)));
+						}
 						const threads = await listThreads(env, space);
 						return json({
 							threads: threads.slice(0, MAX_LISTED).map((thread) => ({
 								thread_id: thread.id,
+								harness: thread.harness,
+								...(thread.orbUrl ? { orb_url: thread.orbUrl, ...(thread.orbId ? { orb_id: thread.orbId } : {}) } : {}),
 								status: thread.state,
 								resolved_profile: thread.resolvedProfile ?? null,
 								repo: thread.repo,
@@ -201,14 +218,20 @@ export const coding = definePimExtension({
 			}),
 			defineTool({
 				name: "coding_diff",
-				description: `What a coding thread changed, as a git diff from where it started (or from \`since\`, a commit) to its latest checkpoint. At most ${MAX_DIFF_CHARS} characters; the thread's page has all of it. A suspended workspace is resumed automatically for a diff not kept, which may take a minute and may report that the thread is queued.`,
-				parameters: Type.Object({ thread_id: ThreadId, since: Type.Optional(Type.String({ description: "A commit to diff from: an earlier checkpoint's sha." })) }),
+				description: `What a coding thread changed, as a git diff from where it started (or from \`since\`, a commit) to its latest checkpoint. At most ${MAX_DIFF_CHARS} characters; the thread's page has all of it. A suspended workspace is resumed automatically for a diff not kept, which may take a minute and may report that the thread is queued. An Amp Orb thread runs in Amp's cloud with no workspace of Pim's: its diff is read from the git host, of its pim/ branch (or another branch it says it pushed, or the \`head\` you give) once it is pushed. Never steer a thread just to print its diff.`,
+				parameters: Type.Object({
+					thread_id: ThreadId,
+					since: Type.Optional(Type.String({ description: "A commit to diff from: an earlier checkpoint's sha." })),
+					head: Type.Optional(Type.String({ description: "For an Amp Orb thread: the branch or commit on the git host to diff to, when it pushed under another name than its own." })),
+				}),
 				replay: "safe",
-				async execute({ thread_id, since }) {
+				async execute({ thread_id, since, head }) {
 					return answer(async () => {
 						if (since !== undefined && !COMMIT.test(since)) throw new CodingError(400, "since must be a commit's sha", "invalid");
-						const { threadId } = await ownedThread(env, space, thread_id);
-						const diff = await calling(() => codingThread(env, threadId).diff(since));
+						if (head !== undefined && !BRANCH_OR_COMMIT.test(head)) throw new CodingError(400, "head must be a branch or a commit", "invalid");
+						const { threadId, branch } = await ownedThread(env, space, thread_id);
+						const diff = await calling(() => codingThread(env, threadId).diff(since, head));
+						if (diff.unpushedOrb) return text(`No pushed branch or commit found on the git host yet (checked ${branch}). Amp Orb threads run in Amp's cloud without a Pim workspace, so coding_diff only sees changes once pushed to GitHub/Gitea (or pass head=<branch-or-sha> if pushed under another name). Read coding_transcript / coding_transcript_output for what the agent did so far, or coding_steer it to push a pim/* branch.`);
 						if (!diff.diff) return text(diff.head ? "No changes." : "Nothing committed yet: each turn's changes are committed when it ends.");
 						const clipped = diff.diff.length > MAX_DIFF_CHARS;
 						const more = clipped ? `\n[… ${diff.diff.length - MAX_DIFF_CHARS} more characters: see ${link(threadId)}]` : diff.truncated ? "\n[The diff was too large to keep whole.]" : "";
@@ -240,10 +263,11 @@ export const coding = definePimExtension({
 			}),
 			defineTool({
 				name: "coding_transcript",
-				description: `What a coding thread said: the task it was given, what its agent answered, the commands it ran and what they printed, and its notices. Messages come oldest first, \`limit\` (${TRANSCRIPT_PAGE} by default, at most ${TRANSCRIPT_MAX_PAGE}) from \`offset\` (0 by default); the answer says how many there are in all and where the next page starts. \`role\` reads only one kind of message (user, assistant, tool or notice), and \`summary\` one line of each, to see the shape of the conversation first. Long messages are cut; coding_transcript_output reads one whole by its id.`,
+				description: `What a coding thread said: the task it was given, what its agent answered, the commands it ran and what they printed, and its notices. It reads the whole conversation of any coding thread, a workspace thread or an Amp Orb thread (also an Amp thread Pim didn't start, by its T-… ID or ampcode.com URL), so never steer a thread just to ask what it did. Messages come oldest first, \`limit\` (${TRANSCRIPT_PAGE} by default, at most ${TRANSCRIPT_MAX_PAGE}) from \`offset\` (0 by default); the answer says how many there are in all and where the next page starts. With \`tail\` it reads the latest \`limit\` instead, where a long thread's final answers are (\`tail\` with role "assistant" for the last replies), and says where they start. \`role\` reads only one kind of message (user, assistant, tool or notice), and \`summary\` one line of each, to see the shape of the conversation first. Long messages are cut; coding_transcript_output reads one whole by its id.`,
 				parameters: Type.Object({
 					thread_id: ThreadId,
 					offset: Type.Optional(Type.Integer({ minimum: 0, description: "The first message to show, counting from 0; the oldest by default." })),
+					tail: Type.Optional(Type.Boolean({ description: "Read the latest `limit` messages (still returned oldest-first in that window) instead of starting at 0; ignored when `offset` is given." })),
 					limit: Type.Optional(Type.Integer({ minimum: 1, maximum: TRANSCRIPT_MAX_PAGE, description: `How many messages to show; ${TRANSCRIPT_PAGE} by default.` })),
 					role: Type.Optional(
 						Type.Union([Type.Literal("user"), Type.Literal("assistant"), Type.Literal("tool"), Type.Literal("notice")], {
@@ -253,16 +277,13 @@ export const coding = definePimExtension({
 					summary: Type.Optional(Type.Boolean({ description: "One line of each message, instead of the whole of each." })),
 				}),
 				replay: "safe",
-				async execute({ thread_id, offset, limit, role, summary }) {
-					return answer(async () => {
-						const { threadId } = await ownedThread(env, space, thread_id);
-						return json(pageTranscript(await threadTranscript(env, threadId), { offset, limit, role, summary }));
-					});
+				async execute({ thread_id, offset, limit, role, summary, tail }) {
+					return answer(async () => json(pageTranscript(await readTranscript(space, thread_id), { offset, limit, role, summary, tail })));
 				},
 			}),
 			defineTool({
 				name: "coding_transcript_output",
-				description: `One message of a coding thread's transcript whole, by the id coding_transcript gave it: the whole of what it said, of a command it ran or of what that printed, which the transcript had cut. Paged by lines like read: up to ${OUTPUT_LINES} lines and about 30 KB from offset (line 1 by default), and it says how to read on when there is more.`,
+				description: `One message of a coding thread's transcript (a workspace thread's, an Amp Orb thread's or a standalone Amp thread's) whole, by the id coding_transcript gave it: the whole of what it said, of a command it ran or of what that printed, which the transcript had cut. Paged by lines like read: up to ${OUTPUT_LINES} lines and about 30 KB from offset (line 1 by default), and it says how to read on when there is more.`,
 				parameters: Type.Object({
 					thread_id: ThreadId,
 					id: Type.String({ description: "The message's id, as coding_transcript gave it." }),
@@ -272,9 +293,8 @@ export const coding = definePimExtension({
 				replay: "safe",
 				async execute({ thread_id, id, offset, limit }) {
 					return answer(async () => {
-						const { threadId } = await ownedThread(env, space, thread_id);
-						const output = transcriptOutput(await threadTranscript(env, threadId), id, { offset, limit });
-						if (output === null) throw new CodingError(404, `No message ${id} in coding thread ${threadId}'s transcript`, "not_found");
+						const output = transcriptOutput(await readTranscript(space, thread_id), id, { offset, limit });
+						if (output === null) throw new CodingError(404, `No message ${id} in coding thread ${thread_id}'s transcript`, "not_found");
 						return text(output);
 					});
 				},

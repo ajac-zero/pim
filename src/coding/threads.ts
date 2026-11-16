@@ -6,7 +6,11 @@ import { threadPath } from "./api";
 import { GitBrokerError } from "@pim/coding/git-broker/broker";
 import { brokerPolicy } from "@pim/coding/git-broker/config";
 import { deploymentProviders } from "./git-broker/worker";
-import { AMP_HTTP_UNSUPPORTED } from "@pim/coding/orb/amp-http";
+import { AMP_HTTP_UNSUPPORTED, AmpHttpOrbClient } from "@pim/coding/orb/amp-http";
+import { type OrbMessage, OrbAuthError, OrbError, OrbLostError } from "@pim/coding/orb/types";
+import type { JsonValue } from "@earendil-works/pi-ai";
+import type { TranscriptMessage } from "@pim/shared/transcript";
+import { codingVault } from "./vault/worker";
 import { cliHarness } from "@pim/coding/harness/index";
 import { codingScheduler, codingThreadsChanged } from "./scheduler-do";
 import { codingThread } from "./thread-do";
@@ -31,13 +35,94 @@ export class CodingError extends HttpError {
 	}
 }
 
+/** A branch or commit as a git host names it: no `..`, spaces or control characters. */
+export const BRANCH_OR_COMMIT = /^(?!.*\.\.)[0-9A-Za-z._/-]{1,200}$/;
+
 type Listed = IndexedThread & { readonly queue: CodingThreadSummary["queue"] };
+
+/** A thread a caller names: one of Pim's by its id, or an Amp thread by its `T-…` id. */
+export type ThreadRef = { readonly kind: "pim" | "amp"; readonly id: string };
+
+/**
+ * What a caller may give for a thread: a Pim coding thread's id, its page (`/coding/<id>`, with or without
+ * the deployment's origin), an Amp thread's id (`T-…`) or its page (`https://ampcode.com/threads/T-…`).
+ */
+export function threadRef(input: string): ThreadRef {
+	const given = typeof input === "string" ? input.trim() : "";
+	if (/^T-[A-Za-z0-9_-]+$/.test(given)) return { kind: "amp", id: given };
+	const amp = /^https?:\/\/(?:www\.)?ampcode\.com\/threads\/(T-[A-Za-z0-9_-]+)\/?(?:[?#].*)?$/.exec(given);
+	if (amp) return { kind: "amp", id: amp[1]! };
+	const page = /^(?:https?:\/\/[^/\s]+)?\/coding\/([^/?#\s]+)\/?(?:[?#].*)?$/.exec(given);
+	return { kind: "pim", id: page ? page[1]! : given };
+}
+
+/** The space's thread that runs on the Amp thread `orbId`, as its list has it; null when it has none. Rows from before the list kept Amp's id are found by asking the space's recent Amp threads. */
+async function threadOfOrb(env: Env, space: string, orbId: string): Promise<Listed | null> {
+	const scheduler = codingScheduler(env, space);
+	const known = await scheduler.threadByOrb(orbId);
+	if (known) return known;
+	const candidates = (await scheduler.threads()).filter((thread) => thread.harness === "amp" && !thread.orbId).slice(0, 50);
+	for (const candidate of candidates) {
+		const orb = (await codingThread(env, candidate.threadId).status().catch(() => null))?.orb;
+		if (orb && (orb.threadId === orbId || orb.url.endsWith(`/${orbId}`))) {
+			await scheduler.recordThreadOrb(candidate.threadId, orbId, orb.url);
+			return (await scheduler.thread(candidate.threadId)) ?? null;
+		}
+	}
+	return null;
+}
 
 /** A thread of the space, as its list has it; `not_found` for one that isn't the space's. */
 export async function ownedThread(env: Env, space: string, threadId: string): Promise<Listed> {
-	const thread = typeof threadId === "string" && threadId.length <= 128 ? await codingScheduler(env, space).thread(threadId) : null;
-	if (!thread) throw new CodingError(404, `No coding thread ${threadId}`, "not_found");
+	const ref = threadRef(threadId);
+	const thread = typeof threadId !== "string" || threadId.length > 512 ? null : ref.kind === "amp" ? await threadOfOrb(env, space, ref.id) : ref.id.length <= 128 ? await codingScheduler(env, space).thread(ref.id) : null;
+	if (!thread) {
+		throw new CodingError(404, ref.kind === "amp" ? `Pim holds no coding thread of this space for Amp thread ${ref.id}: only coding_status, coding_transcript and coding_transcript_output can read one it didn't start` : `No coding thread ${threadId}`, "not_found");
+	}
 	return thread;
+}
+
+/** An Amp thread this space's Pim didn't start, read on Amp's site with the space's own Amp login. */
+export type ExternalAmpThread = Awaited<ReturnType<AmpHttpOrbClient["readThread"]>> & { readonly transcript: TranscriptMessage[] };
+
+/** One Amp message as a transcript's messages: what was said, the tools it called, and what they printed, each result its own message. */
+function transcriptOfOrb(messages: readonly OrbMessage[]): TranscriptMessage[] {
+	const out: TranscriptMessage[] = [];
+	for (const message of messages) {
+		const parts = message.parts ?? [{ type: "text" as const, text: message.text }];
+		const results = parts.filter((part) => part.type === "toolResult");
+		const said = parts.flatMap<TranscriptMessage["parts"][number]>((part) => (part.type === "text" ? [{ type: "text", text: part.text }] : part.type === "toolCall" ? [{ type: "tool-call", id: part.id, name: part.name, arguments: part.arguments as JsonValue }] : []));
+		if (message.role === "assistant" ? said.length > 0 : message.text || results.length === 0) {
+			out.push({ id: message.id, role: message.role, parts: message.role === "assistant" ? said : [{ type: "text", text: message.text }], timestamp: message.at });
+		}
+		for (const [at, result] of results.entries()) {
+			out.push({ id: `${message.id}.${at + 1}`, role: "tool", parts: [{ type: "tool-result", id: result.id, name: result.name, content: [{ type: "text", text: result.text }], error: result.isError }], timestamp: message.at });
+		}
+	}
+	return out;
+}
+
+/** The Amp thread `orbId` read directly, for one that Pim didn't start. Refuses, as a coding error, when Amp isn't connected in the space or has no such thread. */
+export async function readAmpThread(env: Env, space: string, orbId: string): Promise<ExternalAmpThread> {
+	const vault = codingVault(env);
+	if ((await vault.loadApiKey(space, "amp")) === null) throw new CodingError(409, "Amp isn't connected in this space: add an Amp token on the Coding page first", "conflict");
+	const values = new Map<string, unknown>();
+	const client = new AmpHttpOrbClient({ token: () => vault.loadApiKey(space, "amp"), store: { get: async (key) => values.get(key) ?? null, put: async (key, value) => void values.set(key, value), claim: async (key, value) => !values.has(key) && !!values.set(key, value) } });
+	try {
+		const thread = await client.readThread(orbId);
+		return { ...thread, transcript: transcriptOfOrb(thread.messages) };
+	} catch (error) {
+		if (error instanceof OrbLostError) throw new CodingError(404, `Amp has no thread ${orbId} for this space's Amp login`, "not_found");
+		if (error instanceof OrbError) throw new CodingError(error instanceof OrbAuthError ? 409 : 502, error.message, "conflict");
+		throw error;
+	}
+}
+
+/** A thread a read tool names: one of the space's, or an Amp thread it can read on Amp's site. */
+export async function readableThread(env: Env, space: string, input: string): Promise<{ readonly owned: Listed } | { readonly external: ExternalAmpThread }> {
+	const ref = threadRef(input);
+	if (ref.kind === "amp" && !(await threadOfOrb(env, space, ref.id))) return { external: await readAmpThread(env, space, ref.id) };
+	return { owned: await ownedThread(env, space, input) };
 }
 
 export function summaryOf(thread: Listed): CodingThreadSummary {
@@ -62,6 +147,7 @@ export function summaryOf(thread: Listed): CodingThreadSummary {
 		updatedAt: thread.updatedAt,
 		lastTurnEndedAt: thread.lastTurnEndedAt,
 		lastSeenAt: thread.lastSeenAt,
+		...(thread.orbUrl ? { orbUrl: thread.orbUrl, ...(thread.orbId ? { orbId: thread.orbId } : {}) } : {}),
 	};
 }
 

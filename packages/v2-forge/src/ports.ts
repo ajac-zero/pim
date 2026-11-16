@@ -1,0 +1,78 @@
+// What Forge needs from outside, as ports. Production wires them to vendor CLIs in sandboxes, AmpHttpOrbClient, S3 Objects and the git host; tests wire deterministic fakes.
+import { type OrbClient } from "@pim/coding/orb/types";
+import { type ComputeHandle } from "./compute";
+
+export type TurnRequest = {
+	threadId: string;
+	operationId: string;
+	prompt: string;
+	/** The vendor session to resume (CLI harnesses) or null for a fresh one. */
+	sessionId: string | null;
+	resume: boolean;
+	maxBudgetUsd: number | null;
+	workspace: ComputeHandle | null;
+	/** Aborted when the thread is cancelled on this worker. */
+	signal: AbortSignal;
+};
+
+export type TurnResult = {
+	outcome: "completed" | "interrupted" | "failed" | "login_required" | "budget" | "session_limit";
+	sessionId?: string | null;
+	costUsd?: number;
+	tokensIn?: number;
+	tokensOut?: number;
+	text?: string | null;
+	detail?: string | null;
+	/** Whether the turn committed something new (resets the session-limit loop counter). */
+	progress?: boolean;
+};
+
+/** Runs one turn of a sandbox harness: pi (through its pi-durable partition) or one vendor CLI process per turn through workspace.exec. */
+export interface TurnPort {
+	run(turn: TurnRequest): Promise<TurnResult>;
+}
+
+/** The orb client for a thread, or null when the deployment has none (no Amp credential). */
+export type OrbClients = (thread: { threadId: string; ownerId: string }) => OrbClient | null | Promise<OrbClient | null>;
+
+/** Objects: S3. Autosave bundles and mirrored attachments live here, never in PostgreSQL. */
+export interface Objects {
+	put(key: string, bytes: Uint8Array, contentType: string): Promise<void>;
+	delete?(key: string): Promise<void>;
+	get(key: string): Promise<{ bytes: Uint8Array; contentType: string } | null>;
+}
+
+export class MemoryObjects implements Objects {
+	readonly map = new Map<string, { bytes: Uint8Array; contentType: string }>();
+	async put(key: string, bytes: Uint8Array, contentType: string) {
+		this.map.set(key, { bytes, contentType });
+	}
+	async get(key: string) {
+		return this.map.get(key) ?? null;
+	}
+	async delete(key: string) {
+		this.map.delete(key);
+	}
+}
+
+/** Fetches an Amp attachment as the person's Amp login (the login never leaves this call); null when it can't be fetched yet. */
+export type AttachmentFetcher = (canonicalUrl: string) => Promise<{ bytes: Uint8Array; type: string } | null>;
+
+export type PushOutcome = { outcome: "pushed" | "unchanged"; sha: string };
+export type MergeOutcome = { outcome: "merged" | "conflict"; method?: "fast-forward" | "rebase"; sha?: string; detail?: string };
+
+/** A git host (GitHub App or Gitea). The branch rules are Forge's; the host only moves refs and never force-pushes. */
+export interface GitHost {
+	defaultBranch(repo: string): Promise<string>;
+	/** Pushes the thread's checkout HEAD to `branch`; `unchanged` when the branch already is there. */
+	push(workspace: ComputeHandle, repo: string, branch: string): Promise<PushOutcome>;
+	/** Integrates `branch` onto the default branch by fast-forward, else rebase; a conflict aborts and leaves the default branch alone. */
+	merge(workspace: ComputeHandle, repo: string, branch: string): Promise<MergeOutcome>;
+	openPullRequest(repo: string, branch: string, base: string, title: string): Promise<{ url: string; number: number }>;
+	/** The diff of `branch` against the default branch as the host has it (for remote orbs); null when the branch is not on the host. */
+	remoteDiff(repo: string, branch: string): Promise<string | null>;
+	/** Deletes a branch on the host; a separate explicit operation from archiving. */
+	deleteBranch(repo: string, branch: string): Promise<void>;
+	/** Whether the branch exists on the host. */
+	hasBranch(repo: string, branch: string): Promise<boolean>;
+}

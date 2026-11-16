@@ -32,6 +32,10 @@ describe("choosing CI's jobs for a change", () => {
 		expect(running(["displayd/bundle.js"])).toEqual(["daemons", "typecheck", "unit", "web", "worker"]);
 	});
 
+	it("runs only the types and the unit job for a v2 package, which nothing else imports", () => {
+		expect(running(["packages/v2-contracts/src/db.ts", "packages/v2-contracts/migrations/0001_foundation.sql", "scripts/v2-migrate/run.mjs"])).toEqual(["typecheck", "unit"]);
+	});
+
 	it("runs the backend's jobs without the browser for the Worker's code, and the web app too for what it imports", () => {
 		expect(running(["src/pim.ts", "test/agents.test.ts"])).toEqual(["lint", "typecheck", "unit", "worker"]);
 		expect(running(["packages/ui-lang/src/parse.ts"])).toEqual(["lint", "typecheck", "unit", "web", "worker"]);

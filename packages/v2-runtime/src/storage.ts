@@ -64,6 +64,8 @@ export type PgPiStorageOptions = {
 	readonly fence: OwnerFence;
 	/** Ids per leased block; default 256. */
 	readonly idBlockSize?: number;
+	/** Called when a commit fails in a way the owner must act on: ownership lost, or an outcome that is unknown. */
+	readonly onFault?: (error: OwnershipLost | AmbiguousCommit) => void;
 	/** Test seam: change what a COMMIT does, to reproduce a lost acknowledgement. */
 	readonly beforeCommit?: (info: { batchId: string; backendPid: number }) => Promise<void> | void;
 };
@@ -86,6 +88,7 @@ export class PgPiStorage implements Storage {
 	readonly partitionId: string;
 	readonly #ids: IdAllocator;
 	readonly #beforeCommit: PgPiStorageOptions["beforeCommit"];
+	readonly #onFault: PgPiStorageOptions["onFault"];
 	#closed = false;
 	#ambiguous: AmbiguousBatch | undefined;
 	#home: boolean | undefined;
@@ -96,6 +99,7 @@ export class PgPiStorage implements Storage {
 		this.tenantId = options.fence.tenantId;
 		this.partitionId = options.fence.partitionId;
 		this.#beforeCommit = options.beforeCommit;
+		this.#onFault = options.onFault;
 		this.#ids = new IdAllocator(this.db, this.tenantId, () => ({ partitionId: this.partitionId, epoch: this.fence.epoch }), options.idBlockSize);
 	}
 
@@ -124,6 +128,12 @@ export class PgPiStorage implements Storage {
 		return storage;
 	}
 
+	/** A storage for reading a partition's committed state without owning it (a projection or a test); every commit through it is fenced out. */
+	static forReading(db: Db, tenantId: string, partitionId: string): PgPiStorage {
+		const fence: OwnerFence = { tenantId, partitionId, ownerId: "reader", epoch: -1, isLocallyValid: () => false };
+		return new PgPiStorage({ db, fence });
+	}
+
 	get isHome(): Promise<boolean> {
 		if (this.#home !== undefined) return Promise.resolve(this.#home);
 		return this.db
@@ -148,7 +158,11 @@ export class PgPiStorage implements Storage {
 
 	async commit(writes: readonly StorageWrite[], _context: Context): Promise<Seq> {
 		this.#assertUsable();
-		if (!this.fence.isLocallyValid()) throw new OwnershipLost(this.partitionId, this.fence.epoch, "the local lease has run out");
+		if (!this.fence.isLocallyValid()) {
+			const lost = new OwnershipLost(this.partitionId, this.fence.epoch, "the local lease has run out");
+			this.#onFault?.(lost);
+			throw lost;
+		}
 		const batchId = randomUUID();
 		const batch = prepareBatch(writes);
 		await this.#ids.observe(batch.maxId);
@@ -175,12 +189,16 @@ export class PgPiStorage implements Storage {
 					} catch (rollback) {
 						destroy = rollback instanceof Error ? rollback : new Error(String(rollback));
 					}
-					throw rejection(error);
+					const rejected = rejection(error);
+					if (rejected instanceof OwnershipLost) this.#onFault?.(rejected);
+					throw rejected;
 				}
 				// COMMIT left this process and the connection failed before an answer came back: unknown.
 				destroy = error instanceof Error ? error : new Error(String(error));
 				this.#ambiguous = { batchId, backendPid, tenantId: this.tenantId, partitionId: this.partitionId };
-				throw new AmbiguousCommit(batchId, backendPid, { cause: error });
+				const ambiguous = new AmbiguousCommit(batchId, backendPid, { cause: error });
+				this.#onFault?.(ambiguous);
+				throw ambiguous;
 			}
 		} finally {
 			client.release(destroy);

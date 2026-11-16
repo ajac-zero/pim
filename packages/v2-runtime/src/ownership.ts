@@ -32,6 +32,7 @@ export class Lease implements OwnerFence {
 	readonly #steward: Steward;
 	#deadline: number;
 	#timer: ReturnType<typeof setTimeout> | undefined;
+	#deadlineTimer: ReturnType<typeof setTimeout> | undefined;
 	#lostReason: string | undefined;
 	#renewing: Promise<void> | undefined;
 
@@ -43,6 +44,14 @@ export class Lease implements OwnerFence {
 		this.epoch = row.epoch;
 		this.kind = row.kind;
 		this.#deadline = row.sentAt + row.remainingMs - steward.safetyMarginMs;
+		this.#armDeadline();
+	}
+
+	/** A lease nobody renews is lost at its local deadline even when no heartbeat tick runs (a stalled event loop or database). */
+	#armDeadline(): void {
+		if (this.#deadlineTimer !== undefined) clearTimeout(this.#deadlineTimer);
+		this.#deadlineTimer = setTimeout(() => this.lose("the lease ran past its local deadline"), Math.max(0, this.#deadline - performance.now()));
+		this.#deadlineTimer.unref?.();
 	}
 
 	get signal(): AbortSignal {
@@ -91,7 +100,9 @@ export class Lease implements OwnerFence {
 
 	/** @internal */
 	extend(remainingMs: number, sentAt: number): void {
-		if (this.#lostReason === undefined) this.#deadline = Math.max(this.#deadline, sentAt + remainingMs - this.#steward.safetyMarginMs);
+		if (this.#lostReason !== undefined) return;
+		this.#deadline = Math.max(this.#deadline, sentAt + remainingMs - this.#steward.safetyMarginMs);
+		this.#armDeadline();
 	}
 
 	/** Give the lease up locally: stop renewing, abort the signal, notify listeners. Does not touch the database. */
@@ -100,6 +111,8 @@ export class Lease implements OwnerFence {
 		this.#lostReason = reason;
 		if (this.#timer !== undefined) clearTimeout(this.#timer);
 		this.#timer = undefined;
+		if (this.#deadlineTimer !== undefined) clearTimeout(this.#deadlineTimer);
+		this.#deadlineTimer = undefined;
 		this.#abort.abort(new Error(`Lost partition ${this.partitionId} at epoch ${this.epoch}: ${reason}`));
 		for (const listener of [...this.#listeners]) {
 			try {
@@ -261,6 +274,27 @@ export class Steward {
 		const stillMine = holder.rows[0]?.owner_id === lease.ownerId && Number(holder.rows[0]?.owner_epoch) === lease.epoch;
 		if (stillMine) lease.startHeartbeat();
 		return { released: false, reason: stillMine ? "new_work" : "lost" };
+	}
+
+	/**
+	 * Give a partition up while it still has work: the next Runner claims it at once. Used when this Runner drains or
+	 * cannot keep running a partition it holds (the wake intent is persisted before the lease is cleared).
+	 */
+	async handOff(lease: Lease, reason: string): Promise<void> {
+		await lease.stopHeartbeat();
+		await this.db.transaction(lease.tenantId, async (client) => {
+			const held = await client.query(
+				`UPDATE ${S}.partitions SET owner_id = NULL, lease_expires_at = NULL WHERE tenant_id = $1 AND partition_id = $2 AND owner_id = $3 AND owner_epoch = $4 RETURNING 1`,
+				[lease.tenantId, lease.partitionId, lease.ownerId, lease.epoch],
+			);
+			if (held.rowCount === 0) return;
+			await client.query(
+				`INSERT INTO ${S}.due_work (tenant_id, partition_id, state, activation_seq, reason) VALUES ($1, $2, 'needs_owner', 1, $3)
+				 ON CONFLICT (tenant_id, partition_id) DO UPDATE SET state = 'needs_owner', next_due_at = NULL, activation_seq = ${S}.due_work.activation_seq + 1, reason = $3, updated_at = clock_timestamp()`,
+				[lease.tenantId, lease.partitionId, reason],
+			);
+		});
+		lease.lose("handed off");
 	}
 
 	/** Stop claiming partitions; the Runner finishes or checkpoints its active turns, then releases what it holds. */

@@ -3,6 +3,7 @@ import { App } from "./app.ts";
 import { keyringFromEnv } from "./crypto.ts";
 import { connect } from "./db.ts";
 import { createGate } from "./gate.ts";
+import { attachSockets } from "./sockets.ts";
 import { S3ObjectStore } from "./objects.ts";
 
 /**
@@ -14,8 +15,10 @@ export async function startGate(env: Record<string, string | undefined> = proces
 	if (!rolesOf(config.role).includes("gate")) throw new Error(`PIM_ROLE=${config.role} does not run the Gate`);
 	const db = connect(config.databaseUrl, config.pools.foreground.max, config.pools.foreground.statementTimeoutMs);
 	const crypto = env.PIM_KEYS ? keyringFromEnv(env) : undefined;
-	const app = new App(db, new S3ObjectStore(config.s3.bucket, { endpoint: config.s3.endpoint, region: config.s3.region }), { ...(crypto ? { crypto } : {}) });
-	const server = createGate(app, { publicUrl: config.publicUrl });
+	const app = new App(db, new S3ObjectStore(config.s3.bucket, { endpoint: config.s3.endpoint, region: config.s3.region }), { ...(crypto ? { crypto } : {}), ...(env.PIM_APP_SECRET_KEY ? { appKey: env.PIM_APP_SECRET_KEY } : {}) });
+	const gateOptions = { publicUrl: config.publicUrl, ...(env.PIM_APPS_ORIGIN ? { appsOrigin: env.PIM_APPS_ORIGIN } : {}) };
+	const server = createGate(app, gateOptions);
+	const sockets = attachSockets(server, app, gateOptions);
 	await new Promise<void>((resolve) => server.listen(port, resolve));
-	return { server, app, close: () => new Promise<void>((resolve) => server.close(() => db.end().then(resolve))) };
+	return { server, app, close: () => new Promise<void>((resolve) => (sockets.close(), server.close(() => db.end().then(resolve)))) };
 }

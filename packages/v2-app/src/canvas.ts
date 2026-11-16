@@ -6,7 +6,8 @@ import { newId } from "./ids.ts";
 import type { Principal } from "@pim/v2-contracts/identity";
 import type { ObjectStore } from "@pim/v2-contracts/platform";
 
-const TEXT = "content";
+/** The text inside a note's document, named as the Worker's notes name it so imported documents open unchanged. */
+const TEXT = "markdown";
 export const LEASE_MS = 15_000;
 /** After this many logged updates a snapshot is written to the object store and the log before it is dropped. */
 export const COMPACT_AFTER = 200;
@@ -28,6 +29,14 @@ export type Lease = { noteId: string; holder: string; fence: number };
 export class Canvas {
 	/** `instance` names this service process: every writer in it (live editors, note tools) shares one lease holder, so they never block each other, while another process taking over fences this one out. */
 	constructor(private readonly db: Db, private readonly store: ObjectStore, readonly instance = newId("canvas"), private readonly authz = new Authorizer(db)) {}
+
+	readonly #listeners = new Set<(noteId: string, update: Uint8Array, origin: string) => void>();
+
+	/** Hears every update this process appends to any note, with where it came from: live editors broadcast what their peers and agents wrote. */
+	onUpdate(listener: (noteId: string, update: Uint8Array, origin: string) => void): () => void {
+		this.#listeners.add(listener);
+		return () => this.#listeners.delete(listener);
+	}
 
 	async create(p: Principal, title: string, text = ""): Promise<string> {
 		await this.authz.enforce(p, "api:write");
@@ -80,6 +89,7 @@ export class Canvas {
 			await tx.query("UPDATE pim_app.notes SET version = $2 WHERE note_id = $1", [lease.noteId, version + 1]);
 			return version + 1;
 		});
+		for (const listener of this.#listeners) listener(lease.noteId, update, origin);
 		if (version % COMPACT_AFTER === 0) await this.compact(ownerId, lease.noteId).catch(() => undefined);
 		return version;
 	}

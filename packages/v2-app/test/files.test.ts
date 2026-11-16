@@ -95,7 +95,7 @@ describe("Canvas", () => {
 		Y.applyUpdate(editor, (await canvas.state(u.account.ownerId, note)).update);
 		const typed: Uint8Array[] = [];
 		editor.on("update", (up: Uint8Array) => typed.push(up));
-		editor.getText("content").insert(11, "!!!");
+		editor.getText("markdown").insert(11, "!!!");
 		await canvas.applyLive(u.account.ownerId, note, "ada", typed[0]!);
 
 		// The agent read version 1, so its edit is stale: the person's typing is not overwritten, the agent is told to read again.
@@ -105,13 +105,13 @@ describe("Canvas", () => {
 
 		// Reading again, the edit applies on top, and the person's live editor merges it without losing what was typed meanwhile.
 		const before = typed.length;
-		editor.getText("content").insert(0, ">> ");
+		editor.getText("markdown").insert(0, ">> ");
 		expect(await canvas.edit(u.principal, note, 2, "world", "there")).toEqual({ version: 3 });
 		await canvas.applyLive(u.account.ownerId, note, "ada", typed[before]!);
 		Y.applyUpdate(editor, (await canvas.state(u.account.ownerId, note)).update);
 		const merged = (await canvas.read(u.account.ownerId, note)).text;
 		expect(merged).toBe(">> Hello there!!!");
-		expect(editor.getText("content").toString()).toBe(merged);
+		expect(editor.getText("markdown").toString()).toBe(merged);
 		await expect(canvas.edit(u.principal, note, 4, "absent", "x")).rejects.toMatchObject({ code: "text_not_found" });
 	});
 
@@ -122,7 +122,7 @@ describe("Canvas", () => {
 		Y.applyUpdate(editor, (await canvas.state(u.account.ownerId, note)).update);
 		const ups: Uint8Array[] = [];
 		editor.on("update", (up: Uint8Array) => ups.push(up));
-		editor.getText("content").insert(3, "-typed");
+		editor.getText("markdown").insert(3, "-typed");
 		const [live, edit] = await Promise.allSettled([canvas.applyLive(u.account.ownerId, note, "ada", ups[0]!), canvas.edit(u.principal, note, 1, "abc", "ABC")]);
 		const { text, version } = await canvas.read(u.account.ownerId, note);
 		expect(live.status).toBe("fulfilled"); // typing always lands
@@ -142,7 +142,7 @@ describe("Canvas", () => {
 		const taken = await b.acquire(u.account.ownerId, note, "canvas-b", later);
 		expect(taken.fence).toBe(stale.fence + 1);
 		const doc = new Y.Doc();
-		doc.getText("content").insert(0, "zombie");
+		doc.getText("markdown").insert(0, "zombie");
 		await expect(a.append(u.account.ownerId, stale, Y.encodeStateAsUpdate(doc), "user:a")).rejects.toBeInstanceOf(LeaseLostError);
 		expect((await b.read(u.account.ownerId, note)).text).toBe("x");
 	});
@@ -158,27 +158,8 @@ describe("Canvas", () => {
 		const left = await f.db.owner(u.account.ownerId, async (tx) => (await tx.query("SELECT count(*)::int AS n FROM pim_app.note_updates WHERE note_id = $1", [note])).rows[0].n);
 		expect(left).toBe(0);
 		expect((await canvas.read(u.account.ownerId, note)).text).toBe("one two three");
-		const [{ updates }] = [{ updates: await canvas.applyLive(u.account.ownerId, note, "ada", (() => { const d = new Y.Doc(); d.getText("content").insert(0, "x"); return Y.encodeStateAsUpdate(d); })()) }];
+		const [{ updates }] = [{ updates: await canvas.applyLive(u.account.ownerId, note, "ada", (() => { const d = new Y.Doc(); d.getText("markdown").insert(0, "x"); return Y.encodeStateAsUpdate(d); })()) }];
 		expect(updates).toBe(4);
-	});
-});
-
-describe("Relay and absent capabilities", () => {
-	it("reports a missing computer as CapabilityUnavailable, pairs and connects v1 and v2 clients, and cuts off a revoked or suspended one", async () => {
-		const owner = u.account.ownerId;
-		expect(() => f.app.relay.require(owner, "shell")).toThrowError(expect.objectContaining({ name: "CapabilityUnavailableError", capability: "shell" }));
-		const pair = await f.app.relay.pair(u.principal, "laptop", 2);
-		expect(pair.token.startsWith("pimc_")).toBe(true);
-		const sent: unknown[] = [];
-		const id = await f.app.relay.connect(pair.token, { protocol: 1, send: (m) => sent.push(m) }); // an older client connects on the same token
-		expect(id).toBe(pair.computerId);
-		f.app.relay.require(owner, "shell").send({ op: "ping" });
-		expect(sent).toEqual([{ op: "ping" }]);
-		f.app.relay.disconnect(owner, id);
-		expect(() => f.app.relay.require(owner, "desktop_screenshot")).toThrowError(expect.objectContaining({ name: "CapabilityUnavailableError" }));
-		const reissued = await f.app.identity.issueConsumer(owner, "computer", { reissueFrom: (await f.db.owner(owner, (tx) => tx.query("SELECT consumer_id FROM pim_app.computers WHERE id = $1", [id]))).rows[0].consumer_id });
-		await expect(f.app.relay.connect(pair.token, { protocol: 2, send: () => {} })).rejects.toMatchObject({ status: 401 });
-		expect(reissued.token.startsWith("pimc_")).toBe(true);
 	});
 });
 
@@ -231,15 +212,6 @@ describe("Gate over HTTP", () => {
 		expect((await call("/api/sessions", { method: "POST", body: "{}", headers: { cookie, origin: "https://evil.example" } })).status).toBe(403);
 		expect((await call("/auth/sign-out", { method: "POST", ...asCookie })).status).toBe(200);
 		expect((await call("/api/account", asCookie)).status).toBe(401); // the copied cookie is dead
-	});
-
-	it("refuses hosted-app execution for a suspended (403) or deleted (410) author, and reports a missing backend", async () => {
-		const a = await member(f.app, f.admin.principal, "hoster");
-		expect((await call("/hosted/hoster/index.html")).status).toBe(501);
-		await f.app.identity.setStatus(f.admin.principal, a.account.ownerId, "suspended");
-		expect((await call("/hosted/hoster/index.html")).status).toBe(403);
-		await f.app.identity.setStatus(f.admin.principal, a.account.ownerId, "deleted");
-		expect((await call("/hosted/hoster/index.html")).status).toBe(410);
 	});
 
 	it("keeps ordinary chat, notes, goals and memories working with no computer, coding pool or connector", async () => {

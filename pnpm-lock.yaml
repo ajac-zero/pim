@@ -293,9 +293,18 @@ importers:
       '@pim/v2-contracts':
         specifier: workspace:*
         version: link:../v2-contracts
+      lib0:
+        specifier: ^0.2.119
+        version: 0.2.119
       pg:
         specifier: ^8.13.0
         version: 8.23.1
+      ws:
+        specifier: ^8.18.0
+        version: 8.22.0
+      y-protocols:
+        specifier: ^1.0.7
+        version: 1.0.7
       yjs:
         specifier: ^13.6.33
         version: 13.6.33
@@ -309,6 +318,9 @@ importers:
       '@types/pg':
         specifier: ^8.11.10
         version: 8.23.1
+      '@types/ws':
+        specifier: ^8.5.13
+        version: 8.18.2
       embedded-postgres:
         specifier: ^18.0.0-beta.1
         version: 18.0.0-beta.15

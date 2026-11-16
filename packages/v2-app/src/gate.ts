@@ -3,6 +3,7 @@ import type { App } from "./app.ts";
 import { httpStatus, NotFoundError } from "./errors.ts";
 import { makeCtx, type Reply, type Route } from "./http.ts";
 import { authRoutes } from "./routes/auth.ts";
+import { hostedRoutes, serveAppOrigin } from "./routes/hosted.ts";
 import { coreRoutes } from "./routes/core.ts";
 import { domainRoutes } from "./routes/domain.ts";
 
@@ -14,11 +15,13 @@ import { domainRoutes } from "./routes/domain.ts";
 export type GateOptions = {
 	/** Where the app is served from, such as `https://pim.example.com`. Its scheme decides the cookie (`__Host-pim-session` on https) and its host the passkeys' relying party. */
 	publicUrl?: string;
+	/** Where apps with a backend get an origin of their own, `https://<label>.<this host>`. Unset, they are reached only at `/hosted/<owner>/<id>/<token>/`. */
+	appsOrigin?: string;
 	/** Extra routes, tried after the built-in ones. */
 	routes?: Route[];
 };
 
-export const builtInRoutes: Route[] = [...domainRoutes, ...coreRoutes, ...authRoutes];
+export const builtInRoutes: Route[] = [...hostedRoutes, ...domainRoutes, ...coreRoutes, ...authRoutes];
 
 export function createGate(app: App, options: GateOptions = {}): Server {
 	const routes = [...builtInRoutes, ...(options.routes ?? [])];
@@ -40,11 +43,15 @@ async function handle(app: App, routes: Route[], options: GateOptions, req: Inco
 	const origin = originOf(req, options);
 	const url = new URL(req.url ?? "/", origin);
 	const method = req.method ?? "GET";
+	// An app with a backend at its own address, `<label>.<apps origin>`, is answered before anything of Pim's.
+	const appsHost = options.appsOrigin ? new URL(options.appsOrigin).hostname : null;
+	const host = (req.headers.host ?? "").split(":")[0] ?? "";
+	if (appsHost && host.endsWith(`.${appsHost}`)) return send(res, await serveAppOrigin(app, req, url, host.slice(0, -(appsHost.length + 1)), { origin, ...(options.appsOrigin ? { appsOrigin: options.appsOrigin } : {}) }));
 	for (const r of routes) {
 		if (r.method !== method) continue;
 		const m = r.pattern.exec(url.pathname);
 		if (!m) continue;
-		return send(res, await r.run(makeCtx(app, req, url, m.slice(1).map(decodeURIComponent), { origin })));
+		return send(res, await r.run(makeCtx(app, req, url, m.slice(1).map(decodeURIComponent), { origin, appsOrigin: options.appsOrigin })));
 	}
 	throw new NotFoundError();
 }

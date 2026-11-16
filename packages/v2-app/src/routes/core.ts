@@ -72,12 +72,5 @@ export const coreRoutes: Route[] = [
 		const served = await app.objects.serve(p, params[0]!, req.headers.range);
 		return { status: served.status, headers: served.headers, raw: served.body };
 	}),
-	// ---- hosted apps: public execution still asks the author's account, and needs a backend capability this deployment may lack ----
-	route("GET", "/hosted/:username/*", async ({ app, params }) => {
-		const owner = await app.db.anonymous(async (tx) => (await tx.query("SELECT owner_id FROM pim_app.accounts WHERE username = $1", [params[0]])).rows[0]?.owner_id as string | undefined);
-		if (!owner) throw new NotFoundError();
-		await app.identity.authz.requireLive(owner, "hosted:run");
-		throw new CapabilityUnavailableError("hosted app backend", "this deployment runs no app backends");
-	}),
 ];
 

@@ -43,7 +43,7 @@ export class App {
 	readonly apps: Apps;
 	readonly sharing: Sharing;
 	readonly crypto: EnvelopeCrypto;
-	constructor(readonly db: Db, store: ObjectStore, opts: { hideSuspended?: boolean; providers?: Partial<Record<ProviderId, ProviderSettings>>; crypto?: EnvelopeCrypto; fetchTools?: ToolFetcher; exchange?: CodeExchanger; transcripts?: TranscriptSource } = {}) {
+	constructor(readonly db: Db, store: ObjectStore, opts: { hideSuspended?: boolean; providers?: Partial<Record<ProviderId, ProviderSettings>>; crypto?: EnvelopeCrypto; appKey?: string; fetchTools?: ToolFetcher; exchange?: CodeExchanger; transcripts?: TranscriptSource } = {}) {
 		this.identity = new Identity(db);
 		this.conversations = new Conversations(db);
 		this.memories = new Memories(db);
@@ -52,7 +52,7 @@ export class App {
 		this.approvals = new Approvals(db);
 		this.objects = new Objects(db, store, opts);
 		this.canvas = new Canvas(db, store);
-		this.relay = new Relay(db, this.identity);
+		this.relay = new Relay(db, this.identity, undefined, opts.appKey);
 		this.signin = new SignIn(db, this.identity);
 		this.external = new ExternalSignIn(db, this.signin, this.identity, opts.providers ?? {});
 		this.mcp = new McpOAuth(db, this.identity, this.signin, this.conversations);

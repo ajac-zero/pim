@@ -9,13 +9,13 @@ export type Account = { ownerId: OwnerId; username: string; role: AccountRole; s
 /** Actions only a browser session may take; a token, agent or delegate cannot, whatever its scopes (audit B1 gap 3). */
 const SESSION_ONLY = new Set(["token:create", "token:revoke", "session:revoke", "passkey:manage", "account:delete"]);
 /** Actions a guest never takes. */
-const GUEST_DENIED = /^(admin:|coding:|computer:|token:|mcp:|trigger:computer)/;
+const GUEST_DENIED = /^(admin:|coding:|computer:|token:|mcp:|app:deploy|trigger:computer)/;
 /** What an agent acting in its owner's space may do. It never decides approvals (its scopes omit approval:), administers, or touches credentials. */
-const AGENT_SCOPES = ["api:*", "coding:*", "computer:*", "trigger:*"];
+const AGENT_SCOPES = ["api:*", "app:*", "coding:*", "computer:*", "trigger:*"];
 /** Coding actions: the permission an admin's CodingGrant must list. */
 const CODING_ACTIONS = new Set<string>(CODING_PERMISSIONS);
-/** Coding actions with effects outside Pim that a person approves each time unless a StandingApproval covers them. */
-const NEEDS_APPROVAL = new Set<string>(["coding:push", "coding:pr", "coding:merge"]);
+/** Coding actions, and deploying an app's backend onto a personal computer, have effects outside Pim that a person approves each time unless a StandingApproval covers them. */
+const NEEDS_APPROVAL = new Set<string>(["coding:push", "coding:pr", "coding:merge", "app:deploy"]);
 
 export const principalId = (p: Principal): string => {
 	switch (p.kind) {

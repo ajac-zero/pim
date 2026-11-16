@@ -11,6 +11,8 @@ export type Ctx = {
 	params: string[];
 	/** The address the app is served from, `https://pim.example.com`. */
 	origin: string;
+	/** Where apps with a backend get an origin of their own (`https://apps.example.net`), if the deployment sets one. */
+	appsOrigin: string | undefined;
 	secure: boolean;
 	/** The signed-in principal; throws 401 without one. */
 	principal: () => Promise<Principal>;
@@ -87,7 +89,7 @@ export function fromAnotherSite(req: IncomingMessage): boolean {
 	}
 }
 
-export function makeCtx(app: App, req: IncomingMessage, url: URL, params: string[], opts: { origin: string }): Ctx {
+export function makeCtx(app: App, req: IncomingMessage, url: URL, params: string[], opts: { origin: string; appsOrigin?: string | undefined }): Ctx {
 	const secure = opts.origin.startsWith("https:");
 	let cached: Promise<Principal | null> | undefined;
 	const resolve = () =>
@@ -98,7 +100,7 @@ export function makeCtx(app: App, req: IncomingMessage, url: URL, params: string
 			return app.identity.authenticate(bearer);
 		})());
 	return {
-		app, req, url, params, origin: opts.origin, secure,
+		app, req, url, params, origin: opts.origin, appsOrigin: opts.appsOrigin, secure,
 		principal: async () => (await resolve()) ?? Promise.reject(new UnauthorizedError()),
 		maybePrincipal: () => resolve().catch((error) => (error instanceof UnauthorizedError ? null : Promise.reject(error))),
 		json: async () => {

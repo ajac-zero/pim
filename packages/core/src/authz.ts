@@ -122,7 +122,8 @@ async function executionDecision(q: Q, actor: Actor, action: string, kind: Execu
 			lastReason = `pool ${resource.pool} is not granted`;
 			continue;
 		}
-		if ((kind === "repo_push" || kind === "repo_merge") && (resource.repo === undefined || !grant.repos.includes(resource.repo))) {
+		// Push and merge always name a granted repository; a coding grant that lists repositories limits the run to them too.
+		if (((kind === "repo_push" || kind === "repo_merge") || (kind === "coding" && grant.repos.length > 0)) && (resource.repo === undefined || !grant.repos.includes(resource.repo))) {
 			lastReason = `repository ${resource.repo ?? "(none)"} is not granted`;
 			continue;
 		}

@@ -64,6 +64,63 @@ export class Forge {
 		return { threadId: thread.threadId, created, harness };
 	}
 
+	/** The person's threads, newest first; archived ones only when asked for. */
+	async list(actor: Actor, o: { archived?: boolean } = {}) {
+		if (actor.role === "guest") throw new ForbiddenError("coding", "guests can't use coding threads");
+		const rows = (await this.c.db.query<Row>("select * from pim_forge.forge_threads where owner_id = $1 and ($2 or state <> 'archived') order by created_at desc limit 200", [actor.ownerId, o.archived ?? false])).rows;
+		return rows.map((r) => ({ threadId: r.thread_id, url: `/coding/${r.thread_id}`, task: r.task, harness: r.harness, status: r.state, stateReason: r.state_reason, repo: r.repo, branch: r.branch, spentUsd: Number(r.spent_usd), createdBy: r.created_by, createdAt: r.created_at, unread: !r.last_seen_at || new Date(r.updated_at) > new Date(r.last_seen_at) }));
+	}
+
+	async markSeen(actor: Actor, ref: string): Promise<void> {
+		const t = await this.own(actor, ref);
+		await this.c.db.query("update pim_forge.forge_threads set last_seen_at = now() where thread_id = $1", [t.threadId]);
+	}
+
+	/** The thread's events after a cursor (their sequence number), oldest first. */
+	async eventsAfter(actor: Actor, ref: string, after = 0, limit = 200) {
+		const t = await this.own(actor, ref);
+		return (await this.c.db.query<Row>("select seq, kind, role, data, cost_usd, at from pim_forge.forge_events where thread_id = $1 and seq > $2 order by seq limit $3", [t.threadId, after, Math.min(limit, 500)])).rows;
+	}
+
+	/** Goes on after a stop (a failure, a budget raised): a steer that carries no new words. */
+	async continueThread(actor: Actor, ref: string, operationId: string, budgetUsd?: number): Promise<{ queued: boolean }> {
+		const t = await this.own(actor, ref);
+		await this.allow(actor, "coding:steer", t);
+		if (t.state === "archived") throw new ForgeError("archived", "This thread is archived");
+		if (t.budgetUsd !== null && t.spentUsd >= t.budgetUsd && !(budgetUsd !== undefined && budgetUsd > t.spentUsd)) throw new ForgeError("budget_spent", "The thread's budget is spent; give it a bigger one to continue");
+		return this.c.store.locked(t.threadId, async (q) => {
+			if (budgetUsd !== undefined) await q.query("update pim_forge.forge_threads set budget_usd = $2 where thread_id = $1", [t.threadId, budgetUsd]);
+			if (t.state === "failed" || t.state === "waiting_input") await this.c.store.setState(q, t.threadId, "idle");
+			return { queued: await this.c.store.enqueueInbox(q, t.threadId, operationId, "continue", { prompt: "Continue." }) };
+		});
+	}
+
+	/** Cancels a thread that hasn't started: queued or provisioning. A running turn is stopped with `abort`. */
+	async cancelQueued(actor: Actor, ref: string): Promise<void> {
+		const t = await this.own(actor, ref);
+		await this.allow(actor, "coding:abort", t);
+		if (t.state !== "queued" && t.state !== "provisioning") throw new ForgeError("not_cancellable", "Only a thread that hasn't started can be cancelled; abort stops a running one");
+		await this.c.store.locked(t.threadId, async (q) => {
+			await this.c.store.revokeCredentials(q, t.threadId);
+			await q.query("delete from pim_forge.forge_inbox where thread_id = $1 and status = 'pending'", [t.threadId]);
+			await this.c.store.patch(q, t.threadId, { cancel_state: "cancelled" });
+			await this.c.store.setState(q, t.threadId, "idle", "cancelled");
+		});
+		await this.c.scheduler.release(t.threadId, "cancelled");
+	}
+
+	/** A person's setup script for a repository (at most 64 KiB), run in their workspaces for it. Needs the start grant on that repository. */
+	async repoSettings(actor: Actor, repo: string, put?: { setupScript: string }) {
+		await this.c.authz.check(actor, "coding:start", { repo });
+		const name = repoName(repo)!;
+		if (put) {
+			if (typeof put.setupScript !== "string" || put.setupScript.length > 65536) throw new ForgeError("invalid", "The setup script must be text of at most 64 KiB");
+			await this.c.db.query("insert into pim_forge.forge_repo_settings (owner_id, repo, setup_script) values ($1,$2,$3) on conflict (owner_id, repo) do update set setup_script = $3, updated_at = now()", [actor.ownerId, name, put.setupScript]);
+		}
+		const r = (await this.c.db.query<Row>("select setup_script, updated_at from pim_forge.forge_repo_settings where owner_id = $1 and repo = $2", [actor.ownerId, name])).rows[0];
+		return { repo: name, setupScript: r?.setup_script ?? "", updatedAt: r ? new Date(r.updated_at).getTime() : null };
+	}
+
 	async status(actor: Actor, ref: string) {
 		const t = await this.own(actor, ref);
 		return { ...t, capabilities: capabilitiesOf(t.harness) };

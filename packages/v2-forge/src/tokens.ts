@@ -67,15 +67,23 @@ export class Credentials {
 	}
 
 	/** Clone/fetch need a read or push token for the repository; a push also needs a branch under the prefix that is not the default. */
-	async verifyGit(token: string, access: { repo: string; op: "fetch" | "push"; branch?: string; defaultBranch?: string }): Promise<{ threadId: string; ownerId: string }> {
+	async verifyGit(token: string, access: { repo: string; op: "fetch" | "push" | "advertise-push"; branch?: string; defaultBranch?: string }): Promise<{ threadId: string; ownerId: string }> {
 		const c = open("pimgit_", this.key, token, this.clock());
 		if (c.repo !== repoName(access.repo)) throw new ForbiddenError("credential", "this credential is for another repository");
 		await this.live(c);
+		if (access.op === "advertise-push" && c.scope !== "push") throw new ForgeError("push_refused", "This credential can only fetch");
 		if (access.op === "push") {
 			if (c.scope !== "push") throw new ForgeError("push_refused", "This credential can only fetch");
 			assertPushBranch(this.policy, access.branch ?? "", access.defaultBranch ?? "main");
 		}
 		return { threadId: c.thread, ownerId: c.owner };
+	}
+
+	/** The workspace's credential helper trades its grant for a fresh one of the same repository and scope, while the thread is live. */
+	async refreshGit(token: string): Promise<string> {
+		const c = open("pimgit_", this.key, token, this.clock());
+		const row = await this.live(c);
+		return this.gitToken({ threadId: c.thread, ownerId: c.owner, gatewayNonce: row.gateway_nonce }, { repo: c.repo!, scope: c.scope! });
 	}
 
 	async verifyGateway(token: string, family: string): Promise<{ threadId: string; ownerId: string }> {

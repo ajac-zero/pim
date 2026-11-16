@@ -8,7 +8,7 @@ import { type Row, type Queryable } from "./db";
 import { CapabilityUnavailableError, ForgeError, LeaseLostError } from "./errors";
 import { capabilitiesOf, LEGACY_AMP_WORKSPACE_MESSAGE, MAX_RESUMES, MAX_SESSION_RESTARTS, type Harness } from "./harnesses";
 import { type AttachmentFetcher, type Objects, type OrbClients, type TurnPort, type TurnResult } from "./ports";
-import { Provisioner, type ComputeProvider, type ComputeSpec } from "./compute";
+import { Provisioner, type ComputeHandle, type ComputeProvider, type ComputeSpec } from "./compute";
 import { type ForgeScheduler } from "./scheduler";
 import { type ForgeStore, type ThreadRow } from "./store";
 
@@ -20,6 +20,8 @@ export type WorkerDeps = {
 	compute: ComputeProvider | null;
 	/** What a thread's sandbox is made from: its repository (through the git broker) and egress. */
 	computeSpec?: (thread: ThreadRow) => ComputeSpec;
+	/** Makes the checkout in a new sandbox (see git-checkout.ts); runs once, after the sandbox exists. */
+	prepareWorkspace?: (thread: ThreadRow, handle: ComputeHandle) => Promise<void>;
 	orbs: OrbClients;
 	objects: Objects;
 	attachments?: AttachmentFetcher;
@@ -116,6 +118,16 @@ export class ForgeWorker {
 				await store.fenced(thread.threadId, epoch, (q) => store.setState(q, thread.threadId, "failed", "provision_failed", String(error instanceof Error ? error.message : error).slice(0, 500)));
 				await scheduler.release(thread.threadId, "provision_failed");
 				return "done";
+			}
+			if (this.d.prepareWorkspace) {
+				const fresh = (await store.get(thread.threadId))!;
+				try {
+					await this.d.prepareWorkspace(fresh, fresh.workspaceRef);
+				} catch (error) {
+					await store.fenced(thread.threadId, epoch, (q) => store.setState(q, thread.threadId, "failed", "checkout_failed", String(error instanceof Error ? error.message : error).slice(0, 500)));
+					await scheduler.release(thread.threadId, "checkout_failed");
+					return "done";
+				}
 			}
 			await store.fenced(thread.threadId, epoch, async (q) => {
 				await store.patch(q, thread.threadId, { placement: { pool: poolId } });

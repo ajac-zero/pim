@@ -25,6 +25,9 @@ const sharedWithWeb = (file) => ["packages/shared/", "packages/ui-lang/", "displ
 /** A package's own tests: no Worker test or type outside the package reads them, unlike its source and its `test/support/` modules, which Worker tests import. */
 const packageTest = (file) => /^packages\/[^/]+\/test\//.test(file) && !file.includes("/test/support/");
 
+/** The v2 packages (`packages/v2-*`) and tools (`scripts/v2-*`): nothing in the Worker or the web app imports them, so only their types and their own tests (the unit job) can change. */
+const v2 = (file) => /^(packages\/v2-[^/]+\/|scripts\/v2-)/.test(file);
+
 /** What the tests that browse with a Chrome (test/browser.test.ts) can reach. */
 const browsing = (file) =>
 	["src/browser.ts", "src/extensions/browser.ts", "src/space/routes.ts", "src/space/sockets.ts", "src/space/views.ts", "computer/", "test/browser.test.ts", "test/helpers.ts", "test/worker.ts", "scripts/install-test-browser.mjs"].some((path) => file.startsWith(path));
@@ -39,6 +42,8 @@ export function selectJobs(changed, { main = false } = {}) {
 			for (const job of JOBS) jobs[job] = true;
 		} else if (file.startsWith("web/")) {
 			Object.assign(jobs, { typecheck: true, lint: true, web: true });
+		} else if (v2(file)) {
+			Object.assign(jobs, { typecheck: true, unit: true });
 		} else if (packageTest(file)) {
 			// Only the package's own tests read these: its types and its tests, which the unit job runs. Its source also runs under the Worker's tests (below), so the Worker's shards are skipped only for a change that is all tests.
 			Object.assign(jobs, { typecheck: true, unit: true });

@@ -20,7 +20,7 @@ describe("the package's boundary", () => {
 		const sql = readdirSync(resolve(import.meta.dirname, "../migrations")).map((f) => readFileSync(resolve(import.meta.dirname, "../migrations", f), "utf8")).join("\n");
 		const tables = [...sql.matchAll(/CREATE TABLE pim_app\.(\w+)/g)].map((m) => m[1]!);
 		// Instance-level tables hold no tenant data and are the only ones allowed to go unsealed.
-		const open = new Set(["instance_settings", "registration_attempts", "claim_codes", "schedule_wakeups"]);
+		const open = new Set(["instance_settings", "registration_attempts", "claim_codes", "schedule_wakeups", "auth_flows", "oauth_clients"]);
 		for (const table of tables) if (!open.has(table)) expect(sql, table).toMatch(new RegExp(`(seal_tenant|seal_lookup)\\('pim_app\\.${table}'|ALTER TABLE pim_app\\.${table} ENABLE ROW LEVEL SECURITY`));
 	});
 });

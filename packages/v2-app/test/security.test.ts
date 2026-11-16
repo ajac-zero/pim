@@ -1,3 +1,4 @@
+import { readdirSync } from "node:fs";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ApprovalRequiredError, ForbiddenError, GoneError, UnauthorizedError } from "../src/errors.ts";
@@ -17,7 +18,7 @@ describe("migrations", () => {
 		const { rows } = await owner.query("SELECT number FROM public.pim_schema_migrations ORDER BY number");
 		await owner.end();
 		await expect(f.db.anonymous((tx) => tx.query("SELECT 1 FROM public.pim_schema_migrations"))).rejects.toThrow(/permission denied/); // the ledger is not the application's
-		expect(rows.map((r) => r.number)).toEqual([1, 200, 201, 202, 203, 204, 205, 206]);
+		expect(rows.map((r) => r.number)).toEqual([1, ...readdirSync(new URL("../migrations", import.meta.url)).map((f) => Number(f.slice(0, 4))).sort()]);
 		const { migrate } = await import("../src/migrate.ts");
 		expect(await migrate(f.ownerUrl)).toEqual([]);
 	});

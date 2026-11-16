@@ -9,7 +9,7 @@ export type Account = { ownerId: OwnerId; username: string; role: AccountRole; s
 /** Actions only a browser session may take; a token, agent or delegate cannot, whatever its scopes (audit B1 gap 3). */
 const SESSION_ONLY = new Set(["token:create", "token:revoke", "session:revoke", "passkey:manage", "account:delete"]);
 /** Actions a guest never takes. */
-const GUEST_DENIED = /^(admin:|coding:|computer:|token:|trigger:computer)/;
+const GUEST_DENIED = /^(admin:|coding:|computer:|token:|mcp:|trigger:computer)/;
 /** What an agent acting in its owner's space may do. It never decides approvals (its scopes omit approval:), administers, or touches credentials. */
 const AGENT_SCOPES = ["api:*", "coding:*", "computer:*", "trigger:*"];
 /** Coding actions: the permission an admin's CodingGrant must list. */

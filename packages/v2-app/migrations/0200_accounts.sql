@@ -1,17 +1,7 @@
 -- The application ledger replaces the Directory, Auth and Gallery Durable Objects and the per-space pim_* tables.
 -- Tenant tables carry owner_id and are sealed by row-level security keyed on the transaction-local setting pim.owner_id,
 -- so a pooled connection that served one tenant can never leak that tenant's rows to the next (a missing setting matches nothing).
-CREATE SCHEMA IF NOT EXISTS pim_app;
-
-DO $$ BEGIN
-	IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'pim_app_rw') THEN
-		CREATE ROLE pim_app_rw NOLOGIN NOBYPASSRLS NOSUPERUSER;
-	END IF;
-END $$;
-GRANT USAGE ON SCHEMA pim_app TO pim_app_rw;
-
-CREATE FUNCTION pim_app.cur_owner() RETURNS text LANGUAGE sql STABLE
-AS $$ SELECT nullif(current_setting('pim.owner_id', true), '') $$;
+-- The schema, the roles and public.pim_current_owner_id() come from 0001_foundation.sql in @pim/v2-contracts.
 
 CREATE FUNCTION pim_app.cur_lookup() RETURNS text LANGUAGE sql STABLE
 AS $$ SELECT nullif(current_setting('pim.lookup', true), '') $$;
@@ -21,7 +11,7 @@ CREATE FUNCTION pim_app.seal_tenant(tbl regclass) RETURNS void LANGUAGE plpgsql 
 BEGIN
 	EXECUTE format('ALTER TABLE %s ENABLE ROW LEVEL SECURITY', tbl);
 	EXECUTE format('ALTER TABLE %s FORCE ROW LEVEL SECURITY', tbl);
-	EXECUTE format('CREATE POLICY tenant ON %s USING (owner_id = pim_app.cur_owner()) WITH CHECK (owner_id = pim_app.cur_owner())', tbl);
+	EXECUTE format('CREATE POLICY tenant ON %s USING (owner_id = public.pim_current_owner_id()) WITH CHECK (owner_id = public.pim_current_owner_id())', tbl);
 END $$;
 
 -- Seals a table to its owner, and lets a caller holding the secret key `col` names (a token hash, a credential id) find that one row
@@ -30,16 +20,16 @@ CREATE FUNCTION pim_app.seal_lookup(tbl regclass, col text) RETURNS void LANGUAG
 BEGIN
 	EXECUTE format('ALTER TABLE %s ENABLE ROW LEVEL SECURITY', tbl);
 	EXECUTE format('ALTER TABLE %s FORCE ROW LEVEL SECURITY', tbl);
-	EXECUTE format('CREATE POLICY sel ON %s FOR SELECT USING (owner_id = pim_app.cur_owner() OR %I::text = pim_app.cur_lookup())', tbl, col);
-	EXECUTE format('CREATE POLICY ins ON %s FOR INSERT WITH CHECK (owner_id = pim_app.cur_owner())', tbl);
-	EXECUTE format('CREATE POLICY upd ON %s FOR UPDATE USING (owner_id = pim_app.cur_owner() OR %I::text = pim_app.cur_lookup()) WITH CHECK (owner_id = pim_app.cur_owner() OR %I::text = pim_app.cur_lookup())', tbl, col, col);
-	EXECUTE format('CREATE POLICY del ON %s FOR DELETE USING (owner_id = pim_app.cur_owner() OR %I::text = pim_app.cur_lookup())', tbl, col);
+	EXECUTE format('CREATE POLICY sel ON %s FOR SELECT USING (owner_id = public.pim_current_owner_id() OR %I::text = pim_app.cur_lookup())', tbl, col);
+	EXECUTE format('CREATE POLICY ins ON %s FOR INSERT WITH CHECK (owner_id = public.pim_current_owner_id())', tbl);
+	EXECUTE format('CREATE POLICY upd ON %s FOR UPDATE USING (owner_id = public.pim_current_owner_id() OR %I::text = pim_app.cur_lookup()) WITH CHECK (owner_id = public.pim_current_owner_id() OR %I::text = pim_app.cur_lookup())', tbl, col, col);
+	EXECUTE format('CREATE POLICY del ON %s FOR DELETE USING (owner_id = public.pim_current_owner_id() OR %I::text = pim_app.cur_lookup())', tbl, col);
 END $$;
 
 CREATE TABLE pim_app.accounts (
 	owner_id text PRIMARY KEY CHECK (owner_id ~ '^o_[A-Za-z0-9_-]+$'),
 	username text NOT NULL UNIQUE,
-	role text NOT NULL DEFAULT 'member' CHECK (role IN ('admin', 'member')),
+	role text NOT NULL DEFAULT 'member' CHECK (role IN ('admin', 'member', 'guest')),
 	status text NOT NULL CHECK (status IN ('pending', 'active', 'suspended', 'deleting', 'deleted')),
 	bot boolean NOT NULL DEFAULT false,
 	created_at timestamptz NOT NULL DEFAULT now(),
@@ -79,9 +69,9 @@ ALTER TABLE pim_app.accounts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE pim_app.accounts FORCE ROW LEVEL SECURITY;
 -- An account's identity is public to the instance (people, sharing, sign-in need it); only its owner changes it.
 CREATE POLICY sel ON pim_app.accounts FOR SELECT USING (true);
-CREATE POLICY ins ON pim_app.accounts FOR INSERT WITH CHECK (owner_id = pim_app.cur_owner());
-CREATE POLICY upd ON pim_app.accounts FOR UPDATE USING (owner_id = pim_app.cur_owner()) WITH CHECK (owner_id = pim_app.cur_owner());
-CREATE POLICY del ON pim_app.accounts FOR DELETE USING (owner_id = pim_app.cur_owner());
+CREATE POLICY ins ON pim_app.accounts FOR INSERT WITH CHECK (owner_id = public.pim_current_owner_id());
+CREATE POLICY upd ON pim_app.accounts FOR UPDATE USING (owner_id = public.pim_current_owner_id()) WITH CHECK (owner_id = public.pim_current_owner_id());
+CREATE POLICY del ON pim_app.accounts FOR DELETE USING (owner_id = public.pim_current_owner_id());
 
 -- A username is claimed once and never handed to anyone else, even after its account is deleted.
 CREATE TABLE pim_app.usernames (
@@ -92,7 +82,7 @@ CREATE TABLE pim_app.usernames (
 ALTER TABLE pim_app.usernames ENABLE ROW LEVEL SECURITY;
 ALTER TABLE pim_app.usernames FORCE ROW LEVEL SECURITY;
 CREATE POLICY sel ON pim_app.usernames FOR SELECT USING (true);
-CREATE POLICY ins ON pim_app.usernames FOR INSERT WITH CHECK (owner_id = pim_app.cur_owner());
+CREATE POLICY ins ON pim_app.usernames FOR INSERT WITH CHECK (owner_id = public.pim_current_owner_id());
 
 CREATE TABLE pim_app.invites (
 	code_hash text PRIMARY KEY,
@@ -118,4 +108,4 @@ CREATE TABLE pim_app.claim_codes (
 	used_at timestamptz
 );
 
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA pim_app TO pim_app_rw;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA pim_app TO pim_gate;

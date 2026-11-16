@@ -1,4 +1,15 @@
-/** Errors the Gate maps to HTTP statuses. Services throw these; nothing else leaks a status code. */
+import { ApprovalRequiredError, CapabilityUnavailableError, ForbiddenError } from "@pim/v2-contracts/authz";
+
+export { ApprovalRequiredError, CapabilityUnavailableError, ForbiddenError };
+
+/** The HTTP status of an error services throw: the contracts' authorization errors and the typed errors below. Anything else is a 500. */
+export function httpStatus(error: unknown): { status: number; code: string } | null {
+	if (error instanceof PimError) return { status: error.status, code: error.code };
+	if (error instanceof ForbiddenError) return { status: 403, code: error.reason };
+	if (error instanceof ApprovalRequiredError) return { status: 403, code: "approval_required" };
+	if (error instanceof CapabilityUnavailableError) return { status: 501, code: "capability_unavailable" };
+	return null;
+}
 export class PimError extends Error {
 	constructor(
 		readonly status: number,
@@ -15,21 +26,15 @@ export class UnauthorizedError extends PimError {
 	}
 }
 /** The caller is known but may not do this: a token scope, a suspended owner, a missing grant. */
-export class ForbiddenError extends PimError {
-	constructor(message = "Not allowed", code = "forbidden") {
+/** A rule of the product refuses this (registration closed, last admin, an invalid claim): 403 with a code tests and clients can match. */
+export class RefusedError extends PimError {
+	constructor(message: string, code: string) {
 		super(403, code, message);
 	}
 }
-/** The owner is deleting or deleted: what they had is gone, and it stays gone for every surface. */
 export class GoneError extends PimError {
 	constructor(message = "This account has been deleted") {
 		super(410, "gone", message);
-	}
-}
-/** The action is allowed in principle but a human must approve this call. */
-export class ApprovalRequiredError extends PimError {
-	constructor(readonly action: string, message = `"${action}" needs approval`) {
-		super(403, "approval_required", message);
 	}
 }
 export class NotFoundError extends PimError {
@@ -45,11 +50,5 @@ export class ConflictError extends PimError {
 export class BadRequestError extends PimError {
 	constructor(message: string) {
 		super(400, "bad_request", message);
-	}
-}
-/** A tool needs something this deployment has not configured (a personal computer, a coding pool, a connector). */
-export class CapabilityUnavailableError extends PimError {
-	constructor(readonly capability: string, message = `${capability} is not available here`) {
-		super(501, "capability_unavailable", message);
 	}
 }

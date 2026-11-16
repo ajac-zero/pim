@@ -10,7 +10,7 @@ describe("the package's boundary", () => {
 		for (const file of files) {
 			const specifiers = [...readFileSync(join(src, file), "utf8").matchAll(/(?:from|import\()\s*["']([^"']+)["']/g)].map((match) => match[1] ?? "");
 			for (const specifier of specifiers) {
-				expect(specifier, file).not.toMatch(/^cloudflare:|^@pim\//);
+				expect(specifier, file).not.toMatch(/^cloudflare:|^@pim\/(?!v2-contracts\/)/);
 				if (specifier.startsWith(".")) expect(resolve(src, dirname(file), specifier).startsWith(`${src}/`), `${file}: ${specifier}`).toBe(true);
 			}
 		}

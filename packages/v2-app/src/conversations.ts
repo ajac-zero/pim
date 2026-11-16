@@ -2,10 +2,12 @@ import { createHash, randomUUID } from "node:crypto";
 import { Authorizer } from "./authz.ts";
 import type { Db, Tx } from "./db.ts";
 import { BadRequestError, ConflictError, NotFoundError } from "./errors.ts";
-import { newId } from "./ids.ts";
-import { type Principal, principalKey } from "./principal.ts";
+import { CommandSubmission, type CommandKind } from "@pim/v2-contracts/runtime-seam";
+import { effectivePrincipal, OwnerId, type Principal } from "@pim/v2-contracts/identity";
 
-export type CommandKind = "message" | "approval" | "abort" | "fork" | "unarchive" | "delegate" | "task_update";
+/** What a client can submit: the runtime's commands, and three application operations that only change metadata here (fork, unarchive, delegate). */
+export type AdmitKind = CommandKind | "fork" | "unarchive" | "delegate";
+const RUNTIME_KINDS = new Set<string>(["user_message", "approval_decision", "task_wake", "trigger_fire", "coding_wake", "compaction_handoff", "abort"]);
 export type Admission = { commandId: string; piRequestId: string; duplicate: boolean; state: "inbox_accepted" | "runtime_committed" | "rejected"; chatId: string | null; result?: Record<string, unknown> };
 
 const uuidFrom = (seed: string): string => {
@@ -34,7 +36,7 @@ export class Conversations {
 
 	/** A new chat starts a new family (partition) with the next id of the tenant-wide sequence. */
 	async create(p: Principal, input: { agentId?: string; title?: string; kind?: "normal" | "group" | "task" | "trigger" | "review" | "visit"; roomMode?: string; id?: string }): Promise<string> {
-		await this.authz.authorize(p, "api:write");
+		await this.authz.enforce(p, "api:write");
 		return this.db.owner(p.ownerId, (tx) => createChat(tx, p.ownerId, input));
 	}
 
@@ -42,8 +44,8 @@ export class Conversations {
 	 * Accepts a command. A duplicate commandId commits once and answers with the first acceptance (a changed payload under the same id is a conflict).
 	 * Cheap metadata the command implies (fork, unarchive, resuming an archived chat, delegation) is applied in the same transaction.
 	 */
-	async admit(p: Principal, input: { commandId: string; kind: CommandKind; chatId?: string; payload?: Record<string, unknown> }): Promise<Admission> {
-		await this.authz.authorize(p, input.kind === "approval" ? "api:approve" : "api:write");
+	async admit(p: Principal, input: { commandId: string; kind: AdmitKind; chatId?: string; payload?: Record<string, unknown> }): Promise<Admission> {
+		await this.authz.enforce(p, input.kind === "approval_decision" ? "approval:decide" : "api:write");
 		if (!input.commandId || input.commandId.length > 128) throw new BadRequestError("commandId is required");
 		const payload = input.payload ?? {};
 		return this.db.owner(p.ownerId, async (tx) => {
@@ -67,19 +69,22 @@ export class Conversations {
 				result = { forkedChatId: chatId };
 			} else if (input.kind === "unarchive") {
 				await resume(tx, chatId!);
-			} else if (input.kind === "message" && chatId) {
+			} else if (input.kind === "user_message" && chatId) {
 				await resume(tx, chatId);
 				await tx.query("UPDATE pim_app.conversations SET updated_at = now() WHERE public_chat_id = $1", [chatId]);
 			} else if (input.kind === "delegate") {
 				result = await delegateTask(tx, p, chatId!, input.commandId, payload);
 				chatId = result.taskChatId as string;
+				// The task chat starts working: a wake in the task's own chat, stable under a retry of this command.
+				const wakeId = `${input.commandId}:wake`;
+				await tx.query("INSERT INTO pim_app.accepted_commands (owner_id, command_id, kind, public_chat_id, pi_request_id, payload) VALUES ($1,$2,'task_wake',$3,$4,$5)", [p.ownerId, wakeId, chatId, requestId(p.ownerId, wakeId), JSON.stringify({ text: String(payload.prompt ?? payload.title ?? "") , taskId: result.taskId })]);
+				await tx.query("INSERT INTO pim_app.command_inbox (owner_id, command_id, partition_id) VALUES ($1,$2,(SELECT partition_id FROM pim_app.conversations WHERE public_chat_id = $3))", [p.ownerId, wakeId, chatId]);
 			}
 			await tx.query("UPDATE pim_app.accepted_commands SET public_chat_id = $2, payload = payload || $3::jsonb WHERE command_id = $1", [input.commandId, chatId, JSON.stringify(result ? { _result: result } : {})]);
-			await tx.query("INSERT INTO pim_app.command_inbox (owner_id, command_id, partition_id) VALUES ($1, $2, $3)", [
-				p.ownerId,
-				input.commandId,
-				chatId ? (await tx.query("SELECT partition_id FROM pim_app.conversations WHERE public_chat_id = $1", [chatId])).rows[0]?.partition_id : null,
-			]);
+			if (RUNTIME_KINDS.has(input.kind)) {
+				if (!chatId) throw new BadRequestError(`A ${input.kind} command needs a chat`);
+				await tx.query("INSERT INTO pim_app.command_inbox (owner_id, command_id, partition_id) VALUES ($1, $2, (SELECT partition_id FROM pim_app.conversations WHERE public_chat_id = $3))", [p.ownerId, input.commandId, chatId]);
+			}
 			return { commandId: input.commandId, piRequestId, duplicate: false, state: "inbox_accepted", chatId, result };
 		});
 	}
@@ -92,16 +97,29 @@ export class Conversations {
 		});
 	}
 
-	/** The Runner claims due inbox rows without blocking other claimers; a claim that is not committed returns after `leaseMs`. */
-	async claim(ownerId: string, runner: string, limit = 10, leaseMs = 30_000): Promise<{ seq: string; commandId: string }[]> {
+	/**
+	 * The Runner claims due inbox rows without blocking other claimers; a claim that is not committed returns after `leaseMs`.
+	 * Each is the runtime's `CommandSubmission`, with the stable `piRequestId`.
+	 */
+	async claim(ownerId: string, runner: string, limit = 10, leaseMs = 30_000): Promise<CommandSubmission[]> {
 		return this.db.owner(ownerId, async (tx) => {
 			const { rows } = await tx.query(
-				`UPDATE pim_app.command_inbox SET claimed_by = $1, claimed_until = now() + ($3 || ' milliseconds')::interval
-				 WHERE seq IN (SELECT seq FROM pim_app.command_inbox WHERE available_at <= now() AND (claimed_until IS NULL OR claimed_until < now()) ORDER BY seq LIMIT $2 FOR UPDATE SKIP LOCKED)
-				 RETURNING seq, command_id`,
+				`WITH picked AS (
+				   UPDATE pim_app.command_inbox SET claimed_by = $1, claimed_until = now() + ($3 || ' milliseconds')::interval
+				   WHERE seq IN (SELECT seq FROM pim_app.command_inbox WHERE available_at <= now() AND (claimed_until IS NULL OR claimed_until < now()) ORDER BY seq LIMIT $2 FOR UPDATE SKIP LOCKED)
+				   RETURNING seq, command_id)
+				 SELECT c.command_id, c.kind, c.pi_request_id, c.payload, c.accepted_at, v.partition_id, v.conversation_id, v.public_chat_id, p.seq
+				 FROM picked p JOIN pim_app.accepted_commands c ON c.command_id = p.command_id
+				 JOIN pim_app.conversations v ON v.public_chat_id = c.public_chat_id ORDER BY p.seq`,
 				[runner, limit, String(leaseMs)],
 			);
-			return rows.map((r) => ({ seq: r.seq, commandId: r.command_id }));
+			return rows.map((r) => {
+				const { _fingerprint, _result, ...payload } = r.payload;
+				return CommandSubmission.parse({
+					commandId: r.command_id, ownerId, partitionId: r.partition_id, conversationId: Number(r.conversation_id), publicChatId: r.public_chat_id,
+					piRequestId: r.pi_request_id, kind: r.kind, payload, submittedAt: r.accepted_at.toISOString(),
+				});
+			});
 		});
 	}
 
@@ -126,12 +144,16 @@ export class Conversations {
 	 * Resuming the old chat (a message or unarchive) detaches the pair, see `resume`.
 	 */
 	async handoff(p: Principal, chatId: string, summary: string): Promise<string> {
-		await this.authz.authorize(p, "api:write");
+		await this.authz.enforce(p, "api:write");
 		return this.db.owner(p.ownerId, async (tx) => {
 			const from = await requireChat(tx, chatId);
 			if (from.continued_to) return from.continued_to as string;
 			const id = await createChat(tx, p.ownerId, { agentId: from.agent_id, title: from.title, summary, summaryOf: chatId, continuedFrom: chatId });
 			await tx.query("UPDATE pim_app.conversations SET continued_to = $2, archived_at = coalesce(archived_at, now()) WHERE public_chat_id = $1", [chatId, id]);
+			// The Runner carries the summary into the new chat's first turn.
+			const commandId = `handoff:${chatId}`;
+			await tx.query("INSERT INTO pim_app.accepted_commands (owner_id, command_id, kind, public_chat_id, pi_request_id, payload) VALUES ($1,$2,'compaction_handoff',$3,$4,$5) ON CONFLICT DO NOTHING", [p.ownerId, commandId, id, requestId(p.ownerId, commandId), JSON.stringify({ summary, continuedFrom: chatId })]);
+			await tx.query("INSERT INTO pim_app.command_inbox (owner_id, command_id, partition_id) VALUES ($1,$2,(SELECT partition_id FROM pim_app.conversations WHERE public_chat_id = $3)) ON CONFLICT DO NOTHING", [p.ownerId, commandId, id]);
 			return id;
 		});
 	}
@@ -140,7 +162,7 @@ export class Conversations {
 
 	/** Moves a task along working | auth-required | completed | failed | canceled and delivers one "[Task update]" per state to the starting chat, however often it is called. */
 	async updateTask(p: Principal, taskId: string, status: string, result?: string): Promise<{ delivered: boolean }> {
-		await this.authz.authorize(p, "api:write");
+		await this.authz.enforce(p, "api:write");
 		return this.db.owner(p.ownerId, async (tx) => {
 			const { rows } = await tx.query("SELECT status, started_by, task_chat FROM pim_app.tasks WHERE task_id = $1 FOR UPDATE", [taskId]);
 			const task = rows[0];
@@ -150,7 +172,7 @@ export class Conversations {
 			const commandId = `task:${taskId}:${status}`;
 			const first = await tx.query("INSERT INTO pim_app.task_update_deliveries (task_id, owner_id, status, command_id) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING", [taskId, p.ownerId, status, commandId]);
 			if (!first.rowCount) return { delivered: false };
-			await tx.query("INSERT INTO pim_app.accepted_commands (owner_id, command_id, kind, public_chat_id, pi_request_id, payload) VALUES ($1, $2, 'task_update', $3, $4, $5)", [
+			await tx.query("INSERT INTO pim_app.accepted_commands (owner_id, command_id, kind, public_chat_id, pi_request_id, payload) VALUES ($1, $2, 'task_wake', $3, $4, $5)", [
 				p.ownerId, commandId, task.started_by, requestId(p.ownerId, commandId), JSON.stringify({ text: `[Task update] ${taskId} is ${status}${result ? `: ${result}` : ""}`, taskId, status }),
 			]);
 			await tx.query("INSERT INTO pim_app.command_inbox (owner_id, command_id) VALUES ($1, $2)", [p.ownerId, commandId]);
@@ -160,17 +182,17 @@ export class Conversations {
 
 	/** archive_task_chats: archives the chats of finished tasks so they leave the list; returns how many. */
 	async archiveTaskChats(p: Principal): Promise<number> {
-		await this.authz.authorize(p, "api:write");
+		await this.authz.enforce(p, "api:write");
 		return this.db.owner(p.ownerId, async (tx) => (await tx.query(
 			`UPDATE pim_app.conversations c SET archived_at = now() FROM pim_app.tasks t
 			 WHERE t.task_chat = c.public_chat_id AND t.status IN ('completed', 'failed', 'canceled') AND c.archived_at IS NULL`,
 		)).rowCount ?? 0);
 	}
 
-	/** The principal a delegated task runs as: its own scopes, bounded by the chain of whoever asked, so delegation never adds privilege. */
-	async taskPrincipal(ownerId: string, taskId: string, own: { kind?: "agent"; subject: string; scopes: readonly string[] }): Promise<Principal> {
+	/** The principal a delegated task runs as. The Authorizer decides on its origin, the principal that asked, so delegation never adds privilege. */
+	async taskPrincipal(ownerId: string, taskId: string): Promise<Principal> {
 		const { origin } = await this.task(ownerId, taskId);
-		return { kind: own.kind ?? "agent", ownerId, scopes: own.scopes, subject: own.subject, origin };
+		return { kind: "delegated", ownerId: OwnerId.parse(ownerId), delegateId: taskId, originPrincipal: origin };
 	}
 
 	async task(ownerId: string, taskId: string) {
@@ -201,7 +223,7 @@ async function createChat(tx: Tx, ownerId: string, input: NewChat, partitionId?:
 	const id = input.id ?? randomUUID();
 	let partition = partitionId;
 	if (!partition) {
-		partition = newId("p");
+		partition = randomUUID();
 		await tx.query("INSERT INTO pim_app.partitions (partition_id, owner_id) VALUES ($1, $2)", [partition, ownerId]);
 	}
 	await tx.query(
@@ -233,8 +255,7 @@ async function delegateTask(tx: Tx, p: Principal, fromChat: string, commandId: s
 	const title = String(payload.title ?? "Task");
 	const taskId = `task_${createHash("sha256").update(`${p.ownerId}\n${commandId}`).digest("hex").slice(0, 16)}`;
 	const taskChat = await createChat(tx, p.ownerId, { id: uuidFrom(`${p.ownerId}\ntask\n${commandId}`), agentId: payload.agentId as string | undefined, title, kind: "task" });
-	// The chain is recorded so what runs the task is bounded by who asked for it (see Authorizer: every principal in the chain must pass).
-	const origin = { kind: p.kind, ownerId: p.ownerId, scopes: p.scopes, subject: p.subject, origin: p.origin ?? null, key: principalKey(p) };
-	await tx.query("INSERT INTO pim_app.tasks (task_id, owner_id, started_by, task_chat, origin_principal, title) VALUES ($1, $2, $3, $4, $5, $6)", [taskId, p.ownerId, fromChat, taskChat, JSON.stringify(origin), title]);
+	// The effective principal that asked is recorded: what runs the task is bounded by it, however many agents delegate onward.
+	await tx.query("INSERT INTO pim_app.tasks (task_id, owner_id, started_by, task_chat, origin_principal, title) VALUES ($1, $2, $3, $4, $5, $6)", [taskId, p.ownerId, fromChat, taskChat, JSON.stringify(effectivePrincipal(p)), title]);
 	return { taskId, taskChatId: taskChat };
 }

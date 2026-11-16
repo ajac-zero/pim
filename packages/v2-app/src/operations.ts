@@ -1,36 +1,44 @@
-import { ApprovalRequiredError, ConflictError, NotFoundError } from "./errors.ts";
+import type { Principal } from "@pim/v2-contracts/identity";
+import { type ExternalOperationRecord, type ExternalOperationState, operationSettled } from "@pim/v2-contracts/runtime-seam";
+import { ConflictError, NotFoundError } from "./errors.ts";
 import { Authorizer } from "./authz.ts";
 import type { Db } from "./db.ts";
 import { newId } from "./ids.ts";
-import type { Principal } from "./principal.ts";
-
-export type OperationState = "pending" | "running" | "completed" | "failed" | "needs_reconciliation";
 
 /**
- * Durable tool operations (what the Tools worker keeps). An operation that may have had an effect outside Pim and whose outcome is
- * unknown is never run again by the system: a non-idempotent HTTP call, purchase or message goes to `needs_reconciliation` and waits for
- * a person or the provider's own answer. Idempotent ones carry a provider idempotency key and may be retried with it.
+ * Durable tool operations (what the Tools worker keeps), as the contracts' `ExternalOperationRecord`. An operation that may have had an effect
+ * outside Pim and whose outcome is unknown is never run again by the system: a call whose provider does not honour its idempotency key (a plain
+ * HTTP POST, a purchase, a message) goes to `needs_reconciliation` and waits for a person or the provider's own answer. One whose provider does
+ * honour the key may be retried with that same key.
  */
 export class Operations {
 	constructor(private readonly db: Db, private readonly authz = new Authorizer(db)) {}
 
-	async create(p: Principal, input: { tool: string; idempotent: boolean; deadlineMs?: number; now?: Date }): Promise<{ id: string; providerKey: string | null }> {
-		await this.authz.authorize(p, "api:write");
-		const id = newId("op");
-		const providerKey = input.idempotent ? `pim-${id}` : null;
+	async create(p: Principal, input: { partitionId: string; taskId: string; toolName: string; capability: string; idempotent: boolean; deadlineMs?: number; now?: Date }): Promise<ExternalOperationRecord> {
+		await this.authz.enforce(p, "api:write");
+		const operationId = newId("op");
 		const now = input.now ?? new Date();
 		await this.db.owner(p.ownerId, (tx) =>
-			tx.query("INSERT INTO pim_app.external_operations (id, owner_id, tool, idempotent, provider_idempotency_key, deadline_at) VALUES ($1,$2,$3,$4,$5,$6)", [id, p.ownerId, input.tool, input.idempotent, providerKey, input.deadlineMs ? new Date(now.getTime() + input.deadlineMs) : null]),
+			tx.query("INSERT INTO pim_app.external_operations (operation_id, owner_id, partition_id, task_id, tool_name, capability, idempotency_key, idempotent, deadline_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)", [
+				operationId, p.ownerId, input.partitionId, input.taskId, input.toolName, input.capability, `pim-${operationId}`, input.idempotent, input.deadlineMs ? new Date(now.getTime() + input.deadlineMs) : null,
+			]),
 		);
-		return { id, providerKey };
+		return (await this.get(p.ownerId, operationId))!;
 	}
 
-	async #transition(ownerId: string, id: string, from: OperationState[], to: OperationState, extra: { result?: unknown; error?: string; bump?: boolean } = {}): Promise<void> {
+	async get(ownerId: string, operationId: string): Promise<(ExternalOperationRecord & { idempotent: boolean; attempts: number }) | null> {
+		return this.db.owner(ownerId, async (tx) => {
+			const r = (await tx.query("SELECT * FROM pim_app.external_operations WHERE operation_id = $1", [operationId])).rows[0];
+			return r ? { operationId: r.operation_id, ownerId: r.owner_id, partitionId: r.partition_id, taskId: r.task_id, toolName: r.tool_name, capability: r.capability, idempotencyKey: r.idempotency_key, state: r.state, receipt: r.receipt, earlySignal: r.early_signal, idempotent: r.idempotent, attempts: r.attempts } : null;
+		});
+	}
+
+	async #transition(ownerId: string, id: string, from: ExternalOperationState[], to: ExternalOperationState, extra: { receipt?: unknown; error?: string; bump?: boolean } = {}): Promise<void> {
 		const n = await this.db.owner(ownerId, async (tx) =>
-			(await tx.query("UPDATE pim_app.external_operations SET state = $3, result = coalesce($4, result), error = coalesce($5, error), attempts = attempts + $6, updated_at = now() WHERE id = $1 AND state = ANY($2)", [id, from, to, extra.result === undefined ? null : JSON.stringify(extra.result), extra.error ?? null, extra.bump ? 1 : 0])).rowCount,
+			(await tx.query("UPDATE pim_app.external_operations SET state = $3, receipt = coalesce($4, receipt), error = coalesce($5, error), attempts = attempts + $6, updated_at = now() WHERE operation_id = $1 AND state = ANY($2)", [id, from, to, extra.receipt === undefined ? null : JSON.stringify(extra.receipt), extra.error ?? null, extra.bump ? 1 : 0])).rowCount,
 		);
 		if (!n) {
-			const cur = await this.state(ownerId, id);
+			const cur = await this.get(ownerId, id);
 			throw cur ? new ConflictError(`An operation that is ${cur.state} cannot become ${to}`, "bad_operation_state") : new NotFoundError("No such operation");
 		}
 	}
@@ -38,21 +46,21 @@ export class Operations {
 	start(ownerId: string, id: string) {
 		return this.#transition(ownerId, id, ["pending"], "running", { bump: true });
 	}
-	complete(ownerId: string, id: string, result: unknown) {
-		return this.#transition(ownerId, id, ["running", "needs_reconciliation"], "completed", { result: result ?? {} });
+	complete(ownerId: string, id: string, receipt: unknown) {
+		return this.#transition(ownerId, id, ["running", "needs_reconciliation", "cancel_requested", "cancel_uncertain"], "completed", { receipt: receipt ?? {} });
 	}
 	fail(ownerId: string, id: string, error: string) {
-		return this.#transition(ownerId, id, ["running", "pending", "needs_reconciliation"], "failed", { error });
+		return this.#transition(ownerId, id, ["running", "pending", "needs_reconciliation", "cancel_uncertain"], "failed", { error });
 	}
 
-	/** Retrying is allowed only for an idempotent operation that is not waiting on reconciliation; it reuses the provider key. */
-	async retry(ownerId: string, id: string): Promise<{ providerKey: string }> {
-		const op = await this.state(ownerId, id);
+	/** Retrying is allowed only when the provider honours the idempotency key and nothing awaits reconciliation; it reuses the key. */
+	async retry(ownerId: string, id: string): Promise<{ idempotencyKey: string }> {
+		const op = await this.get(ownerId, id);
 		if (!op) throw new NotFoundError("No such operation");
-		if (!op.idempotent || !op.providerKey) throw new ConflictError("This operation has outside effects and cannot be retried blind; reconcile it", "retry_unsafe");
-		if (op.state === "completed") throw new ConflictError("It already completed", "bad_operation_state");
-		await this.#transition(ownerId, id, ["running", "failed", "pending"], "pending");
-		return { providerKey: op.providerKey };
+		if (!op.idempotent) throw new ConflictError("This operation has outside effects and cannot be retried blind; reconcile it", "retry_unsafe");
+		if (operationSettled(op.state)) throw new ConflictError(`It is already ${op.state}`, "bad_operation_state");
+		await this.#transition(ownerId, id, ["running", "pending", "failed"], "pending");
+		return { idempotencyKey: op.idempotencyKey };
 	}
 
 	/** Operations still running past their deadline: idempotent ones go back to pending, the rest wait for reconciliation. */
@@ -64,49 +72,43 @@ export class Operations {
 		});
 	}
 
-	/** Cancellation is a request until the provider confirms; if the provider cannot say, the outcome is uncertain and a person reconciles it. */
+	/** Cancellation is a request until the provider confirms (`cancelled`); if the provider cannot say, it is `cancel_uncertain` and a person reconciles it. */
 	async cancel(ownerId: string, id: string, outcome: "requested" | "confirmed" | "uncertain"): Promise<void> {
-		await this.db.owner(ownerId, async (tx) => {
-			const state = outcome === "confirmed" ? "failed" : outcome === "uncertain" ? "needs_reconciliation" : null;
-			const n = await tx.query("UPDATE pim_app.external_operations SET cancellation = $2, state = coalesce($3, state), error = CASE WHEN $2 = 'confirmed' THEN 'canceled' ELSE error END, updated_at = now() WHERE id = $1 AND state IN ('pending', 'running', 'needs_reconciliation')", [id, outcome, state]);
-			if (!n.rowCount) throw new ConflictError("Only an operation still in flight can be canceled", "bad_operation_state");
+		const to: ExternalOperationState = outcome === "requested" ? "cancel_requested" : outcome === "confirmed" ? "cancelled" : "cancel_uncertain";
+		await this.#transition(ownerId, id, ["pending", "running", "cancel_requested", "needs_reconciliation"], to).catch((error) => {
+			if (error instanceof ConflictError) throw new ConflictError("Only an operation still in flight can be canceled", "bad_operation_state");
+			throw error;
 		});
 	}
 
-	async state(ownerId: string, id: string) {
-		return this.db.owner(ownerId, async (tx) => {
-			const { rows } = await tx.query("SELECT state, idempotent, provider_idempotency_key, attempts, cancellation FROM pim_app.external_operations WHERE id = $1", [id]);
-			const r = rows[0];
-			return r ? { state: r.state as OperationState, idempotent: r.idempotent as boolean, providerKey: r.provider_idempotency_key as string | null, attempts: r.attempts as number, cancellation: r.cancellation as string | null } : null;
-		});
+	/** A decision or result that arrived before the task parked is kept and delivered when it does. */
+	async recordEarlySignal(ownerId: string, id: string, signal: Record<string, unknown>): Promise<void> {
+		await this.db.owner(ownerId, (tx) => tx.query("UPDATE pim_app.external_operations SET early_signal = $2 WHERE operation_id = $1", [id, JSON.stringify(signal)]));
 	}
 }
 
-/** Human approvals. A standing grant (an auditable record) can stand in for the human; without one a gated call files an approval and waits. */
+/** Human approvals. A standing approval (an auditable record) stands in for the person; without one a gated call files an approval and waits. */
 export class Approvals {
 	constructor(private readonly db: Db, private readonly authz = new Authorizer(db)) {}
 
-	/** Authorizes `action` for the principal. Returns "allowed" under a standing grant, or the id of a waiting approval a person must decide. */
-	async gate(p: Principal, input: { action: string; resource?: string; chatId?: string; args?: object; timeoutMs?: number; onTimeout?: "deny" | "approve"; now?: Date }): Promise<{ outcome: "allowed" } | { outcome: "waiting"; approvalId: string }> {
-		try {
-			await this.authz.authorize(p, input.action, input.resource);
-			return { outcome: "allowed" };
-		} catch (error) {
-			if (!(error instanceof ApprovalRequiredError)) throw error;
-		}
+	/** Authorizes `action`. Returns "allowed" (with the standing approval that covered it, if any), or the id of a waiting approval a person must decide. */
+	async gate(p: Principal, input: { action: string; resource?: Record<string, string>; chatId?: string; args?: object; timeoutMs?: number; onTimeout?: "deny" | "approve"; now?: Date }): Promise<{ outcome: "allowed"; viaStandingApproval?: string } | { outcome: "waiting"; approvalId: string }> {
+		const decision = await this.authz.authorize({ principal: p, ownerId: p.ownerId, action: input.action, ...(input.resource ? { resource: input.resource } : {}) });
+		if (decision.outcome === "allow") return { outcome: "allowed", ...(decision.viaStandingApproval ? { viaStandingApproval: decision.viaStandingApproval } : {}) };
 		const id = newId("ap");
 		const now = input.now ?? new Date();
 		await this.db.owner(p.ownerId, (tx) =>
-			tx.query("INSERT INTO pim_app.approvals (id, owner_id, public_chat_id, tool, args, timeout_policy, expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7)", [id, p.ownerId, input.chatId ?? null, input.action, JSON.stringify(input.args ?? {}), input.onTimeout ?? "deny", input.timeoutMs ? new Date(now.getTime() + input.timeoutMs) : null]),
+			tx.query("INSERT INTO pim_app.approvals (id, owner_id, public_chat_id, tool, args, timeout_policy, expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7)", [id, p.ownerId, input.chatId ?? null, input.action, JSON.stringify({ ...input.args, resource: input.resource ?? {} }), input.onTimeout ?? "deny", input.timeoutMs ? new Date(now.getTime() + input.timeoutMs) : null]),
 		);
 		return { outcome: "waiting", approvalId: id };
 	}
 
-	/** A person decides. Only a session can: a token or agent cannot approve its own request. A late decision after a timeout is a conflict. */
+	/** A person decides. An agent cannot approve its own request. A late decision after a timeout is a conflict. */
 	async decide(p: Principal, approvalId: string, approve: boolean): Promise<void> {
-		await this.authz.authorize(p, "approval:decide");
+		await this.authz.enforce(p, "approval:decide");
+		const by = p.kind === "user" ? p.sessionId : p.kind === "token" ? p.tokenId : p.kind;
 		const n = await this.db.owner(p.ownerId, async (tx) =>
-			(await tx.query("UPDATE pim_app.approvals SET state = $2, decided_by = $3, decided_at = now() WHERE id = $1 AND state = 'waiting'", [approvalId, approve ? "approved" : "denied", `${p.kind}:${p.subject}`])).rowCount,
+			(await tx.query("UPDATE pim_app.approvals SET state = $2, decided_by = $3, decided_at = now() WHERE id = $1 AND state = 'waiting'", [approvalId, approve ? "approved" : "denied", `${p.kind}:${by}`])).rowCount,
 		);
 		if (!n) throw new ConflictError("That approval is not waiting", "approval_closed");
 	}
@@ -124,3 +126,4 @@ export class Approvals {
 		return this.db.owner(ownerId, async (tx) => (await tx.query("SELECT state FROM pim_app.approvals WHERE id = $1", [id])).rows[0]?.state ?? null);
 	}
 }
+

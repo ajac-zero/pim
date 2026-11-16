@@ -47,4 +47,4 @@ CREATE TABLE pim_app.device_links (
 );
 SELECT pim_app.seal_lookup('pim_app.device_links', 'code_hash');
 
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA pim_app TO pim_app_rw;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA pim_app TO pim_gate;

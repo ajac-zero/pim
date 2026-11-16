@@ -1,4 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { CommandSubmission } from "@pim/v2-contracts/runtime-seam";
+import { OwnerId, type Principal } from "@pim/v2-contracts/identity";
 import { FIRE_GRACE_MS, nextCron } from "../src/schedules.ts";
 import { fixture, member } from "./support/fixture.ts";
 
@@ -15,11 +17,11 @@ const owner = () => u.account.ownerId;
 describe("command admission", () => {
 	it("commits a duplicate commandId once, and refuses the id for a different command", async () => {
 		const chat = await f.app.conversations.create(u.principal, { title: "hello" });
-		const first = await f.app.conversations.admit(u.principal, { commandId: "c1", kind: "message", chatId: chat, payload: { text: "hi" } });
-		const again = await f.app.conversations.admit(u.principal, { commandId: "c1", kind: "message", chatId: chat, payload: { text: "hi" } });
+		const first = await f.app.conversations.admit(u.principal, { commandId: "c1", kind: "user_message", chatId: chat, payload: { text: "hi" } });
+		const again = await f.app.conversations.admit(u.principal, { commandId: "c1", kind: "user_message", chatId: chat, payload: { text: "hi" } });
 		expect(first).toMatchObject({ duplicate: false, state: "inbox_accepted" });
 		expect(again).toMatchObject({ duplicate: true, piRequestId: first.piRequestId });
-		await expect(f.app.conversations.admit(u.principal, { commandId: "c1", kind: "message", chatId: chat, payload: { text: "other" } })).rejects.toMatchObject({ code: "command_id_reused" });
+		await expect(f.app.conversations.admit(u.principal, { commandId: "c1", kind: "user_message", chatId: chat, payload: { text: "other" } })).rejects.toMatchObject({ code: "command_id_reused" });
 		const rows = await f.db.owner(owner(), (tx) => tx.query("SELECT (SELECT count(*)::int FROM pim_app.accepted_commands WHERE command_id = 'c1') AS a, (SELECT count(*)::int FROM pim_app.command_inbox WHERE command_id = 'c1') AS i"));
 		expect(rows.rows[0]).toEqual({ a: 1, i: 1 });
 	});
@@ -27,11 +29,14 @@ describe("command admission", () => {
 	it("answers without a Runner, and shows accepted and runtime-committed commands apart", async () => {
 		const chat = await f.app.conversations.create(u.principal, {});
 		await f.app.conversations.markCommitted(owner(), "c1"); // the earlier test's command is done
-		await f.app.conversations.admit(u.principal, { commandId: "m1", kind: "message", chatId: chat, payload: { text: "one" } });
-		await f.app.conversations.admit(u.principal, { commandId: "m2", kind: "message", chatId: chat, payload: { text: "two" } });
+		await f.app.conversations.admit(u.principal, { commandId: "m1", kind: "user_message", chatId: chat, payload: { text: "one" } });
+		await f.app.conversations.admit(u.principal, { commandId: "m2", kind: "user_message", chatId: chat, payload: { text: "two" } });
 		expect((await f.app.conversations.pending(owner(), chat)).map((c) => [c.commandId, c.inboxAccepted, c.runtimeCommitted])).toEqual([["m1", true, false], ["m2", true, false]]);
 		const claimed = await f.app.conversations.claim(owner(), "runner-a", 1);
 		expect(claimed.map((c) => c.commandId)).toEqual(["m1"]);
+		// What the Runner receives is the runtime's CommandSubmission, with the stable piRequestId and the numeric pi conversation id.
+		expect(CommandSubmission.parse(claimed[0])).toMatchObject({ kind: "user_message", ownerId: owner(), publicChatId: chat, payload: { text: "one" }, piRequestId: (await f.app.conversations.pending(owner(), chat))[0]!.piRequestId });
+		expect(claimed[0]!.conversationId).toBeGreaterThan(1); // 1 is the home partition's root
 		expect((await f.app.conversations.claim(owner(), "runner-b", 5)).map((c) => c.commandId)).toEqual(["m2"]); // m1 is leased, not handed out twice
 		await f.app.conversations.markCommitted(owner(), "m1");
 		expect((await f.app.conversations.pending(owner(), chat)).map((c) => [c.commandId, c.state])).toEqual([["m1", "runtime_committed"], ["m2", "inbox_accepted"]]);
@@ -53,7 +58,7 @@ describe("command admission", () => {
 	});
 
 	it("detaches a post-idle continuation when the archived chat is unarchived or messaged", async () => {
-		for (const kind of ["unarchive", "message"] as const) {
+		for (const kind of ["unarchive", "user_message"] as const) {
 			const old = await f.app.conversations.create(u.principal, { title: `old-${kind}` });
 			const next = await f.app.conversations.handoff(u.principal, old, "## Goal\nsummary");
 			expect(await f.app.conversations.handoff(u.principal, old, "again")).toBe(next); // one continuation
@@ -67,15 +72,15 @@ describe("command admission", () => {
 
 	it("moves a delegated task through its states and delivers each [Task update] once", async () => {
 		const chat = await f.app.conversations.create(u.principal, {});
-		const d = await f.app.conversations.admit(u.principal, { commandId: "d1", kind: "delegate", chatId: chat, payload: { title: "research" } });
+		const d = await f.app.conversations.admit(u.principal, { commandId: "d1", kind: "delegate", chatId: chat, payload: { title: "research", prompt: "go" } });
 		const taskId = d.result!.taskId as string;
-		expect((await f.app.conversations.admit(u.principal, { commandId: "d1", kind: "delegate", chatId: chat, payload: { title: "research" } })).result).toEqual(d.result);
+		expect((await f.app.conversations.admit(u.principal, { commandId: "d1", kind: "delegate", chatId: chat, payload: { title: "research", prompt: "go" } })).result).toEqual(d.result);
 		expect(await f.app.conversations.updateTask(u.principal, taskId, "auth-required")).toEqual({ delivered: true });
 		expect(await f.app.conversations.updateTask(u.principal, taskId, "auth-required")).toEqual({ delivered: false });
 		await f.app.conversations.updateTask(u.principal, taskId, "working");
 		expect(await f.app.conversations.updateTask(u.principal, taskId, "completed", "done")).toEqual({ delivered: true });
 		await expect(f.app.conversations.updateTask(u.principal, taskId, "working")).rejects.toMatchObject({ code: "bad_task_transition" });
-		const updates = (await f.app.conversations.pending(owner(), chat)).filter((c) => c.kind === "task_update");
+		const updates = (await f.app.conversations.pending(owner(), chat)).filter((c) => c.kind === "task_wake" && c.commandId.startsWith("task:"));
 		expect(updates.map((c) => c.commandId)).toEqual([`task:${taskId}:auth-required`, `task:${taskId}:working`, `task:${taskId}:completed`]);
 		expect(await f.app.conversations.archiveTaskChats(u.principal)).toBeGreaterThanOrEqual(1);
 		expect((await f.app.conversations.get(owner(), d.chatId!)).archived).toBe(true);
@@ -140,43 +145,49 @@ describe("schedules", () => {
 });
 
 describe("durable tool operations and approvals", () => {
-	it("sends a timed-out non-idempotent call to reconciliation and never retries it blind", async () => {
+	const partitionId = "7d444840-9dc0-41b4-8b2c-3b0f0c4b8a11";
+	const op = (idempotent: boolean, now?: Date) => f.app.operations.create(u.principal, { partitionId, taskId: "task_1", toolName: idempotent ? "web_fetch" : "http_request", capability: "http", idempotent, deadlineMs: 1000, ...(now ? { now } : {}) });
+
+	it("sends a timed-out call the provider cannot de-duplicate to reconciliation and never retries it blind", async () => {
 		const now = new Date("2026-11-16T00:00:00Z");
-		const post = await f.app.operations.create(u.principal, { tool: "http_request", idempotent: false, deadlineMs: 1000, now });
-		const get = await f.app.operations.create(u.principal, { tool: "web_fetch", idempotent: true, deadlineMs: 1000, now });
-		expect(post.providerKey).toBeNull();
-		await f.app.operations.start(owner(), post.id);
-		await f.app.operations.start(owner(), get.id);
+		const post = await op(false, now);
+		const get = await op(true, now);
+		expect(post).toMatchObject({ state: "pending", idempotencyKey: `pim-${post.operationId}`, receipt: null, earlySignal: null });
+		await f.app.operations.start(owner(), post.operationId);
+		await f.app.operations.start(owner(), get.operationId);
 		expect(await f.app.operations.sweep(owner(), new Date(now.getTime() + 2000))).toEqual({ requeued: 1, needsReconciliation: 1 });
-		expect((await f.app.operations.state(owner(), post.id))?.state).toBe("needs_reconciliation");
-		await expect(f.app.operations.retry(owner(), post.id)).rejects.toMatchObject({ code: "retry_unsafe" });
-		await expect(f.app.operations.start(owner(), post.id)).rejects.toMatchObject({ code: "bad_operation_state" });
-		// The idempotent one retries under its original provider key.
-		expect(await f.app.operations.retry(owner(), get.id)).toEqual({ providerKey: get.providerKey });
+		expect((await f.app.operations.get(owner(), post.operationId))?.state).toBe("needs_reconciliation");
+		await expect(f.app.operations.retry(owner(), post.operationId)).rejects.toMatchObject({ code: "retry_unsafe" });
+		await expect(f.app.operations.start(owner(), post.operationId)).rejects.toMatchObject({ code: "bad_operation_state" });
+		// The one whose provider honours the key retries under the same key.
+		expect(await f.app.operations.retry(owner(), get.operationId)).toEqual({ idempotencyKey: get.idempotencyKey });
 		// A person reconciles the other with what actually happened.
-		await f.app.operations.complete(owner(), post.id, { status: 201 });
-		expect((await f.app.operations.state(owner(), post.id))?.state).toBe("completed");
+		await f.app.operations.complete(owner(), post.operationId, { status: 201 });
+		expect(await f.app.operations.get(owner(), post.operationId)).toMatchObject({ state: "completed", receipt: { status: 201 } });
 	});
 
-	it("records cancellation as requested, confirmed or uncertain", async () => {
-		const a = await f.app.operations.create(u.principal, { tool: "email", idempotent: false });
-		await f.app.operations.start(owner(), a.id);
-		await f.app.operations.cancel(owner(), a.id, "requested");
-		expect(await f.app.operations.state(owner(), a.id)).toMatchObject({ state: "running", cancellation: "requested" });
-		await f.app.operations.cancel(owner(), a.id, "uncertain");
-		expect(await f.app.operations.state(owner(), a.id)).toMatchObject({ state: "needs_reconciliation", cancellation: "uncertain" });
-		const b = await f.app.operations.create(u.principal, { tool: "email", idempotent: false });
-		await f.app.operations.cancel(owner(), b.id, "confirmed");
-		expect((await f.app.operations.state(owner(), b.id))?.state).toBe("failed");
+	it("records cancellation as requested, confirmed or uncertain, and keeps an early signal for the parked task", async () => {
+		const a = await op(false);
+		await f.app.operations.start(owner(), a.operationId);
+		await f.app.operations.cancel(owner(), a.operationId, "requested");
+		expect((await f.app.operations.get(owner(), a.operationId))?.state).toBe("cancel_requested");
+		await f.app.operations.recordEarlySignal(owner(), a.operationId, { decision: "deny" });
+		await f.app.operations.cancel(owner(), a.operationId, "uncertain");
+		expect(await f.app.operations.get(owner(), a.operationId)).toMatchObject({ state: "cancel_uncertain", earlySignal: { decision: "deny" } });
+		const b = await op(false);
+		await f.app.operations.cancel(owner(), b.operationId, "confirmed");
+		expect((await f.app.operations.get(owner(), b.operationId))?.state).toBe("cancelled");
+		await expect(f.app.operations.cancel(owner(), b.operationId, "requested")).rejects.toMatchObject({ code: "bad_operation_state" });
 	});
 
 	it("applies approval timeouts: deny by default, approve only a call still waiting", async () => {
-		const agent = { kind: "agent" as const, ownerId: owner(), scopes: ["coding:*", "api:*"], subject: "dev" };
-		await f.app.identity.authz.grantCapability(f.admin.principal, { ownerId: owner(), capability: "repository", resource: "acme/*" });
+		const agent: Principal = { kind: "agent", ownerId: OwnerId.parse(owner()), agentId: "dev" };
+		await f.app.identity.authz.grantCoding(f.admin.principal, { ownerId: owner(), permissions: ["coding:push"], repositories: ["github.com/acme/*"] });
+		const resource = { repository: "github.com/acme/app" };
 		const now = new Date("2026-11-16T00:00:00Z");
-		const w1 = await f.app.approvals.gate(agent, { action: "coding:push", resource: "acme/app", timeoutMs: 1000, now });
-		const w2 = await f.app.approvals.gate(agent, { action: "coding:push", resource: "acme/app", timeoutMs: 1000, onTimeout: "approve", now });
-		const w3 = await f.app.approvals.gate(agent, { action: "coding:push", resource: "acme/app", timeoutMs: 1000, onTimeout: "approve", now });
+		const w1 = await f.app.approvals.gate(agent, { action: "coding:push", resource, timeoutMs: 1000, now });
+		const w2 = await f.app.approvals.gate(agent, { action: "coding:push", resource, timeoutMs: 1000, onTimeout: "approve", now });
+		const w3 = await f.app.approvals.gate(agent, { action: "coding:push", resource, timeoutMs: 1000, onTimeout: "approve", now });
 		if (w1.outcome !== "waiting" || w2.outcome !== "waiting" || w3.outcome !== "waiting") throw new Error("expected waiting approvals");
 		await f.app.approvals.decide(u.principal, w3.approvalId, false); // a person said no before the timeout
 		expect(await f.app.approvals.sweep(owner(), new Date(now.getTime() + 5000))).toEqual({ denied: 1, approved: 1 });
@@ -185,9 +196,9 @@ describe("durable tool operations and approvals", () => {
 		expect(await f.app.approvals.state(owner(), w3.approvalId)).toBe("denied"); // not flipped to approved by its policy
 		await expect(f.app.approvals.decide(u.principal, w1.approvalId, true)).rejects.toMatchObject({ code: "approval_closed" });
 		// An agent cannot approve its own request.
-		await expect(f.app.approvals.decide(agent, w1.approvalId, true)).rejects.toMatchObject({ code: "scope" });
-		// A standing grant lets the call through with no approval filed.
-		await f.app.identity.authz.grantStanding(f.admin.principal, { ownerId: owner(), principal: "agent:dev", action: "coding:push", resource: "acme/app", reason: "dev owns pushes" });
-		expect(await f.app.approvals.gate(agent, { action: "coding:push", resource: "acme/app" })).toEqual({ outcome: "allowed" });
+		await expect(f.app.approvals.decide(agent, w1.approvalId, true)).rejects.toMatchObject({ reason: "agent-scope" });
+		// A standing approval lets the call through with no approval filed, and says which one.
+		const standing = await f.app.identity.authz.grantStanding(f.admin.principal, { ownerId: owner(), action: "coding:push", scope: resource });
+		expect(await f.app.approvals.gate(agent, { action: "coding:push", resource })).toEqual({ outcome: "allowed", viaStandingApproval: standing });
 	});
 });

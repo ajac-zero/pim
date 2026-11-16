@@ -1,0 +1,23 @@
+{
+  "name": "@pim/v2-contracts",
+  "version": "0.1.0",
+  "description": "The contracts the v2 workstreams share: identity, authorization, the PostgreSQL migration registry, the runtime, live and forge seams, and platform interfaces. It has no Cloudflare dependency.",
+  "private": true,
+  "type": "module",
+  "license": "FSL-1.1-ALv2",
+  "exports": {
+    "./*": "./src/*.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.1",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.11"
+  }
+}

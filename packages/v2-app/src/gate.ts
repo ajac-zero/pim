@@ -1,7 +1,8 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { App } from "./app.ts";
-import { BadRequestError, ForbiddenError, NotFoundError, PimError, CapabilityUnavailableError } from "./errors.ts";
-import type { Principal } from "./principal.ts";
+import { principalId } from "./authz.ts";
+import { BadRequestError, CapabilityUnavailableError, ForbiddenError, httpStatus, NotFoundError } from "./errors.ts";
+import type { Principal } from "@pim/v2-contracts/identity";
 
 type Ctx = { app: App; req: IncomingMessage; url: URL; params: string[]; principal: () => Promise<Principal>; json: () => Promise<Record<string, any>>; bytes: () => Promise<Uint8Array> };
 type Reply = { status: number; body?: unknown; headers?: Record<string, string>; raw?: Uint8Array };
@@ -35,20 +36,20 @@ const routes: Route[] = [
 	// Sign-out is server-side: the session row is revoked, so a copied cookie stops working too.
 	route("POST", "/auth/sign-out", async ({ app, principal }) => {
 		const p = await principal();
-		if (p.kind === "session") await app.identity.revokeSession(p.ownerId, p.subject);
+		if (p.kind === "user") await app.identity.revokeSession(p.ownerId, principalId(p));
 		return { status: 200, body: { ok: true }, headers: { "set-cookie": `${COOKIE}=; HttpOnly; Path=/; Max-Age=0` } };
 	}),
 	route("GET", "/auth/sessions", async ({ app, principal }) => ok({ sessions: await app.identity.listSessions((await principal()).ownerId) })),
 	route("DELETE", "/auth/sessions/:id", async ({ app, principal, params }) => {
 		const p = await principal();
-		await app.identity.authz.authorize(p, "session:revoke");
+		await app.identity.authz.enforce(p, "session:revoke");
 		await app.identity.revokeSession(p.ownerId, params[0]!);
 		return ok({ ok: true });
 	}),
 	route("GET", "/api/account", async ({ app, principal }) => {
 		const p = await principal();
-		await app.identity.authz.authorize(p, "api:read");
-		return ok({ account: await app.identity.authz.account(p.ownerId), principal: { kind: p.kind, scopes: p.scopes } });
+		await app.identity.authz.enforce(p, "api:read");
+		return ok({ account: await app.identity.authz.account(p.ownerId), principal: { kind: p.kind, scopes: p.kind === "token" ? p.scopes : ["*"] } });
 	}),
 	route("POST", "/api/tokens", async ({ app, principal, json }) => {
 		const b = await json();
@@ -76,8 +77,8 @@ const routes: Route[] = [
 	route("GET", "/api/sessions/:id", async ({ app, principal, params }) => ok(await app.conversations.get((await principal()).ownerId, params[0]!))),
 	route("GET", "/api/sessions/:id/pending", async ({ app, principal, params }) => ok({ commands: await app.conversations.pending((await principal()).ownerId, params[0]!) })),
 	route("POST", "/api/sessions/:id/:command", async ({ app, principal, json, params }) => {
-		const kinds: Record<string, "message" | "abort" | "fork" | "unarchive" | "delegate"> = { messages: "message", abort: "abort", fork: "fork", unarchive: "unarchive", delegate: "delegate" };
-		const kind = kinds[params[1]!];
+		const kinds = { messages: "user_message", abort: "abort", fork: "fork", unarchive: "unarchive", delegate: "delegate" } as const;
+		const kind = (kinds as Record<string, (typeof kinds)[keyof typeof kinds]>)[params[1]!];
 		if (!kind) throw new NotFoundError();
 		const b = await json();
 		const admission = await app.conversations.admit(await principal(), { commandId: String(b.commandId ?? ""), kind, chatId: params[0]!, payload: b.payload ?? { text: b.text } });
@@ -108,7 +109,7 @@ const routes: Route[] = [
 	}),
 	route("GET", "/api/notes/:id", async ({ app, principal, params }) => {
 		const p = await principal();
-		await app.identity.authz.authorize(p, "api:read");
+		await app.identity.authz.enforce(p, "api:read");
 		return ok(await app.canvas.read(p.ownerId, params[0]!));
 	}),
 	route("POST", "/api/notes/:id/edit", async ({ app, principal, json, params }) => {
@@ -126,8 +127,8 @@ const routes: Route[] = [
 	route("GET", "/hosted/:username/*", async ({ app, params }) => {
 		const owner = await app.db.anonymous(async (tx) => (await tx.query("SELECT owner_id FROM pim_app.accounts WHERE username = $1", [params[0]])).rows[0]?.owner_id as string | undefined);
 		if (!owner) throw new NotFoundError();
-		await app.identity.authz.requireLive(owner);
-		throw new CapabilityUnavailableError("hosted app backend");
+		await app.identity.authz.requireLive(owner, "hosted:run");
+		throw new CapabilityUnavailableError("hosted app backend", "this deployment runs no app backends");
 	}),
 ];
 
@@ -154,9 +155,9 @@ export function createGate(app: App): Server {
 		try {
 			await handle(app, req, res);
 		} catch (error) {
-			const e = error instanceof PimError ? error : null;
-			if (!e) console.error("gate error", error);
-			send(res, { status: e?.status ?? 500, body: { error: e?.code ?? "internal", message: e?.message ?? "Something went wrong" } });
+			const known = httpStatus(error);
+			if (!known) console.error("gate error", error);
+			send(res, { status: known?.status ?? 500, body: { error: known?.code ?? "internal", message: known ? (error as Error).message : "Something went wrong" } });
 		}
 	});
 }

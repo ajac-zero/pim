@@ -3,7 +3,7 @@ import type { Db, Tx } from "./db.ts";
 import { Conversations } from "./conversations.ts";
 import { BadRequestError, NotFoundError } from "./errors.ts";
 import { newId } from "./ids.ts";
-import type { Principal } from "./principal.ts";
+import { OwnerId, type Principal } from "@pim/v2-contracts/identity";
 
 /** The next time a 5-field cron expression (minute hour day month weekday; lists, ranges, steps and *) fires strictly after `after`, in UTC. */
 export function nextCron(spec: string, after: Date): Date | null {
@@ -38,7 +38,7 @@ export class Schedules {
 	constructor(private readonly db: Db, private readonly conversations = new Conversations(db), private readonly authz = new Authorizer(db)) {}
 
 	async create(p: Principal, input: ScheduleInput): Promise<string> {
-		await this.authz.authorize(p, "api:write");
+		await this.authz.enforce(p, "api:write");
 		const now = input.now ?? new Date();
 		const next = input.kind === "cron" ? nextCron(input.spec, now) : input.kind === "at" ? new Date(input.spec) : new Date(now.getTime() + Number(input.spec));
 		if (!next || Number.isNaN(next.getTime())) throw new BadRequestError("That schedule never fires");
@@ -63,7 +63,7 @@ export class Schedules {
 	async tick(ownerId: string, now: Date): Promise<{ fired: number; missed: number }> {
 		const account = await this.authz.account(ownerId);
 		if (!account || account.status !== "active") return { fired: 0, missed: 0 };
-		const principal: Principal = { kind: "trigger", ownerId, scopes: ["api:write"], subject: "scheduler" };
+		const principal: Principal = { kind: "agent", ownerId: OwnerId.parse(ownerId), agentId: "scheduler" };
 		const due = await this.db.owner(ownerId, async (tx) => (await tx.query("SELECT * FROM pim_app.schedules WHERE enabled AND next_run_at <= $1 ORDER BY next_run_at", [now])).rows);
 		let fired = 0;
 		let missed = 0;
@@ -92,7 +92,7 @@ export class Schedules {
 				let chatId: string | undefined = s.chat_id ?? undefined;
 				if (s.target === "new_chat") chatId = undefined;
 				const created = s.target === "new_chat" ? await this.conversations.create(principal, { agentId: s.agent_id ?? undefined, title: s.prompt.slice(0, 60), kind: "trigger", id: undefined }) : chatId;
-				const admission = await this.conversations.admit(principal, { commandId, kind: "message", chatId: created, payload: { text: s.prompt, schedule: s.id } });
+				const admission = await this.conversations.admit(principal, { commandId, kind: "trigger_fire", chatId: created, payload: { text: s.prompt, schedule: s.id } });
 				if (!admission.duplicate) fired++;
 			}
 		}

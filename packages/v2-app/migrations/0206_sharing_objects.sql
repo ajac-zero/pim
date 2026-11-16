@@ -145,7 +145,7 @@ CREATE TABLE pim_app.computers (
 );
 SELECT pim_app.seal_tenant('pim_app.computers');
 
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA pim_app TO pim_app_rw;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA pim_app TO pim_gate;
 
 -- Templates are shared through the gallery on purpose, so any signed-in space lists them.
 CREATE POLICY gallery ON pim_app.templates FOR SELECT USING (true);

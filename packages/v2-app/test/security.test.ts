@@ -1,7 +1,7 @@
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ApprovalRequiredError, ForbiddenError, GoneError, UnauthorizedError } from "../src/errors.ts";
-import { delegate } from "../src/principal.ts";
+import { OwnerId, type Principal } from "@pim/v2-contracts/identity";
 import { asSession, fixture, member } from "./support/fixture.ts";
 
 let f: Awaited<ReturnType<typeof fixture>>;
@@ -9,6 +9,19 @@ beforeAll(async () => {
 	f = await fixture();
 });
 afterAll(() => f.close());
+
+describe("migrations", () => {
+	it("apply the canonical foundation and then the application band, recorded in the shared ledger, and again as a no-op", async () => {
+		const owner = new pg.Client({ connectionString: f.ownerUrl });
+		await owner.connect();
+		const { rows } = await owner.query("SELECT number FROM public.pim_schema_migrations ORDER BY number");
+		await owner.end();
+		await expect(f.db.anonymous((tx) => tx.query("SELECT 1 FROM public.pim_schema_migrations"))).rejects.toThrow(/permission denied/); // the ledger is not the application's
+		expect(rows.map((r) => r.number)).toEqual([1, 200, 201, 202, 203, 204, 205, 206]);
+		const { migrate } = await import("../src/migrate.ts");
+		expect(await migrate(f.ownerUrl)).toEqual([]);
+	});
+});
 
 describe("row-level security", () => {
 	it("keeps tenants apart on one pooled connection, and fails closed with no context", async () => {
@@ -64,14 +77,14 @@ describe("sessions, tokens and owner status", () => {
 		const sp = await f.app.identity.authenticate(session);
 		const { token, id } = await f.app.identity.createToken(sp, { name: "ci", scopes: ["api:read"] });
 		const tp = await f.app.identity.authenticate(token);
-		await f.app.identity.authz.authorize(tp, "api:read");
-		await expect(f.app.identity.authz.authorize(tp, "api:write")).rejects.toBeInstanceOf(ForbiddenError);
+		await f.app.identity.authz.enforce(tp, "api:read");
+		await expect(f.app.identity.authz.enforce(tp, "api:write")).rejects.toBeInstanceOf(ForbiddenError);
 		// A token cannot mint tokens, whatever its scopes: that is session-only.
 		const star = await f.app.identity.authenticate((await f.app.identity.createToken(sp, { name: "all", scopes: ["*"] })).token);
-		await expect(f.app.identity.createToken(star, { name: "child", scopes: ["*"] })).rejects.toMatchObject({ code: "session_only" });
+		await expect(f.app.identity.createToken(star, { name: "child", scopes: ["*"] })).rejects.toMatchObject({ reason: "session-only" });
 		await f.app.identity.revokeToken(sp, id);
 		await expect(f.app.identity.authenticate(token)).rejects.toBeInstanceOf(UnauthorizedError);
-		await f.app.identity.revokeSession(d.account.ownerId, sp.subject);
+		await f.app.identity.revokeSession(d.account.ownerId, (sp as { sessionId: string }).sessionId);
 		await expect(f.app.identity.authenticate(session)).rejects.toBeInstanceOf(UnauthorizedError);
 	});
 
@@ -82,19 +95,19 @@ describe("sessions, tokens and owner status", () => {
 		const sp = await f.app.identity.authenticate(session);
 		const api = await f.app.identity.authenticate((await f.app.identity.createToken(sp, { name: "t", scopes: ["*"] })).token);
 		const mcp = await f.app.identity.authenticate((await f.app.identity.issueConsumer(owner, "mcp_grant", { scopes: ["api:*"] })).token);
-		const trigger = { kind: "trigger" as const, ownerId: owner, scopes: ["api:*"], subject: "tr" };
+		const trigger: Principal = { kind: "agent", ownerId: OwnerId.parse(owner), agentId: "trigger" };
 		const surfaces = [sp, api, mcp, trigger];
-		for (const p of surfaces) await f.app.identity.authz.authorize(p, "api:read");
+		for (const p of surfaces) await f.app.identity.authz.enforce(p, "api:read");
 
 		await f.app.identity.setStatus(f.admin.principal, owner, "suspended", "abuse");
-		for (const p of surfaces) await expect(f.app.identity.authz.authorize(p, "api:read")).rejects.toMatchObject({ status: 403, code: "suspended" });
-		await expect(f.app.identity.authenticate(session)).rejects.toMatchObject({ status: 403 });
-		await expect(f.app.identity.authz.requireLive(owner)).rejects.toMatchObject({ status: 403 }); // public hosted-app execution asks this
+		for (const p of surfaces) await expect(f.app.identity.authz.enforce(p, "api:read")).rejects.toMatchObject({ name: "ForbiddenError", reason: "suspended" });
+		await expect(f.app.identity.authenticate(session)).rejects.toMatchObject({ reason: "suspended" });
+		await expect(f.app.identity.authz.requireLive(owner)).rejects.toMatchObject({ reason: "suspended" }); // public hosted-app execution asks this
 
 		await f.app.identity.setStatus(f.admin.principal, owner, "active");
-		await f.app.identity.authz.authorize(sp, "api:read");
+		await f.app.identity.authz.enforce(sp, "api:read");
 		await f.app.identity.setStatus(f.admin.principal, owner, "deleted");
-		for (const p of surfaces) await expect(f.app.identity.authz.authorize(p, "api:read")).rejects.toBeInstanceOf(GoneError);
+		for (const p of surfaces) await expect(f.app.identity.authz.enforce(p, "api:read")).rejects.toBeInstanceOf(GoneError);
 		await expect(f.app.identity.authenticate(session)).rejects.toBeInstanceOf(UnauthorizedError); // credentials were revoked with the account
 		// The username is never reused, even after deletion.
 		await f.app.identity.setRegistrationOpen(f.admin.principal, true);
@@ -127,51 +140,75 @@ describe("sessions, tokens and owner status", () => {
 });
 
 describe("grants, standing approvals and delegation", () => {
-	it("lets a standing grant cover push and merge for one principal, and no one else", async () => {
+	const repo = (name: string) => ({ repository: `github.com/${name}` });
+	const agentOf = (owner: string, agentId: string): Principal => ({ kind: "agent", ownerId: OwnerId.parse(owner), agentId });
+
+	it("lets a standing approval cover push and merge on one repository, and refuses what no grant covers", async () => {
 		const linus = await member(f.app, f.admin.principal, "linus");
 		const owner = linus.account.ownerId;
-		const agent = { kind: "agent" as const, ownerId: owner, scopes: ["coding:*", "api:*"], subject: "linus" };
-		const other = { ...agent, subject: "intruder" };
-		// No coding grant yet: forbidden outright.
-		await expect(f.app.identity.authz.authorize(agent, "coding:push", "ajac-zero/pim")).rejects.toMatchObject({ code: "no_grant" });
-		await f.app.identity.authz.grantCapability(f.admin.principal, { ownerId: owner, capability: "repository", resource: "ajac-zero/*" });
-		// Granted but not approved: a human must approve each push.
-		await expect(f.app.identity.authz.authorize(agent, "coding:push", "ajac-zero/pim")).rejects.toBeInstanceOf(ApprovalRequiredError);
-		await f.app.identity.authz.grantStanding(f.admin.principal, { ownerId: owner, principal: "agent:linus", action: "coding:push", resource: "ajac-zero/pim", reason: "Linus owns pushes to pim" });
-		await f.app.identity.authz.grantStanding(f.admin.principal, { ownerId: owner, principal: "agent:linus", action: "coding:merge", resource: "ajac-zero/pim", reason: "Linus owns merges" });
-		await f.app.identity.authz.authorize(agent, "coding:push", "ajac-zero/pim");
-		await f.app.identity.authz.authorize(agent, "coding:merge", "ajac-zero/pim");
-		await expect(f.app.identity.authz.authorize(agent, "coding:push", "ajac-zero/other")).rejects.toBeInstanceOf(ApprovalRequiredError); // another repository
-		await expect(f.app.identity.authz.authorize(other, "coding:push", "ajac-zero/pim")).rejects.toBeInstanceOf(ApprovalRequiredError); // another principal
-		await expect(f.app.identity.authz.authorize(agent, "coding:push", "elsewhere/x")).rejects.toMatchObject({ code: "no_grant" }); // not an authorized repository
-		// Decisions are audited, and the audit log is append-only to the app role.
+		const authz = f.app.identity.authz;
+		const agent = agentOf(owner, "linus");
+		const ask = (action: string, resource: Record<string, string>) => authz.authorize({ principal: agent, ownerId: owner, action, resource });
+		// No coding grant yet: forbidden outright, for push and for start.
+		await expect(ask("coding:push", repo("ajac-zero/pim"))).rejects.toMatchObject({ name: "ForbiddenError", reason: "no-coding-grant" });
+		// A grant without a pool means coding cannot start at all: the capability is absent, which is not a permission failure.
+		await authz.grantCoding(f.admin.principal, { ownerId: owner, permissions: ["coding:start", "coding:push", "coding:merge"], repositories: ["github.com/ajac-zero/*"] });
+		await expect(ask("coding:start", {})).rejects.toMatchObject({ name: "CapabilityUnavailableError", capability: "coding" });
+		// Granted but not approved: a person must approve each push. Permission and approval are separate answers.
+		expect(await ask("coding:push", repo("ajac-zero/pim"))).toMatchObject({ outcome: "approval_required" });
+		const standing = await authz.grantStanding(f.admin.principal, { ownerId: owner, action: "coding:push", scope: repo("ajac-zero/pim") });
+		await authz.grantStanding(f.admin.principal, { ownerId: owner, action: "coding:merge", scope: repo("ajac-zero/pim") });
+		expect(await ask("coding:push", repo("ajac-zero/pim"))).toEqual({ outcome: "allow", viaStandingApproval: standing });
+		expect(await ask("coding:merge", repo("ajac-zero/pim"))).toMatchObject({ outcome: "allow" });
+		expect(await ask("coding:push", repo("ajac-zero/other"))).toMatchObject({ outcome: "approval_required" }); // another repository
+		await expect(ask("coding:push", repo("elsewhere/x"))).rejects.toMatchObject({ reason: "repository-not-granted" }); // not an authorized repository
+		await expect(ask("coding:pr", repo("ajac-zero/pim"))).rejects.toMatchObject({ reason: "no-coding-grant" }); // the grant never listed PRs
+		// A standing approval is a record: it expires and can be revoked at once.
+		const soon = await authz.grantStanding(f.admin.principal, { ownerId: owner, action: "coding:push", scope: repo("ajac-zero/short"), expiresAt: new Date(Date.now() - 1000) });
+		expect(soon).toBeTruthy();
+		expect(await ask("coding:push", repo("ajac-zero/short"))).toMatchObject({ outcome: "approval_required" });
+		// Decisions are audited, and the audit log is append-only to the application role.
 		const audit = await f.db.owner(owner, (tx) => tx.query("SELECT decision FROM pim_app.audit_log ORDER BY id"));
-		expect(audit.rows.map((r) => r.decision)).toContain("allowed");
+		expect(audit.rows.map((r) => r.decision)).toEqual(expect.arrayContaining(["allowed", "approval_required", "denied", "unavailable"]));
 		await expect(f.db.owner(owner, (tx) => tx.query("DELETE FROM pim_app.audit_log"))).resolves.toMatchObject({ rowCount: 0 });
-		// Revoking the standing grant takes effect at once.
-		const id = (await f.db.owner(owner, (tx) => tx.query("SELECT id FROM pim_app.standing_approvals WHERE action = 'coding:push'"))).rows[0].id;
-		await f.app.identity.authz.revokeStanding(f.admin.principal, owner, id);
-		await expect(f.app.identity.authz.authorize(agent, "coding:push", "ajac-zero/pim")).rejects.toBeInstanceOf(ApprovalRequiredError);
-		// Only an admin manages grants.
-		await expect(f.app.identity.authz.grantStanding(linus.principal, { ownerId: owner, principal: "agent:linus", action: "coding:push", reason: "self" })).rejects.toMatchObject({ code: "admin_only" });
+		await authz.revokeStanding(f.admin.principal, owner, standing);
+		expect(await ask("coding:push", repo("ajac-zero/pim"))).toMatchObject({ outcome: "approval_required" });
+		// Only an admin manages grants, and only a person decides approvals.
+		await expect(authz.grantStanding(linus.principal, { ownerId: owner, action: "coding:push", scope: {} })).rejects.toMatchObject({ reason: "admin-only" });
+		await expect(authz.enforce(agent, "approval:decide")).rejects.toMatchObject({ reason: "agent-scope" });
+		await expect(authz.enforce(agent, "admin:grants")).rejects.toMatchObject({ reason: "agent-scope" });
+		await authz.grantCoding(f.admin.principal, { ownerId: owner, permissions: ["coding:start"], pools: ["shared"] });
+		expect(await ask("coding:start", { pool: "shared" })).toEqual({ outcome: "allow" });
+		await expect(ask("coding:start", { pool: "other" })).rejects.toMatchObject({ reason: "pool-not-granted" });
 	});
 
-	it("does not let delegation launder privilege beyond the originating principal", async () => {
+	it("decides a delegated principal on its origin, so delegation never launders privilege", async () => {
 		const h = await member(f.app, f.admin.principal, "heidi");
 		const owner = h.account.ownerId;
-		await f.app.identity.authz.grantCapability(f.admin.principal, { ownerId: owner, capability: "repository" });
-		await f.app.identity.authz.grantStanding(f.admin.principal, { ownerId: owner, principal: "agent:trusted", action: "coding:push", reason: "trusted agent" });
-		const trusted = { kind: "agent" as const, ownerId: owner, scopes: ["coding:*"], subject: "trusted" };
-		await f.app.identity.authz.authorize(trusted, "coding:push", "r/x");
-		// A read-only token asks the trusted agent to act: the delegated principal carries the chain and is held to both.
-		const readOnly = { kind: "token" as const, ownerId: owner, scopes: ["api:read"], subject: "tok" };
-		const delegated = delegate(readOnly, { kind: "agent", subject: "trusted", scopes: ["coding:*"] });
-		await expect(f.app.identity.authz.authorize(delegated, "coding:push", "r/x")).rejects.toMatchObject({ code: "scope" });
-		// An origin that is suspended stops the chain even though the agent itself is fine.
+		const authz = f.app.identity.authz;
+		await authz.grantCoding(f.admin.principal, { ownerId: owner, permissions: ["coding:push"], repositories: ["github.com/heidi/*"] });
+		await authz.grantStanding(f.admin.principal, { ownerId: owner, action: "coding:push", scope: repo("heidi/app") });
+		const trusted = agentOf(owner, "trusted");
+		const viaAgent = { principal: trusted, ownerId: owner, action: "coding:push", resource: repo("heidi/app") };
+		expect(await authz.authorize(viaAgent)).toMatchObject({ outcome: "allow" });
+		const delegated = (origin: Principal): Principal => ({ kind: "delegated", ownerId: OwnerId.parse(owner), delegateId: "task_1", originPrincipal: origin });
+		// A read-only token asks the trusted agent's task to push: the origin's scope decides, and it has none for coding.
+		const readOnly: Principal = { kind: "token", ownerId: OwnerId.parse(owner), role: "member", tokenId: "tok", scopes: ["api:read"] };
+		await expect(authz.authorize({ ...viaAgent, principal: delegated(readOnly) })).rejects.toMatchObject({ reason: "scope" });
+		// A guest cannot start coding by delegating to an agent.
+		const guest: Principal = { kind: "user", ownerId: OwnerId.parse(owner), role: "guest", sessionId: "g" };
+		await f.db.owner(owner, (tx) => tx.query("UPDATE pim_app.accounts SET role = 'guest' WHERE owner_id = $1", [owner]));
+		await expect(authz.authorize({ ...viaAgent, principal: delegated(guest) })).rejects.toMatchObject({ reason: "guest" });
+		await f.db.owner(owner, (tx) => tx.query("UPDATE pim_app.accounts SET role = 'member' WHERE owner_id = $1", [owner]));
+		// An origin whose account is suspended stops what it started, even through a perfectly fine agent.
 		const visitor = await member(f.app, f.admin.principal, "ivan");
 		await f.app.identity.setStatus(f.admin.principal, visitor.account.ownerId, "suspended");
-		const fromVisitor = { ...delegate(visitor.principal, { kind: "agent", subject: "trusted", scopes: ["coding:*"] }), ownerId: owner };
-		await expect(f.app.identity.authz.authorize(fromVisitor, "coding:push", "r/x")).rejects.toMatchObject({ status: 403, code: "suspended" });
+		await expect(authz.authorize({ ...viaAgent, principal: delegated(visitor.principal) })).rejects.toMatchObject({ reason: "suspended" });
+		// A chain of delegations is decided on the first principal, however long.
+		await expect(authz.authorize({ ...viaAgent, principal: delegated(delegated(readOnly)) })).rejects.toMatchObject({ reason: "scope" });
+		// An origin from another owner cannot reach this owner's resources.
+		const stranger = await member(f.app, f.admin.principal, "stranger");
+		await expect(authz.authorize({ ...viaAgent, principal: delegated(stranger.principal) })).rejects.toMatchObject({ reason: "another-owner" });
 	});
 });
 

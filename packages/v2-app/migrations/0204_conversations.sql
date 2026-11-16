@@ -1,10 +1,10 @@
 -- Conversations, rooms, delegation tasks and the command ledger. A partition is one pi-durable storage (a conversation family);
 -- the numeric pi ConversationId is only unique inside its tenant-wide sequence, so the public chat id (a UUID) is the application's key.
 CREATE TABLE pim_app.partitions (
-	partition_id text PRIMARY KEY,
+	partition_id uuid PRIMARY KEY,
 	owner_id text NOT NULL REFERENCES pim_app.accounts (owner_id),
 	home boolean NOT NULL DEFAULT false,
-	next_conversation_id bigint NOT NULL DEFAULT 1,
+	next_conversation_id bigint NOT NULL DEFAULT 2,
 	created_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE UNIQUE INDEX one_home_partition ON pim_app.partitions (owner_id) WHERE home;
@@ -13,7 +13,7 @@ SELECT pim_app.seal_tenant('pim_app.partitions');
 CREATE TABLE pim_app.conversations (
 	public_chat_id uuid PRIMARY KEY,
 	owner_id text NOT NULL REFERENCES pim_app.accounts (owner_id),
-	partition_id text NOT NULL REFERENCES pim_app.partitions (partition_id),
+	partition_id uuid NOT NULL REFERENCES pim_app.partitions (partition_id),
 	conversation_id bigint NOT NULL,
 	agent_id text,
 	title text,
@@ -71,7 +71,8 @@ SELECT pim_app.seal_tenant('pim_app.task_update_deliveries');
 CREATE TABLE pim_app.accepted_commands (
 	owner_id text NOT NULL REFERENCES pim_app.accounts (owner_id),
 	command_id text NOT NULL,
-	kind text NOT NULL CHECK (kind IN ('message', 'approval', 'abort', 'fork', 'unarchive', 'delegate', 'task_update')),
+	-- The first seven are the runtime's CommandKind; fork, unarchive and delegate are application operations that only change metadata here.
+	kind text NOT NULL CHECK (kind IN ('user_message', 'approval_decision', 'task_wake', 'trigger_fire', 'coding_wake', 'compaction_handoff', 'abort', 'fork', 'unarchive', 'delegate')),
 	public_chat_id uuid REFERENCES pim_app.conversations (public_chat_id),
 	pi_request_id text NOT NULL,
 	payload jsonb NOT NULL,
@@ -87,7 +88,7 @@ CREATE TABLE pim_app.command_inbox (
 	seq bigserial PRIMARY KEY,
 	owner_id text NOT NULL,
 	command_id text NOT NULL,
-	partition_id text,
+	partition_id uuid,
 	available_at timestamptz NOT NULL DEFAULT now(),
 	claimed_by text,
 	claimed_until timestamptz,
@@ -96,5 +97,5 @@ CREATE TABLE pim_app.command_inbox (
 );
 SELECT pim_app.seal_tenant('pim_app.command_inbox');
 
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA pim_app TO pim_app_rw;
-GRANT USAGE ON ALL SEQUENCES IN SCHEMA pim_app TO pim_app_rw;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA pim_app TO pim_gate;
+GRANT USAGE ON ALL SEQUENCES IN SCHEMA pim_app TO pim_gate;

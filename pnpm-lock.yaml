@@ -284,12 +284,21 @@ importers:
       '@aws-sdk/client-s3':
         specifier: ^3.1169.0
         version: 3.1169.0
+      '@aws-sdk/s3-request-presigner':
+        specifier: ^3.1169.0
+        version: 3.1169.0
+      '@pim/v2-contracts':
+        specifier: workspace:*
+        version: link:../v2-contracts
       pg:
         specifier: ^8.13.0
         version: 8.23.1
       yjs:
         specifier: ^13.6.33
         version: 13.6.33
+      zod:
+        specifier: ^4.4.3
+        version: 4.6.5
     devDependencies:
       '@types/node':
         specifier: ^24.19.1
@@ -303,6 +312,22 @@ importers:
       s3rver:
         specifier: ^3.7.1
         version: 3.7.1(supports-color@10.2.2)
+      typescript:
+        specifier: ^6.0.3
+        version: 6.0.3
+      vitest:
+        specifier: ^4.1.11
+        version: 4.1.11(@opentelemetry/api@1.9.1)(@types/node@24.19.1)(happy-dom@21.0.4)(vite@8.3.3(@types/node@24.19.1)(esbuild@0.28.2)(jiti@2.7.0)(yaml@2.9.1))
+
+  packages/v2-contracts:
+    dependencies:
+      zod:
+        specifier: ^4.4.3
+        version: 4.6.5
+    devDependencies:
+      '@types/node':
+        specifier: ^24.19.1
+        version: 24.19.1
       typescript:
         specifier: ^6.0.3
         version: 6.0.3
@@ -644,6 +669,10 @@ packages:
 
   '@aws-sdk/nested-clients@3.998.3':
     resolution: {integrity: sha512-acHTTzMB13CU6dU4sxABYExMI3PQM2zStWH2MiUwJp/7QKTrLg2f7mbzSXoegW2kYOk2tdqQYagsZrWB8Xv7eA==}
+    engines: {node: '>=20.0.0'}
+
+  '@aws-sdk/s3-request-presigner@3.1169.0':
+    resolution: {integrity: sha512-ydc+uJnL8s1rMyPgEWjjiV6C/UFqrQhsAHOhEW5GerQtB0zpgpENupEY3AeeXunWxdQakdDLrNJetimZ0wbhRw==}
     engines: {node: '>=20.0.0'}
 
   '@aws-sdk/signature-v4-multi-region@3.996.47':
@@ -6584,6 +6613,15 @@ snapshots:
       '@smithy/core': 3.40.0
       '@smithy/fetch-http-handler': 5.8.1
       '@smithy/node-http-handler': 4.14.2
+      '@smithy/types': 4.20.0
+      tslib: 2.8.1
+
+  '@aws-sdk/s3-request-presigner@3.1169.0':
+    dependencies:
+      '@aws-sdk/core': 3.981.0
+      '@aws-sdk/signature-v4-multi-region': 3.996.52
+      '@aws-sdk/types': 3.975.1
+      '@smithy/core': 3.40.0
       '@smithy/types': 4.20.0
       tslib: 2.8.1
 

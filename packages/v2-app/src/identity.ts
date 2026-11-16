@@ -1,8 +1,9 @@
+import { randomUUID } from "node:crypto";
+import { OwnerId, type Principal } from "@pim/v2-contracts/identity";
 import { type Account, Authorizer, readAccount } from "./authz.ts";
 import type { Db } from "./db.ts";
-import { BadRequestError, ConflictError, ForbiddenError, NotFoundError, UnauthorizedError } from "./errors.ts";
+import { BadRequestError, ConflictError, NotFoundError, RefusedError, UnauthorizedError } from "./errors.ts";
 import { digest, newId, newOwnerId, secret } from "./ids.ts";
-import type { Principal } from "./principal.ts";
 
 const USERNAME = /^[a-z][a-z0-9-]{1,31}$/;
 export const SESSION_MS = 30 * 24 * 3600_000;
@@ -29,9 +30,9 @@ export class Identity {
 		const first = await this.db.anonymous(async (tx) => (await tx.query("SELECT NOT EXISTS (SELECT 1 FROM pim_app.accounts) AS first")).rows[0].first as boolean);
 		const open = await this.db.anonymous(async (tx) => (await tx.query("SELECT value FROM pim_app.instance_settings WHERE key = 'registration_open'")).rows[0]?.value === true);
 		if (first) {
-			if (!input.bootstrap) throw new ForbiddenError("This Pim needs its bootstrap claim code to create the first account", "bootstrap_required");
+			if (!input.bootstrap) throw new RefusedError("This Pim needs its bootstrap claim code to create the first account", "bootstrap_required");
 			await this.#redeemClaim(input.bootstrap, "bootstrap", now);
-		} else if (!open && !input.invite) throw new ForbiddenError("Registration is closed", "registration_closed");
+		} else if (!open && !input.invite) throw new RefusedError("Registration is closed", "registration_closed");
 		if (input.address) await this.#limit(input.address, now);
 		await this.db.owner(ownerId, async (tx) => {
 			try {
@@ -41,31 +42,31 @@ export class Identity {
 				throw error;
 			}
 			await tx.query("INSERT INTO pim_app.accounts (owner_id, username, role, status, activated_at) VALUES ($1, $2, $3, 'active', $4)", [ownerId, username, first ? "admin" : "member", now]);
-			await tx.query("INSERT INTO pim_app.partitions (partition_id, owner_id, home, next_conversation_id) VALUES ($1, $2, true, 2)", [`p_${ownerId}`, ownerId]);
+			await tx.query("INSERT INTO pim_app.partitions (partition_id, owner_id, home, next_conversation_id) VALUES ($1, $2, true, 2)", [randomUUID(), ownerId]);
 			// The invite is spent in the same transaction as the account, so a failed registration never burns it.
 			if (!first && !open) {
 				const spent = await tx.query("UPDATE pim_app.invites SET used_by = $1, used_at = $2 WHERE code_hash = $3 AND used_at IS NULL", [ownerId, now, digest(input.invite ?? "")]);
-				if (!spent.rowCount) throw new ForbiddenError("That invite is not valid", "invite_invalid");
+				if (!spent.rowCount) throw new RefusedError("That invite is not valid", "invite_invalid");
 			}
 		}, digest(input.invite ?? ""));
-		return { ownerId, username, role: first ? "admin" : "member", status: "active", bot: false };
+		return { ownerId: OwnerId.parse(ownerId), username, role: first ? "admin" : "member", status: "active", bot: false };
 	}
 
 	async #limit(address: string, now: Date, max = 5, windowMs = 3600_000): Promise<void> {
 		await this.db.anonymous(async (tx) => {
 			const { rows } = await tx.query("SELECT count(*)::int AS n FROM pim_app.registration_attempts WHERE address = $1 AND at > $2", [address, new Date(now.getTime() - windowMs)]);
-			if (rows[0].n >= max) throw new ForbiddenError("Too many registrations from this address", "rate_limited");
+			if (rows[0].n >= max) throw new RefusedError("Too many registrations from this address", "rate_limited");
 			await tx.query("INSERT INTO pim_app.registration_attempts (address, at) VALUES ($1, $2)", [address, now]);
 		});
 	}
 
 	async setRegistrationOpen(admin: Principal, open: boolean): Promise<void> {
-		await this.authz.authorize(admin, "admin:settings");
+		await this.authz.enforce(admin, "admin:settings");
 		await this.db.anonymous((tx) => tx.query("INSERT INTO pim_app.instance_settings (key, value) VALUES ('registration_open', $1) ON CONFLICT (key) DO UPDATE SET value = $1", [JSON.stringify(open)]));
 	}
 
 	async createInvite(admin: Principal, note = ""): Promise<string> {
-		await this.authz.authorize(admin, "admin:invites");
+		await this.authz.enforce(admin, "admin:invites");
 		const code = secret(16);
 		await this.db.owner(admin.ownerId, (tx) => tx.query("INSERT INTO pim_app.invites (code_hash, owner_id, note) VALUES ($1, $2, $3)", [digest(code), admin.ownerId, note]));
 		return code;
@@ -82,24 +83,24 @@ export class Identity {
 		const { rows } = await this.db.anonymous((tx) =>
 			tx.query("UPDATE pim_app.claim_codes SET used_at = $3 WHERE code_hash = $1 AND kind = $2 AND used_at IS NULL AND expires_at > $3 RETURNING owner_id", [digest(code), kind, now]),
 		);
-		if (!rows[0]) throw new ForbiddenError("That claim code is not valid", "claim_invalid");
+		if (!rows[0]) throw new RefusedError("That claim code is not valid", "claim_invalid");
 		return rows[0].owner_id;
 	}
 
 	/** The admin recovery path: redeems a claim code, reactivates the admin if needed and returns a session. Anibal keeps his way back in. */
 	async recoverAdmin(code: string, now = new Date()): Promise<{ session: string; account: Account }> {
 		const ownerId = await this.#redeemClaim(code, "admin_recovery", now);
-		if (!ownerId) throw new ForbiddenError("That claim code names no account", "claim_invalid");
+		if (!ownerId) throw new RefusedError("That claim code names no account", "claim_invalid");
 		const account = await this.db.owner(ownerId, async (tx) => {
 			await tx.query("UPDATE pim_app.accounts SET status = 'active', role = 'admin', status_reason = 'admin recovery', status_changed_at = $2 WHERE owner_id = $1 AND status IN ('active', 'suspended')", [ownerId, now]);
 			return readAccount(tx, ownerId);
 		});
-		if (!account || account.status !== "active") throw new ForbiddenError("That account cannot be recovered", "claim_invalid");
+		if (!account || account.status !== "active") throw new RefusedError("That account cannot be recovered", "claim_invalid");
 		return { session: await this.createSession(ownerId, { now }), account };
 	}
 
 	async setStatus(admin: Principal, ownerId: string, status: "active" | "suspended" | "deleting" | "deleted", reason = ""): Promise<void> {
-		await this.authz.authorize(admin, "admin:accounts");
+		await this.authz.enforce(admin, "admin:accounts");
 		await this.db.owner(ownerId, async (tx) => {
 			const { rowCount } = await tx.query("UPDATE pim_app.accounts SET status = $2, status_reason = $3, status_changed_at = now() WHERE owner_id = $1 AND status <> 'deleted'", [ownerId, status, reason]);
 			if (!rowCount) throw new NotFoundError("No such live account");
@@ -107,15 +108,15 @@ export class Identity {
 				for (const table of ["browser_sessions", "api_tokens", "token_consumers"]) await tx.query(`UPDATE pim_app.${table} SET revoked_at = coalesce(revoked_at, now()) WHERE owner_id = $1`, [ownerId]);
 			}
 		}).catch((error) => {
-			if ((error as { code?: string }).code === "P0002") throw new ForbiddenError("The last admin cannot be demoted, suspended or deleted", "last_admin");
+			if ((error as { code?: string }).code === "P0002") throw new RefusedError("The last admin cannot be demoted, suspended or deleted", "last_admin");
 			throw error;
 		});
 	}
 
-	async setRole(admin: Principal, ownerId: string, role: "admin" | "member"): Promise<void> {
-		await this.authz.authorize(admin, "admin:accounts");
+	async setRole(admin: Principal, ownerId: string, role: "admin" | "member" | "guest"): Promise<void> {
+		await this.authz.enforce(admin, "admin:accounts");
 		await this.db.owner(ownerId, (tx) => tx.query("UPDATE pim_app.accounts SET role = $2 WHERE owner_id = $1", [ownerId, role])).catch((error) => {
-			if ((error as { code?: string }).code === "P0002") throw new ForbiddenError("The last admin cannot be demoted", "last_admin");
+			if ((error as { code?: string }).code === "P0002") throw new RefusedError("The last admin cannot be demoted", "last_admin");
 			throw error;
 		});
 	}
@@ -145,7 +146,7 @@ export class Identity {
 
 	/** A scoped API token. Its scopes are what it may do, never more than its owner may. */
 	async createToken(session: Principal, input: { name: string; scopes: string[]; expiresAt?: Date }): Promise<{ id: string; token: string }> {
-		await this.authz.authorize(session, "token:create");
+		await this.authz.enforce(session, "token:create");
 		const token = `pim_${session.ownerId}_${secret()}`;
 		const id = newId("t");
 		await this.db.owner(session.ownerId, (tx) =>
@@ -160,7 +161,7 @@ export class Identity {
 	}
 
 	async revokeToken(session: Principal, id: string): Promise<void> {
-		await this.authz.authorize(session, "token:revoke");
+		await this.authz.enforce(session, "token:revoke");
 		await this.db.owner(session.ownerId, (tx) => tx.query("UPDATE pim_app.api_tokens SET revoked_at = coalesce(revoked_at, now()) WHERE id = $1", [id]));
 	}
 
@@ -182,26 +183,28 @@ export class Identity {
 	async authenticate(bearer: string | undefined, now = new Date()): Promise<Principal> {
 		if (!bearer) throw new UnauthorizedError();
 		const hash = digest(bearer);
-		let found: Principal | null = null;
+		type Found = { kind: "session" | "token"; ownerId: string; id: string; scopes: string[] };
+		let found: Found | null = null;
 		if (bearer.startsWith("pims_")) {
 			found = await this.db.lookup(hash, async (tx) => {
 				const { rows } = await tx.query("SELECT id, owner_id FROM pim_app.browser_sessions WHERE token_hash = $1 AND revoked_at IS NULL AND expires_at > $2", [hash, now]);
-				return rows[0] ? { kind: "session", ownerId: rows[0].owner_id, scopes: ["*"], subject: rows[0].id } : null;
+				return rows[0] ? { kind: "session", ownerId: rows[0].owner_id, id: rows[0].id, scopes: [] } : null;
 			});
 		} else if (bearer.startsWith("pim_")) {
 			found = await this.db.lookup(hash, async (tx) => {
 				const { rows } = await tx.query("UPDATE pim_app.api_tokens SET last_used_at = $2 WHERE token_hash = $1 AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > $2) RETURNING id, owner_id, scopes", [hash, now]);
-				return rows[0] ? { kind: "token", ownerId: rows[0].owner_id, scopes: rows[0].scopes, subject: rows[0].id } : null;
+				return rows[0] ? { kind: "token", ownerId: rows[0].owner_id, id: rows[0].id, scopes: rows[0].scopes } : null;
 			});
 		} else {
+			// Computer, host and MCP bearers are tokens whose scopes name what the consumer may do.
 			found = await this.db.lookup(hash, async (tx) => {
-				const { rows } = await tx.query("SELECT id, owner_id, kind, scopes FROM pim_app.token_consumers WHERE token_hash = $1 AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > $2)", [hash, now]);
-				const r = rows[0];
-				return r ? { kind: r.kind === "computer" ? "computer" : r.kind === "host" ? "host" : "mcp", ownerId: r.owner_id, scopes: r.scopes, subject: r.id } : null;
+				const { rows } = await tx.query("SELECT id, owner_id, scopes FROM pim_app.token_consumers WHERE token_hash = $1 AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > $2)", [hash, now]);
+				return rows[0] ? { kind: "token", ownerId: rows[0].owner_id, id: rows[0].id, scopes: rows[0].scopes } : null;
 			});
 		}
 		if (!found) throw new UnauthorizedError("Invalid or revoked credential");
-		await this.authz.requireLive(found.ownerId);
-		return found;
+		const account = await this.authz.requireLive(found.ownerId);
+		const ownerId = OwnerId.parse(found.ownerId);
+		return found.kind === "session" ? { kind: "user", ownerId, role: account.role, sessionId: found.id } : { kind: "token", ownerId, role: account.role, tokenId: found.id, scopes: found.scopes };
 	}
 }

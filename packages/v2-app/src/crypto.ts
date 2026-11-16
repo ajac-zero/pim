@@ -1,16 +1,5 @@
 import { createCipheriv, createDecipheriv, hkdfSync, randomBytes } from "node:crypto";
-
-/**
- * Versioned envelope encryption. A value is sealed with AES-256-GCM under a key derived (HKDF-SHA256) from one master key
- * per version and per purpose, so a key used for connector credentials never opens a vault entry. The version tag in the value
- * lets the master key rotate: new values use the current version, old ones open under theirs until `rotate` re-seals them.
- *
- *   pimenc:<keyVersion>:<purpose>:<iv>.<ciphertext+tag>     (base64url)
- *
- * The additional data binds a value to its purpose and a caller-given context (owner, row id), so a value moved to another row fails to open.
- * Values sealed by the Cloudflare build open through `LegacyKeys` until they are re-sealed.
- */
-export type Purpose = "connector-credential" | "provider-secret" | "vault" | "oauth-client-secret" | "webhook-signing" | "computer-token";
+import type { EnvelopeCrypto, KeySource, Sealed } from "@pim/v2-contracts/platform";
 
 export class UnreadableError extends Error {
 	constructor(message = "This value cannot be read: its key is missing or it was altered") {
@@ -19,107 +8,120 @@ export class UnreadableError extends Error {
 	}
 }
 
-const b64 = (bytes: Uint8Array) => Buffer.from(bytes).toString("base64url");
-const unb64 = (text: string) => new Uint8Array(Buffer.from(text, "base64url"));
-const PREFIX = "pimenc:";
+/** What the Cloudflare build derived its AES keys from `cookie_key` with (HKDF-SHA256, empty salt, this label). The git broker and gateway keys sign tokens and seal nothing. */
+const COOKIE_KEY_LABELS: Partial<Record<Extract<KeySource, { kind: "legacy-cookie-key" }>["purpose"], string>> = { vault: "pim coding vault v1", gitea: "pim gitea connection v1" };
 
-export type Keyring = { readonly current: string; readonly keys: Readonly<Record<string, Uint8Array>> };
+const FORMAT = 1;
+const TAG = 16;
+const WRAPPED = 12 + 32 + TAG; // wrap nonce, the 32-byte data key, its tag
 
-/** The keys a Cloudflare deployment used, so what it sealed stays readable: `APP_CREDENTIALS_KEY` and the Directory's `cookie_key`. */
-export type LegacyKeys = { readonly appCredentialsKey?: string; readonly cookieKey?: string };
-
-function aead(purpose: string, context: string): Buffer {
-	return Buffer.from(`pim.envelope.v1\n${purpose}\n${context}`);
+function gcm(key: Uint8Array, nonce: Uint8Array, context: Uint8Array, data: Uint8Array, mode: "seal" | "open"): Uint8Array {
+	if (mode === "seal") {
+		const c = createCipheriv("aes-256-gcm", key, nonce);
+		c.setAAD(context);
+		return Buffer.concat([c.update(data), c.final(), c.getAuthTag()]);
+	}
+	const d = createDecipheriv("aes-256-gcm", key, nonce);
+	d.setAAD(context);
+	d.setAuthTag(data.subarray(data.length - TAG));
+	return Buffer.concat([d.update(data.subarray(0, data.length - TAG)), d.final()]);
 }
 
-export class EnvelopeCrypto {
-	constructor(
-		private readonly ring: Keyring,
-		private readonly legacy: LegacyKeys = {},
-	) {
-		if (!ring.keys[ring.current]) throw new Error("The current key version is not in the keyring");
-		for (const [version, key] of Object.entries(ring.keys)) if (key.length !== 32 || /[:.]/.test(version)) throw new Error(`Key ${version} must be 32 bytes with a plain version name`);
+/**
+ * Envelope encryption over a keyring. Each value gets its own random data key, which encrypts it (AES-256-GCM, context as additional data);
+ * the data key is wrapped under the current key-encryption key. `keyId` names that key, so rotation adds a key, seals new values under it,
+ * and `rotate` re-seals old ones. Zero plaintext is kept anywhere.
+ *
+ * Sealed layout: `nonce` is the value's nonce; `ciphertext` is the wrap nonce, the wrapped data key, then the value's ciphertext and tag.
+ * Values the Cloudflare build sealed stay readable through `importLegacyKey`: a legacy `Sealed` carries the old nonce and ciphertext
+ * as they were stored, and `context` is the old additional data verbatim.
+ */
+export class KeyringCrypto implements EnvelopeCrypto {
+	readonly #keys = new Map<string, Uint8Array>();
+	readonly #legacy = new Map<string, Uint8Array>();
+
+	constructor(private readonly currentKeyId: string, keys: Readonly<Record<string, Uint8Array>>) {
+		for (const [id, key] of Object.entries(keys)) {
+			if (key.length !== 32 || id.startsWith("legacy-")) throw new Error(`Key ${id} must be 32 bytes and not named legacy-*`);
+			this.#keys.set(id, key);
+		}
+		if (!this.#keys.has(currentKeyId)) throw new Error("The current key is not in the keyring");
 	}
 
-	#derive(version: string, purpose: string): Buffer {
-		const master = this.ring.keys[version];
-		if (!master) throw new UnreadableError(`Key version ${version} is not configured`);
-		return Buffer.from(hkdfSync("sha256", master, Buffer.from("pim.envelope"), Buffer.from(purpose), 32));
+	async seal(plaintext: Uint8Array, context: string): Promise<Sealed> {
+		const dataKey = randomBytes(32);
+		const nonce = randomBytes(12);
+		const wrapNonce = randomBytes(12);
+		const ad = Buffer.from(context);
+		const wrapped = gcm(this.#keys.get(this.currentKeyId)!, wrapNonce, Buffer.from(`wrap\n${context}`), dataKey, "seal");
+		const body = gcm(dataKey, nonce, ad, plaintext, "seal");
+		return { keyId: this.currentKeyId, version: FORMAT, nonce, ciphertext: Buffer.concat([wrapNonce, wrapped, body]) };
 	}
 
-	seal(purpose: Purpose, plaintext: string, context: string): string {
-		const iv = randomBytes(12);
-		const cipher = createCipheriv("aes-256-gcm", this.#derive(this.ring.current, purpose), iv);
-		cipher.setAAD(aead(purpose, context));
-		const body = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final(), cipher.getAuthTag()]);
-		return `${PREFIX}${this.ring.current}:${purpose}:${b64(iv)}.${b64(body)}`;
-	}
-
-	open(sealed: string, context: string): string {
-		if (!sealed.startsWith(PREFIX)) throw new UnreadableError("Not an envelope value");
-		const [version = "", purpose = "", rest = ""] = sealed.slice(PREFIX.length).split(":");
-		const [iv = "", body = ""] = rest.split(".");
+	async open(sealed: Sealed, context: string): Promise<Uint8Array> {
 		try {
-			const data = unb64(body);
-			const decipher = createDecipheriv("aes-256-gcm", this.#derive(version, purpose), unb64(iv));
-			decipher.setAAD(aead(purpose, context));
-			decipher.setAuthTag(data.subarray(data.length - 16));
-			return Buffer.concat([decipher.update(data.subarray(0, data.length - 16)), decipher.final()]).toString("utf8");
+			const legacy = this.#legacy.get(sealed.keyId);
+			if (sealed.keyId.startsWith("legacy-")) {
+				if (!legacy) throw new UnreadableError("That legacy key is not imported");
+				return new Uint8Array(gcm(legacy, sealed.nonce, Buffer.from(context), sealed.ciphertext, "open"));
+			}
+			const kek = this.#keys.get(sealed.keyId);
+			if (!kek) throw new UnreadableError(`Key ${sealed.keyId} is not in the keyring`);
+			const wrapNonce = sealed.ciphertext.subarray(0, 12);
+			const dataKey = gcm(kek, wrapNonce, Buffer.from(`wrap\n${context}`), sealed.ciphertext.subarray(12, 12 + WRAPPED - 12), "open");
+			return new Uint8Array(gcm(dataKey, sealed.nonce, Buffer.from(context), sealed.ciphertext.subarray(WRAPPED), "open"));
 		} catch (error) {
 			throw error instanceof UnreadableError ? error : new UnreadableError();
 		}
 	}
 
-	/** Whether a value is under an old key version or a legacy format and should be re-sealed. */
-	needsRotation(sealed: string): boolean {
-		return !sealed.startsWith(`${PREFIX}${this.ring.current}:`);
+	async rotate(sealed: Sealed, context: string): Promise<Sealed> {
+		if (sealed.keyId === this.currentKeyId) return sealed;
+		return this.seal(await this.open(sealed, context), context);
 	}
 
-	/** Re-seals under the current key. */
-	rotate(sealed: string, context: string, legacy?: { binding: LegacyContext; purpose: Purpose }): string {
-		if (sealed.startsWith(PREFIX)) return this.seal(sealed.slice(PREFIX.length).split(":")[1] as Purpose, this.open(sealed, context), context);
-		if (!legacy) throw new UnreadableError("A legacy value needs its binding to be re-sealed");
-		return this.seal(legacy.purpose, this.openLegacy(sealed, legacy.binding), context);
-	}
-
-	/** Opens a value the Cloudflare build sealed: native-app credentials (`sealed:v1:`, `APP_CREDENTIALS_KEY`) or a coding vault blob (cookie_key). */
-	openLegacy(sealed: string | Uint8Array, binding?: LegacyContext): string {
-		try {
-			if (typeof sealed === "string" && sealed.startsWith("sealed:v1:")) {
-				if (!this.legacy.appCredentialsKey || binding?.kind !== "app-credential") throw new UnreadableError();
-				const key = unb64(this.legacy.appCredentialsKey.trim());
-				const [iv = "", body = ""] = sealed.slice("sealed:v1:".length).split(".");
-				const data = unb64(body);
-				const decipher = createDecipheriv("aes-256-gcm", key, unb64(iv));
-				decipher.setAAD(Buffer.from(["pim.app-credential.v1", binding.owner, binding.id, binding.app, binding.purpose].join("\n")));
-				decipher.setAuthTag(data.subarray(data.length - 16));
-				return Buffer.concat([decipher.update(data.subarray(0, data.length - 16)), decipher.final()]).toString("utf8");
-			}
-			if (typeof sealed !== "string") {
-				if (!this.legacy.cookieKey || binding?.kind !== "vault") throw new UnreadableError();
-				const key = Buffer.from(hkdfSync("sha256", unb64(this.legacy.cookieKey), Buffer.alloc(0), Buffer.from("pim coding vault v1"), 32));
-				const decipher = createDecipheriv("aes-256-gcm", key, sealed.subarray(1, 13));
-				decipher.setAAD(Buffer.from(JSON.stringify(["pim.coding-vault", sealed[0], binding.owner, binding.harness])));
-				decipher.setAuthTag(sealed.subarray(sealed.length - 16));
-				return Buffer.concat([decipher.update(sealed.subarray(13, sealed.length - 16)), decipher.final()]).toString("utf8");
-			}
-		} catch (error) {
-			throw error instanceof UnreadableError ? error : new UnreadableError();
+	async importLegacyKey(source: KeySource, secret: Uint8Array): Promise<string> {
+		if (source.kind === "v2") {
+			if (secret.length !== 32) throw new Error("A key is 32 bytes");
+			this.#keys.set(source.keyId, secret);
+			return source.keyId;
 		}
-		throw new UnreadableError("Not a legacy value");
+		if (source.kind === "legacy-app-credentials") {
+			if (secret.length !== 32) throw new Error("APP_CREDENTIALS_KEY must be 32 bytes");
+			this.#legacy.set("legacy-app-credentials", secret);
+			return "legacy-app-credentials";
+		}
+		const label = COOKIE_KEY_LABELS[source.purpose];
+		if (!label) throw new UnreadableError(`${source.purpose} keys sign tokens; there is nothing sealed under them to open`);
+		const id = `legacy-cookie-key:${source.purpose}`;
+		this.#legacy.set(id, new Uint8Array(hkdfSync("sha256", secret, Buffer.alloc(0), Buffer.from(label), 32)));
+		return id;
+	}
+
+	/** Whether `sealed` should be passed through `rotate`: it is under an old or legacy key. */
+	needsRotation(sealed: Sealed): boolean {
+		return sealed.keyId !== this.currentKeyId;
 	}
 }
 
-export type LegacyContext =
-	| { kind: "app-credential"; owner: string; id: string; app: string; purpose: string }
-	| { kind: "vault"; owner: string; harness: string };
+/** The stored string `sealed:v1:<iv>.<ciphertext+tag>` of a native-app credential, as a `Sealed` for `open` with context the old additional data (`pim.app-credential.v1`, owner, connection, connector and purpose, newline-joined). */
+export function legacyAppCredential(stored: string): Sealed {
+	const [iv = "", body = ""] = stored.slice("sealed:v1:".length).split(".");
+	return { keyId: "legacy-app-credentials", version: 0, nonce: new Uint8Array(Buffer.from(iv, "base64url")), ciphertext: new Uint8Array(Buffer.from(body, "base64url")) };
+}
 
-/** Reads a keyring from the environment: `PIM_KEYS` as `v1:<base64>,v2:<base64>` with `PIM_KEY_CURRENT` naming the one to seal under. */
-export function keyringFromEnv(env: Record<string, string | undefined>): Keyring {
+/** A coding vault blob (format byte, 12-byte nonce, ciphertext and tag) as a `Sealed`; the context is the old additional data, `JSON.stringify(["pim.coding-vault", format, owner, harness])`. */
+export function legacyVaultBlob(blob: Uint8Array): Sealed {
+	return { keyId: "legacy-cookie-key:vault", version: blob[0]!, nonce: blob.slice(1, 13), ciphertext: blob.slice(13) };
+}
+
+/** Reads a keyring from the environment: `PIM_KEYS` as `id:<base64url>,id:<base64url>` with `PIM_KEY_CURRENT` naming the one to seal under. */
+export function keyringFromEnv(env: Record<string, string | undefined>): KeyringCrypto {
 	const keys: Record<string, Uint8Array> = {};
 	for (const entry of (env.PIM_KEYS ?? "").split(",").filter(Boolean)) {
-		const [version = "", value = ""] = entry.split(":");
-		keys[version] = unb64(value);
+		const [id = "", value = ""] = entry.split(":");
+		keys[id] = new Uint8Array(Buffer.from(value, "base64url"));
 	}
-	return { current: env.PIM_KEY_CURRENT ?? Object.keys(keys).at(-1) ?? "", keys };
+	const current = env.PIM_KEY_CURRENT ?? Object.keys(keys).at(-1) ?? "";
+	return new KeyringCrypto(current, keys);
 }

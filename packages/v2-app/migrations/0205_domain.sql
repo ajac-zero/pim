@@ -119,22 +119,26 @@ CREATE TABLE pim_app.approvals (
 );
 SELECT pim_app.seal_tenant('pim_app.approvals');
 
--- Durable tool operations. An operation whose outcome cannot be known is never retried blind: it waits for reconciliation.
+-- Durable tool operations (the ExternalOperationRecord contract). An operation whose outcome cannot be known is never run again
+-- blind: it waits for reconciliation. `idempotent` says whether the provider honours idempotency_key, which is what makes a retry safe.
 CREATE TABLE pim_app.external_operations (
-	id text NOT NULL,
+	operation_id text NOT NULL,
 	owner_id text NOT NULL REFERENCES pim_app.accounts (owner_id),
-	tool text NOT NULL,
+	partition_id uuid NOT NULL,
+	task_id text NOT NULL,
+	tool_name text NOT NULL,
+	capability text NOT NULL,
+	idempotency_key text NOT NULL,
 	idempotent boolean NOT NULL DEFAULT false,
-	provider_idempotency_key text,
-	state text NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'running', 'completed', 'failed', 'needs_reconciliation')),
-	cancellation text CHECK (cancellation IN ('requested', 'confirmed', 'uncertain')),
+	state text NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'running', 'completed', 'failed', 'cancel_requested', 'cancelled', 'cancel_uncertain', 'needs_reconciliation')),
+	receipt jsonb,
+	early_signal jsonb,
 	deadline_at timestamptz,
 	attempts integer NOT NULL DEFAULT 0,
-	result jsonb,
 	error text,
 	created_at timestamptz NOT NULL DEFAULT now(),
 	updated_at timestamptz NOT NULL DEFAULT now(),
-	PRIMARY KEY (owner_id, id)
+	PRIMARY KEY (owner_id, operation_id)
 );
 SELECT pim_app.seal_tenant('pim_app.external_operations');
 
@@ -177,9 +181,9 @@ CREATE TABLE pim_app.model_calls (
 CREATE INDEX model_calls_by_time ON pim_app.model_calls (owner_id, at);
 SELECT pim_app.seal_tenant('pim_app.model_calls');
 
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA pim_app TO pim_app_rw;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA pim_app TO pim_gate;
 
 -- Which owners have a schedule due, so a scheduler tick finds work without reading across tenants. It holds an owner id and a time, nothing else.
 CREATE TABLE pim_app.schedule_wakeups (owner_id text PRIMARY KEY, next_at timestamptz NOT NULL);
 CREATE INDEX wakeups_by_time ON pim_app.schedule_wakeups (next_at);
-GRANT SELECT, INSERT, UPDATE, DELETE ON pim_app.schedule_wakeups TO pim_app_rw;
+GRANT SELECT, INSERT, UPDATE, DELETE ON pim_app.schedule_wakeups TO pim_gate;

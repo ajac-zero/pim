@@ -46,4 +46,4 @@ CREATE TABLE pim_app.token_consumers (
 CREATE INDEX consumers_by_owner ON pim_app.token_consumers (owner_id, kind);
 SELECT pim_app.seal_lookup('pim_app.token_consumers', 'token_hash');
 
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA pim_app TO pim_app_rw;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA pim_app TO pim_gate;

@@ -1,55 +1,73 @@
 import { createHash, randomBytes } from "node:crypto";
+import type { ObjectMetadata, ObjectRange, ObjectStore } from "@pim/v2-contracts/platform";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { GetObjectCommand, HeadObjectCommand, PutObjectCommand, DeleteObjectCommand, S3Client, type S3ClientConfig } from "@aws-sdk/client-s3";
 import { Authorizer } from "./authz.ts";
 import type { Db } from "./db.ts";
 import { BadRequestError, GoneError, NotFoundError } from "./errors.ts";
-import type { Principal } from "./principal.ts";
+import type { Principal } from "@pim/v2-contracts/identity";
 
-/** Where object bytes live: any S3-compatible service (SeaweedFS, MinIO, R2, S3), or memory in tests. */
-export interface BlobStore {
-	put(key: string, bytes: Uint8Array, contentType: string): Promise<void>;
-	/** Reads bytes `start..end` inclusive, or all when omitted. */
-	get(key: string, range?: { start: number; end: number }): Promise<Uint8Array>;
-	delete(key: string): Promise<void>;
-}
-
-export class MemoryBlobStore implements BlobStore {
-	readonly blobs = new Map<string, Uint8Array>();
-	async put(key: string, bytes: Uint8Array) {
-		this.blobs.set(key, bytes);
+export class MemoryObjectStore implements ObjectStore {
+	readonly blobs = new Map<string, { body: Uint8Array; contentType: string }>();
+	#meta(key: string, size: number, contentType: string, body: Uint8Array): ObjectMetadata {
+		return { key, size, contentType, etag: `"${createHash("md5").update(body).digest("hex")}"` };
 	}
-	async get(key: string, range?: { start: number; end: number }) {
+	async put(key: string, body: Uint8Array, options: { contentType: string }) {
+		this.blobs.set(key, { body, contentType: options.contentType });
+		return this.#meta(key, body.length, options.contentType, body);
+	}
+	async get(key: string, range?: ObjectRange) {
 		const b = this.blobs.get(key);
-		if (!b) throw new NotFoundError("No such object");
-		return range ? b.slice(range.start, range.end + 1) : b;
+		if (!b) return null;
+		return { body: range ? b.body.slice(range.start, range.end + 1) : b.body, metadata: this.#meta(key, b.body.length, b.contentType, b.body) };
+	}
+	async head(key: string) {
+		const b = this.blobs.get(key);
+		return b ? this.#meta(key, b.body.length, b.contentType, b.body) : null;
 	}
 	async delete(key: string) {
 		this.blobs.delete(key);
 	}
+	async presign(key: string, options: { method: "GET" | "PUT"; expiresInSeconds: number }) {
+		return `memory://${key}?method=${options.method}&expires=${options.expiresInSeconds}`;
+	}
 }
 
-export class S3BlobStore implements BlobStore {
+/** Any S3-compatible service: SeaweedFS, MinIO, R2 or S3. Path-style addressing, so a bare endpoint works. */
+export class S3ObjectStore implements ObjectStore {
 	readonly #s3: S3Client;
 	constructor(private readonly bucket: string, config: S3ClientConfig) {
 		this.#s3 = new S3Client({ forcePathStyle: true, ...config });
 	}
-	async put(key: string, bytes: Uint8Array, contentType: string) {
-		await this.#s3.send(new PutObjectCommand({ Bucket: this.bucket, Key: key, Body: bytes, ContentType: contentType }));
+	async put(key: string, body: Uint8Array, options: { contentType: string }) {
+		const out = await this.#s3.send(new PutObjectCommand({ Bucket: this.bucket, Key: key, Body: body, ContentType: options.contentType }));
+		return { key, size: body.length, contentType: options.contentType, etag: out.ETag ?? "" };
 	}
-	async get(key: string, range?: { start: number; end: number }) {
+	async get(key: string, range?: ObjectRange) {
 		try {
 			const out = await this.#s3.send(new GetObjectCommand({ Bucket: this.bucket, Key: key, ...(range ? { Range: `bytes=${range.start}-${range.end}` } : {}) }));
-			return await out.Body!.transformToByteArray();
+			const body = await out.Body!.transformToByteArray();
+			const total = out.ContentRange ? Number(out.ContentRange.split("/")[1]) : (out.ContentLength ?? body.length);
+			return { body, metadata: { key, size: total, contentType: out.ContentType ?? "application/octet-stream", etag: out.ETag ?? "" } };
 		} catch (error) {
-			if ((error as { name?: string }).name === "NoSuchKey") throw new NotFoundError("No such object");
+			if ((error as { name?: string }).name === "NoSuchKey") return null;
 			throw error;
+		}
+	}
+	async head(key: string) {
+		try {
+			const out = await this.#s3.send(new HeadObjectCommand({ Bucket: this.bucket, Key: key }));
+			return { key, size: out.ContentLength ?? 0, contentType: out.ContentType ?? "application/octet-stream", etag: out.ETag ?? "" };
+		} catch {
+			return null;
 		}
 	}
 	async delete(key: string) {
 		await this.#s3.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: key }));
 	}
-	async exists(key: string): Promise<boolean> {
-		return this.#s3.send(new HeadObjectCommand({ Bucket: this.bucket, Key: key })).then(() => true, () => false);
+	presign(key: string, options: { method: "GET" | "PUT"; expiresInSeconds: number; contentType?: string }) {
+		const command = options.method === "GET" ? new GetObjectCommand({ Bucket: this.bucket, Key: key }) : new PutObjectCommand({ Bucket: this.bucket, Key: key, ...(options.contentType ? { ContentType: options.contentType } : {}) });
+		return getSignedUrl(this.#s3, command, { expiresIn: options.expiresInSeconds });
 	}
 }
 
@@ -85,12 +103,12 @@ export function parseRange(header: string, size: number): { start: number; end: 
 	return start >= size || start > end ? null : { start, end };
 }
 
-/** Object metadata and access control in PostgreSQL, bytes in a BlobStore. The ACL row decides who reads; the store holds no permissions. */
+/** Object metadata and access control in PostgreSQL, bytes in a ObjectStore. The ACL row decides who reads; the store holds no permissions. */
 export class Objects {
-	constructor(private readonly db: Db, private readonly store: BlobStore, private readonly opts: { hideSuspended?: boolean } = {}, private readonly authz = new Authorizer(db)) {}
+	constructor(private readonly db: Db, private readonly store: ObjectStore, private readonly opts: { hideSuspended?: boolean } = {}, private readonly authz = new Authorizer(db)) {}
 
 	async put(p: Principal, input: { bytes: Uint8Array; contentType: string; purpose: "image" | "media" | "artifact_file" | "file"; acl?: "private" | "public"; key?: string }): Promise<{ key: string; contentType: string }> {
-		await this.authz.authorize(p, "api:write");
+		await this.authz.enforce(p, "api:write");
 		let contentType = input.contentType;
 		if (input.purpose === "image") {
 			const sniffed = sniffImage(input.bytes);
@@ -99,7 +117,7 @@ export class Objects {
 		}
 		const key = input.key ?? `${p.ownerId}/${randomBytes(12).toString("hex")}`;
 		if (!key.startsWith(`${p.ownerId}/`)) throw new BadRequestError("An object lives under its owner");
-		await this.store.put(key, input.bytes, contentType);
+		await this.store.put(key, input.bytes, { contentType });
 		await this.db.owner(p.ownerId, (tx) =>
 			tx.query(
 				"INSERT INTO pim_app.objects (key, owner_id, purpose, content_type, size, sha256, acl) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (key) DO UPDATE SET content_type = $4, size = $5, sha256 = $6, acl = $7, deleted_at = NULL",
@@ -119,7 +137,7 @@ export class Objects {
 		if (!meta) throw new NotFoundError();
 		const mine = p && p.ownerId === meta.owner_id;
 		if (meta.acl !== "public" && !mine) throw new NotFoundError();
-		if (mine) await this.authz.authorize(p!, "api:read");
+		if (mine) await this.authz.enforce(p!, "api:read");
 		else {
 			// Serving rules for someone else's public object: a deleted author's is gone (410); a suspended author's stays served unless the instance hides it (audit U3).
 			const author = await this.authz.account(ownerId);
@@ -130,12 +148,18 @@ export class Objects {
 		const base = { "content-type": meta.content_type, "accept-ranges": "bytes", etag: `"${meta.sha256}"`, "x-content-type-options": "nosniff" };
 		const range = rangeHeader ? parseRange(rangeHeader, size) : "whole";
 		if (range === null) return { status: 416, headers: { ...base, "content-range": `bytes */${size}` }, body: new Uint8Array() };
-		if (range === "whole") return { status: 200, headers: { ...base, "content-length": String(size) }, body: await this.store.get(key) };
-		return { status: 206, headers: { ...base, "content-range": `bytes ${range.start}-${range.end}/${size}`, "content-length": String(range.end - range.start + 1) }, body: await this.store.get(key, range) };
+		if (range === "whole") return { status: 200, headers: { ...base, "content-length": String(size) }, body: await this.#bytes(key) };
+		return { status: 206, headers: { ...base, "content-range": `bytes ${range.start}-${range.end}/${size}`, "content-length": String(range.end - range.start + 1) }, body: await this.#bytes(key, range) };
+	}
+
+	async #bytes(key: string, range?: { start: number; end: number }): Promise<Uint8Array> {
+		const got = await this.store.get(key, range);
+		if (!got) throw new NotFoundError("No such object");
+		return got.body;
 	}
 
 	async delete(p: Principal, key: string): Promise<void> {
-		await this.authz.authorize(p, "api:write");
+		await this.authz.enforce(p, "api:write");
 		const n = await this.db.owner(p.ownerId, async (tx) => (await tx.query("UPDATE pim_app.objects SET deleted_at = now() WHERE key = $1 AND deleted_at IS NULL", [key])).rowCount);
 		if (!n) throw new NotFoundError();
 		await this.store.delete(key);

@@ -1,10 +1,10 @@
 import * as Y from "yjs";
-import { Authorizer } from "./authz.ts";
+import { Authorizer, principalId } from "./authz.ts";
 import type { Db, Tx } from "./db.ts";
 import { ConflictError, NotFoundError } from "./errors.ts";
 import { newId } from "./ids.ts";
-import type { BlobStore } from "./objects.ts";
-import type { Principal } from "./principal.ts";
+import type { Principal } from "@pim/v2-contracts/identity";
+import type { ObjectStore } from "@pim/v2-contracts/platform";
 
 const TEXT = "content";
 export const LEASE_MS = 15_000;
@@ -27,10 +27,10 @@ export type Lease = { noteId: string; holder: string; fence: number };
  */
 export class Canvas {
 	/** `instance` names this service process: every writer in it (live editors, note tools) shares one lease holder, so they never block each other, while another process taking over fences this one out. */
-	constructor(private readonly db: Db, private readonly store: BlobStore, readonly instance = newId("canvas"), private readonly authz = new Authorizer(db)) {}
+	constructor(private readonly db: Db, private readonly store: ObjectStore, readonly instance = newId("canvas"), private readonly authz = new Authorizer(db)) {}
 
 	async create(p: Principal, title: string, text = ""): Promise<string> {
-		await this.authz.authorize(p, "api:write");
+		await this.authz.enforce(p, "api:write");
 		const id = newId("n");
 		await this.db.owner(p.ownerId, async (tx) => {
 			await tx.query("INSERT INTO pim_app.notes (note_id, owner_id, title) VALUES ($1, $2, $3)", [id, p.ownerId, title]);
@@ -38,7 +38,7 @@ export class Canvas {
 		if (text) await this.#withLease(p.ownerId, id, async (lease) => {
 			const doc = new Y.Doc();
 			doc.getText(TEXT).insert(0, text);
-			await this.append(p.ownerId, lease, Y.encodeStateAsUpdate(doc), `user:${p.subject}`);
+			await this.append(p.ownerId, lease, Y.encodeStateAsUpdate(doc), `user:${principalId(p)}`);
 		});
 		return id;
 	}
@@ -88,7 +88,11 @@ export class Canvas {
 		const note = (await tx.query("SELECT version, snapshot_key, snapshot_seq FROM pim_app.notes WHERE note_id = $1 AND deleted_at IS NULL", [noteId])).rows[0];
 		if (!note) throw new NotFoundError("No such note");
 		const doc = new Y.Doc();
-		if (note.snapshot_key) Y.applyUpdate(doc, await this.store.get(note.snapshot_key));
+		if (note.snapshot_key) {
+			const snapshot = await this.store.get(note.snapshot_key);
+			if (!snapshot) throw new Error(`The snapshot of note ${noteId} is missing from the object store`);
+			Y.applyUpdate(doc, snapshot.body);
+		}
 		for (const row of (await tx.query("SELECT data FROM pim_app.note_updates WHERE note_id = $1 AND seq > $2 ORDER BY seq", [noteId, note.snapshot_seq])).rows) Y.applyUpdate(doc, row.data);
 		return { doc, version: Number(note.version) };
 	}
@@ -118,7 +122,7 @@ export class Canvas {
 	 * delete and insert on the current document, so characters a person typed elsewhere in the note stay.
 	 */
 	async edit(p: Principal, noteId: string, baseVersion: number, find: string, replace: string): Promise<{ version: number }> {
-		await this.authz.authorize(p, "api:write");
+		await this.authz.enforce(p, "api:write");
 		return this.#withLease(p.ownerId, noteId, async (lease) => {
 			const { doc, version } = await this.db.owner(p.ownerId, (tx) => this.#load(tx, noteId));
 			if (version !== baseVersion) throw new ConflictError(`The note changed (version ${version}, you edited ${baseVersion}); read it again`, "version_conflict");
@@ -133,7 +137,7 @@ export class Canvas {
 				text.delete(at, find.length);
 				text.insert(at, replace);
 			});
-			return { version: await this.append(p.ownerId, lease, captured!, `agent:${p.subject}`, baseVersion) };
+			return { version: await this.append(p.ownerId, lease, captured!, `agent:${principalId(p)}`, baseVersion) };
 		});
 	}
 
@@ -141,7 +145,7 @@ export class Canvas {
 	async compact(ownerId: string, noteId: string): Promise<void> {
 		const { doc, version } = await this.db.owner(ownerId, (tx) => this.#load(tx, noteId));
 		const key = `${ownerId}/notes/${noteId}/${version}.snapshot`;
-		await this.store.put(key, Y.encodeStateAsUpdate(doc), "application/octet-stream");
+		await this.store.put(key, Y.encodeStateAsUpdate(doc), { contentType: "application/octet-stream" });
 		await this.db.owner(ownerId, async (tx) => {
 			const n = await tx.query("UPDATE pim_app.notes SET snapshot_key = $2, snapshot_seq = $3 WHERE note_id = $1 AND snapshot_seq < $3", [noteId, key, version]);
 			if (n.rowCount) await tx.query("DELETE FROM pim_app.note_updates WHERE note_id = $1 AND seq <= $2", [noteId, version]);

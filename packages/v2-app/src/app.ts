@@ -4,7 +4,8 @@ import { type Db } from "./db.ts";
 import { Identity } from "./identity.ts";
 import { Memories } from "./memory.ts";
 import { Approvals, Operations } from "./operations.ts";
-import { type BlobStore, Objects } from "./objects.ts";
+import type { ObjectStore } from "@pim/v2-contracts/platform";
+import { Objects } from "./objects.ts";
 import { Relay } from "./relay.ts";
 import { Schedules } from "./schedules.ts";
 
@@ -19,7 +20,7 @@ export class App {
 	readonly objects: Objects;
 	readonly canvas: Canvas;
 	readonly relay: Relay;
-	constructor(readonly db: Db, store: BlobStore, opts: { hideSuspended?: boolean } = {}) {
+	constructor(readonly db: Db, store: ObjectStore, opts: { hideSuspended?: boolean } = {}) {
 		this.identity = new Identity(db);
 		this.conversations = new Conversations(db);
 		this.memories = new Memories(db);

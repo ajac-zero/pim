@@ -6,7 +6,8 @@ import * as Y from "yjs";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createGate } from "../src/gate.ts";
 import { Canvas, LeaseLostError } from "../src/canvas.ts";
-import { type BlobStore, MemoryBlobStore, parseRange, S3BlobStore } from "../src/objects.ts";
+import { MemoryObjectStore, Objects, parseRange, S3ObjectStore } from "../src/objects.ts";
+import type { ObjectStore } from "@pim/v2-contracts/platform";
 import { fixture, member } from "./support/fixture.ts";
 import type { Server } from "node:http";
 
@@ -16,7 +17,7 @@ const mp4 = new Uint8Array(1000).map((_, i) => i % 251);
 let f: Awaited<ReturnType<typeof fixture>>;
 let u: Awaited<ReturnType<typeof member>>;
 let s3: S3rver;
-let s3Store: S3BlobStore;
+let s3Store: S3ObjectStore;
 beforeAll(async () => {
 	f = await fixture();
 	u = await member(f.app, f.admin.principal, "mia");
@@ -24,7 +25,7 @@ beforeAll(async () => {
 	const port = 41000 + Math.floor(Math.random() * 5000);
 	s3 = new S3rver({ port, address: "127.0.0.1", silent: true, directory: dir, configureBuckets: [{ name: "pim", configs: [] }] });
 	await s3.run();
-	s3Store = new S3BlobStore("pim", { endpoint: `http://127.0.0.1:${port}`, region: "us-east-1", credentials: { accessKeyId: "S3RVER", secretAccessKey: "S3RVER" } });
+	s3Store = new S3ObjectStore("pim", { endpoint: `http://127.0.0.1:${port}`, region: "us-east-1", credentials: { accessKeyId: "S3RVER", secretAccessKey: "S3RVER" } });
 });
 afterAll(async () => {
 	await s3.close();
@@ -43,10 +44,9 @@ describe("parseRange", () => {
 	});
 });
 
-for (const [label, make] of [["memory store", () => f.store as BlobStore], ["S3 protocol (s3rver)", () => s3Store as BlobStore]] as const) {
+for (const [label, make] of [["memory store", () => f.store as ObjectStore], ["S3 protocol (s3rver)", () => s3Store as ObjectStore]] as const) {
 	describe(`Objects over ${label}`, () => {
 		it("serves 206 ranges for video, validates images by magic bytes, and enforces ACLs", async () => {
-			const { Objects } = await import("../src/objects.ts");
 			const objects = new Objects(f.db, make());
 			const video = await objects.put(u.principal, { bytes: mp4, contentType: "video/mp4", purpose: "media", acl: "public" });
 			const whole = await objects.serve(null, video.key);
@@ -70,7 +70,6 @@ for (const [label, make] of [["memory store", () => f.store as BlobStore], ["S3 
 		});
 
 		it("stops serving a deleted author's public object (410), and a suspended author's only when the instance hides it", async () => {
-			const { Objects } = await import("../src/objects.ts");
 			const author = await member(f.app, f.admin.principal, `auth-${label.length}`);
 			const o = new Objects(f.db, make());
 			const hiding = new Objects(f.db, make(), { hideSuspended: true });
@@ -167,8 +166,7 @@ describe("Canvas", () => {
 describe("Relay and absent capabilities", () => {
 	it("reports a missing computer as CapabilityUnavailable, pairs and connects v1 and v2 clients, and cuts off a revoked or suspended one", async () => {
 		const owner = u.account.ownerId;
-		expect(() => f.app.relay.require(owner, "shell")).toThrowError(/shell needs a paired personal computer/);
-		await f.app.identity.authz.grantCapability(f.admin.principal, { ownerId: owner, capability: "compute" });
+		expect(() => f.app.relay.require(owner, "shell")).toThrowError(expect.objectContaining({ name: "CapabilityUnavailableError", capability: "shell" }));
 		const pair = await f.app.relay.pair(u.principal, "laptop", 2);
 		expect(pair.token.startsWith("pimc_")).toBe(true);
 		const sent: unknown[] = [];
@@ -177,7 +175,7 @@ describe("Relay and absent capabilities", () => {
 		f.app.relay.require(owner, "shell").send({ op: "ping" });
 		expect(sent).toEqual([{ op: "ping" }]);
 		f.app.relay.disconnect(owner, id);
-		expect(() => f.app.relay.require(owner, "desktop_screenshot")).toThrow(/needs a paired personal computer/);
+		expect(() => f.app.relay.require(owner, "desktop_screenshot")).toThrowError(expect.objectContaining({ name: "CapabilityUnavailableError" }));
 		const reissued = await f.app.identity.issueConsumer(owner, "computer", { reissueFrom: (await f.db.owner(owner, (tx) => tx.query("SELECT consumer_id FROM pim_app.computers WHERE id = $1", [id]))).rows[0].consumer_id });
 		await expect(f.app.relay.connect(pair.token, { protocol: 2, send: () => {} })).rejects.toMatchObject({ status: 401 });
 		expect(reissued.token.startsWith("pimc_")).toBe(true);
@@ -250,7 +248,10 @@ describe("Gate over HTTP", () => {
 		expect(((await (await call(`/api/notes/${note.id}`, { token })).json()) as { text: string }).text).toBe("hi");
 		expect((await call("/api/goals", { method: "POST", token, body: JSON.stringify({ title: "g", steps: ["a"] }) })).status).toBe(201);
 		expect((await call("/api/memories", { method: "POST", token, body: JSON.stringify({ title: "m", body: "b" }) })).status).toBe(201);
-		const fresh = await member(f.app, f.admin.principal, "nogrant");
-		await expect(f.app.relay.pair(fresh.principal, "x", 2)).rejects.toMatchObject({ code: "no_grant" }); // computer use is a grant, absent by default
+		// Dependent tools say what is missing; nothing else is affected.
+		expect(() => f.app.relay.require(u.account.ownerId, "desktop_screenshot")).toThrowError(expect.objectContaining({ name: "CapabilityUnavailableError" }));
+		const guest = await member(f.app, f.admin.principal, "guest1");
+		await f.app.identity.setRole(f.admin.principal, guest.account.ownerId, "guest");
+		await expect(f.app.relay.pair(guest.principal, "x", 2)).rejects.toMatchObject({ reason: "guest" }); // a guest cannot pair a computer
 	});
 });

@@ -204,7 +204,7 @@ export class Files {
 		try {
 			const stat = await this.#fs.stat(file);
 			if (!stat.isFile) throw new HttpError(404, `No file ${file}`);
-			return { path: file, name, size: stat.size, type: fileType(name), sha256: stat.sha256, body: await this.#fs.readFile(file, range && { byteOffset: range.start, byteLength: range.end - range.start + 1 }) };
+			return { path: file, name, size: stat.size, type: fileType(name), sha256: stat.sha256 ?? null, body: await this.#fs.readFile(file, range && { byteOffset: range.start, byteLength: range.end - range.start + 1 }) };
 		} catch (error) {
 			throw answer(error, `No file ${file}`);
 		}
@@ -221,7 +221,7 @@ export class Files {
 		try {
 			const stat = await this.#fs.stat(file);
 			if (!stat.isFile) throw new HttpError(404, `No file ${file}`);
-			return { path: file, size: stat.size, mtime: stat.mtime, sha256: stat.sha256 };
+			return { path: file, size: stat.size, mtime: stat.mtime, sha256: stat.sha256 ?? null };
 		} catch (error) {
 			throw answer(error, `No file ${file}`);
 		}

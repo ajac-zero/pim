@@ -1643,7 +1643,11 @@ export async function readFile(path: string): Promise<FileRead> {
     .get("etag")
     ?.replace(/^W\//, "")
     .replace(/"/g, "");
-  const sha256 = response.headers.get("x-file-sha256") ?? etag ?? null;
+  // Only a real hash is kept: it is sent back as `If-Match`, which Pim refuses for anything else.
+  const hash = [response.headers.get("x-file-sha256"), etag].find(
+    (value) => value && /^[0-9a-f]{64}$/i.test(value),
+  );
+  const sha256 = hash ?? null;
   return { bytes: new Uint8Array(await response.arrayBuffer()), sha256 };
 }
 

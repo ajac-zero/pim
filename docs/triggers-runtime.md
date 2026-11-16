@@ -211,6 +211,7 @@ six strings, keys in that sorted order, no whitespace. A grant therefore names o
 - **The socket closes**: the runtime is detached. Observers keep running and spooling until the space's last lease runs out (at most 120 s), as apps keep running across a dropped connection; then each is stopped, its process group with it. A new socket starts nothing until the space reconciles on it.
 - **SIGTERM or SIGINT**: `close` stops every observer and waits for their stops (each bounded: 4.1 s by default), takes retired bytes out of the journal and closes the spool, alongside the apps' stop; then pim-computer exits.
 - **Replaced by another computer** (close code 4409): the same, then it exits 1.
+- **Asked to update** (close code 4410, for a computer that says an older protocol in its `hello`): under the installed service, when the Pim serves a different pim-computer, the same, then it exits 0 and `run` starts the newer one; otherwise it logs that and reconnects. The space asks again only after ten minutes.
 - **Any exit** (`process.exit`, an uncaught error): SIGKILL, synchronously, to each tracked child's group that is still provably its own (its leader unreaped).
 
 Nothing is signalled but a group these launchers started, and only while its leader is unreaped. A SIGKILL or SIGHUP of pim-computer (it catches neither) leaves a stream's command running under its leader; containing that would need cgroups or a parent-death signal, and isn't done.

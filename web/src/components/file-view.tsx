@@ -120,13 +120,20 @@ const STATUS_LABELS = {
 } as const;
 
 /** Whether the file's edits are safe: clean, unsaved, being saved, saved, in conflict, failed, or not editable. */
-function SaveStatus({ status }: { status: SessionStatus }) {
+function SaveStatus({
+  status,
+  error,
+}: {
+  status: SessionStatus;
+  error: string | null;
+}) {
   const { t } = useI18n();
   if (status === "loading") return null;
   return (
     <span
       role="status"
       data-status={status}
+      title={status === "error" && error ? error : undefined}
       className={cn(
         "shrink-0 text-muted-foreground text-xs",
         (status === "conflict" || status === "error") && "text-destructive",
@@ -282,7 +289,9 @@ export function FileView({
         {tabs ?? (
           <h1 className="min-w-0 flex-1 truncate font-semibold">{name}</h1>
         )}
-        {load.phase === "ready" && <SaveStatus status={state.status} />}
+        {load.phase === "ready" && (
+          <SaveStatus status={state.status} error={state.error} />
+        )}
         {load.phase === "ready" && preview.kind === "markdown" && (
           <div
             role="group"

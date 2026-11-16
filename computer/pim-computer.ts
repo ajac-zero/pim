@@ -39,13 +39,24 @@ import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import type { TriggersHost, TriggersHostOptions } from "./triggers-host.ts";
 
-export const VERSION = "0.1.0";
+export const VERSION = "0.2.0";
+
+/**
+ * The revision of what the space and this computer say to each other. 2 is
+ * where writes became conditional (`expectedHash`), `write` took `from`, and
+ * `stat` gave a file's sha256 and `watch` existed; a computer that says less
+ * is worked with through fallbacks, and asked to update.
+ */
+export const PROTOCOL_VERSION = 2;
 
 /** The folder the space's file calls name; it is `root` on this machine. */
 export const WORKSPACE = "/workspace";
 
 /** The close code a connection gets when another computer connects in its place. */
 export const REPLACED = 4409;
+
+/** The close code the space gives a connection whose computer speaks an older protocol: it should update itself, then connect again. */
+export const OUTDATED = 4410;
 
 /** The most bytes one read returns; larger files are read in parts. */
 export const MAX_READ_BYTES = 1_048_576;
@@ -3261,9 +3272,8 @@ async function main(): Promise<void> {
 	if (triggers) process.on("exit", () => triggers.killOwned());
 	// Set once the thread browsers exist: ends them and lets go of their sites' slots before the program exits.
 	let endBrowsers: () => Promise<unknown> = async () => {};
-	for (const signal of ["SIGTERM", "SIGINT"] as const) {
-		process.on(signal, () => void Promise.allSettled([apps.stopAll(), endBrowsers(), ...(triggers ? [triggers.close()] : [])]).finally(() => process.exit(0)));
-	}
+	const stop = () => Promise.allSettled([apps.stopAll(), endBrowsers(), ...(triggers ? [triggers.close()] : [])]).finally(() => process.exit(0));
+	for (const signal of ["SIGTERM", "SIGINT"] as const) process.on(signal, () => void stop());
 	const displays = new DisplayClient({
 		url: env.DISPLAYD_URL ?? "http://127.0.0.1:9900",
 		...(env.DISPLAYD_TOKEN
@@ -3305,7 +3315,7 @@ async function main(): Promise<void> {
 	void ensureDisplayd(url, log);
 	const hello = {
 		type: "hello",
-		version: 1,
+		version: PROTOCOL_VERSION,
 		agent: `pim-computer/${VERSION}`,
 		hostname: os.hostname(),
 		platform: os.platform(),
@@ -3357,16 +3367,51 @@ async function main(): Promise<void> {
 				void triggers.close().finally(() => process.exit(1));
 				return;
 			}
+			const retry = () => {
+				log(`${ping ? "Disconnected" : "Couldn't connect"}${event.reason ? ` (${event.reason})` : ""}; trying again in ${wait / 1000} s.`);
+				setTimeout(connect, wait);
+				wait = Math.min(wait * 2, 60_000);
+			};
+			if (event.code === OUTDATED) {
+				// Under the installed service, `run` fetches the newest program at each start, so exiting is the update, when there is a newer one. The space asks once in a while: a computer that can't update goes on, and works as an older one does.
+				void (async () => {
+					const next = env.PIM_COMPUTER_TOKEN_FILE ? await newerProgram(url, realpathSync(process.argv[1]!)) : null;
+					if (next === null) {
+						log("Your Pim has a newer pim-computer; run 'pim-computer update' to update.");
+						return retry();
+					}
+					log("Your Pim has a newer pim-computer; restarting to update.");
+					await stop();
+				})();
+				return;
+			}
 			// A token Pim doesn't know is refused before the connection opens, which looks the same as being offline.
-			log(`${ping ? "Disconnected" : "Couldn't connect"}${event.reason ? ` (${event.reason})` : ""}; trying again in ${wait / 1000} s.`);
-			setTimeout(connect, wait);
-			wait = Math.min(wait * 2, 60_000);
+			retry();
 		});
 		socket.addEventListener("error", () => {
 			// "close" follows, and tries again.
 		});
 	};
 	connect();
+}
+
+/**
+ * What your Pim serves as pim-computer, when it isn't the program in `running`
+ * (a file): the program text. Null when it is the same, or what the Pim
+ * answered isn't a program, so a computer asked to update restarts only when
+ * restarting would run something new.
+ */
+export async function newerProgram(url: string, running: string, fetcher: typeof fetch = fetch): Promise<string | null> {
+	try {
+		const response = await fetcher(`${url.replace(/\/+$/, "")}/pim-computer.ts`, { signal: AbortSignal.timeout(30_000) });
+		if (!response.ok) return null;
+		const text = await response.text();
+		if (text.trim() === "" || text.trimStart().startsWith("<")) return null;
+		const current = await fs.readFile(running);
+		return sha256(Buffer.from(text)) === sha256(current) ? null : text;
+	} catch {
+		return null;
+	}
 }
 
 // Run as a program, not when tests import `handle`.

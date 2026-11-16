@@ -5,7 +5,7 @@ import type { Message } from "@earendil-works/pi-ai";
 import { env, runInDurableObject } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vitest";
-import { handle, type DisplayHost, type DriverHost, type ExecArgs, type ExecResult, type ScreenHost } from "../computer/pim-computer";
+import { handle, OUTDATED, PROTOCOL_VERSION, type DisplayHost, type DriverHost, type ExecArgs, type ExecResult, type ScreenHost } from "../computer/pim-computer";
 import type { Approval } from "../src/store";
 import { COMPUTER_GRANT_ACTION, PROTOCOL, runtimeIdOf, TRIGGERS_ENVELOPE } from "@pim/triggers/computer";
 import { TRIGGER_TICK_CALLBACK } from "@pim/triggers/engine";
@@ -594,7 +594,7 @@ describe("the computer", () => {
 		computer.socket.addEventListener("message", listen);
 		try {
 			computer.socket.send(`${TRIGGERS_ENVELOPE}${JSON.stringify({ protocol: PROTOCOL, type: "hello", runtimeId: runtimeIdOf(digest), connectionId: "connection-2", lastEpoch: null, pending: 0 })}}`);
-			computer.socket.send(JSON.stringify({ type: "hello", version: 1, agent: "pim-computer/test", hostname: "test-box", platform: "linux", arch: "x64", user: "ada", root: computer.root, browser: null, screen: false, desktop: false }));
+			computer.socket.send(JSON.stringify({ type: "hello", version: PROTOCOL_VERSION, agent: "pim-computer/test", hostname: "test-box", platform: "linux", arch: "x64", user: "ada", root: computer.root, browser: null, screen: false, desktop: false }));
 			await vi.waitFor(() => expect(answered).toHaveLength(1));
 		} finally {
 			computer.socket.removeEventListener("message", listen);
@@ -1111,7 +1111,7 @@ describe("watching files on the computer", () => {
 		sent.length = 0;
 		const resumed: string[] = [];
 		computer.onWatchResumed((state) => void resumed.push(`${state.path} ${state.sha256}`));
-		computer.receive(JSON.stringify({ type: "hello" }));
+		computer.receive(JSON.stringify({ type: "hello", version: PROTOCOL_VERSION }));
 		await vi.waitFor(() => expect(resumed).toEqual(["/workspace/a.ts ab"]));
 		// The computer's own set is cleared first, so it can't hold more than the space's.
 		expect(sent).toEqual([
@@ -1123,7 +1123,7 @@ describe("watching files on the computer", () => {
 		expect(await computer.unwatch("/workspace/a.ts")).toBe(true);
 		expect(await computer.unwatch("/workspace/a.ts")).toBe(false);
 		sent.length = 0;
-		computer.receive(JSON.stringify({ type: "hello" }));
+		computer.receive(JSON.stringify({ type: "hello", version: PROTOCOL_VERSION }));
 		await Promise.resolve();
 		expect(sent.filter((call) => call.op === "watch")).toEqual([]);
 	});
@@ -1136,7 +1136,7 @@ describe("watching files on the computer", () => {
 		computer.onFileEvent((event) => void heard.push(event));
 		computer.receive(JSON.stringify({ type: "event", event: "watch_error", path: "/workspace/b.ts", code: "EMFILE" }));
 		sent.length = 0;
-		computer.receive(JSON.stringify({ type: "hello" }));
+		computer.receive(JSON.stringify({ type: "hello", version: PROTOCOL_VERSION }));
 		await vi.waitFor(() => expect(sent.filter((call) => call.op === "watch")).toEqual([{ op: "watch", path: "/workspace/a.ts" }]));
 		expect(heard).toEqual([{ event: "watch_error", path: "/workspace/b.ts", code: "EMFILE" }]);
 	});
@@ -1171,7 +1171,7 @@ describe("watching files on the computer", () => {
 		await computer.watch("/workspace/b.ts");
 		sent.length = 0;
 		holding = true;
-		computer.receive(JSON.stringify({ type: "hello" }));
+		computer.receive(JSON.stringify({ type: "hello", version: PROTOCOL_VERSION }));
 		await vi.waitFor(() => expect(sent.map((call) => call.op)).toEqual(["unwatch_all", "watch"]));
 		// b's two watches have not been asked for yet: letting them go asks nothing of the computer.
 		expect(await computer.unwatch("/workspace/b.ts")).toBe(true);
@@ -1193,7 +1193,7 @@ describe("watching files on the computer", () => {
 		computer.onFileEvent((event) => void heard.push(event));
 		sent.length = 0;
 		drop = true;
-		computer.receive(JSON.stringify({ type: "hello" }));
+		computer.receive(JSON.stringify({ type: "hello", version: PROTOCOL_VERSION }));
 		await new Promise((resolve) => setTimeout(resolve, 30));
 		// The second watch of the pair is not asked for on a dead connection, and nothing says the watch failed.
 		expect(sent.filter((call) => call.op === "watch")).toHaveLength(1);
@@ -1201,7 +1201,7 @@ describe("watching files on the computer", () => {
 		drop = false;
 		socket.readyState = WebSocket.OPEN;
 		sent.length = 0;
-		computer.receive(JSON.stringify({ type: "hello" }));
+		computer.receive(JSON.stringify({ type: "hello", version: PROTOCOL_VERSION }));
 		await vi.waitFor(() => expect(sent.filter((call) => call.op === "watch")).toHaveLength(2));
 		expect(await computer.unwatch("/workspace/a.ts")).toBe(true);
 	});
@@ -1216,7 +1216,7 @@ describe("watching files on the computer", () => {
 		computer.onFileEvent((event) => void heard.push(event));
 		sent.length = 0;
 		refusing = true;
-		computer.receive(JSON.stringify({ type: "hello" }));
+		computer.receive(JSON.stringify({ type: "hello", version: PROTOCOL_VERSION }));
 		await vi.waitFor(() => expect(heard).toEqual([{ event: "watch_error", path: "/workspace/a.ts", code: "EWATCHLIMIT" }]));
 		expect(sent.map((call) => call.op)).toEqual(["unwatch_all", "watch", "watch", "unwatch"]);
 		expect(await computer.unwatch("/workspace/a.ts")).toBe(false);
@@ -1230,14 +1230,14 @@ describe("watching files on the computer", () => {
 		await computer.watch("/workspace/a.ts");
 		sent.length = 0;
 		holding = true;
-		computer.receive(JSON.stringify({ type: "hello" }));
+		computer.receive(JSON.stringify({ type: "hello", version: PROTOCOL_VERSION }));
 		await vi.waitFor(() => expect(sent.map((call) => call.op)).toEqual(["unwatch_all", "watch"]));
 		const made = computer.watch("/workspace/c.ts");
 		release();
 		await made;
 		expect(sent.filter((call) => call.op === "watch" && call.path === "/workspace/c.ts")).toHaveLength(1);
 		sent.length = 0;
-		computer.receive(JSON.stringify({ type: "hello" }));
+		computer.receive(JSON.stringify({ type: "hello", version: PROTOCOL_VERSION }));
 		await vi.waitFor(() => expect(sent.filter((call) => call.op === "watch")).toHaveLength(2));
 		expect(await computer.unwatch("/workspace/c.ts")).toBe(false);
 	});
@@ -1471,5 +1471,101 @@ describe("the code editor canvas", () => {
 				expect(await callTool(tool, args)).toMatchObject({ isError: false, text: expect.stringContaining("No app has this chat open") });
 			}
 		});
+	});
+});
+
+describe("a computer that speaks protocol 1", () => {
+	const sha = (data: string | Uint8Array) => createHash("sha256").update(data).digest("hex");
+	const root = `/tmp/computer-${crypto.randomUUID()}`;
+	const ASKED = "computer_update_asked_at";
+	const noCommands = async (): Promise<ExecResult> => {
+		throw new Error("This test's computer runs no commands.");
+	};
+	let token = "";
+	let old: Awaited<ReturnType<typeof connectTestComputer>>;
+	const put = (path: string, body: BodyInit, headers: Record<string, string> = {}) => raw(`/files/content?path=${encodeURIComponent(path)}`, { method: "PUT", body, headers });
+	const get = (path: string) => raw(`/files/content?path=${encodeURIComponent(path)}`);
+	const meta = (work: (pim: Pim) => unknown) => runInDurableObject(agent(), (pim: Pim) => work(pim));
+
+	it("is asked to update when it says hello, which a pim-computer under its service does by restarting", async () => {
+		token = (await post<{ token: string }>("/computer")).body.token;
+		const response = await opens("/computer/connect", token);
+		const socket = response.webSocket!;
+		const closed = new Promise<CloseEvent>((resolve) => socket.addEventListener("close", resolve));
+		socket.accept();
+		socket.send(JSON.stringify({ type: "hello", version: 1, agent: "pim-computer/0.1.0", hostname: "box", platform: "linux", arch: "x64", user: "ada", root, browser: null }));
+		expect((await closed).code).toBe(OUTDATED);
+		expect(OUTDATED).toBe(4410);
+		expect(await meta((pim) => pim.store.meta(ASKED))).toBeDefined();
+	});
+
+	it("stays connected when it comes back as it was, rather than being sent away again", async () => {
+		old = await connectTestComputer(token, root, noCommands, undefined, undefined, undefined, {}, undefined, 1);
+		let closed = false;
+		void old.closed.then(() => (closed = true));
+		await new Promise((resolve) => setTimeout(resolve, 1500));
+		expect(closed).toBe(false);
+		expect((await api("/computer")).body).toMatchObject({ state: "online", computer: { protocol: 1 } });
+	});
+
+	it("serves files without a hash header the old stat can't back", async () => {
+		await fs.mkdir(`${root}/v1`, { recursive: true });
+		await fs.writeFile(`${root}/v1/a.txt`, "one");
+		const read = await get("/workspace/v1/a.txt");
+		expect(await read.text()).toBe("one");
+		expect([read.status, read.headers.get("etag"), read.headers.get("x-file-sha256")]).toEqual([200, null, null]);
+		expect((await raw(`/files/content?path=${encodeURIComponent("/workspace/v1/a.txt")}`, { method: "HEAD" })).headers.get("etag")).toBeNull();
+	});
+
+	it("saves, unconditionally and conditionally, and answers a stale save as a conflict", async () => {
+		const path = "/workspace/v1/b.txt";
+		const first = await put(path, "one", { "if-none-match": "*" });
+		expect([first.status, first.headers.get("etag")]).toEqual([200, `"${sha("one")}"`]);
+		expect(await first.json()).toMatchObject({ path, sha256: sha("one"), size: 3 });
+		expect((await put(path, "again", { "if-none-match": "*" })).status).toBe(409);
+		const stale = await put(path, "mine", { "if-match": `"${sha("other")}"` });
+		expect([stale.status, await stale.json()]).toEqual([409, expect.objectContaining({ error: "conflict", code: "hash_mismatch", currentHash: sha("one") })]);
+		expect((await put("/workspace/v1/none.txt", "x", { "if-match": `"${sha("one")}"` })).status).toBe(409);
+		expect(await fs.readFile(`${root}/v1/b.txt`, "utf8")).toBe("one");
+		const swapped = await put(path, "two", { "if-match": `"${sha("one")}"` });
+		expect([swapped.status, swapped.headers.get("etag")]).toEqual([200, `"${sha("two")}"`]);
+		const plain = await put(path, "three");
+		expect([plain.status, plain.headers.get("etag")]).toEqual([200, `"${sha("three")}"`]);
+		expect(await fs.readFile(`${root}/v1/b.txt`, "utf8")).toBe("three");
+	});
+
+	it("saves a file in parts, and holds it to the condition", async () => {
+		const path = "/workspace/v1/large.txt";
+		const big = "x".repeat(2_500_000);
+		expect((await put(path, big, { "if-none-match": "*" })).status).toBe(200);
+		expect((await put(path, big, { "if-none-match": "*" })).status).toBe(409);
+		const next = "y".repeat(2_500_000);
+		expect((await put(path, next, { "if-match": `"${sha("nope")}"` })).status).toBe(409);
+		const swapped = await put(path, next, { "if-match": `"${sha(big)}"` });
+		expect([swapped.status, swapped.headers.get("etag")]).toEqual([200, `"${sha(next)}"`]);
+		expect(await fs.readFile(`${root}/v1/large.txt`, "utf8")).toBe(next);
+		expect((await fs.readdir(`${root}/v1`)).filter((name) => name.includes(".pim-"))).toEqual([]);
+	});
+
+	it("lets an agent write and edit files", async () => {
+		expect((await callTool("file_write", { path: "/workspace/v1/c.txt", content: "hello" })).isError).toBe(false);
+		expect((await callTool("file_edit", { path: "/workspace/v1/c.txt", edits: [{ oldText: "hello", newText: "bye" }] })).isError).toBe(false);
+		expect(await fs.readFile(`${root}/v1/c.txt`, "utf8")).toBe("bye");
+	});
+
+	it("opens a file in a tab that can't be told of changes, without an error", async () => {
+		const { socket, received } = await connect();
+		socket.send(JSON.stringify({ type: "watch_file", id: "w", path: "/workspace/v1/a.txt" }));
+		await vi.waitFor(() => expect(received).toContainEqual({ type: "file_changed", path: "/workspace/v1/a.txt", kind: "unwatched", sha256: null, size: null }));
+		expect(received.some((message) => message.type === "error")).toBe(false);
+		socket.close();
+	});
+
+	it("is asked again, after the work it was doing, once the space has forgotten asking, and the work doesn't fail", async () => {
+		await meta((pim) => pim.store.deleteMeta(ASKED));
+		const closed = old.closed;
+		const read = await get("/workspace/v1/a.txt");
+		expect([read.status, await read.text()]).toEqual([200, "one"]);
+		expect((await closed).code).toBe(OUTDATED);
 	});
 });

@@ -5,7 +5,7 @@ import { getAgentByName } from "agents";
 import { env } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { afterEach, beforeAll, expect, vi } from "vitest";
-import { type BrowserHost, type DisplayHost, type DriverHost, type ExecArgs, type ExecResult, Link, type Machine, type ScreenHost } from "../computer/pim-computer";
+import { CallError, handle, type BrowserHost, type DisplayHost, type DriverHost, type ExecArgs, type ExecResult, Link, type Machine, PROTOCOL_VERSION, type ScreenHost } from "../computer/pim-computer";
 import { ownedCode } from "../src/auth";
 import type { Approval } from "../src/store";
 import type { TranscriptMessage } from "@pim/shared/transcript";
@@ -308,6 +308,8 @@ export async function connectTestComputer(
 	calls: Record<string, (args: any) => unknown> = {},
 	/** The computer's per-thread displays, where the test needs them to list, show and take over; else they call `driver`. */
 	displays?: DisplayHost,
+	/** The protocol revision it says in its hello. Below 2 it also answers as the first pim-computers did: `stat` without a hash, `write` unconditional, with no `from` and nothing to say, and no `watch`. */
+	version = PROTOCOL_VERSION,
 ) {
 	await fs.mkdir(root, { recursive: true });
 	const machine: Machine = { root: await fs.realpath(root), exec, ...(browser ? { browser } : {}), ...(screen ? { screen } : {}), ...(driver ? { driver, displays: { call: (_thread, tool, args) => driver.call(tool, args), envOf: async () => undefined } } : {}), ...(displays ? { displays } : {}) };
@@ -316,10 +318,25 @@ export async function connectTestComputer(
 	const socket = response.webSocket!;
 	const closed = new Promise<CloseEvent>((resolve) => socket.addEventListener("close", resolve));
 	const link = new Link(machine, (message) => socket.send(message));
+	const legacy: Record<string, (args: any) => unknown> = {
+		stat: async (args) => {
+			const { sha256: _sha256, ...stat } = (await handle(machine, "stat", args)) as Record<string, unknown>;
+			return stat;
+		},
+		write: async (args) => {
+			if (args.from !== undefined) throw new CallError("This computer doesn't know write from a file. Update pim-computer.", "ENOSYS");
+			const { expectedHash: _expected, ...rest } = args;
+			await handle(machine, "write", rest);
+			return null;
+		},
+		watch: () => {
+			throw new CallError("This computer doesn't know the call watch. Update pim-computer.", "ENOSYS");
+		},
+	};
 	socket.addEventListener("message", (event) => {
 		const message = JSON.parse(event.data as string) as { type?: string; id?: string; op?: string; args?: unknown };
 		if (message.type === "call" && message.op?.startsWith("browser_")) browserCalls.push({ op: message.op, args: (message.args ?? {}) as Record<string, unknown> });
-		const answer = message.type === "call" && message.op ? calls[message.op] : undefined;
+		const answer = message.type === "call" && message.op ? (calls[message.op] ?? (version < 2 ? legacy[message.op] : undefined)) : undefined;
 		if (!answer) return link.receive(event.data as string);
 		Promise.resolve()
 			.then(() => answer(message.args))
@@ -333,7 +350,7 @@ export async function connectTestComputer(
 	socket.send(
 		JSON.stringify({
 			type: "hello",
-			version: 1,
+			version,
 			agent: "pim-computer/test",
 			hostname: "test-box",
 			platform: "linux",

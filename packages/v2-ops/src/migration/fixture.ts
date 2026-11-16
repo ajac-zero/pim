@@ -319,8 +319,8 @@ export async function buildLegacySnapshot(dir: string, options: { cutoverAt?: nu
 	const threadColumns = ["thread_id", "space", "repo_url", "base_ref", "branch", "harness", "provider_id", "provider_kind", "orb", "state", "start_operation"];
 	await writer.dump(
 		dump("CodingScheduler", owners.ada, {
-			coding_slots: table(["slot", "thread_id", "state"], [{ slot: "s1", thread_id: "thr_cli1", state: "running" }]),
-			coding_thread_index: table(["thread_id", "state"], [{ thread_id: "thr_amp1", state: "running" }, { thread_id: "thr_cli1", state: "running" }]),
+			pim_coding_slots: table(["slot", "thread_id", "state"], [{ slot: "s1", thread_id: "thr_cli1", state: "running" }]),
+			pim_coding_threads: table(["thread_id", "state"], [{ thread_id: "thr_amp1", state: "running" }, { thread_id: "thr_cli1", state: "running" }]),
 		}),
 	);
 	await writer.dump(

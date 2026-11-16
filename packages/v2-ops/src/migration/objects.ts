@@ -13,7 +13,10 @@ const enc = (key: string) => key.split("/").map(encodeURIComponent).join("/");
 
 /** A directory standing in for a bucket: for rehearsals and tests where no S3 server runs. */
 export class FsObjectStore implements ObjectStore {
-	constructor(readonly root: string) {}
+	readonly root: string;
+	constructor(root: string) {
+		this.root = root;
+	}
 	#path(bucket: string, key: string) {
 		return join(this.root, bucket, enc(key));
 	}

@@ -43,7 +43,10 @@ const objectPath = (bucket: string, key: string) => `objects/data/${bucket}/${sh
 export class SnapshotWriter {
 	readonly #files: Record<string, string> = {};
 	readonly #objects: ObjectEntry[] = [];
-	constructor(readonly dir: string) {}
+	readonly dir: string;
+	constructor(dir: string) {
+		this.dir = dir;
+	}
 
 	async #write(path: string, data: string | Uint8Array) {
 		const full = join(this.dir, path);
@@ -74,7 +77,10 @@ export class SnapshotWriter {
 }
 
 export class SnapshotReader {
-	constructor(readonly dir: string) {}
+	readonly dir: string;
+	constructor(dir: string) {
+		this.dir = dir;
+	}
 
 	async manifest(): Promise<SnapshotManifest> {
 		return JSON.parse(await readFile(join(this.dir, "manifest.json"), "utf8")) as SnapshotManifest;

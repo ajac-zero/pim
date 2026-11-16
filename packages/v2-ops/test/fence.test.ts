@@ -136,3 +136,46 @@ describe("the inert fence worker", () => {
 		expect((await fence("/fence/v1/do/WorkspaceContainer/ws_1/destroy", { method: "POST", headers: auth })).status).toBe(403);
 	});
 });
+
+import { FenceExporter } from "../src/migration/export.ts";
+import type { DoDump } from "../src/migration/snapshot.ts";
+
+describe("the exporter against the fence worker", () => {
+	it("exports a Directory, its spaces, coding threads, objects and OAUTH_KV completely, every row counted", async () => {
+		const owner = "own_exp";
+		await seed(env.Directory.getByName("directory"), ["CREATE TABLE accounts (owner_id TEXT PRIMARY KEY, username TEXT, role TEXT, status TEXT)", `INSERT INTO accounts VALUES ('${owner}', 'exp', 'admin', 'active')`]);
+		await seed(env.Auth.getByName(owner), ["CREATE TABLE auth_passkeys (id TEXT PRIMARY KEY, spki TEXT)", "INSERT INTO auth_passkeys VALUES ('pk1', 'abc')"]);
+		await seed(env.Pim.getByName(owner), JOBS);
+		await seed(env.CodingScheduler.getByName(owner), ["CREATE TABLE pim_coding_threads (thread_id TEXT PRIMARY KEY, harness TEXT)", "INSERT INTO pim_coding_threads VALUES ('thr_e1', 'amp')"]);
+		await seed(env.CodingThread.getByName("thr_e1"), ["CREATE TABLE coding_thread (thread_id TEXT PRIMARY KEY, orb TEXT)", "INSERT INTO coding_thread VALUES ('thr_e1', '{\"threadId\":\"T-1\"}')"]);
+		await runInDurableObject(env.WorkspaceCatalog.getByName("workspaces"), (_i, state) => state.storage.put("session:ws_1", true));
+		await env.ARTIFACTS.put("own_exp/a/v1/index.html", "<p>x</p>");
+		await env.BLOBS.put("own_exp/big.bin", new Uint8Array(300_000).fill(7), { httpMetadata: { contentType: "video/mp4" } });
+		await env.OAUTH_KV.put("tok:1", JSON.stringify({ hash: "ff" }));
+
+		const dumps: DoDump[] = [];
+		const objects: { bucket: string; key: string; bytes: Uint8Array }[] = [];
+		let kv: unknown[] = [];
+		const result = await new FenceExporter({
+			baseUrl: "https://pim.example.test",
+			token: TOKEN,
+			fetch: (request) => fetchWorker(request.url, { headers: request.headers }),
+			sink: {
+				dump: async (d) => void dumps.push(d),
+				object: async (bucket, key, bytes) => void objects.push({ bucket, key, bytes }),
+				oauthKv: async (entries) => void (kv = entries),
+				finish: async () => undefined,
+			},
+		}).run();
+		const by = (cls: string, name: string) => dumps.find((d) => d.class === cls && d.name === name);
+		expect(result.spaces).toContain(owner);
+		expect(by("Auth", owner)?.tables.auth_passkeys?.rows).toEqual([{ id: "pk1", spki: "abc" }]);
+		expect(by("Pim", owner)?.tables.cf_agents_jobs?.rows.map((r) => r.id)).toEqual(["j1", "j2", "j3"]);
+		expect(by("CodingThread", "thr_e1")?.tables.coding_thread?.rows[0]).toMatchObject({ orb: '{"threadId":"T-1"}' });
+		expect(by("WorkspaceContainer", "ws_1")).toBeDefined();
+		const big = objects.find((o) => o.key === "own_exp/big.bin")!;
+		expect(big.bytes.length).toBe(300_000);
+		expect(result.objects.find((o) => o.key === "own_exp/big.bin")).toMatchObject({ size: 300_000, contentType: "video/mp4", sha256: expect.stringMatching(/^[0-9a-f]{64}$/) });
+		expect(kv).toContainEqual({ key: "tok:1", value: { hash: "ff" } });
+	});
+});

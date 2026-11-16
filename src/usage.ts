@@ -1,3 +1,4 @@
+import { CallPhases, type ModelPhases } from "./model-phases";
 import {
 	type Api,
 	type AssistantMessage,
@@ -132,6 +133,21 @@ function requestShape(value: unknown, depth = 0): Record<string, unknown> | unde
 	return shape;
 }
 
+/** What of a request's body is worth knowing beside its settings: how many tools it carried and how large their schemas were, how large the whole was, and how many cache breakpoints it set. */
+function payloadFacts(payload: unknown): Record<string, unknown> {
+	try {
+		const text = JSON.stringify(payload) ?? "";
+		const tools = (payload as { tools?: unknown } | null)?.tools;
+		return {
+			payload_bytes: new TextEncoder().encode(text).byteLength,
+			cache_control_breakpoints: text.split('"cache_control"').length - 1,
+			...(Array.isArray(tools) ? { tool_count: tools.length, tool_schema_bytes: new TextEncoder().encode(JSON.stringify(tools)).byteLength } : {}),
+		};
+	} catch {
+		return {};
+	}
+}
+
 export type StreamFn = (model: Model<Api>, context: unknown, options?: unknown) => AssistantMessageEventStream;
 
 /** A response that never reached the model, with why. */
@@ -228,7 +244,7 @@ export class UsageMeter {
 	 * Writes a settled call to the ledger without holding up its caller: its tags may take a lookup,
 	 * and nothing here may fail the call, so what goes wrong is logged and the call is left unrecorded.
 	 */
-	#recordCall(model: Model<Api>, call: CallInfo, started: number, message: { usage?: ModelUsage; stopReason: string; errorMessage?: string } | undefined, failure: { error?: string; request?: Record<string, unknown> } = {}): void {
+	#recordCall(model: Model<Api>, call: CallInfo, started: number, message: { usage?: ModelUsage; stopReason: string; errorMessage?: string } | undefined, failure: { error?: string; request?: Record<string, unknown>; phases?: ModelPhases } = {}): void {
 		const ts = this.#now();
 		void (async () => {
 			try {
@@ -254,6 +270,7 @@ export class UsageMeter {
 					plan: this.#subscription(model.provider),
 					error: message?.errorMessage ?? failure.error,
 					request: failure.request,
+					phases: failure.phases,
 				});
 				if (due) this.#rollupDue?.();
 			} catch (error) {
@@ -443,8 +460,17 @@ export class UsageMeter {
 				const logged = { ...(options as StreamOptions | undefined) };
 				const onPayload = logged.onPayload;
 				logged.onPayload = async (payload, payloadModel) => {
-					sent = requestShape(payload);
+					sent = { ...requestShape(payload), ...payloadFacts(payload) };
 					return onPayload?.(payload, payloadModel);
+				};
+				// Where the call's time goes: its requests and the first event they bring (./model-phases.ts).
+				const phases = new CallPhases(started, this.#now);
+				// Google's adapters refuse a `fetch` of their own: their calls have the first event's time and no more.
+				if (model.api !== "google-generative-ai" && model.api !== "google-vertex") logged.fetch = phases.fetch(logged.fetch as never) as never;
+				const onEvent = logged.onProviderStreamEvent;
+				logged.onProviderStreamEvent = async (data, eventModel) => {
+					phases.event();
+					return onEvent?.(data, eventModel);
 				};
 				let events: AssistantMessageEventStream;
 				try {
@@ -459,14 +485,14 @@ export class UsageMeter {
 				events.result().then(
 					(message) => {
 						this.settleModel(reserved.reservation, message.usage);
-						this.#recordCall(model, info, started, message, { request: sent });
+						this.#recordCall(model, info, started, message, { request: sent, phases: phases.finish() });
 						// The provider's own words are kept with the call, and logged for whoever runs the deployment.
 						if (message.stopReason !== "stop" && message.stopReason !== "toolUse" && message.stopReason !== "length") {
 							console.warn(JSON.stringify({ event: "pim.model_error", ...modelFacts(model), request: sent, stopReason: message.stopReason, error: (message.errorMessage ?? "").slice(0, 1000) }));
 						}
 					},
 					(error) => {
-						this.#recordCall(model, info, started, undefined, { error: String(error), request: sent });
+						this.#recordCall(model, info, started, undefined, { error: String(error), request: sent, phases: phases.finish() });
 						console.warn(JSON.stringify({ event: "pim.model_error", ...modelFacts(model), request: sent, error: String(error).slice(0, 1000) }));
 					},
 				);

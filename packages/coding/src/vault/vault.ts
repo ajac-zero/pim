@@ -20,7 +20,8 @@ import type { VaultRecord, VaultStatus, VaultWriteResult } from "./store";
 /** One person's sealed entries, wherever they are kept. Every call names the person; an implementation reaches only that person's. */
 export interface VaultBackend {
 	status(userId: string): Promise<VaultStatus[]>;
-	read(userId: string, harness: CodingVaultKey): Promise<VaultRecord>;
+	/** `fresh` asks for what the space holds now, not a copy kept a moment ago, as a write that goes on from the version it read needs. */
+	read(userId: string, harness: CodingVaultKey, options?: { fresh?: boolean }): Promise<VaultRecord>;
 	write(userId: string, harness: CodingVaultKey, sealed: Uint8Array, byteLength: number, expectedVersion: number): Promise<VaultWriteResult>;
 	delete(userId: string, harness: Harness): Promise<VaultStatus>;
 }
@@ -67,7 +68,7 @@ export class CodingVault {
 	/** The person's entry, opened. */
 	async load(userId: string, harness: LoginHarness): Promise<VaultEntry> {
 		if (!isLoginHarness(harness)) throw new Error("No such coding harness login");
-		const record = await this.backend.read(userId, harness);
+		const record = await this.backend.read(userId, harness, { fresh: true });
 		if (record.sealed === null) return { version: record.version, files: null, unreadable: false };
 		try {
 			const archive = await openBlob(await this.key(), { userId, harness }, record.sealed);
@@ -118,7 +119,7 @@ export class CodingVault {
 		const plaintext = new TextEncoder().encode(apiKey);
 		const sealed = await sealBlob(await this.key(), { userId, harness }, plaintext);
 		// The newest key wins: a write that lost to another is tried again on the version it lost to.
-		let { version } = await this.backend.read(userId, harness);
+		let { version } = await this.backend.read(userId, harness, { fresh: true });
 		for (let attempt = 0; attempt < 3; attempt++) {
 			const written = await this.backend.write(userId, harness, sealed, plaintext.byteLength, version);
 			if (written.ok) return (await this.backend.status(userId)).find((status) => status.harness === harness)!;

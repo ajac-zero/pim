@@ -106,6 +106,21 @@ describe("the majordomo's diagnostics tools", () => {
 				error: `400 {"error":{"code":400,"message":"Unknown name \\"patternProperties\\" at 'tools[0].function_declarations[3].parameters'; max_tokens 8192 for gemini-4-hydrogen-20261101 from https://${PUBLIC_HOST}/v1 with x-api-key: ${SECRET}","status":"INVALID_ARGUMENT"}}`,
 				request: { model: "gemini-4-hydrogen-20261101", max_tokens: 8192, tools: "31 items" },
 			});
+			// A slow call that succeeded keeps its request and where its time went, as a failed one does.
+			pim.usage.calls.record({
+				ts: now - 1,
+				tags: { runKind: "interactive" },
+				provider: "test",
+				model: "slow-model",
+				usage: undefined,
+				stopReason: "stop",
+				latencyMs: 125_000,
+				shape: undefined,
+				plan: false,
+				request: { model: "slow-model", max_tokens: 32768, tool_count: 155 },
+				phases: { preFetchMs: 12, httpAttempts: 1, headersMs: 124_900, firstByteMs: 40, firstEventMs: 41, streamMs: 90, totalMs: 125_000, attempts: [{ attempt: 1, status: 200, sentMs: 12, headersMs: 124_900, firstByteMs: 40, bodyMs: 90 }] },
+			});
+			pim.usage.calls.record({ ts: now - 2, tags: {}, provider: "test", model: "quick-model", usage: undefined, stopReason: "stop", latencyMs: 900, shape: undefined, plan: false, request: { model: "quick-model" } });
 			pim.providerCooldowns.failed("openai", { message: `You've hit your usage limit (key ${SECRET}). Try again in 42 min.` }, now);
 			pim.diagnosticEvents.record("slow_request", { method: "GET", path: "/api/sessions", ms: 7000, error: `Bearer ${SECRET} from https://${PUBLIC_HOST}/x?key=${SECRET}`, api_key: SECRET });
 			pim.store.requestApproval({ id: "ap-1", session: pim.store.sessionOf(ROOT)!, action: "send_email", tool: null, args: {}, summary: `Send to someone@example.org with token=${SECRET}`, callId: null, createdAt: now, expiresAt: null, onTimeout: "deny" });
@@ -134,6 +149,10 @@ describe("the majordomo's diagnostics tools", () => {
 		expect(report.sections.model_calls.items[0].error).toContain(`Unknown name \\"patternProperties\\" at 'tools[0].function_declarations[3].parameters'; max_tokens 8192 for gemini-4-hydrogen-20261101 from [address]/v1`);
 		expect(report.sections.model_calls.items[0].error).toContain('"status":"INVALID_ARGUMENT"');
 		expect(report.sections.model_calls.items[0].request).toEqual({ model: "gemini-4-hydrogen-20261101", max_tokens: 8192, tools: "31 items" });
+		const slow = report.sections.model_calls.items.find((item: { model: string }) => item.model === "slow-model");
+		expect(slow).toMatchObject({ latency_ms: 125_000, request: { max_tokens: 32768, tool_count: 155, phases: { preFetchMs: 12, httpAttempts: 1, headersMs: 124_900, streamMs: 90 } } });
+		// A quick call that worked keeps no request.
+		expect(report.sections.model_calls.items.find((item: { model: string }) => item.model === "quick-model")?.request).toBeUndefined();
 		expect(report.sections.events.items[0]).toMatchObject({ kind: "slow_request", detail: { method: "GET", path: "/api/sessions", ms: 7000, api_key: "[redacted]" } });
 		expect(report.sections.triggers.items).toEqual(
 			expect.arrayContaining([

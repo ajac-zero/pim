@@ -1,4 +1,5 @@
 import type { CallApproval, Turn, TurnStep } from "@pim/shared/activity-types";
+import { SLOW_CALL_MS } from "./model-calls";
 export type { CallApproval, Turn, TurnStep } from "@pim/shared/activity-types";
 import { activityOf, type Activity } from "./activity";
 import type { Message } from "@earendil-works/pi-ai";
@@ -305,8 +306,7 @@ function triggers({ triggerFailures }: DiagnosticSources, since: number, limit: 
 	);
 }
 
-/** A call this slow or this dear is reported as unusual. */
-const SLOW_CALL_MS = 60_000;
+/** A call this dear is reported as unusual. */
 const COSTLY_CALL_USD = 1;
 
 function modelCalls({ sql }: DiagnosticSources, since: number, limit: number): Section {
@@ -342,7 +342,7 @@ function modelCalls({ sql }: DiagnosticSources, since: number, limit: number): S
 	return section(
 		items.slice(0, limit),
 		items.length,
-		`${Number(totals.calls)} calls in the window, ${Number(totals.errors)} of them errors or aborted. Slow is ${SLOW_CALL_MS / 1000} s or more, costly $${COSTLY_CALL_USD} or more. A failed call has the provider's error as it answered, and the request's settings without its content.`,
+		`${Number(totals.calls)} calls in the window, ${Number(totals.errors)} of them errors or aborted. Slow is ${SLOW_CALL_MS / 1000} s or more, costly $${COSTLY_CALL_USD} or more. A failed or slow call has the request's settings without its content and, under phases, where its time went: preFetchMs is Pim's own preparation before the first request was sent, headersMs the wait for the provider's response headers (a gateway's 524 or 504 arrives here), firstByteMs and firstEventMs the wait from the headers to the first body bytes and the first parsed event, streamMs the rest of the stream, and httpAttempts how many requests the call sent. A failed call also has the provider's error as it answered.`,
 	);
 }
 

@@ -112,6 +112,8 @@ function vaultRoutes(env: Env, userId: string): Route[] {
 			if (!known) return unknown();
 			const status = publicStatus(await vault.delete(userId, known));
 			console.info(JSON.stringify({ event: "pim.coding.vault_disconnected", user: userId, harness: known }));
+			// Threads at work on it stop using what they read of it.
+			await codingScheduler(env, userId).harnessDisconnected(known);
 			return status;
 		}),
 	];

@@ -24,6 +24,7 @@ import type { Provider } from "@earendil-works/pi-ai";
 import { loginProvider } from "./fake-claude-login";
 import { fakeContainers } from "./fake-container";
 import { fakeGit } from "./fake-git";
+import { forgetVaultReads } from "../src/coding/vault/worker";
 
 export { default, Auth, Directory, Gallery, HostOps } from "../src/index";
 
@@ -390,7 +391,7 @@ export const codingEvents: CodingThreadEvent[] = [];
  * workspace that fails and doesn't answer for a second counts as down; a running turn's work is autosaved every three
  * minutes, which a test may set to 0, to autosave at each heartbeat.
  */
-const DEFAULT_CODING_TIMINGS = { stallMs: 300, lostGraceMs: 1_000, autosaveMs: 3 * 60_000, autopushMs: 20_000, resumeWaitMs: 120_000, retryMs: 30_000, orbPollMs: 30_000, orbSyncTtlMs: 0 };
+const DEFAULT_CODING_TIMINGS = { stallMs: 300, lostGraceMs: 1_000, autosaveMs: 3 * 60_000, autopushMs: 20_000, resumeWaitMs: 120_000, retryMs: 30_000, orbPollMs: 30_000, orbSyncTtlMs: 0, orbOverloadMs: 50, emitRetryMs: 5 };
 export const codingTimings = { ...DEFAULT_CODING_TIMINGS };
 
 /** The coding threads' clock in tests: real time until a test sets it, as the stuck timeout needs (test/coding-thread-do.test.ts). */
@@ -491,6 +492,14 @@ export class CodingThreadDO extends RealCodingThreadDO {
 		return codingTimings.orbPollMs;
 	}
 
+	protected override orbOverloadDelayMs(): number {
+		return codingTimings.orbOverloadMs;
+	}
+
+	protected override emitRetryMs(): number {
+		return codingTimings.emitRetryMs;
+	}
+
 	protected override orbSyncTtlMs(): number {
 		return codingTimings.orbSyncTtlMs;
 	}
@@ -534,6 +543,7 @@ export function resetTestWorkerState(): { pendingResponses: number } {
 	const pendingResponses = faux.getPendingResponseCount();
 	for (const provider of [faux, codingFaux, napper, utility]) provider.setResponses([]);
 	spans.reset();
+	forgetVaultReads();
 	outbox.length = 0;
 	paintings.length = 0;
 	codingEvents.length = 0;

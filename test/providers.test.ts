@@ -787,7 +787,8 @@ describe("A person's own model providers", () => {
 			(pim as unknown as { ctx: { storage: { sql: SqlStorage } } }).ctx.storage.sql.exec("SELECT stop_reason, error, request FROM pim_model_calls WHERE provider = 'own:proxy' AND stop_reason = 'error' ORDER BY id DESC LIMIT 1").toArray(),
 		);
 		expect(call).toMatchObject({ stop_reason: "error", error: '400 {"type":"error","error":{"type":"invalid_request_error","message":"thinking is wrong"}}' });
-		expect(JSON.parse(String(call!.request))).toMatchObject({ model: "claude-sonnet-5-5", thinking: { type: "adaptive" } });
+		// With where its time went: one request, answered 400 with headers and body read.
+		expect(JSON.parse(String(call!.request))).toMatchObject({ model: "claude-sonnet-5-5", thinking: { type: "adaptive" }, tool_count: expect.any(Number), phases: { httpAttempts: 1, attempts: [{ status: 400, contentType: "application/json" }], wire: { headers: { "anthropic-version": "2023-06-01" } } } });
 		expect(String(call!.request)).not.toContain("Secret words");
 		// Saving again keeps the API it speaks.
 		expect((await put("/providers/proxy", { name: "Proxy 2" })).body.provider).toMatchObject({ api: "anthropic-messages" });

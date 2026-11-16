@@ -1,4 +1,5 @@
 import type { Usage as ModelUsage } from "@earendil-works/pi-ai";
+import type { ModelPhases } from "./model-phases";
 import PRICES from "../config/model-prices.json";
 import { redactSecrets } from "@pim/shared/redact";
 
@@ -112,10 +113,14 @@ export type ModelCall = {
 	readonly error?: string;
 	/** A failed call's request without its content: its settings, and how many messages and tools it carried. */
 	readonly request?: Record<string, unknown>;
+	/** Where the call's time went (./model-phases.ts); kept with the request of a call that failed or was slow. */
+	readonly phases?: ModelPhases;
 };
 
 /** The most characters of a failed call's error and request that are kept. */
 export const ERROR_KEEP = 8_000;
+/** A call this slow is reported as unusual, and keeps its request and phases. */
+export const SLOW_CALL_MS = 60_000;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS pim_model_calls (
@@ -289,7 +294,9 @@ export class ModelCallLedger {
 			const { tags, shape } = call;
 			const failed = call.stopReason === "error" || call.stopReason === "aborted";
 			const error = failed && call.error?.trim() ? redactSecrets(call.error.trim()).slice(0, ERROR_KEEP) : null;
-			const request = failed && call.request ? redactSecrets(JSON.stringify(call.request)).slice(0, ERROR_KEEP) : null;
+			// A slow call that succeeded keeps its request and phases too: they are what says where the time went.
+			const keepRequest = (failed || call.latencyMs >= SLOW_CALL_MS) && (call.request || call.phases);
+			const request = keepRequest ? redactSecrets(JSON.stringify({ ...(call.phases ? { phases: call.phases } : {}), ...call.request })).slice(0, ERROR_KEEP) : null;
 			this.#sql.exec(
 				`INSERT INTO pim_model_calls (ts, agent_id, chat_id, run_kind, coding_thread_id, schedule_or_trigger_id, parent_run_id, turn_index, provider, model,
 					input, output, cache_read, cache_write_5m, cache_write_1h, stop_reason, latency_ms, prompt_bytes, tool_count, tool_schema_bytes, cost_usd, price_version, plan, error, request)

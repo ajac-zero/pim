@@ -145,6 +145,8 @@ export class AmpHttpOrbClient implements OrbClient {
 	readonly #base: string;
 	readonly #projects = new Map<string, string>();
 	#lastStatus = 0;
+	/** Whether the call in progress got as far as sending its request: before that, nothing can have been created. */
+	#sent = false;
 	#failure: string | undefined;
 	constructor(readonly options: AmpHttpOptions) {
 		this.#fetch = options.fetch ?? ((input, init) => fetch(input, init));
@@ -171,6 +173,7 @@ export class AmpHttpOrbClient implements OrbClient {
 			throw new OrbError(`Amp start outcome is uncertain${failure ? ` (first attempt: ${failure})` : ""}; check Amp before starting another thread`, "orb_start_uncertain");
 		}
 		this.#failure = undefined;
+		this.#sent = false;
 		try {
 			const result = object(await this.#call("createRemoteExecutorThread", {
 				agentMode: start.mode && AGENT_MODES.has(start.mode) ? start.mode : "medium",
@@ -193,9 +196,9 @@ export class AmpHttpOrbClient implements OrbClient {
 			await this.options.store.put(`amp:progress:${handle.threadId}`, { startedAt: this.#now(), working: false, errorAt: null });
 			return handle;
 		} catch (error) {
-			// Only a definitive rejection permits another create. Network failures,
-			// malformed success responses and 5xx leave the reservation intact.
-			if (error instanceof OrbAuthError || error instanceof AmpRateLimitError || error instanceof AmpBeforeSendError || error instanceof AmpRedirectError || error instanceof AmpRejectedError) await this.options.store.put(key, null);
+			// Only a definitive rejection permits another create, or a failure before the request was sent (the token couldn't be read, the API is backing off): nothing was created then. Network failures,
+			// malformed success responses and 5xx after the send leave the reservation intact.
+			if (!this.#sent || error instanceof OrbAuthError || error instanceof AmpRateLimitError || error instanceof AmpBeforeSendError || error instanceof AmpRedirectError || error instanceof AmpRejectedError) await this.options.store.put(key, null);
 			else await this.options.store.put(key, this.#failure ? { pending: true, failure: this.#failure } : { pending: true });
 			throw error;
 		}
@@ -383,6 +386,7 @@ export class AmpHttpOrbClient implements OrbClient {
 		const op = `POST ${method}`;
 		const attempt = (retry?.attempts ?? 0) + 1;
 		try {
+			this.#sent = true;
 			response = await this.#fetch(`${this.#base}/api/internal?${method}`, { method: "POST", redirect: "manual", signal: AbortSignal.timeout(30_000), headers: { Authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify({ method, params }) });
 		} catch (error) {
 			const elapsedMs = this.#now() - began;

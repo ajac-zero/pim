@@ -69,6 +69,7 @@ export class FakeOrbClient implements OrbClient {
 	readonly #byKey = new Map<string, string>();
 	readonly #capabilities: OrbCapabilities;
 	readonly #unreachable = new Set<OrbMethod>();
+	readonly #overloaded = new Set<OrbMethod>();
 	readonly #page: number;
 	readonly #now: () => number;
 	#threadsMade = 0;
@@ -204,6 +205,12 @@ export class FakeOrbClient implements OrbClient {
 		else this.#unreachable.delete(what);
 	}
 
+	/** Makes calls of `what` throw as one does when Pim's own Durable Objects are overloaded, before anything reaches the agent's cloud, or stops that when `on` is false. */
+	overloaded(what: OrbMethod, on = true): void {
+		if (on) this.#overloaded.add(what);
+		else this.#overloaded.delete(what);
+	}
+
 	// What a test can see of the fake's own threads.
 
 	/** The messages steered to the thread and not taken yet, oldest first. */
@@ -223,6 +230,7 @@ export class FakeOrbClient implements OrbClient {
 
 	/** Throws when the fake is told this call can't reach the agent's cloud. */
 	#refuse(what: OrbMethod): void {
+		if (this.#overloaded.has(what)) throw Object.assign(new Error("Durable Object is overloaded. Requests queued for too long."), { overloaded: true });
 		if (this.#unreachable.has(what)) throw new OrbUnreachableError();
 	}
 

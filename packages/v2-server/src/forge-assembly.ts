@@ -16,7 +16,7 @@ import { Credentials } from "@pim/v2-forge/tokens";
 
 const noGitHost = new Proxy({}, { get: (_t, name) => () => Promise.reject(new CapabilityUnavailableError("git host", `no git host is configured (${String(name)})`)) }) as unknown as GitHost;
 
-export type ForgeParts = { forge: Forge; store: ForgeStore; authz: Authz; scheduler: ForgeScheduler; db: ForgeDb };
+export type ForgeParts = { forge: Forge; store: ForgeStore; authz: Authz; scheduler: ForgeScheduler; credentials: Credentials; db: ForgeDb };
 
 export function assembleForge(db: ForgeDb, objects: ObjectStore, env: Record<string, string | undefined>): ForgeParts {
 	const store = new ForgeStore(db);
@@ -25,5 +25,5 @@ export function assembleForge(db: ForgeDb, objects: ObjectStore, env: Record<str
 	// Without a configured signing key a process signs with its own, so the broker tokens it issues die with it: fine for a trial, set one in a deployment.
 	const credentials = new Credentials(db, env.PIM_CODING_SIGNING_KEY ?? randomBytes(32).toString("base64url"), authz.policy);
 	const forge = new Forge({ db, store, authz, scheduler, credentials, git: noGitHost, objects, orbs: () => null, compute: null, ampConfigured: false });
-	return { forge, store, authz, scheduler, db };
+	return { forge, store, authz, scheduler, credentials, db };
 }

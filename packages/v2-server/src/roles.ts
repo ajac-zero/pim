@@ -14,6 +14,10 @@ import { attachSockets } from "@pim/v2-app/sockets";
 import { runnerMayStart } from "@pim/v2-ops/backup/reconcile";
 import { createPimMetrics, instrumentPool, monitorEventLoop } from "@pim/v2-ops/observability/signals";
 import { codingRest } from "@pim/v2-forge/http/rest";
+import { compose } from "@pim/v2-forge/http/index";
+import { codingVault } from "@pim/v2-forge/http/vault";
+import { modelGateway } from "@pim/v2-forge/http/gateway";
+import { ForgeVault } from "@pim/v2-forge/vault";
 import { Projector } from "@pim/v2-live/projections/projector";
 import { LiveHub } from "@pim/v2-live/server/hub";
 import { LogStore } from "@pim/v2-live/server/log-store";
@@ -86,7 +90,15 @@ export async function startGate(config: ProcessConfig, env: Env, host: Host, nat
 	const secure = config.publicUrl.startsWith("https:");
 	const forge = assembleForge(db.pool as never, objects, env);
 	mirrorCodingGrants(app, forge.authz as never);
-	const coding = codingRest({ forge: forge.forge, scheduler: forge.scheduler, store: forge.store, db: forge.db, authenticate: forgeAuthenticator(app, secure) });
+	const authenticate = forgeAuthenticator(app, secure);
+	// The rest of Forge's HTTP surface: a person's harness logins, sealed under the deployment's keys; and the model gateway, only where the deployment holds a provider key.
+	// The git broker and the Gitea connection need a git host and a Gitea configuration this process does not build: they are not mounted.
+	const gatewayKeys: Record<string, string | undefined> = { anthropic: env.PIM_CODING_ANTHROPIC_API_KEY, openai: env.PIM_CODING_OPENAI_API_KEY };
+	const coding = compose(
+		codingRest({ forge: forge.forge, scheduler: forge.scheduler, store: forge.store, db: forge.db, authenticate }),
+		codingVault({ vault: new ForgeVault(forge.db, app.crypto as never), authenticate }),
+		gatewayKeys.anthropic || gatewayKeys.openai ? modelGateway({ credentials: forge.credentials, store: forge.store, key: async (_thread, family) => (gatewayKeys[family] ? { apiKey: gatewayKeys[family]! } : null) }) : null,
+	);
 	const options = { publicUrl: config.publicUrl, ...(env.PIM_APPS_ORIGIN ? { appsOrigin: env.PIM_APPS_ORIGIN } : {}), routes: [...snapshotRoutes(db.pool), ...codingAdminRoutes(), ...forgeRoutes(coding)] };
 	const gate = createGate(app, options);
 	const listener = gate.listeners("request")[0] as (req: never, res: never) => void;

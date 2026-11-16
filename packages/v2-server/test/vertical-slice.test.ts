@@ -217,6 +217,11 @@ real("the vertical slice", () => {
 		const forgeDb = d.stack.admin as unknown as ForgeDb;
 		const authz = new Authz(forgeDb, { allowedRepos: ["acme/*"], branchPrefix: "pim/" });
 		const actor = { ownerId, role: "admin" as const };
+		// A person's harness logins are on the Gate too, sealed under the deployment's keys: none connected yet, and no key material in the answer.
+		const vault = await web.call("GET", "/api/coding/vault");
+		expect(vault.status).toBe(200);
+		expect(vault.json.supported).toEqual(expect.arrayContaining(["claude-code", "codex"]));
+		expect(JSON.stringify(vault.json)).not.toMatch(/sealed|secret/i);
 		// Without a grant, coding is refused.
 		expect((await web.call("POST", "/api/coding/threads", { operationId: "op-0", task: "Nothing", repo: REPO, chat: chatId })).status).toBe(403);
 		// The admin grants through the Gate; Forge enforces the same grant. With one but no compute pool configured, it is unavailable (not forbidden): the deployment has nothing to run it on.

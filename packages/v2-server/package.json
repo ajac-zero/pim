@@ -18,7 +18,8 @@
     "@pim/v2-contracts": "workspace:*",
     "@pim/v2-live": "workspace:*",
     "@pim/v2-runtime": "workspace:*",
-    "pg": "^8.16.3"
+    "pg": "^8.16.3",
+    "@pim/v2-forge": "workspace:*"
   },
   "devDependencies": {
     "@earendil-works/chord": "1.1.0",

@@ -121,6 +121,7 @@ jobs:
       - run: pnpm test:packages
         env:
           PIM_V2_REQUIRE_INFRA: "1"
+          PIM_NATS_BIN: /usr/local/bin/nats-server
       - run: pnpm exec vitest run --project node
 
   # The Worker's tests in workerd, a quarter of the files each, so one job's files don't wait for the

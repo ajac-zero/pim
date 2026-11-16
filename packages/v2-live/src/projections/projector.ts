@@ -122,13 +122,13 @@ export class Projector {
 				const partial = payload.partial === true;
 				// A final message takes the place of the partial that showed it while it streamed.
 				if (payload.replaces !== undefined) await client.query("DELETE FROM pim_projection.chat_transcript_projection WHERE owner_id = $1 AND stream_kind = $2 AND chat_id = $3 AND entry_id = $4 AND partial", [ownerId, stream, id, payload.replaces]);
-				for (const message of projectEntries([payload.entry])) {
+				for (const message of payload.message ? [payload.message] : projectEntries([payload.entry!])) {
 					await client.query(
 						`INSERT INTO pim_projection.chat_transcript_projection (owner_id, stream_kind, chat_id, entry_id, position, partial, message, partition_id, commit_seq, projection_version)
 						 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 						 ON CONFLICT (owner_id, stream_kind, chat_id, entry_id) DO UPDATE SET partial = excluded.partial, message = excluded.message, partition_id = excluded.partition_id, commit_seq = excluded.commit_seq, projection_version = excluded.projection_version
 						 WHERE chat_transcript_projection.commit_seq <= excluded.commit_seq`,
-						[ownerId, stream, id, message.id, payload.position ?? Number(payload.entry.id), partial, JSON.stringify(message), partitionId, seq, version],
+						[ownerId, stream, id, message.id, payload.position ?? Number(message.id), partial, JSON.stringify(message), partitionId, seq, version],
 					);
 					// Streaming partials of one message replace each other; the committed message is canonical.
 					await emit(stream === "chat" ? chatTopic(id) : codingTopic(id), partial ? "message.partial" : "message", { message, partial, ...(payload.replaces === undefined ? {} : { replaces: payload.replaces }) } as unknown as JsonValue, partial ? `entry:${message.id}` : null);

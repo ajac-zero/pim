@@ -21,6 +21,15 @@ A v2 package imports `@pim/v2-contracts` and npm packages. It does not import an
 
 `@pim/shared/live-client` (moved from `web/src/lib/`) is the Live protocol client the web app and Node callers, such as `v2-server`'s tests and the load harness, share; packages may not import `web/`.
 
+## Joins
+
+`@pim/v2-server` holds what connects workstreams, so none of them imports another's internals:
+
+- **Runtime to Live:** `runtimeOutboxSource` turns the runtime's commits (receipts and outbox references) into the events Live projects.
+- **Forge to Live:** `forgeOutboxSource` reads Forge's outbox, which migration 0601 numbers per owner without gaps, as a stream with a stable pseudo-partition id (`forgePartitionId`). `combineSources` gives the projector both.
+- **Forge to the runtime:** `deliverForgeWakes` turns each `wake` row of Forge's outbox into a `coding_wake` command in the partition that holds the chat; the wake id is the command id.
+- Forge's `cost_ledger` rows are left for the application ledger's consumer.
+
 ## Migrations
 
 `packages/v2-contracts/migrations/0001_foundation.sql` creates the schemas `pim_app`, `pim_runtime`, `pim_forge` and `pim_projection`, one `NOLOGIN` role per process kind, the `public.pim_schema_migrations` ledger and `pim_current_owner_id()`, which row-level security policies compare with `owner_id`. A workstream keeps its migrations in its own package and numbers them in its band, writing only its own schema:
@@ -33,7 +42,7 @@ A v2 package imports `@pim/v2-contracts` and npm packages. It does not import an
 | 0300–0399 | live | `pim_projection` |
 | 0400–0499 | forge | `pim_forge` |
 | 0500–0599 | operations | maintenance across schemas |
-| 0600–0699 | canonical (`packages/v2-server/migrations`) | grants and functions across workstreams, applied last |
+| 0600–0699 | canonical (`packages/v2-server/migrations`) | grants, numbering and functions across workstreams, applied last (`0600` Live reads the runtime, `0601` Live reads Forge) |
 
 `validateMigrationFiles` in `src/db.ts` checks a directory against its band. Work for an owner goes through `withTenantTransaction`, which sets `pim.owner_id` with `SET LOCAL` semantics so PgBouncer in transaction mode never leaks it.
 

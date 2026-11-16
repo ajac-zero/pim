@@ -472,6 +472,9 @@ importers:
       '@pim/v2-contracts':
         specifier: workspace:*
         version: link:../v2-contracts
+      '@pim/v2-forge':
+        specifier: workspace:*
+        version: link:../v2-forge
       '@pim/v2-live':
         specifier: workspace:*
         version: link:../v2-live

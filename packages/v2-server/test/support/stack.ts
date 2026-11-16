@@ -7,6 +7,7 @@ import pg from "pg";
 import { Db } from "@pim/v2-runtime/db";
 import { applyMigrations, migrate as migrateRuntime } from "@pim/v2-runtime/migrate";
 import { migrate as migrateLive } from "@pim/v2-live/migrate";
+import { migrate as migrateForge, type Db as ForgeDb } from "@pim/v2-forge/db";
 
 const FOUNDATION = fileURLToPath(new URL("../../../v2-contracts/migrations/", import.meta.url));
 const INTEGRATION = fileURLToPath(new URL("../../migrations/", import.meta.url));
@@ -82,6 +83,7 @@ export async function createStack(): Promise<Stack> {
 	await applyMigrations(admin, FOUNDATION, "foundation");
 	await migrateRuntime(admin);
 	await migrateLive(admin);
+	await migrateForge(admin as unknown as ForgeDb);
 	await applyMigrations(admin, INTEGRATION, "integration");
 	await admin.query("GRANT pim_runtime TO srv_runtime_app");
 	await admin.query("GRANT pim_live TO srv_live_app");

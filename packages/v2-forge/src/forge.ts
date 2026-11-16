@@ -9,7 +9,7 @@ import { ForbiddenError, ForgeError } from "./errors";
 import { HARNESSES, capabilitiesOf, type Harness } from "./harnesses";
 import { type GitHost, type Objects, type OrbClients } from "./ports";
 import { type ForgeScheduler } from "./scheduler";
-import { type ForgeStore, type ThreadRow } from "./store";
+import { type ForgeStore, type OutboxTopic, type ThreadRow } from "./store";
 import { type Credentials } from "./tokens";
 
 export type ForgeConfig = {
@@ -383,10 +383,10 @@ export class Forge {
 		await this.c.db.query("insert into pim_forge.forge_autosaves (thread_id, head_sha, object_key, bytes) values ($1,$2,$3,$4) on conflict (thread_id) do update set head_sha = $2, object_key = $3, bytes = $4, at = now()", [threadId, head, key, bytes.length]);
 	}
 
-	/** Hands undelivered outbox rows to `deliver` (Live, the originating chat's inbox, the cost ledger), exactly one consumer per row. */
-	async deliverOutbox(deliver: (row: { id: number; topic: string; dedupeKey: string; payload: any }) => Promise<void>, limit = 100): Promise<number> {
+	/** Hands undelivered outbox rows to `deliver` (the originating chat's inbox, the cost ledger), exactly one consumer per row. A consumer names the `topics` it handles; Live reads projections from the outbox without consuming them (see `@pim/v2-server`). */
+	async deliverOutbox(deliver: (row: { id: number; topic: string; dedupeKey: string; payload: any }) => Promise<void>, limit = 100, topics?: readonly OutboxTopic[]): Promise<number> {
 		return tx(this.c.db, async (q) => {
-			const rows = (await q.query<Row>("select * from pim_forge.forge_outbox where delivered_at is null order by id limit $1 for update skip locked", [limit])).rows;
+			const rows = (await q.query<Row>("select * from pim_forge.forge_outbox where delivered_at is null and ($2::text[] is null or topic = any($2)) order by id limit $1 for update skip locked", [limit, topics ?? null])).rows;
 			for (const r of rows) {
 				await deliver({ id: Number(r.id), topic: r.topic, dedupeKey: r.dedupe_key, payload: r.payload });
 				await q.query("update pim_forge.forge_outbox set delivered_at = now() where id = $1", [r.id]);

@@ -102,6 +102,9 @@ export function conversationText(messages: readonly TranscriptMessage[], limit: 
 			const post = ROOM_POST.exec(text);
 			if (post) turns.push(`${post[1]}: ${text.slice(post[0].length).trim()}`);
 			else turns.push(`${text.startsWith("[") ? "Event" : "Person"}: ${text}`);
+		} else if (message.compaction) {
+			const text = message.parts.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n");
+			if (text !== "") turns.push(`Earlier in this chat: ${text}`);
 		} else if (message.role === "assistant") {
 			for (const part of message.parts) {
 				if (part.type !== "tool-call" || part.name !== "send_to_user") continue;

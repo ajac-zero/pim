@@ -76,14 +76,16 @@ export function groupByAge(sessions: readonly Session[], now = Date.now()) {
  *
  * A chat that carries on a longer one takes its place: chats the longer one
  * started go under the chat that carries it on, even though the longer one,
- * archived, is listed apart. `all` is every chat, for finding that chat when
+ * archived, is listed apart; one the person went on in again is not replaced. `all` is every chat, for finding that chat when
  * `list` is only some of them.
  */
 export function nestChats(list: readonly Session[], all = list) {
   const byId = new Map(all.map((session) => [session.id, session]));
   const next = new Map<string, Session>();
   for (const session of all) {
-    if (session.continuedFrom) next.set(session.continuedFrom, session);
+    // A chat the person went on in again, which is no longer archived, is not taken the place of.
+    if (session.continuedFrom && byId.get(session.continuedFrom)?.archived)
+      next.set(session.continuedFrom, session);
   }
   const latest = (session: Session) => {
     const seen = new Set([session]);

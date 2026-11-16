@@ -467,6 +467,12 @@ export class PimStore {
 		if (!sessionColumns.includes("read_at")) this.#sql.exec("ALTER TABLE pim_sessions ADD COLUMN read_at INTEGER");
 		if (!sessionColumns.includes("archived_at")) this.#sql.exec("ALTER TABLE pim_sessions ADD COLUMN archived_at INTEGER");
 		if (!sessionColumns.includes("continued_from")) this.#sql.exec("ALTER TABLE pim_sessions ADD COLUMN continued_from TEXT");
+		if (!sessionColumns.includes("continued_to")) {
+			this.#sql.exec("ALTER TABLE pim_sessions ADD COLUMN continued_to TEXT");
+			// Chats continued before forwarding was recorded on the chat itself keep forwarding and stay archived, as they were shown.
+			this.#sql.exec("UPDATE pim_sessions SET continued_to = (SELECT c.id FROM pim_sessions c WHERE c.continued_from = pim_sessions.id LIMIT 1) WHERE EXISTS (SELECT 1 FROM pim_sessions c WHERE c.continued_from = pim_sessions.id)");
+			this.#sql.exec("UPDATE pim_sessions SET archived_at = COALESCE(archived_at, updated_at) WHERE EXISTS (SELECT 1 FROM pim_sessions c WHERE c.continued_from = pim_sessions.id AND c.deleted_at IS NULL)");
+		}
 		if (!sessionColumns.includes("model")) this.#sql.exec("ALTER TABLE pim_sessions ADD COLUMN model TEXT");
 		// Connectors were once called apps: what was chosen or waiting under a tool's old name is kept under its new one.
 		for (const [from, to] of RENAMED_TOOLS) {
@@ -782,26 +788,32 @@ export class PimStore {
 		);
 	}
 
-	/** Records that `id` carries on a chat `from` that grew too long to go on in. */
+	/** Records that `id` carries on a chat `from` that grew too long to go on in: `from` now forwards to it. */
 	continueSession(id: string, from: string): void {
 		this.#sql.exec("UPDATE pim_sessions SET continued_from = ? WHERE id = ?", from, id);
+		this.#sql.exec("UPDATE pim_sessions SET continued_to = ? WHERE id = ?", id, from);
 	}
 
-	/** The chat a session carries on, if it is a continuation. */
+	/** The chat a session carries on, if it is a continuation; kept as history after the chat is resumed. */
 	continuedFrom(id: string): string | null {
 		const [row] = this.#sql.exec("SELECT continued_from FROM pim_sessions WHERE id = ?", id).toArray();
 		return row?.continued_from == null ? null : String(row.continued_from);
 	}
 
-	/** The chat that carries a chat on, once it has one. */
+	/** The chat a chat now forwards to, once it has one and until the person resumes it. */
 	continuation(id: string): string | null {
-		const [row] = this.#sql.exec("SELECT id FROM pim_sessions WHERE continued_from = ? LIMIT 1", id).toArray();
-		return row ? String(row.id) : null;
+		const [row] = this.#sql.exec("SELECT continued_to FROM pim_sessions WHERE id = ?", id).toArray();
+		return row?.continued_to == null ? null : String(row.continued_to);
 	}
 
-	/** Whether a chat already has a continuation. */
+	/** Whether a chat forwards to a continuation. */
 	isContinued(id: string): boolean {
-		return this.#sql.exec("SELECT 1 FROM pim_sessions WHERE continued_from = ? LIMIT 1", id).toArray().length > 0;
+		return this.continuation(id) !== null;
+	}
+
+	/** The person goes on in a chat that was carried on: it stops forwarding, so what is sent to it stays there. */
+	resumeContinuedSession(id: string): void {
+		this.#sql.exec("UPDATE pim_sessions SET continued_to = NULL WHERE id = ?", id);
 	}
 
 	/** A delivered reply is unread until a client acknowledges that reply, not a later one. */

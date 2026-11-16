@@ -296,6 +296,37 @@ describe("scheduled tasks", () => {
 		expect(note).toMatchObject({ kind: "scheduled", title: "Check in." });
 		await post(`/notifications/${note.id}/read`);
 	});
+
+	it("keeps a scheduled task in the chat that scheduled it when the person went on in that chat after it was carried on", async () => {
+		const { id } = (await post("/sessions", {})).body;
+		faux.setResponses([toolUse("schedule_task", { instruction: "Check in.", delay_seconds: 3600 }), toolUse("send_to_user", { message: "Will do." })]);
+		await say("Remind me.", id);
+		faux.setResponses([fauxAssistantMessage("The person asked for a reminder.")]);
+		await inSpace(async (instance) => {
+			const pi = await instance.harness.pi();
+			const conversation = Number(instance.store.sessionOf(id));
+			const compaction = await (await pi.conversation(conversation as never, BACKGROUND_CONTEXT))!.commit(
+				(tx) => tx.createTask(CompactionTask, { reason: "threshold" }, { ownership: { kind: "conversation" }, conversationId: conversation as never, background: true }),
+				BACKGROUND_CONTEXT,
+			);
+			await pi.waitForTask(compaction, BACKGROUND_CONTEXT);
+		});
+		const carried = async () => (await api("/sessions")).body.sessions.find((chat: { continuedFrom: string | null }) => chat.continuedFrom === id)?.id;
+		await vi.waitFor(async () => expect(await carried()).toBeDefined());
+		const next = await carried();
+		faux.setResponses([toolUse("send_to_user", { message: "Still here." })]);
+		await say("I am back.", id);
+
+		const [task] = (await api("/schedules")).body.schedules.filter((scheduled: { session: string }) => scheduled.session === id);
+		faux.setResponses([fauxAssistantMessage("Hello again.")]);
+		await tickAt(Date.parse(task.next) + SECOND);
+		await vi.waitFor(async () => expect((await messagesOf(id, "user")).some((text) => text.includes("Check in."))).toBe(true));
+		expect((await messagesOf(next, "user")).some((text) => text.includes("Check in."))).toBe(false);
+		await settled(id);
+		await finish(task.id, Date.parse(task.next) + MINUTE);
+		const note = (await api("/notifications")).body.notifications.find((note: { session: string }) => note.session === id);
+		await post(`/notifications/${note.id}/read`);
+	});
 });
 
 describe("sending to the person", () => {

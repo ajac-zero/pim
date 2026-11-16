@@ -77,7 +77,7 @@ export function sharedMessages(entries: readonly EntryRecord[]): SharedMessage[]
 	const messages: SharedMessage[] = [];
 	for (const entry of shown) {
 		const message = entry.model?.[0];
-		if (entry.kind === "pi.system" || message === undefined) continue;
+		if (entry.kind === "pi.system" || entry.kind === "pi.compaction" || message === undefined) continue;
 		if (message.role === "user") {
 			const text = textOf(message.content);
 			if (isDeliveryReminder(text) || text.startsWith(INTRODUCTION) || NOTICE_PREFIXES.some(([prefix]) => prefix.test(text))) continue;

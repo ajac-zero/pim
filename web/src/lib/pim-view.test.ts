@@ -977,6 +977,58 @@ describe("entries", () => {
   });
 });
 
+describe("compaction", () => {
+  const compaction = (id: number, head: number, summary: string) =>
+    ({
+      id,
+      kind: "pi.compaction",
+      head,
+      model: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: `The conversation history before this point was compacted into the following summary:\n\n<summary>\n${summary}\n</summary>`,
+            },
+          ],
+          timestamp: 5,
+        },
+      ],
+    }) as unknown as EntryRecord;
+
+  it("shows a continuation's summary as a notice, not as something the user said", () => {
+    const state = run([
+      snapshot({ entries: [compaction(1, 1, "## Goal\nTrip")] }),
+    ]);
+    expect(describeEntries(state.view.entries)).toEqual([
+      "1 notice:compaction Compacted earlier conversation",
+    ]);
+    expect(state.view.entries[0]).toMatchObject({
+      notice: { text: "## Goal\nTrip" },
+    });
+  });
+
+  it("puts a live compaction's summary before the entries it keeps, and drops what it summarized", () => {
+    const state = run([
+      snapshot({
+        entries: [
+          user(1, "one"),
+          assistant(2, [{ type: "text", text: "two" }]),
+          user(3, "three"),
+          assistant(4, [{ type: "text", text: "four" }]),
+        ],
+      }),
+      event({ type: "message_end", entry: compaction(5, 3, "so far") }),
+    ]);
+    expect(describeEntries(state.view.entries)).toEqual([
+      "5 notice:compaction Compacted earlier conversation",
+      "3 user: three",
+      "4:0 assistant: four",
+    ]);
+  });
+});
+
 describe("errors", () => {
   const unanswered = (reason: string, detail?: string) =>
     run([

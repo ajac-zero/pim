@@ -81,7 +81,27 @@ export type TranscriptMessage = {
 	readonly timestamp: number;
 	readonly stopReason?: string;
 	readonly error?: string;
+	/** A notice that is the summary of what the chat said before it was compacted. */
+	readonly compaction?: true;
 };
+
+/** What pi puts before a compaction's summary and after it, in the message that carries it. */
+export const SUMMARY_PREFIX = "The conversation history before this point was compacted into the following summary:\n\n<summary>\n";
+export const SUMMARY_SUFFIX = "\n</summary>";
+
+/** The summary a compaction entry's message holds, without the words pi wraps it in. */
+export function compactionSummaryText(text: string): string {
+	const trimmed = text.trim();
+	if (!trimmed.startsWith(SUMMARY_PREFIX.trim()) || !trimmed.endsWith(SUMMARY_SUFFIX.trim())) return trimmed;
+	return trimmed.slice(SUMMARY_PREFIX.trim().length, trimmed.length - SUMMARY_SUFFIX.trim().length).trim();
+}
+
+/** The text of the message a compaction entry carries. */
+export function compactionText(message: Message | undefined): string {
+	if (message?.role !== "user") return "";
+	const text = typeof message.content === "string" ? message.content : message.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n");
+	return compactionSummaryText(text);
+}
 
 function projectMessage(message: Message, id: string): TranscriptMessage | undefined {
 	switch (message.role) {
@@ -157,6 +177,9 @@ export function projectEntries(entries: readonly EntryRecord[]): TranscriptMessa
 	return entries.flatMap((entry) => {
 		if (entry.kind === "pi.reset") {
 			return [{ id: String(entry.id), role: "notice" as const, parts: [{ type: "text" as const, text: "Context reset" }], timestamp: 0 }];
+		}
+		if (entry.kind === "pi.compaction") {
+			return [{ id: String(entry.id), role: "notice" as const, parts: [{ type: "text" as const, text: compactionText(entry.model?.[0]) }], timestamp: entry.model?.[0]?.timestamp ?? 0, compaction: true as const }];
 		}
 		const message = entry.model?.[0];
 		if (entry.kind === "pi.system" || message === undefined) return [];

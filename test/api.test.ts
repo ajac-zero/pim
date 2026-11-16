@@ -943,7 +943,63 @@ describe("conversation", () => {
 		await vi.waitFor(async () => {
 			const { messages } = (await api(`/sessions/${next}/messages`)).body;
 			expect(textOf(messages[0])).toContain("The user asked two questions.");
+			// Only the summary, as a notice: none of the chat's messages are replayed after it.
+			expect(messages).toHaveLength(1);
+			expect(messages[0].role).toBe("notice");
 		});
+
+		// Going on in the chat that was carried on lists it again, and nothing is forwarded from it any more.
+		faux.setResponses([toolUse("send_to_user", { message: "Three." })]);
+		await say("back here", id);
+		const resumed = (await api("/sessions")).body.sessions;
+		expect(resumed.find((session: { id: string }) => session.id === id).archived).toBe(false);
+		const forwards = await runInDurableObject(env.Pim.getByName(OWNER), async (instance: Pim) => instance.store.isContinued(instance.store.sessionOf(id)!));
+		expect(forwards).toBe(false);
+	});
+
+	it("waits for a chat's run to end before carrying it on, so nothing it said is left behind", async () => {
+		const { id } = (await post("/sessions", { title: "Busy chat" })).body;
+		faux.setResponses([toolUse("send_to_user", { message: "One." })]);
+		await say("first question", id);
+		let release!: () => void;
+		const held = new Promise<void>((resolve) => (release = resolve));
+		let started = false;
+		faux.setResponses([
+			async () => {
+				started = true;
+				await held;
+				return toolUse("send_to_user", { message: "Late reply." });
+			},
+		]);
+		await post(`/sessions/${id}/messages`, { content: "second question" });
+		await vi.waitFor(() => expect(started).toBe(true));
+		await runInDurableObject(env.Pim.getByName(OWNER), async (instance: Pim) => {
+			const pi = await instance.harness.pi();
+			const session = Number(instance.store.sessionOf(id));
+			const conversation = (await pi.conversation(session as never, BACKGROUND_CONTEXT))!;
+			// A threshold compaction, started while the chat is still at work.
+			const task = await conversation.commit(
+				(tx) => tx.createTask(CompactionTask, { reason: "threshold" }, { ownership: { kind: "conversation" }, conversationId: session as never, background: true }),
+				BACKGROUND_CONTEXT,
+			);
+			await pi.waitForTask(task, BACKGROUND_CONTEXT);
+		});
+		const continued = async () => (await api("/sessions")).body.sessions.find((session: { continuedFrom: string | null }) => session.continuedFrom === id);
+		expect(await continued()).toBeUndefined();
+		let summarized = "";
+		faux.setResponses([
+			(context) => {
+				summarized = JSON.stringify(context.messages);
+				return fauxAssistantMessage("Summary of everything.");
+			},
+		]);
+		release();
+		await vi.waitFor(async () => expect(await continued()).toBeDefined());
+		// The summary was written from the chat as it was at rest, with the reply that was still coming.
+		expect(summarized).toContain("Late reply.");
+		const { messages } = (await api(`/sessions/${(await continued()).id}/messages`)).body;
+		expect(messages).toHaveLength(1);
+		expect(textOf(messages[0])).toContain("Summary of everything.");
 	});
 
 });

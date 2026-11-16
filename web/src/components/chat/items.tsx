@@ -24,6 +24,7 @@ import {
   Folder,
   GitFork,
   Globe,
+  History,
   ImageIcon,
   Lightbulb,
   ListChecks,
@@ -510,6 +511,7 @@ const NOTICE_ICONS = {
   room: Users,
   coding: Code,
   reset: RotateCcw,
+  compaction: History,
 } as const;
 
 /**
@@ -528,6 +530,7 @@ export const EventNotice = memo(function EventNotice({
   at?: number;
   children?: ReactNode;
 }) {
+  const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const Icon = NOTICE_ICONS[notice.kind];
   if (notice.coding) {
@@ -555,7 +558,9 @@ export const EventNotice = memo(function EventNotice({
           className="inline-flex max-w-full items-center gap-1.5 px-3 py-1 text-muted-foreground text-[13px] transition-colors hover:text-foreground"
         >
           <Icon className="size-3.5 shrink-0" />
-          <span className="truncate">{notice.title}</span>
+          <span className="truncate">
+            {notice.kind === "compaction" ? t("compactedNotice") : notice.title}
+          </span>
           <ChevronRight
             className={cn(
               "size-3 shrink-0 transition-transform",
@@ -576,9 +581,15 @@ export const EventNotice = memo(function EventNotice({
             at !== undefined && notice.kind === "task" && "mt-5",
           )}
         >
-          <pre className="max-h-64 overflow-y-auto whitespace-pre-wrap font-mono text-xs leading-relaxed [overflow-wrap:anywhere]">
-            {notice.text}
-          </pre>
+          {notice.kind === "compaction" ? (
+            <div className="max-h-96 overflow-y-auto text-sm">
+              <Markdown text={notice.text} />
+            </div>
+          ) : (
+            <pre className="max-h-64 overflow-y-auto whitespace-pre-wrap font-mono text-xs leading-relaxed [overflow-wrap:anywhere]">
+              {notice.text}
+            </pre>
+          )}
           {children}
         </div>
       )}

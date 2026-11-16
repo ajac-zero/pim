@@ -158,6 +158,8 @@ export class Conversations {
 		}
 		const title = from === "user" && !this.host.visits.bySession(session) ? titleFrom(content) : undefined;
 		const named = (this.host.store.sessionInfo(session)?.title ?? null) !== null;
+		// The person going on in a chat that was carried on keeps it: nothing is forwarded from it any more.
+		if (from === "user") this.host.store.resumeContinuedSession(session);
 		this.host.store.touchSession(session, title);
 		const said = `Person: ${textOf(content).slice(0, 2_000)}`;
 		if (title !== undefined && !named) void this.host.keepAliveWhile(() => this.host.nameSession(session, said, title));
@@ -225,7 +227,10 @@ export class Conversations {
 			if (archived.has(chat)) continue;
 			archived.add(chat);
 			if (archive) this.host.store.archiveSession(chat);
-			else this.host.store.unarchiveSession(chat);
+			else {
+				this.host.store.resumeContinuedSession(chat);
+				this.host.store.unarchiveSession(chat);
+			}
 			for (const task of this.host.tasks.byRequester(chat)) if (task.chat && task.kind !== "review") pending.push(task.conversation);
 		}
 		this.host.broadcastMessage({ type: "sessions" });

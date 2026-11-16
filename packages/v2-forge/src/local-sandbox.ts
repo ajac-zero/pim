@@ -58,6 +58,11 @@ export class LocalSandboxProvider implements ComputeProvider {
 		});
 	}
 
+	/** Just enough of a Workspace for readers of staged files: absolute paths on this machine. */
+	async workspace(_handle: ComputeHandle): Promise<import("@pim/coding/workspace/types").Workspace> {
+		return { readFile: async (p: string) => new Uint8Array(readFileSync(p)), writeFile: async (p: string, d: Uint8Array) => writeFileSync(p, d) } as never;
+	}
+
 	async destroy(handle: ComputeHandle): Promise<void> {
 		rmSync(this.dir(handle.tag), { recursive: true, force: true });
 	}

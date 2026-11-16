@@ -7,8 +7,8 @@ import { type GitHost } from "../ports";
 import { type Credentials } from "../tokens";
 import { type Handler, errorResponse, json, match } from "./common";
 
-/** Where the host's smart HTTP endpoint is, and how to sign in to it for this repository. The broker never gives this to a sandbox. */
-export type GitUpstream = (repo: string, access: "read" | "write") => Promise<{ url: string; authorization: string | null }>;
+/** `repoUrl` is the repository as the thread names it (its provider instance is found from it). Where the host's smart HTTP endpoint is, and how to sign in to it for this repository. The broker never gives this to a sandbox. */
+export type GitUpstream = (repoUrl: string, access: "read" | "write") => Promise<{ url: string; authorization: string | null }>;
 
 export type GitBrokerDeps = { credentials: Credentials; store: ForgeStore; git: GitHost; upstream: GitUpstream; fetch?: typeof fetch; maxPushBytes?: number };
 
@@ -65,19 +65,20 @@ export function gitBroker(d: GitBrokerDeps): Handler {
 			const service = url.searchParams.get("service");
 			let target: string;
 			let op: "read" | "write";
+			let who: { threadId: string };
 			if (rest === "info/refs" && req.method === "GET" && (service === "git-upload-pack" || service === "git-receive-pack")) {
 				op = service === "git-receive-pack" ? "write" : "read";
-				await d.credentials.verifyGit(token, { repo, op: op === "write" ? "advertise-push" : "fetch" });
+				who = await d.credentials.verifyGit(token, { repo, op: op === "write" ? "advertise-push" : "fetch" });
 				target = `info/refs?service=${service}`;
 			} else if (rest === "git-upload-pack" && req.method === "POST") {
 				op = "read";
-				await d.credentials.verifyGit(token, { repo, op: "fetch" });
+				who = await d.credentials.verifyGit(token, { repo, op: "fetch" });
 				target = rest;
 			} else if (rest === "git-receive-pack" && req.method === "POST") {
 				op = "write";
 				return await receive(d, doFetch, req, repo, token);
 			} else return json(404, { error: "No such git route", code: "not_found" });
-			return await proxy(d, doFetch, req, repo, op, target, req.method === "POST" ? new Uint8Array(await req.arrayBuffer()) : undefined);
+			return await proxy(d, doFetch, req, (await d.store.get(who.threadId))!.repo, op, target, req.method === "POST" ? new Uint8Array(await req.arrayBuffer()) : undefined);
 		} catch (e) {
 			// A refusal from git's side reads best as a plain status: the sandbox's git prints it.
 			const r = errorResponse(e);
@@ -86,8 +87,8 @@ export function gitBroker(d: GitBrokerDeps): Handler {
 	};
 }
 
-async function proxy(d: GitBrokerDeps, doFetch: typeof fetch, req: Request, repo: string, op: "read" | "write", target: string, body: Uint8Array | undefined): Promise<Response> {
-	const up = await d.upstream(repo, op);
+async function proxy(d: GitBrokerDeps, doFetch: typeof fetch, req: Request, repoUrl: string, op: "read" | "write", target: string, body: Uint8Array | undefined): Promise<Response> {
+	const up = await d.upstream(repoUrl, op);
 	const headers = new Headers();
 	for (const h of FORWARD_REQ) if (req.headers.get(h)) headers.set(h, req.headers.get(h)!);
 	if (up.authorization) headers.set("authorization", up.authorization);
@@ -113,7 +114,7 @@ async function receive(d: GitBrokerDeps, doFetch: typeof fetch, req: Request, re
 	const thread = (await d.store.get(first.threadId))!;
 	const who = await d.credentials.verifyGit(token, { repo, op: "push", branch, defaultBranch: await d.git.defaultBranch(thread.repo) });
 	if (thread.branch && thread.branch !== branch) throw new ForgeError("push_refused", `This thread pushes only its own branch, ${thread.branch}`);
-	const res = await proxy(d, doFetch, req, repo, "write", "git-receive-pack", body);
+	const res = await proxy(d, doFetch, req, thread.repo, "write", "git-receive-pack", body);
 	if (res.status !== 200) return res;
 	const answer = new Uint8Array(await res.arrayBuffer());
 	if (new TextDecoder().decode(answer).includes(`ok ${cmd.ref}`)) {

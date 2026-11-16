@@ -18,10 +18,25 @@ Forge is Pim's coding control plane on PostgreSQL (`pim_forge`, migrations `0400
 
 Forge depends on `@pim/v2-contracts`: `codingThreadId`, the `ForgeCompletionWake` / `ForgeStallWake` envelopes (every outbox wake is parsed with them; operation ids with a colon are made safe in the wake id only), `ObjectStore` (`Objects`), the `Authorizer` (`ForgeAuthorizer`, deciding on the origin of a delegation chain, with `StandingApproval` as an auditable table), the error classes, and the shared `public.pim_schema_migrations` ledger (migrations `0400`–`0404`, band-validated). `toContractDescriptor` computes the contracts' capability shape from Forge's honest descriptor; it differs from `HARNESS_CAPABILITIES` only where `CONTRACT_DIVERGENCES` lists, and a test pins that list. Amp cost is captured as dollar deltas when the orb client's `usage` reports them; otherwise spend stays 0 and unmetered. Row-level security on `pim_current_owner_id()` is not enabled: Forge's workers step every owner's threads, so isolation is by `owner_id` in each query.
 
+## Adapters (real, not test ports)
+
+- `workspace-agent.ts`: `WorkspaceAgentComputeProvider` puts `@pim/coding`'s `WorkspaceProvider` (`ComposeWorkspaceProvider`, the sandbox-manager client whose sandboxes run workspace-agentd) behind Forge's tag contract. The tag is the thread id, which is the manager's session id.
+- `cli-port.ts`: `CliTurnPort` runs claude-code, codex and mistral-vibe turns with `@pim/coding`'s `HarnessRunner`, command builders and parsers: the person's login restored from the vault and written back, their login lock, API-key mode, the session's cost as a delta, messages and test runs recorded, a dead worker's run finished off by `recoverRun`.
+- `pi-storage.ts`, `pi-port.ts`: a real pi-durable 1.1.0 `Harness` per `pi` thread on `PgPiStorage` (an event-sourced Storage: the in-memory engine validates each commit, `forge_pi_commits` keeps it under the lease epoch, opening replays the log), with the coding tools in the sandbox and their journal in `forge_tool_journal`.
+- `amp-adapter.ts`: `AmpHttpOrbClient` with `PgAmpStore` and the person's Amp key from the vault, and an attachment fetcher that checks magic bytes. A steer is never sent twice or dropped silently: it is `sending`, then `sent` or `uncertain` (settled against Amp's own transcript, resent only by `Forge.retrySteer`). A start whose answer was lost waits in `waiting_input / orb_start_uncertain`.
+- `provider-git.ts`, `gitops.ts`: `ProviderGitHost` and `providerUpstream` over `@pim/coding`'s GitHub and Gitea providers. A merge (any thread, Amp's included) runs in a throwaway clone: fast-forward, else rebase, never force. `git-checkout.ts` makes the sandbox's checkout through the broker.
+- `vault.ts`, `gitea.ts`: `ForgeVault` (a `CodingVault` on `EnvelopeCrypto`, `PgVaultBackend` behind `CachingVaultBackend`) and the Gitea OAuth (PKCE) connection with refresh.
+
+## HTTP (`src/http/`)
+
+Portable `(req: Request) => Promise<Response | null>` handlers, composed with `compose`; the host supplies `authenticate` (Gate owns sessions and tokens). `rest.ts` (`/api/coding/threads*`, repo settings, `/api/admin/coding/pools`), `git-broker.ts` (smart HTTP in front of the git host), `gateway.ts` (`pimgw_` model gateway with budget, caps and usage charging), `vault.ts` (`/api/coding/vault/*`, `/api/coding/gitea/*`).
+
 ## Not here
 
-- Wiring to the real vendor CLIs (`TurnPort`), `workspace-agentd`/`sandbox-manager` (`ComputeProvider`), S3 (`Objects`), the GitHub App/Gitea (`GitHost`) and `AmpHttpOrbClient` is by port. Tests use a scripted turn runner, a local-process sandbox, local bare repositories and `FakeOrbClient`; nothing contacts a real service.
-- `PgPiLog` is the pi thread's fenced partition; running pi-durable on it is not done.
-- The model gateway's HTTP route, the git broker's HTTP route, vault, Gitea OAuth and the `@pim/v2-contracts` bindings are not ported.
+- The vendor CLIs' own sign-in flow (`/login`): the routes call a `LoginFlows` port a deployment wires and answer 503 without it.
+- A pool-level environment build/snapshot (`/environment/rebuild`): the scheduler deduplicates builds, but nothing builds one yet.
+- The gateway's catalog prices: it takes a `price` function and defaults to the family's dearest.
+- A production `EnvelopeCrypto`, the `@pim/v2-contracts` Gate wiring and row-level security.
+- Force-push detection in the broker: a sandbox can only update its own branch, but a non-fast-forward of it reaches the host.
 
-Tests run against a real PostgreSQL (`embedded-postgres`, started once by `test/global-setup.ts`): `pnpm --filter @pim/v2-forge test`.
+Tests run against a real PostgreSQL (`embedded-postgres`, started once by `test/global-setup.ts`): `pnpm --filter @pim/v2-forge test`. The sandbox manager is the `@pim/coding` fake manager, vendor CLIs are its fixtures, Amp and Gitea are local `http.createServer` mocks, and the git host is `git http-backend`.

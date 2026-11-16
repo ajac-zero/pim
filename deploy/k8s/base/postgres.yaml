@@ -1,0 +1,103 @@
+# PostgreSQL by CloudNativePG (https://cloudnative-pg.io, operator installed separately, 1.24 or newer): three instances, WAL and base backups to an
+# S3-compatible object store with point-in-time recovery, and a PgBouncer Pooler in transaction mode.
+#
+# DURABILITY AND AVAILABILITY: the choices below are a tradeoff, and the cluster does not pretend otherwise.
+#  - `synchronous: { method: any, number: 1, dataDurability: required }` makes every commit wait for one standby to confirm it. A primary that fails then
+#    loses no committed transaction, because a confirmed standby has it. The price: if no standby is available, writes stop (they wait) until one returns,
+#    and every commit pays a network round trip.
+#  - `dataDurability: preferred` keeps the cluster writable when no standby answers, and then a failover can lose the commits only the old primary had.
+#    That is the availability-first choice. Choose it only knowing that.
+#  - With NO `synchronous` block replication is asynchronous, and a primary failure can lose the last moments of commits. Backups and WAL archiving
+#    protect against loss of the whole cluster, with an RPO of the archive lag (about a minute), not against losing the primary.
+# This file chooses `required`: data first. Pim does not claim that failover is lossless on asynchronous replication.
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: pim-pg
+  labels: { app.kubernetes.io/name: pim-pg, pim.dev/tier: control }
+spec:
+  instances: 3
+  imageName: ghcr.io/cloudnative-pg/postgresql:17.2
+  primaryUpdateStrategy: unsupervised
+  enableSuperuserAccess: false
+  postgresql:
+    synchronous:
+      method: any
+      number: 1
+      dataDurability: required
+    parameters:
+      # Durability settings are not relaxed anywhere in Pim: CloudNativePG forces fsync and full_page_writes on, and commits are synchronous.
+      synchronous_commit: "on"
+      max_connections: "200"
+      shared_buffers: 1GB
+      wal_compression: "on"
+      track_io_timing: "on"
+      log_min_duration_statement: "500"
+  bootstrap:
+    initdb:
+      database: pim
+      owner: pim_migrator
+      secret: { name: pim-pg-roles }
+  managed:
+    # The five process roles of @pim/v2-contracts (0001_foundation.sql would create any that are missing; creating them here first keeps the logins' membership declarative),
+    # then one login per process kind that is a member of its role. No role is superuser or BYPASSRLS.
+    roles:
+      - { name: pim_gate, ensure: present, login: false, superuser: false, bypassrls: false, createdb: false, createrole: false }
+      - { name: pim_runtime, ensure: present, login: false, superuser: false, bypassrls: false, createdb: false, createrole: false }
+      - { name: pim_live, ensure: present, login: false, superuser: false, bypassrls: false, createdb: false, createrole: false }
+      - { name: pim_forge, ensure: present, login: false, superuser: false, bypassrls: false, createdb: false, createrole: false }
+      - { name: pim_maintenance, ensure: present, login: false, superuser: false, bypassrls: false, createdb: false, createrole: false }
+      - { name: pim_gate_login, ensure: present, login: true, superuser: false, bypassrls: false, createdb: false, createrole: false, connectionLimit: 60, inRoles: [pim_gate], passwordSecret: { name: pim-pg-gate-login } }
+      - { name: pim_runtime_login, ensure: present, login: true, superuser: false, bypassrls: false, createdb: false, createrole: false, connectionLimit: 80, inRoles: [pim_runtime], passwordSecret: { name: pim-pg-runtime-login } }
+      - { name: pim_live_login, ensure: present, login: true, superuser: false, bypassrls: false, createdb: false, createrole: false, connectionLimit: 40, inRoles: [pim_live], passwordSecret: { name: pim-pg-live-login } }
+      - { name: pim_forge_login, ensure: present, login: true, superuser: false, bypassrls: false, createdb: false, createrole: false, connectionLimit: 30, inRoles: [pim_forge], passwordSecret: { name: pim-pg-forge-login } }
+      - { name: pim_maintenance_login, ensure: present, login: true, superuser: false, bypassrls: false, createdb: false, createrole: false, connectionLimit: 8, inRoles: [pim_maintenance], passwordSecret: { name: pim-pg-maintenance-login } }
+  storage: { size: 100Gi }
+  walStorage: { size: 20Gi }
+  affinity:
+    enablePodAntiAffinity: true
+    podAntiAffinityType: required
+    topologyKey: kubernetes.io/hostname
+  resources:
+    requests: { cpu: "1", memory: 4Gi }
+    limits: { memory: 4Gi }
+  monitoring: { enablePodMonitor: false }
+  backup:
+    retentionPolicy: 30d
+    barmanObjectStore:
+      destinationPath: s3://pim-backups/pg
+      endpointURL: https://s3.example.test
+      s3Credentials:
+        accessKeyId: { name: pim-backup-s3, key: access-key }
+        secretAccessKey: { name: pim-backup-s3, key: secret-key }
+      wal: { compression: gzip, maxParallel: 4 }
+      data: { compression: gzip, jobs: 2 }
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: ScheduledBackup
+metadata: { name: pim-pg-daily }
+spec:
+  # CloudNativePG cron has six fields (seconds first): every day at 02:00:00.
+  schedule: "0 0 2 * * *"
+  backupOwnerReference: self
+  cluster: { name: pim-pg }
+---
+# PgBouncer in transaction mode, managed by the operator. Runners and the Gate connect here; the migrator and maintenance connect to pim-pg-rw directly.
+apiVersion: postgresql.cnpg.io/v1
+kind: Pooler
+metadata: { name: pim-pg-pooler-rw }
+spec:
+  cluster: { name: pim-pg }
+  instances: 2
+  type: rw
+  pgbouncer:
+    poolMode: transaction
+    parameters:
+      max_client_conn: "2000"
+      default_pool_size: "20"
+      max_db_connections: "160"
+      query_wait_timeout: "15"
+      server_reset_query: DISCARD ALL
+  template:
+    spec:
+      containers: []

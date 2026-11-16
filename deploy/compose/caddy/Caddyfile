@@ -1,0 +1,76 @@
+# TLS and routing for the Compose stack. Caddy gets and renews certificates itself (ports 80 and 443 reachable, DNS pointing here).
+# Routes, by what the path is for: HTTP and the API to `gate`; the realtime WebSocket to `live`; shared notes to `canvas`; the personal computer's
+# media and relay to `relay`. The last two exist only with their Compose profiles; when they are off Caddy answers 503 for those paths.
+{
+	email {$PIM_ACME_EMAIL}
+	# Caddy trusts no client's X-Forwarded-*, and sets its own.
+}
+
+(headers) {
+	# Roles answer only requests that carry the ingress secret, and read the client address from the header Caddy sets here, replacing what a client sent.
+	header_up X-Pim-Client-IP {remote_host}
+	header_up X-Pim-Ingress-Secret {env.PIM_INGRESS_SECRET}
+	header_up -CF-Connecting-IP
+	header_up -True-Client-IP
+	header_up -X-Real-IP
+	header_up -X-Client-IP
+	header_up -Forwarded
+}
+
+{$PIM_DOMAIN} {
+	encode zstd gzip
+
+	@live path /api/ws /api/ws/*
+	handle @live {
+		reverse_proxy live:8080 {
+			import headers
+			# A WebSocket is long-lived: no response timeout, and a short health interval so a replaced Live drops out quickly.
+			flush_interval -1
+			health_uri /healthz
+			health_interval 5s
+		}
+	}
+
+	@canvas path /api/notes/live /api/notes/live/*
+	handle @canvas {
+		reverse_proxy canvas:8080 {
+			import headers
+			flush_interval -1
+			health_uri /healthz
+			lb_try_duration 2s
+		}
+	}
+
+	@relay path /api/computer /api/computer/* /api/browser/live /api/browser/live/*
+	handle @relay {
+		reverse_proxy relay:8080 {
+			import headers
+			flush_interval -1
+			health_uri /healthz
+			lb_try_duration 2s
+		}
+	}
+
+	handle {
+		reverse_proxy gate:8080 {
+			import headers
+			health_uri /healthz
+			health_interval 5s
+		}
+	}
+}
+
+# Public app links and hosted-app origins go to the same Gate, which dispatches on Host.
+{$PIM_CONTENT_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy gate:8080 {
+		import headers
+	}
+}
+
+*.{$PIM_APPS_DOMAIN} {
+	# A wildcard certificate needs a DNS-challenge build of Caddy (add your DNS provider's module); ordinary deployments use one hostname per app or skip hosted apps.
+	reverse_proxy gate:8080 {
+		import headers
+	}
+}

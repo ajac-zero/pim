@@ -1,0 +1,181 @@
+{
+  "profile": "500",
+  "activeStreamingRuns": 500,
+  "tenants": 50,
+  "idleStoredChats": 10000,
+  "idleStoredEntries": 200000,
+  "workload": {
+    "ttftMs": 400,
+    "tokenIntervalMs": 25,
+    "tokensPerTurn": 120,
+    "toolLatencyMs": 300,
+    "turnPauseMs": 200,
+    "partialIntervalMs": 250,
+    "commitMode": "single",
+    "batchWindowMs": 5,
+    "poolSizePerRunner": 16,
+    "errorRate": 0.01
+  },
+  "phases": {
+    "baselineSeconds": 8,
+    "rampSeconds": 6,
+    "loadedSeconds": 25
+  },
+  "environment": {
+    "cpus": 4,
+    "cpuModel": "Intel(R) Xeon(R) Processor @ 2.60GHz",
+    "memGb": 7.8,
+    "node": "v26.13.1",
+    "postgres": "17.11",
+    "settings": {
+      "fsync": "on",
+      "full_page_writes": "on",
+      "max_connections": "600",
+      "shared_buffers": "32768",
+      "synchronous_commit": "on",
+      "wal_level": "replica"
+    },
+    "fsyncMedianMs": 0.475
+  },
+  "measuredSeconds": 25,
+  "foreground": {
+    "baseline": {
+      "sidebar": {
+        "n": 1248,
+        "p50": 2.29,
+        "p95": 3.72,
+        "p99": 7.22,
+        "max": 14.41,
+        "mean": 2.44
+      },
+      "session": {
+        "n": 1250,
+        "p50": 2.61,
+        "p95": 4.05,
+        "p99": 7.29,
+        "max": 16.12,
+        "mean": 2.75
+      },
+      "errors": 0
+    },
+    "underLoad": {
+      "sidebar": {
+        "n": 3596,
+        "p50": 2.31,
+        "p95": 9.18,
+        "p99": 16.78,
+        "max": 38.66,
+        "mean": 3.26
+      },
+      "session": {
+        "n": 3597,
+        "p50": 2.81,
+        "p95": 8.89,
+        "p99": 17.51,
+        "max": 43.43,
+        "mean": 3.71
+      },
+      "errors": 0
+    },
+    "slo": {
+      "sidebarP95Ms": 9.18,
+      "sessionP95Ms": 8.89,
+      "absoluteUnder250ms": true,
+      "sidebarRegressionPct": 146.5,
+      "sessionRegressionPct": 119.3,
+      "relativeWithin20pct": false,
+      "passesBoth": false,
+      "note": "The relative test compares warm p95 under load with warm p95 at baseline, measured in the same run."
+    }
+  },
+  "write": {
+    "commits": 63078,
+    "commitsPerSecondInWindow": 2047.6,
+    "commitsPerSecondPerActiveRun": 4.1,
+    "commitLatencyMsByRunner": [
+      {
+        "n": 15765,
+        "p50": 2.07,
+        "p95": 12.88,
+        "p99": 32.77,
+        "max": 196.65,
+        "mean": 3.98
+      },
+      {
+        "n": 15770,
+        "p50": 2.07,
+        "p95": 12.41,
+        "p99": 38.49,
+        "max": 228.88,
+        "mean": 4.14
+      },
+      {
+        "n": 15773,
+        "p50": 2.11,
+        "p95": 13.5,
+        "p99": 34.31,
+        "max": 215.9,
+        "mean": 4.1
+      },
+      {
+        "n": 15770,
+        "p50": 2.02,
+        "p95": 12.29,
+        "p99": 51.49,
+        "max": 206.74,
+        "mean": 4.24
+      }
+    ],
+    "partialsPerSecondPerRun": 3.13,
+    "fencingRejects": 0,
+    "providerErrors": 47,
+    "turnsCompleted": 3547,
+    "turnsMuchLaterThanTwiceExpected": 0,
+    "expectedTurnMs": 3900,
+    "codingFloodRows": 99280
+  },
+  "postgres": {
+    "transactionsPerSecondIncludingReads": 2539.9,
+    "rowsInsertedPerSecond": 3412.8,
+    "rowsUpdatedPerSecond": 3862.1,
+    "walFsyncsPerSecond": 1268.9,
+    "walFsyncMeanMs": 0.397,
+    "rollbacks": 0
+  },
+  "resources": {
+    "machineCpuBusyPct": 87.6,
+    "postgresRssMbMax": 5118,
+    "nodeProcessesRssMbMax": 1387,
+    "maxEventLoopDelayMs": 78.8,
+    "gatePool": {
+      "total": 4,
+      "idle": 4,
+      "waiting": 0
+    }
+  },
+  "live": {
+    "websocketsOpen": 155,
+    "websocketsRequested": 155,
+    "eventsReceived": 189273,
+    "deliveryLagMs": {
+      "n": 189273,
+      "p50": 1,
+      "p95": 5,
+      "p99": 12,
+      "max": 37,
+      "mean": 1.43
+    },
+    "coalesced": 0,
+    "overflowDisconnects": 0,
+    "liveEventLoopMaxMs": 52.1
+  },
+  "saturation": {
+    "fractionOfTurnsMuchLate": 0,
+    "commitP99Ms": 51.49,
+    "verdict": "keeping up"
+  },
+  "dataRows": {
+    "entries": "226547",
+    "flood": "99400"
+  }
+}

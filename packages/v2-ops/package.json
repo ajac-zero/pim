@@ -1,0 +1,36 @@
+{
+  "name": "@pim/v2-ops",
+  "version": "0.1.0",
+  "description": "Operations for Pim's portable persistent backend: the migration, fence and backup toolkit, observability, deployment checks and the multi-tenant benchmark harness. Depends on no other Pim package and never on the Worker.",
+  "private": true,
+  "type": "module",
+  "license": "FSL-1.1-ALv2",
+  "exports": {
+    "./*": "./src/*.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.worker.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@opentelemetry/api": "1.9.1",
+    "@opentelemetry/core": "2.12.0",
+    "@opentelemetry/otlp-transformer": "0.223.0",
+    "@opentelemetry/resources": "2.12.0",
+    "@opentelemetry/sdk-trace": "2.12.0",
+    "@pim/v2-contracts": "workspace:*",
+    "nats": "2.29.3",
+    "pg": "^8.13.0",
+    "ws": "^8.18.0",
+    "yaml": "^2.6.0"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "^1.3.7",
+    "@types/node": "^24.19.1",
+    "@types/pg": "^8.11.0",
+    "@types/ws": "^8.5.0",
+    "embedded-postgres": "17.11.0-beta.19",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.11"
+  }
+}

@@ -1,0 +1,11 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: pim
+  namespace: pim
+  labels: { app.kubernetes.io/name: pim }
+spec:
+  selector:
+    matchLabels: { app.kubernetes.io/name: pim }
+  podMetricsEndpoints:
+    - { port: metrics, interval: 15s, path: /metrics }

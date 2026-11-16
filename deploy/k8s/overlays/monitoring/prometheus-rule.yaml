@@ -1,0 +1,181 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: pim-alerts
+  labels:
+    app.kubernetes.io/name: pim
+spec:
+  groups:
+    - name: pim
+      rules:
+        - alert: PimGateLatencyHigh
+          expr: histogram_quantile(0.95, sum by (le) (rate(pim_http_request_duration_seconds_bucket{service="gate"}[5m]))) > 0.25
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: Gate p95 latency is above 250 ms
+            description: Gate p95 latency is above 250 ms
+            runbook: deploy/observability/runbooks/README.md#pimgatelatencyhigh
+        - alert: PimGateErrorRate
+          expr: sum(rate(pim_http_request_duration_seconds_count{service="gate",status_class="5xx"}[5m])) / sum(rate(pim_http_request_duration_seconds_count{service="gate"}[5m])) > 0.02
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: More than 2% of Gate requests fail with 5xx
+            description: More than 2% of Gate requests fail with 5xx
+            runbook: deploy/observability/runbooks/README.md#pimgateerrorrate
+        - alert: PimEventLoopLag
+          expr: max by (service, instance) (pim_nodejs_event_loop_delay_seconds{quantile="0.99"}) > 0.1
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: A service's event loop p99 delay is above 100 ms
+            description: A service's event loop p99 delay is above 100 ms
+            runbook: deploy/observability/runbooks/README.md#pimeventlooplag
+        - alert: PimPgPoolWaiting
+          expr: sum by (service) (pim_pg_pool_connections{state="waiting"}) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: Callers are waiting for PostgreSQL connections
+            description: Callers are waiting for PostgreSQL connections
+            runbook: deploy/observability/runbooks/README.md#pimpgpoolwaiting
+        - alert: PimPgPoolWaitSlow
+          expr: histogram_quantile(0.95, sum by (le, service) (rate(pim_pg_pool_wait_seconds_bucket[5m]))) > 0.05
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: Waiting for a PostgreSQL connection takes more than 50 ms at p95
+            description: Waiting for a PostgreSQL connection takes more than 50 ms at p95
+            runbook: deploy/observability/runbooks/README.md#pimpgpoolwaitslow
+        - alert: PimCommitSlow
+          expr: histogram_quantile(0.99, sum by (le, service) (rate(pim_pg_commit_batch_duration_seconds_bucket[5m]))) > 0.25
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: Commit batches take more than 250 ms at p99
+            description: Commit batches take more than 250 ms at p99
+            runbook: deploy/observability/runbooks/README.md#pimcommitslow
+        - alert: PimInboxStale
+          expr: max by (queue) (pim_inbox_oldest_age_seconds) > 60
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: An inbox has an item older than a minute
+            description: An inbox has an item older than a minute
+            runbook: deploy/observability/runbooks/README.md#piminboxstale
+        - alert: PimDueWorkOverdue
+          expr: max by (kind) (pim_due_work_oldest_age_seconds) > 120
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: Scheduled work is more than two minutes overdue
+            description: Scheduled work is more than two minutes overdue
+            runbook: deploy/observability/runbooks/README.md#pimdueworkoverdue
+        - alert: PimFencingRejects
+          expr: sum(rate(pim_fencing_rejects_total[10m])) > 0
+          for: 15m
+          labels:
+            severity: critical
+          annotations:
+            summary: Writes are being rejected for stale lease epochs
+            description: A steady rate of fencing rejects means two Runners believe they own the same partition, or a Runner kept running after it lost its lease.
+            runbook: deploy/observability/runbooks/README.md#pimfencingrejects
+        - alert: PimLeaseChurn
+          expr: sum(rate(pim_partition_ownership_transfers_total[15m])) * 900 > 50
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: Partition leases are moving between Runners more than 50 times in 15 minutes
+            description: Partition leases are moving between Runners more than 50 times in 15 minutes
+            runbook: deploy/observability/runbooks/README.md#pimleasechurn
+        - alert: PimProjectionLag
+          expr: max by (projection) (pim_projection_lag_seconds) > 30
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: A projection is more than 30 s behind
+            description: A projection is more than 30 s behind
+            runbook: deploy/observability/runbooks/README.md#pimprojectionlag
+        - alert: PimLiveReplayLag
+          expr: histogram_quantile(0.95, sum by (le) (rate(pim_live_cursor_replay_lag_seconds_bucket[10m]))) > 5
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: Reconnecting browsers are more than 5 s behind at p95
+            description: Reconnecting browsers are more than 5 s behind at p95
+            runbook: deploy/observability/runbooks/README.md#pimlivereplaylag
+        - alert: PimSlowClientOverflow
+          expr: sum(rate(pim_live_slow_client_overflow_total[10m])) > 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: Live is disconnecting clients whose buffers overflow
+            description: Live is disconnecting clients whose buffers overflow
+            runbook: deploy/observability/runbooks/README.md#pimslowclientoverflow
+        - alert: PimModelTimeouts
+          expr: sum by (provider) (rate(pim_model_errors_total{class="timeout_524"}[10m])) / sum by (provider) (rate(pim_model_request_duration_seconds_count[10m])) > 0.05
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: More than 5% of a provider's requests end in a 524 timeout
+            description: More than 5% of a provider's requests end in a 524 timeout
+            runbook: deploy/observability/runbooks/README.md#pimmodeltimeouts
+        - alert: PimModelRateLimited
+          expr: sum by (provider) (rate(pim_model_errors_total{class="rate_limited"}[10m])) > 0.1
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: A model provider is rate-limiting Pim
+            description: A model provider is rate-limiting Pim
+            runbook: deploy/observability/runbooks/README.md#pimmodelratelimited
+        - alert: PimSpendSpike
+          expr: sum(increase(pim_spend_usd_total[1h])) > 50
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            summary: Spend in the last hour is above 50 USD
+            description: "The threshold is a starting value: set it to a multiple of the deployment's normal hourly spend."
+            runbook: deploy/observability/runbooks/README.md#pimspendspike
+        - alert: PimTargetDown
+          expr: up{job=~"pim-.*"} == 0
+          for: 3m
+          labels:
+            severity: critical
+          annotations:
+            summary: A Pim service is not being scraped
+            description: A Pim service is not being scraped
+            runbook: deploy/observability/runbooks/README.md#pimtargetdown
+        - alert: PimPostgresReplicationLag
+          expr: max(cnpg_pg_replication_lag) > 30
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: A PostgreSQL standby is more than 30 s behind
+            description: With synchronous replication required, a lagging standby delays commits; see the runbook.
+            runbook: deploy/observability/runbooks/README.md#pimpostgresreplicationlag
+        - alert: PimPostgresBackupOld
+          expr: time() - max(cnpg_collector_last_available_backup_timestamp) > 129600
+          for: 30m
+          labels:
+            severity: critical
+          annotations:
+            summary: No successful PostgreSQL backup for 36 hours
+            description: No successful PostgreSQL backup for 36 hours
+            runbook: deploy/observability/runbooks/README.md#pimpostgresbackupold

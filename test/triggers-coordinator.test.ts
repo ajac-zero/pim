@@ -1108,8 +1108,8 @@ BEGIN SELECT RAISE(ABORT, 'a run keeps the chat it was pinned to'); END;
 		});
 	});
 
-	it("is wired only into Pim, behind its gate (test/triggers-host.test.ts), into connector watches, which are triggers, and into what a space holds; the preview, the web app and the other packages don't use it", () => {
-		const files = import.meta.glob(["../src/**/*.ts", "../preview/**/*.ts", "../pim.config.ts", "../test/worker.ts", "../web/src/**/*.{ts,tsx}", "../packages/*/src/**/*.ts", "!../packages/triggers/src/**"], { query: "?raw", import: "default", eager: true });
+	it("is wired only into Pim, behind its gate (test/triggers-host.test.ts), into connector watches, which are triggers, and into what a space holds; the preview, the web app and the other packages don't use it (the v2 operations package reads the legacy trigger tables to migrate them, and is excluded)", () => {
+		const files = import.meta.glob(["../src/**/*.ts", "../preview/**/*.ts", "../pim.config.ts", "../test/worker.ts", "../web/src/**/*.{ts,tsx}", "../packages/*/src/**/*.ts", "!../packages/triggers/src/**", "!../packages/v2-ops/src/**"], { query: "?raw", import: "default", eager: true });
 		expect(Object.keys(files)).toContain("../src/pim.ts");
 		expect(Object.keys(files)).toContain("../packages/shared/src/http.ts");
 		// A file uses triggers when it imports `@pim/triggers` (statically, for its effects, dynamically or to re-export it) or names their classes or tables; a URL such as the web app's `/triggers/<id>` is not a use.

@@ -42,7 +42,7 @@ describe("selecting which tests a change reaches", () => {
 	it("runs each package's own tests for a change in it, and every package's for one in @pim/shared, which they depend on", () => {
 		expect(selectRuns(["packages/ui-lang/src/parse.ts"])).toEqual({ full: false, root: true, web: true, daemons: false, packages: ["ui-lang"] });
 		expect(selectRuns(["packages/coding/src/pools.ts", "packages/triggers/src/time.ts"])).toMatchObject({ packages: ["coding", "triggers"] });
-		expect(selectRuns(["packages/shared/src/http.ts"])).toMatchObject({ packages: ["coding", "shared", "triggers", "ui-lang", "v2-contracts", "v2-live", "v2-runtime", "v2-server"] });
+		expect(selectRuns(["packages/shared/src/http.ts"])).toMatchObject({ packages: ["coding", "shared", "triggers", "ui-lang", "v2-contracts", "v2-forge", "v2-live", "v2-ops", "v2-runtime", "v2-server"] });
 	});
 
 	it("keeps a package's own tests out of the root project, but not the support modules the Worker's tests import", () => {

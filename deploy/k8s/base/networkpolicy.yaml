@@ -1,0 +1,80 @@
+# The control plane is closed by default: nothing reaches it unless a policy below says so. Untrusted sandbox pods live in another namespace (../sandboxes), on their
+# own node pool, and these policies are written so that the only control-plane address a sandbox can reach is the Gate's HTTP port, which is where the git broker and the
+# model gateway are. PostgreSQL, NATS, object storage and every other role are unreachable from there, enforced here (ingress) and again in the sandbox namespace (egress).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: default-deny-ingress }
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: allow-ingress-controller-to-edge-roles }
+spec:
+  podSelector:
+    matchExpressions:
+      - { key: app.kubernetes.io/component, operator: In, values: [gate, live, canvas, relay] }
+  policyTypes: [Ingress]
+  ingress:
+    - from: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: ingress-nginx } } }]
+      ports: [{ port: 8080 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: allow-sandboxes-to-gate }
+spec:
+  # Coding workspaces reach the git broker (/api/coding/git) and the model gateway (/api/coding/gateway), both served by the Gate: nothing else.
+  podSelector:
+    matchLabels: { app.kubernetes.io/component: gate }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: pim-sandboxes } }
+          podSelector: { matchLabels: { pim.dev/tier: sandbox } }
+      ports: [{ port: 8080 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: allow-control-to-postgres }
+spec:
+  podSelector:
+    matchLabels: { cnpg.io/cluster: pim-pg }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: { matchLabels: { pim.dev/tier: control } }
+        - podSelector: { matchLabels: { cnpg.io/poolerName: pim-pg-pooler-rw } }
+      ports: [{ port: 5432 }, { port: 8000 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: allow-control-to-pooler }
+spec:
+  podSelector:
+    matchLabels: { cnpg.io/poolerName: pim-pg-pooler-rw }
+  policyTypes: [Ingress]
+  ingress:
+    - from: [{ podSelector: { matchLabels: { pim.dev/tier: control } } }]
+      ports: [{ port: 5432 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: allow-control-to-nats }
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: pim-nats }
+  policyTypes: [Ingress]
+  ingress:
+    - from: [{ podSelector: { matchLabels: { pim.dev/tier: control } } }]
+      ports: [{ port: 4222 }, { port: 6222 }, { port: 8222 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: allow-metrics-scrape }
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    - from: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: monitoring } } }]
+      ports: [{ port: 9464 }, { port: 8222 }, { port: 9187 }]

@@ -1,0 +1,12 @@
+# Prometheus Operator objects, the alert rules and the Grafana dashboard (picked up by Grafana's sidecar through the grafana_dashboard label).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: pim
+resources:
+  - ../../base
+  - servicemonitor.yaml
+  - prometheus-rule.yaml
+configMapGenerator:
+  - name: pim-dashboard
+    files: [pim-operations.json=../../../observability/grafana/dashboards/pim-operations.json]
+    options: { labels: { grafana_dashboard: "1" }, disableNameSuffixHash: true }

@@ -1,0 +1,13 @@
+# Plain deployment settings. Nothing secret belongs here: credentials are Secrets (pim-db, pim-objects, pim-ingress, pim-kek), see secrets.example.yaml.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pim-config
+data:
+  PIM_PUBLIC_URL: https://pim.example.test
+  PIM_CONTENT_ORIGIN: https://content.pim.example.test
+  PIM_APPS_ORIGIN: https://apps.pim.example.test
+  PIM_NATS_URL: nats://pim-nats:4222
+  PIM_KEK_CURRENT: k1
+  PIM_METRICS_PORT: "9464"
+  OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT: "false"

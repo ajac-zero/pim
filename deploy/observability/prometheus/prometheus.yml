@@ -1,0 +1,19 @@
+# Scrape configuration for the Compose stack (profile `observability`). Roles are found by their service name, which resolves to every replica, so `--scale runner=N` needs no change here.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+rule_files: [/etc/prometheus/pim-alerts.rules.yml]
+scrape_configs:
+  - job_name: pim-gate
+    dns_sd_configs: [{ names: [gate], type: A, port: 9464 }]
+  - job_name: pim-live
+    dns_sd_configs: [{ names: [live], type: A, port: 9464 }]
+  - job_name: pim-runner
+    dns_sd_configs: [{ names: [runner], type: A, port: 9464 }]
+  - job_name: pim-forge
+    dns_sd_configs: [{ names: [forge], type: A, port: 9464 }]
+  - job_name: pim-maintenance
+    dns_sd_configs: [{ names: [maintenance], type: A, port: 9464 }]
+  - job_name: pim-nats
+    metrics_path: /metrics
+    static_configs: [{ targets: ["nats:7777"] }]

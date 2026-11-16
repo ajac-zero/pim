@@ -1,0 +1,93 @@
+# Untrusted coding workspaces. They run in their own namespace, with a sandboxed runtime (gVisor here; Kata Containers or an agent-sandbox runtime class work the same way),
+# on a node pool no control-plane pod can land on. A sandbox may reach the Gate (git broker, model gateway) and the public internet, and nothing inside the cluster.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: pim-sandboxes
+  labels:
+    pim.dev/zone: sandbox
+    pod-security.kubernetes.io/enforce: baseline
+---
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata: { name: gvisor }
+handler: runsc
+scheduling:
+  nodeSelector: { pim.dev/pool: sandbox }
+  tolerations:
+    - { key: pim.dev/untrusted, operator: Equal, value: "true", effect: NoSchedule }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: default-deny-all, namespace: pim-sandboxes }
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: sandbox-egress, namespace: pim-sandboxes }
+spec:
+  podSelector:
+    matchLabels: { pim.dev/tier: sandbox }
+  policyTypes: [Egress]
+  egress:
+    # DNS.
+    - to:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } }
+          podSelector: { matchLabels: { k8s-app: kube-dns } }
+      ports: [{ port: 53, protocol: UDP }, { port: 53, protocol: TCP }]
+    # The Gate, for the git broker and the model gateway.
+    - to:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: pim } }
+          podSelector: { matchLabels: { app.kubernetes.io/component: gate } }
+      ports: [{ port: 8080 }]
+    # The public internet, never a private range, a link-local address (cloud metadata) or the cluster's own networks.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 100.64.0.0/10, 127.0.0.0/8]
+      ports: [{ port: 443 }, { port: 80 }, { port: 22 }]
+---
+apiVersion: v1
+kind: LimitRange
+metadata: { name: sandbox-limits, namespace: pim-sandboxes }
+spec:
+  limits:
+    - type: Container
+      default: { cpu: "2", memory: 4Gi }
+      defaultRequest: { cpu: 250m, memory: 512Mi }
+      max: { cpu: "4", memory: 8Gi }
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata: { name: sandbox-quota, namespace: pim-sandboxes }
+spec:
+  hard: { pods: "200", requests.cpu: "100", requests.memory: 200Gi }
+---
+# The pod shape the sandbox manager creates for each workspace (the manager fills in the image and command): a sandboxed runtime, the untrusted node pool, no service
+# account token, no privileges. Kept here as a Deployment at zero replicas so that `kubeconform` and policy engines check the shape; it never runs by itself.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sandbox-template
+  namespace: pim-sandboxes
+  labels: { pim.dev/tier: sandbox }
+spec:
+  replicas: 0
+  selector: { matchLabels: { pim.dev/tier: sandbox, app.kubernetes.io/name: sandbox-template } }
+  template:
+    metadata: { labels: { pim.dev/tier: sandbox, app.kubernetes.io/name: sandbox-template } }
+    spec:
+      runtimeClassName: gvisor
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      hostNetwork: false
+      hostPID: false
+      tolerations: [{ key: pim.dev/untrusted, operator: Equal, value: "true", effect: NoSchedule }]
+      nodeSelector: { pim.dev/pool: sandbox }
+      securityContext: { runAsNonRoot: true, runAsUser: 10001, runAsGroup: 10001, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: workspace
+          image: registry.example.test/pim-workspace:2.0.0
+          securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }

@@ -1,41 +1,59 @@
 /**
- * The client of Pim's Live service: a cursor per followed stream over one WebSocket, with HTTP snapshots
- * underneath, so what is on screen never waits on the socket.
+ * The client of Pim's Live service, speaking the canonical frames and cursors of `@pim/v2-contracts`
+ * (`live-seam`): a cursor per followed topic over one WebSocket, with HTTP snapshots underneath, so what is on
+ * screen never waits on the socket.
  *
- * - Only the streams the person is looking at are followed: the open chat or coding thread and the compact
- *   sidebar. Never every running agent.
- * - Every stream loads from a bounded HTTP snapshot first, whether or not the socket is up; its
- *   `liveCursor` is where the subscription starts, so the two never overlap or leave a hole.
- * - A frame is applied only if it is the next seq of its stream, or follows seqs the server said it skipped
- *   (`coalesced`: replaceable progress for a slow reader). Anything else is a duplicate (dropped) or a gap
- *   (the stream resubscribes from its cursor).
- * - `snapshot_required` means the cursor can't be replayed: the snapshot is fetched again.
+ * - Only the topics the person is looking at are followed: the open chat or coding thread and the compact
+ *   sidebar. Never every running agent. The protocol has no unsubscribe, so a topic let go is let go by
+ *   connecting again with the rest: Live keeps no state a reconnect would lose.
+ * - Every topic loads from a bounded HTTP snapshot first, whether or not the socket is up; its `liveCursor`
+ *   (`partition:projectionVersion:commitSeq`, or null when the topic had no events) is where the subscription
+ *   starts, so the two never overlap or leave a hole.
+ * - A cursor names a commit, not a position in the topic, so holes are Live's to detect: it replays what is
+ *   missing from its log, or says `snapshot_required` (`gap`, `projection_version`, `expired`), and the
+ *   snapshot is fetched again. The client drops what it has already applied, per partition.
+ * - `coalesced_progress` is the latest of replaceable progress a slow reader skipped over (`skipped` of them).
  * - 4003, or a snapshot refused with 401, 403 or 410, ends the session's access: nothing reconnects and
  *   `onUnauthorized` wipes what this device kept.
- * - A socket that drops reconnects with backoff; the state is "syncing", which the app shows as a small
- *   indicator without blocking navigation or reads.
+ * - A socket that drops reconnects with backoff, resuming from each topic's last cursor; the state is
+ *   "syncing", which the app shows as a small indicator without blocking navigation or reads.
  */
 
 export type LiveStatus = "live" | "syncing" | "offline";
 
 type Frame =
-  | { type: "hello" }
-  | { type: "subscribed"; stream: string; cursor: number; head: number }
+  | { type: "ack"; cursor: string }
+  | { type: "cursor_replay"; topic: string; from: string; to: string }
   | {
       type: "event";
-      stream: string;
-      seq: number;
+      topic: string;
+      cursor: string;
       kind: string;
-      replaceableKey: string | null;
-      payload: unknown;
-      coalesced?: true;
+      data: unknown;
     }
-  | { type: "snapshot_required"; stream: string; head: number; reason: string }
-  | { type: "unsubscribed"; stream: string }
-  | { type: "pong" }
-  | { type: "error"; stream?: string; message: string };
+  | {
+      type: "coalesced_progress";
+      topic: string;
+      cursor: string;
+      skipped: number;
+      data: unknown;
+    }
+  | {
+      type: "snapshot_required";
+      topic: string;
+      reason: "gap" | "projection_version" | "expired";
+    }
+  | { type: "error"; code: string; message: string };
 
-export type LiveEventFrame = Extract<Frame, { type: "event" }>;
+/** What the page is told of each frame that carries state. */
+export type LiveUpdate = {
+  topic: string;
+  cursor: string;
+  /** `progress` for a coalesced update, standing for `skipped` before it. */
+  kind: string;
+  data: unknown;
+  skipped?: number;
+};
 
 /** The part of a WebSocket the client uses, so tests can stand in for it. */
 export interface LiveSocket {
@@ -46,8 +64,8 @@ export interface LiveSocket {
   onclose: ((event: { code: number }) => void) | null;
 }
 
-/** What loading a stream's first page told: where to subscribe from. A refused read has a status. */
-export type Snapshot = { liveCursor: number };
+/** What loading a topic's first page told: where to subscribe from (null: from the start). A refused read has a status. */
+export type Snapshot = { liveCursor: string | null };
 
 export class SnapshotRefused extends Error {
   constructor(readonly status: number) {
@@ -57,13 +75,12 @@ export class SnapshotRefused extends Error {
 
 export type LiveClientOptions = {
   openSocket: () => LiveSocket;
-  /** Fetches and shows a stream's bounded page over HTTP; resolves with its cursor. */
-  loadSnapshot: (stream: string) => Promise<Snapshot>;
-  onEvent: (event: LiveEventFrame) => void;
+  /** Fetches and shows a topic's bounded page over HTTP; resolves with its cursor. */
+  loadSnapshot: (topic: string) => Promise<Snapshot>;
+  onUpdate: (update: LiveUpdate) => void;
   onStatus?: (status: LiveStatus) => void;
   /** Access ended: wipe this device's kept views and show the sign-in screen. */
   onUnauthorized: () => void;
-  now?: () => number;
   schedule?: (fn: () => void, ms: number) => unknown;
   cancel?: (handle: unknown) => void;
   random?: () => number;
@@ -72,23 +89,36 @@ export type LiveClientOptions = {
 const MAX_BACKOFF_MS = 15_000;
 const WIPE_STATUSES = new Set([401, 403, 410]);
 
-type Stream = {
-  /** The last seq applied; null until its snapshot has been taken. */
-  cursor: number | null;
+type Topic = {
+  /** Where a subscription starts: the last cursor applied, else the snapshot's. Undefined until the snapshot is taken. */
+  cursor: string | null | undefined;
+  /** The newest commit applied, per partition: a frame at or below it is a duplicate. */
+  seen: Map<string, bigint>;
   /** Counts snapshots asked for, so an answer to an older ask is ignored. */
   ask: number;
   subscribed: boolean;
 };
 
+function commitOf(
+  cursor: string,
+): { partition: string; commit: bigint } | null {
+  const match = /^([^:]+):\d+:(\d+)$/.exec(cursor);
+  return match
+    ? { partition: match[1] as string, commit: BigInt(match[2] as string) }
+    : null;
+}
+
 export class LiveClient {
   readonly #options: LiveClientOptions;
-  readonly #streams = new Map<string, Stream>();
+  readonly #topics = new Map<string, Topic>();
   #socket: LiveSocket | null = null;
   #open = false;
   #attempt = 0;
   #retry: unknown = null;
   #status: LiveStatus = "syncing";
   #ended = false;
+  #acks = new Set<string>();
+  #ackQueued = false;
 
   constructor(options: LiveClientOptions) {
     this.#options = options;
@@ -98,26 +128,36 @@ export class LiveClient {
     return this.#status;
   }
 
-  /** The followed streams' cursors, for tests and diagnostics. */
-  cursor(stream: string): number | null {
-    return this.#streams.get(stream)?.cursor ?? null;
+  /** The cursor a topic would resume from, for tests and diagnostics. */
+  cursor(topic: string): string | null | undefined {
+    return this.#topics.get(topic)?.cursor;
   }
 
-  /** Follows exactly these streams: the ones that are on screen. Others are let go. */
-  follow(streams: readonly string[]): void {
+  /** Follows exactly these topics: the ones that are on screen. Others are let go. */
+  follow(topics: readonly string[]): void {
     if (this.#ended) return;
-    const wanted = new Set(streams);
-    for (const [name] of this.#streams) {
+    const wanted = new Set(topics);
+    let dropped = false;
+    for (const name of [...this.#topics.keys()]) {
       if (wanted.has(name)) continue;
-      this.#streams.delete(name);
-      if (this.#open) this.#send({ type: "unsubscribe", stream: name });
+      this.#topics.delete(name);
+      dropped = true;
     }
     for (const name of wanted) {
-      if (this.#streams.has(name)) continue;
-      this.#streams.set(name, { cursor: null, ask: 0, subscribed: false });
+      if (this.#topics.has(name)) continue;
+      this.#topics.set(name, {
+        cursor: undefined,
+        seen: new Map(),
+        ask: 0,
+        subscribed: false,
+      });
       void this.#snapshot(name);
     }
-    if (wanted.size > 0 && !this.#socket && !this.#retry) this.#connect();
+    // There is no unsubscribe: connecting again with what is left is how a topic is let go.
+    if (dropped && this.#socket) this.#hangUp();
+    if (wanted.size > 0 && !this.#socket && this.#retry === null) {
+      this.#connect();
+    }
     if (wanted.size === 0) this.#hangUp();
     this.#refresh();
   }
@@ -125,40 +165,48 @@ export class LiveClient {
   /** Signing out, or access ended: nothing more is read or opened. */
   stop(): void {
     this.#ended = true;
-    this.#streams.clear();
+    this.#topics.clear();
     this.#hangUp();
     this.#setStatus("offline");
   }
 
   async #snapshot(name: string): Promise<void> {
-    const stream = this.#streams.get(name);
-    if (!stream) return;
-    const ask = ++stream.ask;
-    stream.subscribed = false;
-    stream.cursor = null;
+    const topic = this.#topics.get(name);
+    if (!topic) return;
+    const ask = ++topic.ask;
+    topic.subscribed = false;
+    topic.cursor = undefined;
+    topic.seen.clear();
     let snapshot: Snapshot;
     try {
       snapshot = await this.#options.loadSnapshot(name);
     } catch (error) {
-      if (error instanceof SnapshotRefused && WIPE_STATUSES.has(error.status))
+      if (error instanceof SnapshotRefused && WIPE_STATUSES.has(error.status)) {
         return this.#unauthorized();
+      }
       // Not loaded: try again soon. The page keeps what it showed.
       this.#later(() => {
-        if (this.#streams.get(name)?.ask === ask) void this.#snapshot(name);
+        if (this.#topics.get(name)?.ask === ask) void this.#snapshot(name);
       }, this.#backoff());
       return;
     }
-    if (this.#streams.get(name) !== stream || stream.ask !== ask) return;
-    stream.cursor = snapshot.liveCursor;
+    if (this.#topics.get(name) !== topic || topic.ask !== ask) return;
+    topic.cursor = snapshot.liveCursor;
+    const at = snapshot.liveCursor ? commitOf(snapshot.liveCursor) : null;
+    if (at) topic.seen.set(at.partition, at.commit);
     this.#subscribe(name);
     this.#refresh();
   }
 
   #subscribe(name: string): void {
-    const stream = this.#streams.get(name);
-    if (!stream || !this.#open || stream.cursor === null) return;
-    stream.subscribed = true;
-    this.#send({ type: "subscribe", stream: name, cursor: stream.cursor });
+    const topic = this.#topics.get(name);
+    if (!topic || !this.#open || topic.cursor === undefined) return;
+    topic.subscribed = true;
+    this.#send({
+      type: "subscribe",
+      topic: name,
+      ...(topic.cursor ? { cursor: topic.cursor } : {}),
+    });
   }
 
   #connect(): void {
@@ -170,7 +218,7 @@ export class LiveClient {
       if (this.#socket !== socket) return;
       this.#open = true;
       this.#attempt = 0;
-      for (const name of this.#streams.keys()) this.#subscribe(name);
+      for (const name of this.#topics.keys()) this.#subscribe(name);
       this.#refresh();
     };
     socket.onmessage = (event) => {
@@ -187,39 +235,64 @@ export class LiveClient {
       if (this.#socket !== socket) return;
       this.#socket = null;
       this.#open = false;
-      for (const stream of this.#streams.values()) stream.subscribed = false;
+      for (const topic of this.#topics.values()) topic.subscribed = false;
       if (event.code === 4003) return this.#unauthorized();
       this.#refresh();
-      if (this.#streams.size > 0) this.#reconnectLater();
+      if (this.#topics.size > 0) this.#reconnectLater();
     };
   }
 
   #receive(frame: Frame): void {
     switch (frame.type) {
-      case "event": {
-        const stream = this.#streams.get(frame.stream);
-        if (!stream || stream.cursor === null || !stream.subscribed) return;
+      case "event":
+      case "coalesced_progress": {
+        const topic = this.#topics.get(frame.topic);
+        if (!topic || !topic.subscribed) return;
+        const at = commitOf(frame.cursor);
+        if (!at) return;
         // Delivered already, by a replay or an earlier frame.
-        if (frame.seq <= stream.cursor) return;
-        // A skip the server did not announce is a hole: ask again from the cursor.
-        if (frame.seq !== stream.cursor + 1 && !frame.coalesced) {
-          this.#subscribe(frame.stream);
-          return;
-        }
-        stream.cursor = frame.seq;
-        this.#options.onEvent(frame);
+        if ((topic.seen.get(at.partition) ?? -1n) >= at.commit) return;
+        topic.seen.set(at.partition, at.commit);
+        topic.cursor = frame.cursor;
+        this.#options.onUpdate(
+          frame.type === "event"
+            ? {
+                topic: frame.topic,
+                cursor: frame.cursor,
+                kind: frame.kind,
+                data: frame.data,
+              }
+            : {
+                topic: frame.topic,
+                cursor: frame.cursor,
+                kind: "progress",
+                data: frame.data,
+                skipped: frame.skipped,
+              },
+        );
+        this.#acks.add(frame.cursor);
+        this.#queueAck();
         return;
       }
       case "snapshot_required":
-        if (this.#streams.has(frame.stream)) void this.#snapshot(frame.stream);
-        this.#refresh();
-        return;
-      case "subscribed":
-      case "unsubscribed":
+        if (this.#topics.has(frame.topic)) void this.#snapshot(frame.topic);
         this.#refresh();
         return;
       default:
+        this.#refresh();
     }
+  }
+
+  /** Tells Live how far this client has applied, once per turn however many frames arrived. */
+  #queueAck(): void {
+    if (this.#ackQueued) return;
+    this.#ackQueued = true;
+    queueMicrotask(() => {
+      this.#ackQueued = false;
+      const last = [...this.#acks].at(-1);
+      this.#acks.clear();
+      if (last) this.#send({ type: "ack", cursor: last });
+    });
   }
 
   #unauthorized(): void {
@@ -237,14 +310,16 @@ export class LiveClient {
   }
 
   #hangUp(): void {
-    if (this.#retry !== null)
+    if (this.#retry !== null) {
       (this.#options.cancel ?? ((handle) => clearTimeout(handle as number)))(
         this.#retry,
       );
+    }
     this.#retry = null;
     const socket = this.#socket;
     this.#socket = null;
     this.#open = false;
+    for (const topic of this.#topics.values()) topic.subscribed = false;
     if (socket) {
       socket.onclose = null;
       socket.close(1000);
@@ -268,12 +343,12 @@ export class LiveClient {
     return Math.round(ms / 2 + (random() * ms) / 2);
   }
 
-  /** Live when the socket is up and every followed stream is subscribed from a snapshot; offline once access ended; otherwise syncing. */
+  /** Live when the socket is up and every followed topic is subscribed from a snapshot; offline once access ended; otherwise syncing. */
   #refresh(): void {
     if (this.#ended) return;
     const synced =
       this.#open &&
-      [...this.#streams.values()].every((stream) => stream.subscribed);
+      [...this.#topics.values()].every((topic) => topic.subscribed);
     this.#setStatus(synced ? "live" : "syncing");
   }
 

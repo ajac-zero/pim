@@ -1,7 +1,7 @@
 /**
  * The Live service's network edge: an HTTP server with the WebSocket endpoint (`/live`) and the bounded
- * snapshot reads (`/snapshot/...`), both authenticated by the shared Authorizer. It holds no state that a
- * restart or another replica could not rebuild.
+ * snapshot reads (`/snapshot/...`), both authenticated by `LiveIdentity`. It holds no state that a restart or
+ * another replica could not rebuild.
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -9,7 +9,6 @@ import type { Pool } from "pg";
 import { WebSocket, WebSocketServer } from "ws";
 import { CLOSE_UNAUTHORIZED } from "../contracts.ts";
 import { sidebarPage, transcriptPage } from "../projections/snapshots.ts";
-import type { Authorizer, Identity } from "./authorizer.ts";
 import type { LiveConnection, LiveHub, Transport } from "./hub.ts";
 
 export type LiveServer = { server: Server; port: number; close(): Promise<void> };
@@ -26,7 +25,7 @@ function json(response: ServerResponse, status: number, body: unknown): void {
 	response.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(body));
 }
 
-export async function startLiveServer(hub: LiveHub, authorizer: Authorizer, pool: Pool, options: { port?: number; host?: string } = {}): Promise<LiveServer> {
+export async function startLiveServer(hub: LiveHub, pool: Pool, options: { port?: number; host?: string } = {}): Promise<LiveServer> {
 	const sockets = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
 	const server = createServer(async (request, response) => {
 		try {
@@ -38,15 +37,16 @@ export async function startLiveServer(hub: LiveHub, authorizer: Authorizer, pool
 
 	async function snapshot(request: IncomingMessage, response: ServerResponse): Promise<void> {
 		const url = new URL(request.url ?? "/", "http://live");
-		const identity = await authorizer.authenticate(request);
-		if (!identity) return json(response, 401, { error: "Sign in" });
+		const principal = await hub.identity.authenticate(request);
+		if (!principal || !(await hub.identity.stillValid(principal))) return json(response, 401, { error: "Sign in" });
+		const ownerId = principal.ownerId;
 		const limit = url.searchParams.has("limit") ? Number(url.searchParams.get("limit")) : undefined;
 		const parts = url.pathname.split("/").filter(Boolean);
 		if (request.method === "GET" && parts[0] === "snapshot" && parts[1] === "sidebar") {
-			return json(response, 200, await sidebarPage(pool, identity.tenantId, { after: url.searchParams.get("after"), ...(limit === undefined ? {} : { limit }) }));
+			return json(response, 200, await sidebarPage(pool, ownerId, { after: url.searchParams.get("after"), ...(limit === undefined ? {} : { limit }) }));
 		}
 		if (request.method === "GET" && parts[0] === "snapshot" && (parts[1] === "chat" || parts[1] === "coding") && parts[2]) {
-			return json(response, 200, await transcriptPage(pool, identity.tenantId, decodeURIComponent(parts[2]), { kind: parts[1], before: url.searchParams.get("before"), ...(limit === undefined ? {} : { limit }) }));
+			return json(response, 200, await transcriptPage(pool, ownerId, decodeURIComponent(parts[2]), { kind: parts[1], before: url.searchParams.get("before"), ...(limit === undefined ? {} : { limit }) }));
 		}
 		json(response, 404, { error: "Not found" });
 	}
@@ -57,9 +57,9 @@ export async function startLiveServer(hub: LiveHub, authorizer: Authorizer, pool
 			return;
 		}
 		// The upgrade completes first, so an unauthenticated client gets the close code the app acts on.
-		const identity: Promise<Identity | null> = authorizer.authenticate(request).catch(() => null);
+		const principal = hub.identity.authenticate(request).catch(() => null);
 		sockets.handleUpgrade(request, socket, head, (ws) => {
-			// Frames that arrive while the identity is being looked up wait for it, in order.
+			// Frames that arrive while the principal is being looked up wait for it, in order.
 			let connection: LiveConnection | null = null;
 			const early: string[] = [];
 			ws.on("message", (data, isBinary) => {
@@ -69,7 +69,7 @@ export async function startLiveServer(hub: LiveHub, authorizer: Authorizer, pool
 			});
 			ws.on("close", () => connection?.close(1000, "closed"));
 			ws.on("error", () => connection?.close(1011, "error"));
-			void identity.then(async (who) => {
+			void principal.then(async (who) => {
 				if (!who) return ws.close(CLOSE_UNAUTHORIZED, "unauthorized");
 				if (ws.readyState !== WebSocket.OPEN) return;
 				connection = hub.connect(who, transportOf(ws));

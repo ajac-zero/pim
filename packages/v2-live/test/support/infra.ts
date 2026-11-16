@@ -1,9 +1,11 @@
 /** Real PostgreSQL and NATS for the tests, each started on a private port and removed afterwards; skipped when the binaries are absent. */
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import pg from "pg";
 import { migrate } from "../../src/migrate.ts";
 
@@ -37,30 +39,41 @@ function freePort(): Promise<number> {
 	});
 }
 
-export type Database = { pool: pg.Pool; url: string; stop(): Promise<void> };
+/** `admin` is the superuser that sets the fixtures up; `pool` connects as a member of `pim_live`, so row-level security applies to it as it would in production. */
+export type Database = { pool: pg.Pool; admin: pg.Pool; stop(): Promise<void> };
 
-/** A fresh cluster with this package's migrations and the fixtures of what it reads: the runtime outbox and the identity tables. */
+const FOUNDATION = fileURLToPath(new URL("../../../v2-contracts/migrations/0001_foundation.sql", import.meta.url));
+
+/** A fresh cluster with the canonical foundation migration, this package's migrations and the fixtures of what it reads: the runtime outbox and a stand-in for Gate's sessions. */
 export async function startPostgres(): Promise<Database> {
 	if (!POSTGRES) throw new Error("PostgreSQL is not installed");
 	const dir = mkdtempSync(join(tmpdir(), "pim-live-pg-"));
 	const port = await freePort();
 	execFileSync(join(POSTGRES, "initdb"), ["-D", join(dir, "data"), "-A", "trust", "-U", "postgres", "--no-sync"], { stdio: "ignore" });
 	execFileSync(join(POSTGRES, "pg_ctl"), ["-D", join(dir, "data"), "-o", `-p ${port} -k ${dir} -c listen_addresses=127.0.0.1 -c fsync=off -c max_connections=200`, "-w", "-l", join(dir, "log"), "start"], { stdio: "ignore" });
-	const url = `postgres://postgres@127.0.0.1:${port}/postgres`;
-	const pool = new pg.Pool({ connectionString: url, max: 40 });
-	await migrate(pool);
-	await pool.query(`
-		CREATE SCHEMA pim_runtime; CREATE SCHEMA pim_identity;
-		CREATE TABLE pim_runtime.runtime_outbox (partition_id text NOT NULL, commit_seq bigint NOT NULL, tenant_id text NOT NULL, payload jsonb NOT NULL, created_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (partition_id, commit_seq));
+	const admin = new pg.Pool({ connectionString: `postgres://postgres@127.0.0.1:${port}/postgres`, max: 10 });
+	const foundation = readFileSync(FOUNDATION, "utf8");
+	await admin.query(foundation);
+	await admin.query("INSERT INTO public.pim_schema_migrations (number, name, checksum) VALUES (1, 'foundation', $1)", [createHash("sha256").update(foundation).digest("hex")]);
+	await migrate(admin);
+	await admin.query(`
+		CREATE TABLE pim_runtime.runtime_outbox (
+			partition_id uuid NOT NULL, commit_seq bigint NOT NULL, projection_version integer NOT NULL, owner_id text NOT NULL, public_chat_id uuid NOT NULL,
+			conversation_id integer NOT NULL, event_kind text NOT NULL, payload jsonb NOT NULL, committed_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (partition_id, commit_seq));
 		CREATE TABLE pim_runtime.effects_ledger (id bigserial PRIMARY KEY, what text NOT NULL);
-		CREATE TABLE pim_identity.accounts (tenant_id text PRIMARY KEY, status text NOT NULL DEFAULT 'active');
-		CREATE TABLE pim_identity.sessions (session_id text PRIMARY KEY, tenant_id text NOT NULL, user_id text NOT NULL, revoked_at timestamptz, expires_at timestamptz);
+		GRANT SELECT ON pim_runtime.runtime_outbox TO pim_live;
+		CREATE SCHEMA test_identity;
+		CREATE TABLE test_identity.accounts (owner_id text PRIMARY KEY, status text NOT NULL DEFAULT 'active');
+		CREATE TABLE test_identity.sessions (session_id text PRIMARY KEY, owner_id text NOT NULL, revoked_at timestamptz);
+		CREATE ROLE live_app LOGIN IN ROLE pim_live;
 	`);
+	const pool = new pg.Pool({ connectionString: `postgres://live_app@127.0.0.1:${port}/postgres`, max: 40 });
 	return {
 		pool,
-		url,
+		admin,
 		async stop() {
 			await pool.end().catch(() => {});
+			await admin.end().catch(() => {});
 			try {
 				execFileSync(join(POSTGRES, "pg_ctl"), ["-D", join(dir, "data"), "-m", "immediate", "-w", "stop"], { stdio: "ignore" });
 			} finally {

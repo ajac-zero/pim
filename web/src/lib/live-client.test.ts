@@ -1,11 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   LiveClient,
-  type LiveEventFrame,
   type LiveSocket,
   type LiveStatus,
+  type LiveUpdate,
   SnapshotRefused,
 } from "~/lib/live-client";
+
+const P = "11111111-1111-4111-8111-111111111111";
+const Q = "22222222-2222-4222-8222-222222222222";
+const at = (commit: number, partition = P) => `${partition}:1:${commit}`;
 
 class FakeSocket implements LiveSocket {
   sent: Record<string, unknown>[] = [];
@@ -28,15 +32,21 @@ class FakeSocket implements LiveSocket {
   drop(code = 1006) {
     this.onclose?.({ code });
   }
+  /** What was sent that isn't an ack. */
+  get subs() {
+    return this.sent.filter((frame) => frame.type !== "ack");
+  }
 }
 
 function setup(
-  snapshot: (stream: string) => Promise<{ liveCursor: number }> = async () => ({
-    liveCursor: 10,
+  snapshot: (
+    topic: string,
+  ) => Promise<{ liveCursor: string | null }> = async () => ({
+    liveCursor: at(10),
   }),
 ) {
   const sockets: FakeSocket[] = [];
-  const events: LiveEventFrame[] = [];
+  const updates: LiveUpdate[] = [];
   const statuses: LiveStatus[] = [];
   const timers: { fn: () => void; ms: number }[] = [];
   const unauthorized = vi.fn();
@@ -47,31 +57,30 @@ function setup(
       sockets.push(socket);
       return socket;
     },
-    loadSnapshot: (stream) => {
-      loads.push(stream);
-      return snapshot(stream);
+    loadSnapshot: (topic) => {
+      loads.push(topic);
+      return snapshot(topic);
     },
-    onEvent: (event) => events.push(event),
+    onUpdate: (update) => updates.push(update),
     onStatus: (status) => statuses.push(status),
     onUnauthorized: unauthorized,
     schedule: (fn, ms) => timers.push({ fn, ms }),
     cancel: () => {},
     random: () => 0.5,
   });
-  const ev = (stream: string, seq: number, extra: object = {}) => ({
+  const ev = (topic: string, cursor: string, extra: object = {}) => ({
     type: "event",
-    stream,
-    seq,
+    topic,
+    cursor,
     kind: "message",
-    replaceableKey: null,
-    payload: seq,
+    data: cursor,
     ...extra,
   });
   const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
   return {
     client,
     sockets,
-    events,
+    updates,
     statuses,
     timers,
     unauthorized,
@@ -82,100 +91,131 @@ function setup(
 }
 
 describe("LiveClient", () => {
-  it("loads the HTTP snapshot first and subscribes from its cursor, applying only the next seqs", async () => {
+  it("loads the HTTP snapshot first and subscribes from its cursor, applying each commit once", async () => {
     const t = setup();
     t.client.follow(["chat:a"]);
     // The snapshot is requested before the socket is even open: reads never wait on it.
     expect(t.loads).toEqual(["chat:a"]);
     await t.flush();
     expect(t.client.status).toBe("syncing");
-    t.sockets[0]!.open();
-    expect(t.sockets[0]!.sent).toEqual([
-      { type: "subscribe", stream: "chat:a", cursor: 10 },
+    const s = t.sockets[0]!;
+    s.open();
+    expect(s.subs).toEqual([
+      { type: "subscribe", topic: "chat:a", cursor: at(10) },
     ]);
     expect(t.client.status).toBe("live");
-    const s = t.sockets[0]!;
-    s.say(t.ev("chat:a", 11));
-    s.say(t.ev("chat:a", 11)); // duplicate
-    s.say(t.ev("chat:a", 10)); // replayed
-    s.say(t.ev("chat:a", 12));
-    expect(t.events.map((event) => event.seq)).toEqual([11, 12]);
+    s.say(t.ev("chat:a", at(11)));
+    s.say(t.ev("chat:a", at(11))); // duplicate
+    s.say(t.ev("chat:a", at(10))); // replayed
+    s.say(t.ev("chat:a", at(12)));
+    expect(t.updates.map((update) => update.cursor)).toEqual([at(11), at(12)]);
+    await t.flush();
+    expect(s.sent.at(-1)).toEqual({ type: "ack", cursor: at(12) });
   });
 
-  it("resubscribes from its cursor on a gap, but accepts the skip a coalescing server announces", async () => {
+  it("subscribes from the start when the topic had no events, and tracks partitions apart", async () => {
+    const t = setup(async () => ({ liveCursor: null }));
+    t.client.follow(["sidebar"]);
+    await t.flush();
+    const s = t.sockets[0]!;
+    s.open();
+    expect(s.subs).toEqual([{ type: "subscribe", topic: "sidebar" }]);
+    s.say(t.ev("sidebar", at(5, P)));
+    s.say(t.ev("sidebar", at(3, Q))); // another partition's commit 3 is new
+    s.say(t.ev("sidebar", at(4, P))); // behind P's 5
+    expect(t.updates.map((update) => update.cursor)).toEqual([
+      at(5, P),
+      at(3, Q),
+    ]);
+    expect(t.client.cursor("sidebar")).toBe(at(3, Q));
+  });
+
+  it("passes coalesced progress on, saying how many updates it stands for", async () => {
     const t = setup();
     t.client.follow(["chat:a"]);
     await t.flush();
     const s = t.sockets[0]!;
     s.open();
-    s.sent.length = 0;
-    s.say(t.ev("chat:a", 11));
-    s.say(t.ev("chat:a", 14)); // lost frames: not announced
-    expect(t.events.map((event) => event.seq)).toEqual([11]);
-    expect(s.sent).toEqual([
-      { type: "subscribe", stream: "chat:a", cursor: 11 },
+    s.say({
+      type: "coalesced_progress",
+      topic: "chat:a",
+      cursor: at(40),
+      skipped: 29,
+      data: "latest",
+    });
+    expect(t.updates).toEqual([
+      {
+        topic: "chat:a",
+        cursor: at(40),
+        kind: "progress",
+        data: "latest",
+        skipped: 29,
+      },
     ]);
-    s.say(t.ev("chat:a", 14, { coalesced: true })); // slow-reader skip
-    expect(t.events.map((event) => event.seq)).toEqual([11, 14]);
-    expect(t.client.cursor("chat:a")).toBe(14);
   });
 
-  it("takes a fresh snapshot on snapshot_required and subscribes from the new cursor", async () => {
-    let cursor = 10;
+  it("takes a fresh snapshot on snapshot_required, whatever the reason, and subscribes from the new cursor", async () => {
+    let cursor = at(10);
     const t = setup(async () => ({ liveCursor: cursor }));
     t.client.follow(["chat:a"]);
     await t.flush();
     const s = t.sockets[0]!;
     s.open();
     s.sent.length = 0;
-    cursor = 500;
+    cursor = at(500);
     s.say({
       type: "snapshot_required",
-      stream: "chat:a",
-      head: 500,
-      reason: "slow_client",
+      topic: "chat:a",
+      reason: "projection_version",
     });
-    expect(t.client.cursor("chat:a")).toBeNull();
-    s.say(t.ev("chat:a", 11)); // from before the snapshot: not applied
+    expect(t.client.cursor("chat:a")).toBeUndefined();
+    s.say(t.ev("chat:a", at(11))); // from before the snapshot: not applied
     await t.flush();
     expect(t.loads).toEqual(["chat:a", "chat:a"]);
-    expect(s.sent).toEqual([
-      { type: "subscribe", stream: "chat:a", cursor: 500 },
+    expect(s.subs).toEqual([
+      { type: "subscribe", topic: "chat:a", cursor: at(500) },
     ]);
-    expect(t.events).toHaveLength(0);
+    expect(t.updates).toHaveLength(0);
   });
 
-  it("follows only what is on screen: others are unsubscribed and their events ignored", async () => {
+  it("follows only what is on screen: a topic let go reconnects with the rest, and its frames are ignored", async () => {
     const t = setup();
     t.client.follow(["sidebar", "chat:a"]);
     await t.flush();
-    const s = t.sockets[0]!;
-    s.open();
+    const first = t.sockets[0]!;
+    first.open();
     t.client.follow(["sidebar", "chat:b"]);
-    expect(s.sent.at(-1)).toEqual({ type: "unsubscribe", stream: "chat:a" });
-    s.say(t.ev("chat:a", 11));
-    expect(t.events).toHaveLength(0);
+    expect(first.closedWith).toBe(1000);
+    const second = t.sockets[1]!;
+    first.say(t.ev("chat:a", at(11)));
+    await t.flush();
+    second.open();
+    expect(second.subs).toEqual([
+      { type: "subscribe", topic: "sidebar", cursor: at(10) },
+      { type: "subscribe", topic: "chat:b", cursor: at(10) },
+    ]);
+    second.say(t.ev("chat:a", at(11)));
+    expect(t.updates).toHaveLength(0);
     expect(t.loads).toEqual(["sidebar", "chat:a", "chat:b"]);
   });
 
-  it("shows syncing, not offline, while the socket is down, and resumes from its cursors", async () => {
+  it("shows syncing, not offline, while the socket is down, and resumes from each topic's last cursor", async () => {
     const t = setup();
     t.client.follow(["chat:a"]);
     await t.flush();
     const s = t.sockets[0]!;
     s.open();
-    s.say(t.ev("chat:a", 11));
+    s.say(t.ev("chat:a", at(11)));
     s.drop();
     expect(t.client.status).toBe("syncing");
     expect(t.timers).toHaveLength(1);
     t.timers[0]!.fn();
     const next = t.sockets[1]!;
     next.open();
-    expect(next.sent).toEqual([
-      { type: "subscribe", stream: "chat:a", cursor: 11 },
+    expect(next.subs).toEqual([
+      { type: "subscribe", topic: "chat:a", cursor: at(11) },
     ]);
     expect(t.client.status).toBe("live");
-    // Backoff grows but is capped.
     for (let i = 0; i < 12; i++) {
       t.sockets.at(-1)!.drop();
       t.timers.at(-1)!.fn();
@@ -211,7 +251,7 @@ describe("LiveClient", () => {
     let fail = true;
     const t = setup(async () => {
       if (fail) throw new Error("offline");
-      return { liveCursor: 3 };
+      return { liveCursor: at(3) };
     });
     t.client.follow(["chat:a"]);
     await t.flush();
@@ -220,8 +260,8 @@ describe("LiveClient", () => {
     t.timers.at(-1)!.fn();
     await t.flush();
     t.sockets[0]!.open();
-    expect(t.sockets[0]!.sent).toEqual([
-      { type: "subscribe", stream: "chat:a", cursor: 3 },
+    expect(t.sockets[0]!.subs).toEqual([
+      { type: "subscribe", topic: "chat:a", cursor: at(3) },
     ]);
   });
 });

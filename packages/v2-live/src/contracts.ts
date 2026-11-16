@@ -16,7 +16,7 @@ export type { RuntimeOutboxEvent } from "@pim/v2-contracts/runtime-seam";
 /** `eventKind`s of a `RuntimeOutboxEvent` that Live projects, and their `payload`s. Other kinds are skipped. */
 export type OutboxPayloads = {
 	/** A message committed to a chat or coding thread (`publicChatId`, or `payload.threadId` for coding); `partial` while it streams. The final commit replaces the partial. */
-	"chat.entry": { entry: EntryRecord; partial?: boolean; stream?: "chat" | "coding"; threadId?: string };
+	"chat.entry": { entry: EntryRecord; partial?: boolean; stream?: "chat" | "coding"; threadId?: string; /** Where the message sorts, when its entry id does not say (a streaming partial has no entry yet). */ position?: number; /** The id of the partial message this one replaces, which is dropped from the transcript. */ replaces?: string };
 	/** What the sidebar shows of a chat: a merge into its summary. */
 	"chat.meta": { title?: string | null; busy?: boolean; unread?: boolean; stalled?: boolean; updatedAt?: number; summary?: Record<string, JsonValue> };
 	/** The state a person gave an interactive `ui` block, keyed by the message that holds it. */

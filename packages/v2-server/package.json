@@ -1,0 +1,33 @@
+{
+  "name": "@pim/v2-server",
+  "version": "0.1.0",
+  "description": "Pim v2's integration layer: what joins the runtime, Live and the other workstreams into one deployment, with the migrations that span them and the tests that run them together against real PostgreSQL and NATS.",
+  "private": true,
+  "type": "module",
+  "license": "FSL-1.1-ALv2",
+  "exports": {
+    "./*": "./src/*.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@earendil-works/pi-durable": "1.1.0",
+    "@pim/shared": "workspace:*",
+    "@pim/v2-contracts": "workspace:*",
+    "@pim/v2-live": "workspace:*",
+    "@pim/v2-runtime": "workspace:*",
+    "pg": "^8.16.3"
+  },
+  "devDependencies": {
+    "@earendil-works/chord": "1.1.0",
+    "@earendil-works/pi-ai": "1.1.0",
+    "@types/node": "^24.19.1",
+    "@types/pg": "^8.15.5",
+    "@types/ws": "^8.18.1",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.11",
+    "ws": "^8.22.0"
+  }
+}

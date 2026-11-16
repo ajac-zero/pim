@@ -11,6 +11,7 @@ Pim is one Cloudflare Worker (`src/`) that serves the API, passkey sign-in and t
 - `@pim/triggers`: the triggers engine, store, spec, conditions, time scheduler, API contract and connector ingress. Pim's gated action and tools over it stay in `src/triggers/`.
 - `@pim/coding`: the coding subsystem that needs no Worker: workspaces, harnesses, orbs, the git broker, the vault, tools, pools and the scheduler's queue. The Durable Objects (`CodingThreadDO`, `CodingSchedulerDO`) and the code that reaches bindings (`src/coding/`, including `vault/worker.ts` and `git-broker/worker.ts`) stay in `src/`. Its `test/support/` holds fixtures and fakes the Worker's tests import too.
 - `@pim/v2-live`: v2 live delivery: PostgreSQL projections, the live event log and the `Live` WebSocket service. Its tests start a private PostgreSQL and NATS when installed (`packages/v2-live/README.md`).
+- `@pim/v2-server`: the integration of the v2 packages: what joins the runtime to Live, the migrations that span workstreams (band 0600), and the end-to-end tests against real PostgreSQL and NATS. CI installs both (`packages/v2-runtime/scripts/ensure-postgres.sh`, `packages/v2-server/scripts/ensure-nats.sh`) and sets `PIM_V2_REQUIRE_INFRA` so a missing binary fails instead of skipping.
 
 A package imports only `@pim/shared` (besides npm packages), never `src/` or `web/`, and no `cloudflare:` module; each package's boundary test checks it. `web/` imports only `@pim/shared` and `@pim/ui-lang`. Import a package by its subpath, such as `@pim/coding/workspace/types`.
 

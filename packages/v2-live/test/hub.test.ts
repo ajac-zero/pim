@@ -3,10 +3,10 @@ import { LiveHub } from "../src/server/hub.ts";
 import { LogStore } from "../src/server/log-store.ts";
 import { MemoryPulse } from "../src/server/pulse.ts";
 import { Projector } from "../src/projections/projector.ts";
-import { type Database, POSTGRES, seeded, startPostgres, until } from "./support/infra.ts";
+import { type Database, POSTGRES, seeded, startPostgres, until, describeWith } from "./support/infra.ts";
 import { ADA, C1, FakeTransport, FixtureAuthorizer, FixtureIdentity, GRACE, Outbox, P1, addSession, assistant, principal, reset } from "./support/fixtures.ts";
 
-const live = POSTGRES ? describe : describe.skip;
+const live = describeWith(!!POSTGRES);
 const FAST = { heartbeatMs: 40, revalidateMs: 60, pumpMs: 2 };
 const TOPIC = `chat:${C1}`;
 
@@ -66,6 +66,23 @@ live("Live bridge over PostgreSQL", () => {
 		expect(transport.of("ack")[0]).toEqual({ type: "ack", cursor: `${P1}:1:2` });
 		expect(transport.of("cursor_replay")[0]).toEqual({ type: "cursor_replay", topic: TOPIC, from: `${P1}:1:2`, to: `${P1}:1:5` });
 		expect(transport.events(TOPIC)[0]).toMatchObject({ type: "event", kind: "message", cursor: `${P1}:1:3` });
+	});
+
+	it("stops delivering a topic after unsubscribe, keeps the others on the same connection, and ignores a topic it never followed", async () => {
+		const { transport, connection } = await open(TOPIC);
+		await connection.receive(JSON.stringify({ type: "subscribe", topic: "sidebar" }));
+		await say("one");
+		await until(() => transport.events(TOPIC).length === 1, "first message");
+		await connection.receive(JSON.stringify({ type: "unsubscribe", topic: TOPIC }));
+		await connection.receive(JSON.stringify({ type: "unsubscribe", topic: `chat:${"c".repeat(8)}` }));
+		expect(connection.topics).toEqual(["sidebar"]);
+		await outbox.commit(P1, ADA, C1, "chat.meta", { title: "t", updatedAt: 1 });
+		await say("two");
+		await until(() => transport.events("sidebar").length === 1, "sidebar still delivers");
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		expect(transport.events(TOPIC)).toHaveLength(1);
+		expect(transport.closed).toBeNull();
+		expect(transport.of("error")).toEqual([]);
 	});
 
 	it("zero gaps and zero duplicates when commits race a subscribe, with lost and duplicated hints", async () => {
@@ -235,7 +252,7 @@ live("Live bridge over PostgreSQL", () => {
 		for (const topic of ["sidebar", TOPIC, `chat:${"b".repeat(8)}`]) await connection.receive(JSON.stringify({ type: "subscribe", topic }));
 		expect(connection.topics).toEqual(["sidebar", TOPIC]);
 		expect(transport.of("error")[0]).toMatchObject({ code: "too_many_topics" });
-		for (const raw of ["not json", JSON.stringify({ type: "unsubscribe", topic: "sidebar" }), JSON.stringify({ type: "subscribe", topic: "chat:>" }), JSON.stringify({ type: "subscribe", topic: "chat:*" }), JSON.stringify({ type: "subscribe", topic: "sidebar", cursor: "nope" })]) await connection.receive(raw);
+		for (const raw of ["not json", JSON.stringify({ type: "teleport", topic: "sidebar" }), JSON.stringify({ type: "subscribe", topic: "chat:>" }), JSON.stringify({ type: "subscribe", topic: "chat:*" }), JSON.stringify({ type: "subscribe", topic: "sidebar", cursor: "nope" })]) await connection.receive(raw);
 		expect(transport.of("error").map((frame) => frame.code)).toEqual(["too_many_topics", "bad_frame", "bad_frame", "bad_topic", "bad_topic", "bad_cursor"]);
 		await say("one");
 		await until(() => transport.events(TOPIC).length === 1, "delivered");

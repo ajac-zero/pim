@@ -5,10 +5,10 @@ import { LogStore } from "../src/server/log-store.ts";
 import { NatsPulse } from "../src/server/pulse.ts";
 import { type LiveServer, startLiveServer } from "../src/server/ws-server.ts";
 import { Projector } from "../src/projections/projector.ts";
-import { type Database, NATS_SERVER, type Nats, POSTGRES, startNats, startPostgres, until } from "./support/infra.ts";
+import { type Database, NATS_SERVER, type Nats, POSTGRES, startNats, startPostgres, until, describeWith } from "./support/infra.ts";
 import { ADA, C1, FixtureAuthorizer, FixtureIdentity, Outbox, P1, addSession, assistant, reset } from "./support/fixtures.ts";
 
-const real = POSTGRES && NATS_SERVER ? describe : describe.skip;
+const real = describeWith(!!(POSTGRES && NATS_SERVER));
 const TOPIC = `chat:${C1}`;
 
 real("Live service over real WebSockets, PostgreSQL and NATS", () => {

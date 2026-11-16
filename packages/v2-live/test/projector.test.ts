@@ -2,10 +2,10 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { Projector } from "../src/projections/projector.ts";
 import { sidebarPage, transcriptPage } from "../src/projections/snapshots.ts";
 import { withOwner } from "../src/owner-tx.ts";
-import { type Database, POSTGRES, startPostgres } from "./support/infra.ts";
+import { type Database, POSTGRES, startPostgres, describeWith } from "./support/infra.ts";
 import { ADA, C1, C2, GRACE, Outbox, P1, P2, P3, assistant, entry, reset, user } from "./support/fixtures.ts";
 
-const live = POSTGRES ? describe : describe.skip;
+const live = describeWith(!!POSTGRES);
 
 live("projections over PostgreSQL", () => {
 	let db: Database;
@@ -177,5 +177,45 @@ live("projections over PostgreSQL", () => {
 		expect((await transcriptPage(db.pool, ADA, C2, { limit: 2, before: older.nextBefore })).nextBefore).toBeNull();
 		// A topic with no events has no cursor: a client subscribes from the start.
 		expect((await transcriptPage(db.pool, GRACE, C2)).liveCursor).toBeNull();
+	});
+
+	it("projects a commit with several events in one transaction: one log row per topic, a final message replacing its partial", async () => {
+		const at = (commitSeq: bigint, events: { eventKind: string; payload: Record<string, unknown> }[]) => ({
+			commitSeq,
+			committedAt: new Date(),
+			events: events.map((e) => ({ partitionId: P1, commitSeq, projectionVersion: 1, ownerId: ADA, publicChatId: C1, conversationId: 1, committedAt: new Date().toISOString(), ...e })),
+		});
+		const commits = [
+			at(1n, [{ eventKind: "chat.entry", payload: { entry: entry(-1, "pi.assistant", { role: "assistant", content: [{ type: "text", text: "Hel" }], stopReason: "pending", timestamp: 1 }), partial: true, position: 11 } }]),
+			at(2n, [
+				{ eventKind: "chat.entry", payload: { entry: assistant(11, "Hello"), replaces: "-1" } },
+				{ eventKind: "chat.entry", payload: { entry: entry(12, "pi.message", { role: "toolResult", toolCallId: "c", toolName: "t", content: [{ type: "text", text: "ok" }], isError: false, timestamp: 12 }) } },
+				{ eventKind: "chat.meta", payload: { busy: false, updatedAt: 5 } },
+			]),
+			at(3n, []),
+		];
+		const source = {
+			partitions: async () => [{ ownerId: ADA, partitionId: P1 }],
+			partitionsOf: async () => [P1],
+			commitsAfter: async (_o: string, _p: string, _v: number, after: number) => commits.filter((c) => Number(c.commitSeq) > after),
+			heads: async () => [{ ownerId: ADA, partitionId: P1, maxSeq: 3 }],
+			oldestAfter: async () => null,
+		};
+		const projector = new Projector(db.pool, { source });
+		expect(await projector.drainAll()).toBe(3);
+		const page = await transcriptPage(db.pool, ADA, C1);
+		expect(page.messages.map((m) => [m.id, m.partial])).toEqual([["11", false], ["12", false]]);
+		const log = (await db.admin.query("SELECT topic, commit_seq, event_kind, replaceable_key FROM pim_projection.live_event_log ORDER BY commit_seq, topic")).rows;
+		expect(log).toEqual([
+			{ topic: `chat:${C1}`, commit_seq: "1", event_kind: "message.partial", replaceable_key: "entry:-1" },
+			{ topic: `chat:${C1}`, commit_seq: "2", event_kind: "batch", replaceable_key: null },
+			{ topic: "sidebar", commit_seq: "2", event_kind: "sidebar.summary", replaceable_key: `chat:${C1}` },
+		]);
+		const batch = (await db.admin.query("SELECT payload FROM pim_projection.live_event_log WHERE commit_seq = 2 AND topic = $1", [`chat:${C1}`])).rows[0].payload;
+		expect(batch.events.map((e: { kind: string; data: { replaces?: string } }) => [e.kind, e.data.replaces])).toEqual([["message", "-1"], ["message", undefined]]);
+		// A commit with no events still moves the watermark, so the next one is not waiting on a hole.
+		expect((await projector.lag())[0]).toMatchObject({ projectedSeq: 3, lagCommits: 0 });
+		expect(await projector.rebuild(ADA)).toBe(3);
+		expect((await transcriptPage(db.pool, ADA, C1)).messages.map((m) => m.id)).toEqual(["11", "12"]);
 	});
 });

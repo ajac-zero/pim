@@ -65,6 +65,8 @@ describe("cursors", () => {
 		expect(pulseSubjects.sidebar(owner)).toBe("pim.v2.tenant.o_ada.sidebar");
 		expect(pulseSubjects.coding(owner, "t1")).toBe("pim.v2.tenant.o_ada.coding.t1");
 		expect(ClientFrame.safeParse({ type: "subscribe", topic: "chat" }).success).toBe(true);
+		expect(ClientFrame.safeParse({ type: "unsubscribe", topic: "chat" }).success).toBe(true);
+		expect(ClientFrame.safeParse({ type: "unsubscribe" }).success).toBe(false);
 		expect(ServerFrame.safeParse({ type: "snapshot_required", topic: "chat", reason: "gap" }).success).toBe(true);
 		expect(ServerFrame.safeParse({ type: "snapshot_required", topic: "chat", reason: "bored" }).success).toBe(false);
 	});
@@ -78,7 +80,8 @@ describe("migration bands", () => {
 		expect(migrationOwner(199)).toBe("runtime");
 		expect(migrationOwner(200)).toBe("application");
 		expect(migrationOwner(499)).toBe("forge");
-		expect(migrationOwner(600)).toBeNull();
+		expect(migrationOwner(600)).toBe("integration");
+		expect(migrationOwner(700)).toBeNull();
 	});
 	it("flags names, band violations and duplicates", () => {
 		expect(validateMigrationFiles("runtime", ["0100_a.sql", "0199_b.sql"])).toEqual([]);

@@ -3,7 +3,7 @@ import { OwnerId } from "./identity.ts";
 /** The PostgreSQL schemas, one per workstream; a workstream writes only its own. */
 export const SCHEMAS = { app: "pim_app", runtime: "pim_runtime", forge: "pim_forge", projection: "pim_projection" } as const;
 
-export type MigrationOwner = "foundation" | "runtime" | "application" | "live" | "forge" | "operations";
+export type MigrationOwner = "foundation" | "runtime" | "application" | "live" | "forge" | "operations" | "integration";
 
 /** The inclusive range of migration numbers each workstream owns. `0001_foundation.sql` is canonical's alone. */
 export const MIGRATION_BANDS: Readonly<Record<MigrationOwner, readonly [number, number]>> = {
@@ -13,6 +13,8 @@ export const MIGRATION_BANDS: Readonly<Record<MigrationOwner, readonly [number, 
 	live: [300, 399],
 	forge: [400, 499],
 	operations: [500, 599],
+	/** Grants and functions that span workstreams (what Live may read of the runtime); applied after every other band. */
+	integration: [600, 699],
 };
 
 /** The schema each band's migrations create tables in; foundation creates all of them, and operations only maintains. */

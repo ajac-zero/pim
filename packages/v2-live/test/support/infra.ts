@@ -1,4 +1,5 @@
 /** Real PostgreSQL and NATS for the tests, each started on a private port and removed afterwards; skipped when the binaries are absent. */
+import { describe } from "vitest";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
@@ -27,6 +28,12 @@ function postgresBin(): string | null {
 
 export const POSTGRES = postgresBin();
 export const NATS_SERVER = process.env.NATS_SERVER ?? which("nats-server");
+
+/** `describe` when the infrastructure is there, and skipped without it, unless CI says it must be there (PIM_V2_REQUIRE_INFRA): then its absence fails the run instead of passing it. */
+export function describeWith(available: boolean) {
+	if (!available && process.env.PIM_V2_REQUIRE_INFRA) throw new Error("PostgreSQL and nats-server are required here (PIM_V2_REQUIRE_INFRA is set) but one is missing");
+	return describe.skipIf(!available);
+}
 
 function freePort(): Promise<number> {
 	return new Promise((resolve, reject) => {

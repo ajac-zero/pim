@@ -157,6 +157,10 @@ export class LiveConnection {
 			for (const [topic, bridge] of this.#bridges) if (bridge.delivered(frame.cursor)) this.acked.set(topic, frame.cursor);
 			return;
 		}
+		if (frame.type === "unsubscribe") {
+			this.#drop(frame.topic);
+			return;
+		}
 		await this.#subscribe(frame.topic, frame.cursor);
 	}
 

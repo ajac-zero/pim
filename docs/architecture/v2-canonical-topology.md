@@ -6,7 +6,7 @@ The portable persistent-backend rearchitecture is built by six workstreams in pa
 
 | Branch | Owns | Builds |
 | --- | --- | --- |
-| `pim/v2-canonical` | `packages/v2-contracts/**`, `docs/architecture/**`, root wiring (`package.json`, `tsconfig`, `scripts/ci-scope.mjs`), later `packages/v2-server/**` | Contracts, `0001_foundation.sql`, integration |
+| `pim/v2-canonical` | `packages/v2-contracts/**`, `packages/v2-server/**`, `docs/architecture/**`, root wiring (`package.json`, `tsconfig`, `scripts/ci-scope.mjs`, `.github/workflows/ci.yml`) | Contracts, `0001_foundation.sql`, integration: the runtime source for Live's projector, cross-workstream grants, end-to-end tests |
 | `pim/v2-runtime` | `packages/v2-runtime/**` | PostgreSQL pi-durable 1.1.0 storage, partition lease and epoch fencing, Steward, Dispatch and Runner lifecycle |
 | `pim/v2-application` | `packages/v2-app/**` | Application ledger, RBAC, grants and standing approvals, tokens, sessions and envelope crypto, Gate HTTP API, agent features, Canvas, Relay, Objects |
 | `pim/v2-live-ui` | `packages/v2-live/**`, `web/**` | Projections, NATS Pulse, cursor replay, Live WebSocket server, the live client |
@@ -18,6 +18,8 @@ The legacy Worker (`src/`, `packages/shared`, `packages/coding`, …) is not cha
 ## Dependencies
 
 A v2 package imports `@pim/v2-contracts` and npm packages. It does not import another v2 package except where this table allows it: `v2-app`, `v2-live` and `v2-forge` may import `v2-runtime`'s public exports. `v2-contracts` imports nothing from Pim and nothing from Cloudflare.
+
+`@pim/shared/live-client` (moved from `web/src/lib/`) is the Live protocol client the web app and Node callers, such as `v2-server`'s tests and the load harness, share; packages may not import `web/`.
 
 ## Migrations
 
@@ -31,6 +33,7 @@ A v2 package imports `@pim/v2-contracts` and npm packages. It does not import an
 | 0300–0399 | live | `pim_projection` |
 | 0400–0499 | forge | `pim_forge` |
 | 0500–0599 | operations | maintenance across schemas |
+| 0600–0699 | canonical (`packages/v2-server/migrations`) | grants and functions across workstreams, applied last |
 
 `validateMigrationFiles` in `src/db.ts` checks a directory against its band. Work for an owner goes through `withTenantTransaction`, which sets `pim.owner_id` with `SET LOCAL` semantics so PgBouncer in transaction mode never leaks it.
 

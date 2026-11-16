@@ -46,6 +46,8 @@ export interface PulseHint {
 
 /** Frames a client sends and receives on the Live WebSocket. */
 export const SubscribeFrame = z.object({ type: z.literal("subscribe"), topic: z.string(), cursor: z.string().optional() });
+/** Stops following a topic without closing the socket, so switching chats keeps one connection. A topic not followed is ignored. */
+export const UnsubscribeFrame = z.object({ type: z.literal("unsubscribe"), topic: z.string() });
 export const AckFrame = z.object({ type: z.literal("ack"), cursor: z.string() });
 export const CursorReplayFrame = z.object({ type: z.literal("cursor_replay"), topic: z.string(), from: z.string(), to: z.string() });
 export const EventFrame = z.object({ type: z.literal("event"), topic: z.string(), cursor: z.string(), kind: z.string(), data: z.unknown() });
@@ -55,7 +57,7 @@ export const CoalescedProgressFrame = z.object({ type: z.literal("coalesced_prog
 export const SnapshotRequiredFrame = z.object({ type: z.literal("snapshot_required"), topic: z.string(), reason: z.enum(["gap", "projection_version", "expired"]) });
 export const ErrorFrame = z.object({ type: z.literal("error"), code: z.string(), message: z.string() });
 
-export const ClientFrame = z.discriminatedUnion("type", [SubscribeFrame, AckFrame]);
+export const ClientFrame = z.discriminatedUnion("type", [SubscribeFrame, UnsubscribeFrame, AckFrame]);
 export const ServerFrame = z.discriminatedUnion("type", [CursorReplayFrame, EventFrame, CoalescedProgressFrame, SnapshotRequiredFrame, AckFrame, ErrorFrame]);
 export type ClientFrame = z.infer<typeof ClientFrame>;
 export type ServerFrame = z.infer<typeof ServerFrame>;

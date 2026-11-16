@@ -44,6 +44,21 @@ describe("a page of a coding thread's transcript", () => {
 		expect(pageTranscript(messages, { offset: 24, limit: 1 }).messages).toHaveLength(1);
 	});
 
+	it("reads the latest messages with tail, oldest first, and says where they start", () => {
+		const messages = Array.from({ length: 25 }, (_, index) => said(index % 2 ? "assistant" : "user", `Turn ${index}`, `t${index}`));
+		const last = pageTranscript(messages, { tail: true, limit: 3 });
+		expect(last).toEqual({ messages: [{ id: "t22", role: "user", text: "Turn 22" }, { id: "t23", role: "assistant", text: "Turn 23" }, { id: "t24", role: "user", text: "Turn 24" }], total: 25, offset: 22 });
+		// With a role, only that kind counts: the last two replies of twelve.
+		const replies = pageTranscript(messages, { tail: true, limit: 2, role: "assistant" });
+		expect(replies.messages.map((each) => each.id)).toEqual(["t21", "t23"]);
+		expect([replies.total, replies.offset]).toEqual([12, 10]);
+		// Fewer messages than the limit: all of them, from 0. An offset wins over tail.
+		expect(pageTranscript(messages.slice(0, 2), { tail: true })).toMatchObject({ total: 2, offset: 0 });
+		expect(pageTranscript(messages, { tail: true, offset: 1, limit: 1 }).messages.map((each) => each.id)).toEqual(["t1"]);
+		// Without tail the shape is as it was.
+		expect(pageTranscript(messages.slice(0, 2))).not.toHaveProperty("offset");
+	});
+
 	it("keeps only the messages of the role asked, and counts just those", () => {
 		const whole = pageTranscript(thread());
 		expect(whole.total).toBe(5);

@@ -1724,7 +1724,7 @@ export class Pim extends DurableAgent<Env> {
 						return { chat: this.store.publicId(this.#rooms.of(session)?.room ?? session), agent: { id, name, majordomo } };
 					},
 					diagnostics: { report: (query) => this.diagnosticsReport(query), health: () => this.healthReport() },
-					compute: { codingSandbox: () => this.#abilitiesOf.hasCodingSandbox() },
+					compute: { codingSandbox: () => this.#abilitiesOf.hasCodingSandbox(), codingBackend: () => this.#abilitiesOf.hasCodingBackend() },
 				});
 				return [[extension.id, ability] as const];
 			}),
@@ -2837,6 +2837,7 @@ export class Pim extends DurableAgent<Env> {
 			get codingSandboxes() { return self.#codingSandboxes; },
 			set codingSandboxes(value) { self.#codingSandboxes = value; },
 			environmentWorkspaceIds: (...args) => self.environmentWorkspaceIds(...args),
+			hasAmpToken: () => self.#coding.hasAmpToken(),
 			get abilities() { return self.abilities; },
 			get registry() { return self.registry; },
 			get visits() { return self.visits; },

@@ -63,9 +63,22 @@ export interface GitProvider {
 	 * host can't move a branch forward only (GitHub does, in its API) answers this, so that the broker can.
 	 */
 	isAncestor?(repo: RepoRef, ancestor: string, descendant: string): Promise<boolean>;
+	/**
+	 * Read-only looks at the repository on the host, for a thread whose work Pim holds no copy of (an Amp
+	 * Orb thread pushes from Amp's own cloud). They use a read credential, or none for a public repository.
+	 * The branches the host has, by name without `refs/heads/`, each at its commit.
+	 */
+	listBranches(repo: RepoRef): Promise<ReadonlyMap<string, string>>;
+	/** The commit a branch, tag or commit names, as its full sha; null when the host has no such thing. */
+	resolveCommit(repo: RepoRef, ref: string): Promise<string | null>;
+	/** The change from `base` to `head` as a git diff, at most `MAX_COMPARE_CHARS` of it; null when the host has no such commit. */
+	compareDiff(repo: RepoRef, base: string, head: string): Promise<{ readonly baseSha: string; readonly headSha: string; readonly diff: string } | null>;
 	/** Opens a pull request from `head` into `base`. */
 	createPullRequest(input: PullRequestInput): Promise<{ readonly url: string; readonly number: number }>;
 }
+
+/** The most of a comparison's diff a provider reads. */
+export const MAX_COMPARE_CHARS = 512 * 1024;
 
 /** The `Authorization` header value for git over HTTP. */
 export const basicAuth = (credential: GitCredential) => `Basic ${btoa(`${credential.username}:${credential.token}`)}`;

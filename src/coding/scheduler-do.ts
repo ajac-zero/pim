@@ -248,6 +248,17 @@ export class CodingSchedulerDO extends DurableObject<Env> {
 		this.#threads.record(thread);
 	}
 
+	/** An older row learning the agent-hosted thread it runs on. */
+	recordThreadOrb(threadId: string, orbId: string, orbUrl: string): void {
+		this.#threads.recordOrb(threadId, orbId, orbUrl);
+	}
+
+	/** The space's thread that runs on the agent's thread `orbId`; null when it has none. */
+	threadByOrb(orbId: string): (IndexedThread & { readonly queue: QueuePlace | null }) | null {
+		const thread = this.#threads.getByOrb(orbId);
+		return thread && { ...thread, queue: this.#scheduler.position(thread.threadId) };
+	}
+
 	/** The person viewed a thread now; false for one that isn't the space's. */
 	markThreadSeen(threadId: string): boolean {
 		return this.#threads.markSeen(threadId, this.now());

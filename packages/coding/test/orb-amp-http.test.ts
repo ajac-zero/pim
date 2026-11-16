@@ -262,9 +262,36 @@ describe("AmpHttpOrbClient contract", () => {
 		const big = () => new Response(`{"ok":true,"result":{"pad":"${"x".repeat(2_100_000)}"}}`);
 		fetcher.mockImplementationOnce(async () => big()).mockImplementationOnce(async () => reply("tail-idle"));
 		expect(await client.messages("T")).toHaveLength(4);
-		expect(bodies(fetcher).map((b) => b.params.limit)).toEqual([200, 20]);
+		expect(bodies(fetcher).map((b) => b.params.limit)).toEqual([200, 80]);
 		fetcher.mockImplementation(async () => big());
 		await expect(client.state("T")).rejects.toMatchObject({ code: "orb_request", message: expect.stringContaining("size cap") });
+	});
+
+	it("steps the transcript window down 200, 80, 30, 10 before giving up", async () => {
+		const { client, fetcher } = fixture();
+		logs();
+		const big = () => new Response(`{"ok":true,"result":{"pad":"${"x".repeat(2_100_000)}"}}`);
+		fetcher.mockImplementation(async () => big());
+		fetcher.mockImplementationOnce(async () => big()).mockImplementationOnce(async () => big()).mockImplementationOnce(async () => big()).mockImplementationOnce(async () => reply("tail-idle"));
+		expect(await client.messages("T")).toHaveLength(4);
+		expect(bodies(fetcher).map((b) => b.params.limit)).toEqual([200, 80, 30, 10]);
+		fetcher.mockClear();
+		await expect(client.messages("T")).rejects.toMatchObject({ message: expect.stringContaining("size cap") });
+		expect(bodies(fetcher).map((b) => b.params.limit)).toEqual([200, 80, 30, 10]);
+	});
+
+	it("keeps long replies and tool output up to the raised caps", () => {
+		expect(AMP_MAX_MESSAGE_CHARS).toBe(64_000);
+		expect(AMP_MAX_TOOL_OUTPUT_CHARS).toBe(32_000);
+	});
+
+	it("reads a thread it never started, with its state and link", async () => {
+		const { client, fetcher } = fixture();
+		fetcher.mockImplementation(async () => reply("tail-idle"));
+		const thread = await client.readThread("T-other-9");
+		expect(thread).toMatchObject({ threadId: "T-other-9", url: "https://ampcode.com/threads/T-other-9", state: "idle" });
+		expect(thread.messages.map((m) => m.id)).toEqual(["0", "1", "2", "3"]);
+		expect(bodies(fetcher)[0]).toEqual({ method: "getThreadTail", params: { thread: "T-other-9", limit: 200 } });
 	});
 
 	it("steers with sendMessageToThread", async () => {

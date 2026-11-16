@@ -45,6 +45,6 @@ export function turnEndedMessage(event: TurnEndedEvent, origin: string | null): 
 	if (event.outcome === "error") lines.push("This looks like a failure. If it is transient (workspace, manager or harness error), retry once by starting a fresh thread with the same task; if it fails again, tell the person.");
 	if (event.checkpoint) lines.push(`Its changes are committed as ${event.checkpoint.slice(0, 12)}.`);
 	if (event.said) lines.push("It last said:", event.said);
-	lines.push("Look with coding_status, coding_diff or coding_tests; tell it more with coding_steer; push its branch with coding_push (then coding_open_pull_request; neither needs approval), or ship it to the default branch with coding_merge (no approval needed: check its diff and tests first). Tell the person what matters.");
+	lines.push("Look with coding_transcript (use tail=true or role=\"assistant\", then coding_transcript_output for full messages), coding_status, coding_diff or coding_tests; tell it more with coding_steer; push its branch with coding_push (then coding_open_pull_request; neither needs approval), or ship it to the default branch with coding_merge (no approval needed: check its diff and tests first). Never steer a thread just to ask for a summary or diff printout. Tell the person what matters.");
 	return lines.join("\n");
 }

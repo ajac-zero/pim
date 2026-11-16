@@ -33,6 +33,8 @@ export type PagedTranscriptMessage = {
 export type PagedTranscript = {
 	readonly messages: readonly PagedTranscriptMessage[];
 	readonly total: number;
+	/** Where the page starts; given only for a `tail` read, which doesn't say it in advance. */
+	readonly offset?: number;
 	readonly next_offset?: number;
 };
 
@@ -70,13 +72,14 @@ function cut(text: string, max: number): string {
 /**
  * The page of a transcript the model reads: `offset` messages in (the oldest
  * first), at most `limit` of them, of one `role` only when asked, each cut to
- * what fits. In a summary each message is its first line, cut short, so the
+ * what fits; with `tail` and no `offset`, the latest `limit` messages, still oldest first. In a summary each message is its first line, cut short, so the
  * page shows the shape of the conversation.
  */
-export function pageTranscript(messages: readonly TranscriptMessage[], want: { offset?: number; limit?: number; role?: TranscriptMessage["role"]; summary?: boolean } = {}): PagedTranscript {
+export function pageTranscript(messages: readonly TranscriptMessage[], want: { offset?: number; limit?: number; role?: TranscriptMessage["role"]; summary?: boolean; tail?: boolean } = {}): PagedTranscript {
 	const ofRole = want.role === undefined ? messages : messages.filter((message) => message.role === want.role);
-	const offset = Math.max(0, want.offset ?? 0);
 	const limit = Math.min(TRANSCRIPT_MAX_PAGE, Math.max(1, want.limit ?? TRANSCRIPT_PAGE));
+	const tail = want.tail === true && want.offset === undefined;
+	const offset = tail ? Math.max(0, ofRole.length - limit) : Math.max(0, want.offset ?? 0);
 	const page = ofRole.slice(offset, offset + limit);
 	const shown = page.map((message) => {
 		const full = redact(transcriptText(message));
@@ -86,6 +89,7 @@ export function pageTranscript(messages: readonly TranscriptMessage[], want: { o
 	return {
 		messages: shown,
 		total: ofRole.length,
+		...(tail ? { offset } : {}),
 		...(offset + page.length < ofRole.length ? { next_offset: offset + page.length } : {}),
 	};
 }

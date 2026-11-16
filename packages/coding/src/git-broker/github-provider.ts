@@ -1,7 +1,7 @@
 import { apiHeaders, GITHUB_API, type Fetch, type GitHubApp, RepoNotInstalledError } from "./github-app";
-import { GitBrokerError, type RepoRef, parseRepoUrl, repoDefaultBranch } from "./broker";
+import { GitBrokerError, listBranchesOverGit, readCapped, type RepoRef, parseRepoUrl, repoDefaultBranch } from "./broker";
 import { type BrokerPolicy, GitBrokerNotConfiguredError } from "./config";
-import { type GitAccess, type GitCredential, type GitProvider, GITHUB_INSTANCE, type ProviderInstance, type PullRequestInput } from "./provider";
+import { type GitAccess, type GitCredential, type GitProvider, GITHUB_INSTANCE, MAX_COMPARE_CHARS, type ProviderInstance, type PullRequestInput } from "./provider";
 
 /**
  * github.com, through the deployment's GitHub App (./github-app.ts): every
@@ -48,6 +48,47 @@ export class GitHubProvider implements GitProvider {
 
 	defaultBranch(repo: RepoRef): Promise<string> {
 		return repoDefaultBranch({ app: this.#app, policy: this.#policy, fetch: this.#fetch }, this.repoUrl(repo));
+	}
+
+	async listBranches(repo: RepoRef): Promise<ReadonlyMap<string, string>> {
+		return listBranchesOverGit(this.#fetch, this.gitUrl(repo), await this.credential(repo, "read"));
+	}
+
+	/** A read of GitHub's API, with the repository's read token when there is one, and anonymously when there isn't. */
+	async #read(repo: RepoRef, path: string, accept?: string): Promise<Response> {
+		const credential = await this.credential(repo, "read");
+		try {
+			return await this.#fetch(`${GITHUB_API}/repos/${repo.owner}/${repo.name}${path}`, {
+				headers: credential ? { ...apiHeaders(`Bearer ${credential.token}`), ...(accept ? { Accept: accept } : {}) } : { Accept: accept ?? "application/vnd.github+json", "User-Agent": "pim-git-broker", "X-GitHub-Api-Version": "2022-11-28" },
+				redirect: "manual",
+				signal: AbortSignal.timeout(30_000),
+			});
+		} catch {
+			throw new GitBrokerError(502, "GitHub couldn't be reached");
+		}
+	}
+
+	async resolveCommit(repo: RepoRef, ref: string): Promise<string | null> {
+		const response = await this.#read(repo, `/commits/${ref.split("/").map(encodeURIComponent).join("/")}`);
+		if (response.status === 404 || response.status === 422) {
+			await response.body?.cancel().catch(() => {});
+			return null;
+		}
+		if (!response.ok) throw new GitBrokerError(502, `GitHub answered HTTP ${response.status} when looking up ${ref} on ${repo.fullName}`);
+		const { sha } = (await response.json()) as { sha?: unknown };
+		return typeof sha === "string" && /^[0-9a-f]{40}$/i.test(sha) ? sha.toLowerCase() : null;
+	}
+
+	async compareDiff(repo: RepoRef, base: string, head: string): Promise<{ baseSha: string; headSha: string; diff: string } | null> {
+		const [baseSha, headSha] = [/^[0-9a-f]{40}$/i.test(base) ? base.toLowerCase() : await this.resolveCommit(repo, base), /^[0-9a-f]{40}$/i.test(head) ? head.toLowerCase() : await this.resolveCommit(repo, head)];
+		if (!baseSha || !headSha) return null;
+		const response = await this.#read(repo, `/compare/${baseSha}...${headSha}`, "application/vnd.github.v3.diff");
+		if (response.status === 404 || response.status === 422) {
+			await response.body?.cancel().catch(() => {});
+			return null;
+		}
+		if (!response.ok) throw new GitBrokerError(502, `GitHub answered HTTP ${response.status} when comparing commits of ${repo.fullName}`);
+		return { baseSha, headSha, diff: await readCapped(response, MAX_COMPARE_CHARS) };
 	}
 
 	async createPullRequest({ repo, head, base, title, body }: PullRequestInput): Promise<{ url: string; number: number }> {

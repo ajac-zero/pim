@@ -8,7 +8,10 @@ import { OWNER, apiUrl, TOKEN } from "./helpers";
 import { FakeOrbClient } from "@pim/coding/orb/fake";
 import { OrbAuthError, OrbLostError } from "@pim/coding/orb/types";
 import { codingThread, type StartThread } from "../src/coding/thread-do";
-import { type CodingThreadDO, codingEvents, codingOrbs, codingStalls, codingThreadClock, codingTimings } from "./worker";
+import { CodingError, ownedThread, readableThread, startThread, threadRef } from "../src/coding/threads";
+import { codingScheduler } from "../src/coding/scheduler-do";
+import type { GitHubApp } from "@pim/coding/git-broker/github-app";
+import { type CodingThreadDO, codingEvents, codingGitHub, codingOrbs, codingStalls, codingThreadClock, codingTimings } from "./worker";
 
 // An agent-hosted thread here is a thread record turned into one — there is no way to start one from the
 // API yet — on the fake orb client: it runs its whole turn through the OrbClient interface, with no
@@ -610,6 +613,21 @@ describe("Amp attachment images in an agent-hosted thread", () => {
 		expect(fetcher).not.toHaveBeenCalled();
 	});
 
+	it("tells the supervisor what a long reply opened with, without its suggested replies", async () => {
+		vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(PNG, { headers: { "content-type": "image/png" } }));
+		const { id, stub, fake, orb } = await ampThread();
+		const long = `Merged abc1234, 12 tests pass.\n${"detail ".repeat(900)}\nAnything else?\n\n<suggested-replies>\n**Push it**\n</suggested-replies>`;
+		fake.say(orb(), "assistant", long);
+		fake.setState(orb(), "idle");
+		await heartbeat(stub);
+		const said = (ended(id).at(-1) as { said?: string } | undefined)?.said ?? "";
+		expect(said.startsWith("Merged abc1234, 12 tests pass.")).toBe(true);
+		expect(said).toContain("characters omitted; read the full reply with coding_transcript(tail=true)");
+		expect(said.endsWith("Anything else?")).toBe(true);
+		expect(said).not.toContain("suggested-replies");
+		expect(said.length).toBeLessThan(4_200);
+	});
+
 	it("mirrors an image from a continuation on Amp's site while the thread is idle", async () => {
 		vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(PNG, { headers: { "content-type": "image/png" } }));
 		const { stub, fake, orb } = await ampThread();
@@ -906,5 +924,200 @@ describe("supervising an agent-hosted thread", () => {
 		expect(await stalls()).toEqual([]);
 		advance(2_000);
 		expect((await stalls()).map((stall) => stall.reason)).toContain("past declared timeout");
+	});
+});
+
+describe("an Amp thread read by its Amp id or page", () => {
+	const TOKEN = "sgamp_READ_TOKEN";
+	const OTHER = "someone-else";
+
+	async function started() {
+		const fake = new FakeOrbClient({ id: "amp-http" });
+		codingOrbs.factory = () => fake;
+		const { view } = await startThread(env, OWNER, { repo: REPO, task: TASK, harness: "amp", profile: CODER, operationId: crypto.randomUUID() }, { type: "person" });
+		const stub = codingThread(env, view.id);
+		await heartbeat(stub);
+		const orb = fake.started[0]!.threadId;
+		await vi.waitFor(async () => expect(await codingScheduler(env, OWNER).threadByOrb(orb)).not.toBeNull());
+		return { id: view.id, stub, fake, orb };
+	}
+
+	beforeEach(async () => {
+		await codingVault(env).saveApiKey(OWNER, "amp", TOKEN);
+	});
+	afterEach(async () => {
+		vi.restoreAllMocks();
+		await codingVault(env).delete(OWNER, "amp");
+	});
+
+	it("is the thread's own, whether named by its id, its page, the Amp id or the Amp page, and no other space's", async () => {
+		const { id, orb } = await started();
+		const same = async (input: string) => (await ownedThread(env, OWNER, input)).threadId;
+		for (const input of [id, `/coding/${id}`, `https://pim.test/coding/${id}`, `  https://pim.test/coding/${id}/?x=1#top `, orb, `https://ampcode.com/threads/${orb}`, `https://ampcode.com/threads/${orb}/?q=1#m`]) expect(await same(input), input).toBe(id);
+		expect(await codingScheduler(env, OWNER).thread(id)).toMatchObject({ orbId: orb, orbUrl: expect.stringContaining(orb) });
+		expect(threadRef("https://evil.example/threads/T-1")).toEqual({ kind: "pim", id: "https://evil.example/threads/T-1" });
+		// Another space finds none of them, whichever way it asks.
+		for (const input of [id, orb, `https://ampcode.com/threads/${orb}`]) await expect(ownedThread(env, OTHER, input)).rejects.toMatchObject({ status: 404, code: "not_found" });
+		await expect(readableThread(env, OTHER, orb)).rejects.toMatchObject({ status: 409, message: expect.stringContaining("Amp isn't connected") });
+	});
+
+	it("is found, and noted, for a thread from before the list kept Amp's id", async () => {
+		const { id, orb, stub } = await started();
+		// Its own re-indexing after the start's changes is done before the row is made old.
+		await stub.status();
+		await new Promise((resolve) => setTimeout(resolve, 200));
+		await runInDurableObject(codingScheduler(env, OWNER), (_scheduler, state) => {
+			// The fake gives every thread the same Amp id, so the threads of the other tests go.
+			state.storage.sql.exec("DELETE FROM pim_coding_threads WHERE thread_id != ?", id);
+			state.storage.sql.exec("UPDATE pim_coding_threads SET orb_id = NULL, orb_url = NULL");
+		});
+		expect((await ownedThread(env, OWNER, `https://ampcode.com/threads/${orb}`)).threadId).toBe(id);
+		expect(await codingScheduler(env, OWNER).threadByOrb(orb)).toMatchObject({ threadId: id });
+	});
+
+	it("is read directly with the space's own Amp login when Pim didn't start it", async () => {
+		const calls: { method: string; auth: string | null }[] = [];
+		let answer: () => Response = () => Response.json({ ok: true, result: { thread: { title: "Fix the thing", data: { meta: { lastKnownAgentState: { state: "idle", updatedAt: 1_700_000_000_000 } } } }, messages: [
+			{ messageId: 0, role: "user", content: [{ type: "text", text: "Do it" }], createdAt: 1 },
+			{ messageId: 1, role: "assistant", content: [{ type: "text", text: "Looking." }, { type: "tool_use", id: "t1", name: "Bash", input: { cmd: "ls" } }], createdAt: 2 },
+			{ messageId: 2, role: "user", content: [{ type: "tool_result", toolUseID: "t1", content: `printed ${TOKEN}` }], createdAt: 3 },
+			{ messageId: 3, role: "assistant", content: [{ type: "text", text: "Done: abc1234." }], createdAt: 4 },
+		] } });
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+			calls.push({ method: JSON.parse(String(init?.body)).method, auth: new Headers(init?.headers).get("authorization") });
+			expect(String(input)).toBe("https://ampcode.com/api/internal?getThreadTail");
+			return answer();
+		});
+		const before = (await codingScheduler(env, OWNER).threads()).length;
+		const found = await readableThread(env, OWNER, "https://ampcode.com/threads/T-standalone-1");
+		if (!("external" in found)) throw new Error("expected an external thread");
+		expect(found.external).toMatchObject({ threadId: "T-standalone-1", url: "https://ampcode.com/threads/T-standalone-1", title: "Fix the thing", state: "idle" });
+		expect(found.external.transcript.map((message) => [message.id, message.role, message.parts.map((part) => part.type)])).toEqual([
+			["0", "user", ["text"]],
+			["1", "assistant", ["text", "tool-call"]],
+			["2.1", "tool", ["tool-result"]],
+			["3", "assistant", ["text"]],
+		]);
+		expect(calls).toEqual([{ method: "getThreadTail", auth: `Bearer ${TOKEN}` }]);
+		// It is nothing Pim keeps: no thread of the space's, and the mutating calls refuse it.
+		await expect(ownedThread(env, OWNER, "T-standalone-1")).rejects.toMatchObject({ status: 404, code: "not_found" });
+		expect(await codingScheduler(env, OWNER).threads()).toHaveLength(before);
+		// Amp has no such thread for this login.
+		answer = () => new Response("{}", { status: 404 });
+		await expect(readableThread(env, OWNER, "T-gone")).rejects.toMatchObject({ status: 404, code: "not_found" });
+		// With no saved login it says so, and asks nothing of Amp.
+		await codingVault(env).delete(OWNER, "amp");
+		calls.length = 0;
+		const refused = await readableThread(env, OWNER, "T-standalone-1").catch((error: unknown) => error);
+		expect(refused).toBeInstanceOf(CodingError);
+		expect(refused).toMatchObject({ status: 409, code: "conflict", message: "Amp isn't connected in this space: add an Amp token on the Coding page first" });
+		expect(calls).toEqual([]);
+	});
+});
+
+describe("the diff and pull request of an agent-hosted thread", () => {
+	const BASE = "a".repeat(40);
+	const WORK = "b".repeat(40);
+	const OTHER_WORK = "c".repeat(40);
+	const SHORT = "d1e2f3a";
+	const DIFF = "diff --git a/hello.txt b/hello.txt\n+Hello\n";
+
+	/** github.com as a read sees it: its branches, the commits it knows by name, and a comparison that says what it was asked. */
+	function host(branches: Record<string, string>, commits: Record<string, string> = {}) {
+		const pkt = (text: string) => `${(text.length + 4).toString(16).padStart(4, "0")}${text}`;
+		const compared: { path: string; accept: string | null }[] = [];
+		const pulls: unknown[] = [];
+		const fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+			const url = String(input);
+			if (url === "https://github.com/acme/demo.git/info/refs?service=git-upload-pack") {
+				const refs = Object.entries(branches).map(([name, sha], index) => pkt(`${sha} refs/heads/${name}${index === 0 ? "\0multi_ack" : ""}\n`));
+				return new Response(`${pkt("# service=git-upload-pack\n")}0000${refs.join("")}0000`);
+			}
+			if (url === "https://api.github.com/repos/acme/demo") return Response.json({ default_branch: "main" });
+			const commit = /^https:\/\/api\.github\.com\/repos\/acme\/demo\/commits\/(.+)$/.exec(url);
+			if (commit) {
+				const sha = commits[decodeURIComponent(commit[1]!)];
+				return sha ? Response.json({ sha }) : new Response("{}", { status: 404 });
+			}
+			const compare = /^https:\/\/api\.github\.com\/repos\/acme\/demo\/compare\/(.+)$/.exec(url);
+			if (compare) {
+				compared.push({ path: compare[1]!, accept: new Headers(init?.headers).get("accept") });
+				return new Response(DIFF);
+			}
+			if (url === "https://api.github.com/repos/acme/demo/pulls" && init?.method === "POST") {
+				pulls.push(JSON.parse(String(init.body)));
+				return Response.json({ html_url: "https://github.com/acme/demo/pull/7", number: 7 }, { status: 201 });
+			}
+			return new Response("Not found", { status: 404 });
+		};
+		return { fetch, compared, pulls };
+	}
+
+	beforeEach(() => {
+		codingGitHub.app = { installationToken: async () => ({ token: "ghs_read", expiresAt: Date.now() + 3_600_000 }) } as unknown as GitHubApp;
+	});
+	afterEach(() => {
+		codingGitHub.app = null;
+		codingGitHub.fetch = null;
+	});
+
+	/** A thread whose agent has finished a turn, having said `said`. */
+	async function finished(said: string) {
+		const fake = new FakeOrbClient();
+		const thread = await orbThread(fake);
+		await heartbeat(thread.stub);
+		fake.say(thread.orb(), "assistant", said);
+		fake.setState(thread.orb(), "idle");
+		await heartbeat(thread.stub);
+		return { ...thread, branch: (await thread.stub.status()).repo.branch };
+	}
+
+	it("compares its own pushed branch with where it started, through the git host, with no workspace", async () => {
+		const { stub, branch } = await finished("Pushed it.");
+		const github = host({ main: BASE, [branch]: WORK });
+		codingGitHub.fetch = github.fetch;
+		expect(await stub.diff()).toEqual({ since: BASE, head: WORK, diff: DIFF, truncated: false });
+		expect(github.compared).toEqual([{ path: `${BASE}...${WORK}`, accept: "application/vnd.github.v3.diff" }]);
+		expect(await stub.status()).toMatchObject({ slot: "none", workspaceProvider: expect.anything(), repo: { baseSha: BASE } });
+		// Asked again, it is the diff kept, not another comparison.
+		await stub.diff();
+		expect(github.compared).toHaveLength(1);
+	});
+
+	it("says nothing is pushed yet, rather than that nothing is committed", async () => {
+		const { stub } = await finished("Working on it.");
+		codingGitHub.fetch = host({ main: BASE }).fetch;
+		expect(await stub.diff()).toEqual({ since: BASE, head: null, diff: "", truncated: false, unpushedOrb: true });
+	});
+
+	it("follows the branch or commit its agent said it pushed, or the one it is told", async () => {
+		const named = await finished("All done: I pushed my work to feature/x for you.");
+		const github = host({ main: BASE, "feature/x": OTHER_WORK, "unrelated": WORK });
+		codingGitHub.fetch = github.fetch;
+		expect(await named.stub.diff()).toMatchObject({ since: BASE, head: OTHER_WORK, diff: DIFF });
+		expect(await named.stub.diff(undefined, "unrelated")).toMatchObject({ head: WORK });
+		expect(await named.stub.diff(undefined, WORK)).toMatchObject({ head: WORK });
+		await expect(inside(named.stub, (thread) => thread.diff(undefined, "nowhere"))).rejects.toThrow(/nowhere isn't a branch or commit/);
+
+		const byCommit = await finished(`Committed ${SHORT} and pushed it to origin.`);
+		codingGitHub.fetch = host({ main: BASE }, { [SHORT]: WORK }).fetch;
+		expect(await byCommit.stub.diff()).toMatchObject({ head: WORK });
+		// A branch it merely mentions that is where it started isn't its work, nor is main unless it showed a push to it.
+		const onMain = await finished("I looked at main and left it.");
+		codingGitHub.fetch = host({ main: BASE, other: WORK }).fetch;
+		expect(await onMain.stub.diff()).toMatchObject({ head: null, unpushedOrb: true });
+	});
+
+	it("is not pushed or merged by Pim, and has a pull request opened once its agent pushed the branch itself", async () => {
+		const { stub, branch } = await finished("Done.");
+		for (const refused of [await stub.preparePush(), await stub.prepareMerge()]) expect(refused).toMatchObject({ ok: false, code: "conflict", message: expect.stringContaining("Amp's cloud") });
+		codingGitHub.fetch = host({ main: BASE }).fetch;
+		expect(await stub.preparePullRequest()).toMatchObject({ ok: false, code: "not_pushed" });
+		const github = host({ main: BASE, [branch]: WORK });
+		codingGitHub.fetch = github.fetch;
+		const prepared = await stub.preparePullRequest();
+		if (!prepared.ok) throw new Error(prepared.message);
+		expect(await stub.openPullRequest(prepared.request)).toMatchObject({ ok: true, result: { number: 7, head: branch, base: "main" } });
+		expect(github.pulls).toEqual([expect.objectContaining({ head: branch, base: "main" })]);
 	});
 });

@@ -40,6 +40,9 @@ export type CodingThreadSummary = {
 	readonly lastTurnEndedAt: number | null;
 	/** When the person last viewed it; null if never. */
 	readonly lastSeenAt: number | null;
+	/** An agent-hosted thread's id and page on the agent's site (an Amp thread's `T-…` and its ampcode.com URL); absent for a thread with none. */
+	readonly orbId?: string;
+	readonly orbUrl?: string;
 };
 
 /** One thread in full: its status, with what the list says of it. */

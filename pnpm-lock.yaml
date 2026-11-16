@@ -279,6 +279,22 @@ importers:
         specifier: ^4.1.11
         version: 4.1.11(@opentelemetry/api@1.9.1)(@types/node@24.19.1)(happy-dom@21.0.4)(vite@8.3.3(@types/node@24.19.1)(esbuild@0.28.2)(jiti@2.7.0)(yaml@2.9.1))
 
+  packages/v2-contracts:
+    dependencies:
+      zod:
+        specifier: ^4.4.3
+        version: 4.6.5
+    devDependencies:
+      '@types/node':
+        specifier: ^24.19.1
+        version: 24.19.1
+      typescript:
+        specifier: ^6.0.3
+        version: 6.0.3
+      vitest:
+        specifier: ^4.1.11
+        version: 4.1.11(@opentelemetry/api@1.9.1)(@types/node@24.19.1)(happy-dom@21.0.4)(vite@8.3.3(@types/node@24.19.1)(esbuild@0.28.2)(jiti@2.7.0)(yaml@2.9.1))
+
   packages/v2-live:
     dependencies:
       '@earendil-works/pi-ai':
@@ -293,6 +309,9 @@ importers:
       '@pim/shared':
         specifier: workspace:*
         version: link:../shared
+      '@pim/v2-contracts':
+        specifier: workspace:*
+        version: link:../v2-contracts
       pg:
         specifier: ^8.13.1
         version: 8.23.1

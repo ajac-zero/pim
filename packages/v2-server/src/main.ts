@@ -10,6 +10,7 @@ import { pathToFileURL } from "node:url";
 import pg from "pg";
 import { createHost, type Host } from "./host.ts";
 import { migrateAll } from "./migrate.ts";
+import { promoteToLive } from "./migration-bridge.ts";
 import { type Env, type Hooks, NatsPulse, type Role, startForge, startGate, startLive, startMaintenance, startRunner } from "./roles.ts";
 
 export type Process = { host: Host; roles: Role[]; close(): Promise<void>; drain(): Promise<void> };
@@ -19,6 +20,21 @@ export async function migrateCommand(env: Env): Promise<number[]> {
 	const pool = new pg.Pool({ connectionString: env.PIM_DATABASE_URL, max: 2 });
 	try {
 		return await migrateAll(pool);
+	} finally {
+		await pool.end();
+	}
+}
+
+/**
+ * `promote`: after `@pim/v2-ops` has imported and audited a legacy snapshot into the landing schema, writes it into the live schemas (see `migration-bridge.ts`).
+ * Reads `PIM_DATABASE_URL` (the schema owner), `PIM_RP_ID` (the new deployment's hostname), `PIM_CUTOVER_AT` (epoch ms) and optionally `PIM_DEFAULT_MODEL` (`provider/model`).
+ */
+export async function promoteCommand(env: Env) {
+	for (const name of ["PIM_DATABASE_URL", "PIM_RP_ID", "PIM_CUTOVER_AT"]) if (!env[name]) throw new Error(`${name} is required to promote`);
+	const [provider, ...model] = (env.PIM_DEFAULT_MODEL ?? "").split("/");
+	const pool = new pg.Pool({ connectionString: env.PIM_DATABASE_URL, max: 4 });
+	try {
+		return await promoteToLive(pool, { rpId: env.PIM_RP_ID!, cutoverAt: Number(env.PIM_CUTOVER_AT), ...(provider && model.length ? { defaultAgent: { provider, modelId: model.join("/") } } : {}) });
 	} finally {
 		await pool.end();
 	}
@@ -70,6 +86,10 @@ export async function startProcess(command: string, env: Env, hooks: Hooks = {})
 export async function main(argv = process.argv.slice(2), env: Env = process.env): Promise<void> {
 	const command = argv[0] ?? env.PIM_ROLE;
 	if (!command) throw new Error("Name a role: migrate, " + PROCESS_ROLES.join(", "));
+	if (command === "promote") {
+		console.log(JSON.stringify({ event: "pim.promote", ...(await promoteCommand(env)) }));
+		return;
+	}
 	if (command === "migrate") {
 		const applied = await migrateCommand(env);
 		console.log(JSON.stringify({ event: "pim.migrate", applied }));

@@ -1,0 +1,170 @@
+// A cutover rehearsal on the real stack: a legacy export (the ops package's synthetic snapshot) is imported into the landing schema, audited, promoted into the
+// live schemas, and then real gate, live and runner processes serve it: an imported passkey signs in, imported forked chats read over the snapshot API,
+// a new message in an imported chat runs on a Runner, and Forge adopts an imported Amp thread without starting it again.
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { createModels } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
+import { createRegistry, type HarnessOptions } from "@earendil-works/pi-durable";
+import { FakeOrbClient } from "@pim/coding/orb/fake";
+import { userHandle } from "@pim/v2-app/signin";
+import { EnvelopeCrypto } from "@pim/v2-ops/crypto/envelope";
+import { auditImport } from "@pim/v2-ops/migration/audit";
+import { FIXTURE_CUTOVER_AT, type FixtureInfo, buildLegacySnapshot } from "@pim/v2-ops/migration/fixture";
+import { importSnapshot } from "@pim/v2-ops/migration/import";
+import { FsObjectStore } from "@pim/v2-ops/migration/objects";
+import { SnapshotReader } from "@pim/v2-ops/migration/snapshot";
+import type { Db as ForgeDb } from "@pim/v2-forge/db";
+import { MemoryObjects } from "@pim/v2-forge/ports";
+import { ForgeScheduler } from "@pim/v2-forge/scheduler";
+import { ForgeStore } from "@pim/v2-forge/store";
+import { ForgeWorker } from "@pim/v2-forge/worker";
+import { promoteToLive } from "../src/migration-bridge.ts";
+import type { Process } from "../src/main.ts";
+import { waitFor } from "../../v2-runtime/test/support/rig.ts";
+import { Authenticator } from "./support/authenticator.ts";
+import { Client } from "./support/client.ts";
+import { type Deployment, base, start, startS3 } from "./support/processes.ts";
+import { createStack, describeWith, freePort, hasNats, startNats } from "./support/stack.ts";
+
+const real = describeWith(hasNats());
+const ADA = "o_own_ada";
+
+real("a cutover rehearsal", () => {
+	let d: Deployment;
+	let info: FixtureInfo;
+	let web: Client;
+	const procs: Process[] = [];
+	const faux = fauxProvider({ provider: "faux", models: [{ id: "m" }] });
+	const key = new Authenticator("ES256");
+	const asked: string[] = [];
+
+	const hooks = () => {
+		const models = createModels();
+		models.setProvider(faux.provider);
+		const agent = { model: { provider: "faux", modelId: "m" } };
+		return { harnessOptions: (): HarnessOptions => ({ models, registry: createRegistry(), settings: { retry: { enabled: false, maxRetries: 0, baseDelayMs: 1_000 } } as never }), homeRoot: () => ({ agent }), chatAgent: () => agent, pollMs: 40 };
+	};
+
+	beforeAll(async () => {
+		const stack = await createStack();
+		d = { stack, nats: await startNats(), s3: await startS3(), gatePort: await freePort(), ingressSecret: "ingress" };
+		const dir = await mkdtemp(join(tmpdir(), "pim-cutover-"));
+		info = await buildLegacySnapshot(join(dir, "snapshot"));
+		const reader = new SnapshotReader(join(dir, "snapshot"));
+		const objects = new FsObjectStore(join(dir, "s3"));
+		const crypto = new EnvelopeCrypto({ k1: Buffer.alloc(32, 1) }, "k1");
+		await importSnapshot(stack.admin, reader, { cutoverId: "cut-1", crypto, objects, appCredentialsKey: info.keys.appCredentialsKey.toString("base64") });
+		const audit = await auditImport(stack.admin, reader, objects, { cutoverId: "cut-1" });
+		expect(audit.checks.filter((c) => !c.ok)).toEqual([]);
+		// The synthetic snapshot's assistant messages are bare; pi's own carry a usage record and a stop reason, which pi reads back when it builds the next request.
+		await stack.admin.query(`
+			UPDATE pim_ops.pi_entries SET record = jsonb_set(record, '{model,0}', (record->'model'->0) || jsonb_build_object('usage', jsonb_build_object('input', 0, 'output', 0, 'cacheRead', 0, 'cacheWrite', 0, 'totalTokens', 0, 'cost', jsonb_build_object('input', 0, 'output', 0, 'cacheRead', 0, 'cacheWrite', 0, 'total', 0)), 'stopReason', 'stop', 'api', 'faux', 'provider', 'faux', 'model', 'm', 'timestamp', 1))
+			WHERE record->'model'->0->>'role' = 'assistant'`);
+		// The synthetic passkeys' keys are random bytes; Ada's is replaced by a real one so the test can sign in with it.
+		await stack.admin.query("UPDATE pim_ops.passkeys SET id = $1, spki = $2, algorithm = -7 WHERE owner_id = $3 AND id = (SELECT min(id) FROM pim_ops.passkeys WHERE owner_id = $3)", [key.id, key.spki, ADA]);
+	}, 180_000);
+	afterAll(async () => {
+		await Promise.allSettled(procs.map((p) => p.close()));
+		d?.nats.stop();
+		await d?.s3.stop();
+		await d?.stack.drop();
+	}, 60_000);
+
+	it("promotes the landing into the live schemas, idempotently", async () => {
+		const report = await promoteToLive(d.stack.admin, { rpId: "127.0.0.1", cutoverAt: FIXTURE_CUTOVER_AT, defaultAgent: { provider: "faux", modelId: "m" } });
+		expect(report.owners).toEqual(expect.arrayContaining([ADA]));
+		expect(report.chats).toBeGreaterThanOrEqual(6);
+		expect(report.messages).toBeGreaterThan(0);
+		expect(report.orphanedTasks).toBeGreaterThan(0);
+		const count = async (sql: string) => Number((await d.stack.admin.query(sql)).rows[0].n);
+		const before = [await count("SELECT count(*) n FROM pim_app.accounts"), await count("SELECT count(*) n FROM pim_app.conversations"), await count("SELECT count(*) n FROM pim_runtime.entries"), await count("SELECT count(*) n FROM pim_projection.chat_transcript_projection"), await count("SELECT count(*) n FROM pim_forge.forge_threads")];
+		expect(before.every((n) => n > 0)).toBe(true);
+		await promoteToLive(d.stack.admin, { rpId: "127.0.0.1", cutoverAt: FIXTURE_CUTOVER_AT, defaultAgent: { provider: "faux", modelId: "m" } });
+		expect([await count("SELECT count(*) n FROM pim_app.accounts"), await count("SELECT count(*) n FROM pim_app.conversations"), await count("SELECT count(*) n FROM pim_runtime.entries"), await count("SELECT count(*) n FROM pim_projection.chat_transcript_projection"), await count("SELECT count(*) n FROM pim_forge.forge_threads")]).toEqual(before);
+		// The numeric ids are the legacy ones, and the app's chat ids are the runtime's.
+		const same = await count("SELECT count(*) n FROM pim_app.conversations c JOIN pim_runtime.conversation_partitions p ON p.public_chat_id = c.public_chat_id AND p.conversation_id = c.conversation_id AND p.partition_id = c.partition_id");
+		expect(same).toBe(await count("SELECT count(*) n FROM pim_app.conversations"));
+		const held = await count("SELECT count(*) n FROM pim_runtime.tasks WHERE status <> 'terminal' AND id IN (SELECT id FROM pim_ops.pi_tasks WHERE hold IS NOT NULL)");
+		expect(held).toBe(0);
+	});
+
+	it("boots real processes that sign in with an imported passkey and read imported forked chats", async () => {
+		const gate = await start(d, "gate");
+		const live = await start(d, "live", { pollMs: 40 });
+		procs.push(gate, live);
+		web = new Client(base(gate), d.ingressSecret);
+		const challenge = await web.call("POST", "/auth/sign-in/options");
+		const signedIn = await web.call("POST", "/auth/sign-in", key.get(challenge.json, base(gate), userHandle(ADA)));
+		expect(signedIn.status).toBe(200);
+		expect((await web.call("GET", "/auth/session")).json).toMatchObject({ signedIn: true, account: { ownerId: ADA } });
+
+		const read = async (chat: string) => (await web.call("GET", `/api/snapshot/chat/${chat}?limit=200`)).json as { messages: { id: string; role: string }[] };
+		const branched = await read(info.chats.branched);
+		const fork = await read(info.chats.fork);
+		const nested = await read(info.chats.nestedFork);
+		const plain = await read(info.chats.plain);
+		for (const s of [branched, fork, nested, plain]) expect(s.messages.length).toBeGreaterThan(0);
+		// A fork shows its parent's history up to the fork point, then its own: the shared prefix has the same entry ids.
+		const shared = branched.messages.filter((m) => fork.messages.some((f) => f.id === m.id));
+		expect(shared.length).toBeGreaterThan(0);
+		expect(fork.messages.map((m) => m.id).slice(0, shared.length)).toEqual(shared.map((m) => m.id));
+		expect(fork.messages.length).toBeGreaterThan(shared.length - 1);
+		// The sidebar lists the imported chats.
+		const sidebar = (await web.call("GET", "/api/snapshot/sidebar?limit=100")).json as { sessions: { chatId: string }[] };
+		expect(sidebar.sessions.map((s) => s.chatId)).toEqual(expect.arrayContaining([info.chats.plain, info.chats.branched, info.chats.fork]));
+	}, 60_000);
+
+	// A chat cut off mid-tool (info.chats.plain, info.chats.branched) keeps its in-flight run in its live document and queues new input behind it until someone reconciles it:
+	// the runtime does not clear a run whose task it orphaned. That is documented, not hidden, so the new message here goes to an idle imported fork.
+	it("runs a new message in an imported chat on a Runner, after the imported history, with projections continuing", async () => {
+		// Any call the imported work makes gets a plain answer; the one this test sends gets its own.
+		const answer = (ctx: { messages: { role: string; content: unknown }[] }) => {
+			const last = JSON.stringify(ctx.messages.at(-1)?.content ?? "");
+			asked.push(last);
+			return fauxAssistantMessage(last.includes("what did we say before") ? "We said hello, and now we are on v2." : "Noted.");
+		};
+		faux.setResponses(Array.from({ length: 40 }, () => answer as never));
+		const runner = await start(d, "runner", hooks());
+		procs.push(runner);
+		const read = async () => (await web.call("GET", `/api/snapshot/chat/${info.chats.nestedFork}?limit=200`)).json as { messages: { id: string; role: string; parts: { type: string; text?: string }[] }[] };
+		const before = await read();
+		const t0 = Date.now();
+		expect((await web.call("POST", `/api/sessions/${info.chats.nestedFork}/messages`, { commandId: "after-cutover", text: "what did we say before?" })).status).toBe(202);
+		expect(Date.now() - t0).toBeLessThan(2_000);
+		const after = await waitFor("the answer to the new message", async () => {
+			const s = await read();
+			return s.messages.some((m) => m.parts.some((p) => p.text?.includes("now we are on v2"))) ? s : undefined;
+		}, 60_000);
+		// The imported messages are unchanged and in place; the new ones follow them, with ids above every imported one.
+		expect(after.messages.slice(0, before.messages.length).map((m) => m.id)).toEqual(before.messages.map((m) => m.id));
+		const tail = after.messages.slice(before.messages.length);
+		expect(tail.map((m) => m.role)).toEqual(["user", "assistant"]);
+		expect(Math.min(...tail.map((m) => Number(m.id)))).toBeGreaterThan(Math.max(...before.messages.map((m) => Number(m.id))));
+		expect(tail[0]!.parts[0]!.text).toBe("what did we say before?");
+	}, 120_000);
+
+	it("adopts an imported Amp thread in Forge without starting it again, and leaves a cut-off CLI thread idle", async () => {
+		const forgeDb = d.stack.admin as unknown as ForgeDb;
+		const store = new ForgeStore(forgeDb);
+		const scheduler = new ForgeScheduler(forgeDb, store, Date.now);
+		const rows = (await d.stack.admin.query("SELECT thread_id, harness, state, orb FROM pim_forge.forge_threads WHERE owner_id = $1 ORDER BY thread_id", [ADA])).rows;
+		const amp = rows.find((r) => r.harness === "amp")!;
+		const cli = rows.find((r) => r.harness === "claude-code")!;
+		expect(amp.state).toBe("running");
+		expect(amp.orb.threadId).toBe("T-fixture-amp-0001");
+		expect(cli.state).toBe("idle");
+		// Amp's cloud is a fake that already holds the thread the legacy deployment started.
+		const orb = new FakeOrbClient();
+		const remote = await orb.start({ key: "legacy-start", task: "legacy task", repo: "https://git.example.test/ada/app", branch: "pim/thr_amp1" } as never);
+		orb.say(remote.threadId, "assistant", "Still working on it.");
+		await d.stack.admin.query("UPDATE pim_forge.forge_threads SET orb = jsonb_build_object('threadId', $2::text) WHERE thread_id = $1", [amp.thread_id, remote.threadId]);
+		const worker = new ForgeWorker({ store, scheduler, turns: {}, compute: null, orbs: () => orb, objects: new MemoryObjects(), defaultPool: "orbs" });
+		await worker.step(amp.thread_id);
+		expect(orb.started).toHaveLength(1); // only the legacy start: Forge started nothing
+		const events = (await d.stack.admin.query("SELECT data FROM pim_forge.forge_events WHERE thread_id = $1", [amp.thread_id])).rows.map((r) => JSON.stringify(r.data));
+		expect(events.join(" ")).toContain("Still working on it.");
+	}, 60_000);
+});

@@ -23,6 +23,8 @@ export type Host = {
 	/** A role reports whether it can serve; `/readyz` is 200 only when every one does. */
 	readiness(check: () => boolean | Promise<boolean>): void;
 	onDrain(fn: () => Promise<void>): void;
+	/** Every role has started: until then `/readyz` is 503, whatever the checks added so far say. */
+	started(): void;
 	close(): Promise<void>;
 };
 
@@ -35,6 +37,7 @@ export async function createHost(options: { port: number; metricsPort: number; i
 	const drains: (() => Promise<void>)[] = [];
 	const registry = new Registry();
 	let draining: Promise<void> | undefined;
+	let up = false;
 	const trusted = (req: IncomingMessage) => !options.ingressSecret || req.headers["x-pim-ingress-secret"] === options.ingressSecret;
 
 	const server = createServer(async (req, res) => {
@@ -42,7 +45,7 @@ export async function createHost(options: { port: number; metricsPort: number; i
 			const path = (req.url ?? "/").split("?")[0];
 			if (req.method === "GET" && path === "/healthz") return void text(res, 200, "ok");
 			if (req.method === "GET" && path === "/readyz") {
-				const ready = (await Promise.all(checks.map((c) => c()))).every(Boolean) && draining === undefined;
+				const ready = up && (await Promise.all(checks.map((c) => c()))).every(Boolean) && draining === undefined;
 				return void text(res, ready ? 200 : 503, ready ? "ready" : "not ready");
 			}
 			// A drain is an orchestrator's request from inside the cluster (a preStop hook): it carries no ingress secret, which the proxy would never forward for it.
@@ -76,6 +79,7 @@ export async function createHost(options: { port: number; metricsPort: number; i
 		upgrade: (u) => void upgraders.push(u),
 		readiness: (c) => void checks.push(c),
 		onDrain: (d) => void drains.push(d),
+		started: () => void (up = true),
 		async close() {
 			await Promise.all([new Promise<void>((r) => server.close(() => r())), new Promise<void>((r) => metrics.close(() => r()))]);
 		},

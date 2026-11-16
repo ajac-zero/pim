@@ -50,6 +50,7 @@ export async function startProcess(command: string, env: Env, hooks: Hooks = {})
 		await host.close();
 		throw error;
 	}
+	host.started();
 	const proc: Process = {
 		host,
 		roles: started,
@@ -74,19 +75,30 @@ export async function main(argv = process.argv.slice(2), env: Env = process.env)
 		console.log(JSON.stringify({ event: "pim.migrate", applied }));
 		return;
 	}
-	const proc = await startProcess(command, env);
-	console.log(JSON.stringify({ event: "pim.started", role: command, port: proc.host.port, metricsPort: proc.host.metricsPort }));
+	// Signals are handled from the first moment, so one that arrives while the roles are still starting stops them cleanly too.
+	let proc: Process | undefined;
 	let stopping = false;
+	let early = false;
 	const stop = async (signal: string) => {
 		if (stopping) return;
 		stopping = true;
 		console.log(JSON.stringify({ event: "pim.stopping", signal }));
+		if (!proc) {
+			early = true;
+			return;
+		}
 		await proc.drain().catch(() => undefined);
 		await proc.close();
 		process.exit(0);
 	};
 	process.on("SIGTERM", () => void stop("SIGTERM"));
 	process.on("SIGINT", () => void stop("SIGINT"));
+	proc = await startProcess(command, env);
+	console.log(JSON.stringify({ event: "pim.started", role: command, port: proc.host.port, metricsPort: proc.host.metricsPort }));
+	if (early) {
+		await proc.close();
+		process.exit(0);
+	}
 }
 
 if (process.argv[1] && pathToFileURL(realpathSync(process.argv[1])).href === import.meta.url) {

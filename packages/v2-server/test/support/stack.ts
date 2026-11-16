@@ -5,12 +5,8 @@ import { createServer, connect } from "node:net";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
 import { Db } from "@pim/v2-runtime/db";
-import { applyMigrations, migrate as migrateRuntime } from "@pim/v2-runtime/migrate";
-import { migrate as migrateLive } from "@pim/v2-live/migrate";
-import { migrate as migrateForge, type Db as ForgeDb } from "@pim/v2-forge/db";
+import { migrateAll } from "../../src/migrate.ts";
 
-const FOUNDATION = fileURLToPath(new URL("../../../v2-contracts/migrations/", import.meta.url));
-const INTEGRATION = fileURLToPath(new URL("../../migrations/", import.meta.url));
 
 /** `describe` when nats-server is installed, and skipped without it, unless CI says it must be there (PIM_V2_REQUIRE_INFRA): then its absence fails the run. */
 export function describeWith(available: boolean) {
@@ -63,7 +59,7 @@ export type Stack = {
 	drop(): Promise<void>;
 };
 
-/** A fresh database with every band migrated in order (foundation, runtime, live, integration), and one login per role. */
+/** A fresh database with every band migrated by the real migrator (foundation, runtime, application, live, forge, operations, integration), and one login per role. */
 export async function createStack(): Promise<Stack> {
 	const base = process.env.PIM_V2_PG_URL;
 	if (!base) throw new Error("PIM_V2_PG_URL is not set; the global setup starts PostgreSQL");
@@ -79,16 +75,13 @@ export async function createStack(): Promise<Stack> {
 		if (user) url.username = user;
 		return url.toString();
 	};
-	const admin = new pg.Pool({ connectionString: urlFor(), max: 5 });
-	await applyMigrations(admin, FOUNDATION, "foundation");
-	await migrateRuntime(admin);
-	await migrateLive(admin);
-	await migrateForge(admin as unknown as ForgeDb);
-	await applyMigrations(admin, INTEGRATION, "integration");
+	// An idle connection that the server drops (the database is dropped under it at teardown) is not a test failure.
+	const admin = new pg.Pool({ connectionString: urlFor(), max: 5 }).on("error", () => {});
+	await migrateAll(admin);
 	await admin.query("GRANT pim_runtime TO srv_runtime_app");
 	await admin.query("GRANT pim_live TO srv_live_app");
 	const runtime = Db.connect({ connectionString: urlFor("srv_runtime_app"), max: 10 });
-	const live = new pg.Pool({ connectionString: urlFor("srv_live_app"), max: 10 });
+	const live = new pg.Pool({ connectionString: urlFor("srv_live_app"), max: 10 }).on("error", () => {});
 	return {
 		admin,
 		runtime,

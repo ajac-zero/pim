@@ -15,11 +15,13 @@
   "dependencies": {
     "@earendil-works/pi-durable": "1.1.0",
     "@pim/shared": "workspace:*",
+    "@pim/v2-app": "workspace:*",
     "@pim/v2-contracts": "workspace:*",
+    "@pim/v2-forge": "workspace:*",
     "@pim/v2-live": "workspace:*",
+    "@pim/v2-ops": "workspace:*",
     "@pim/v2-runtime": "workspace:*",
-    "pg": "^8.16.3",
-    "@pim/v2-forge": "workspace:*"
+    "pg": "^8.16.3"
   },
   "devDependencies": {
     "@earendil-works/chord": "1.1.0",

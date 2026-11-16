@@ -108,9 +108,9 @@ real("a turn from the Runner to a LiveClient", () => {
 		expect(seen.filter((m) => !m.partial && m.replaces !== undefined)).toHaveLength(2);
 		expect(rig.echoRuns).toEqual(["ping"]);
 		// The sidebar told the client the chat was busy, then idle.
-		const busy = updates.filter((u) => u.topic === "sidebar").map((u) => (u.data as { busy: boolean }).busy);
-		expect(busy[0]).toBe(true);
-		expect(busy.at(-1)).toBe(false);
+		const busy = () => updates.filter((u) => u.topic === "sidebar").map((u) => (u.data as { busy: boolean }).busy);
+		await waitFor("the sidebar to say the chat is idle again", () => (busy().at(-1) === false ? true : undefined));
+		expect(busy()[0]).toBe(true);
 
 		// The final transcript is the runtime's committed one, and a rebuild from the runtime's tables reproduces it.
 		await waitFor("the projector to catch up", async () => ((await projector.lag()).every((l) => l.lagCommits === 0) ? true : undefined));

@@ -524,6 +524,9 @@ importers:
       '@pim/shared':
         specifier: workspace:*
         version: link:../shared
+      '@pim/v2-app':
+        specifier: workspace:*
+        version: link:../v2-app
       '@pim/v2-contracts':
         specifier: workspace:*
         version: link:../v2-contracts
@@ -533,6 +536,9 @@ importers:
       '@pim/v2-live':
         specifier: workspace:*
         version: link:../v2-live
+      '@pim/v2-ops':
+        specifier: workspace:*
+        version: link:../v2-ops
       '@pim/v2-runtime':
         specifier: workspace:*
         version: link:../v2-runtime

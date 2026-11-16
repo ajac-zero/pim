@@ -31,11 +31,15 @@ async function chatWithHistory(turns = 3) {
 	const answers = async () => (await db.admin.query("SELECT count(*)::int AS n FROM rt.entries WHERE partition_id = $1 AND record LIKE '%pi.assistant%'", [chat.partitionId])).rows[0].n as number;
 	await runner.claimOnce();
 	await until(async () => (await answers()) === 1, "first answer");
+	// The owner unloads once the family is quiescent; a command sent before then is delivered by the owner itself, one sent after needs a claim.
+	const unloaded = () => until(() => runner.hosts.size === 0, "the owner to unload");
+	await unloaded();
 	const conv = (await db.admin.query("SELECT conversation_id FROM app.chats WHERE chat_id = $1", [chat.chatId])).rows[0].conversation_id as number;
 	const send = async (n: number) => {
 		await acceptCommand(db.gate, { tenantId: t.tenantId, commandId: `m${n}-${chat.chatId}`, actor: "ada", kind: "chat.send", partitionId: chat.partitionId, payload: { conversationId: conv, content: `t${n}` }, signal: { kind: "input" } });
 		await runner.claimOnce();
 		await until(async () => (await answers()) === n + 1, `answer ${n}`);
+		await unloaded();
 	};
 	for (let n = 1; n < turns; n++) await send(n);
 	return { t, chat, conv, runner, send, answers, ids };

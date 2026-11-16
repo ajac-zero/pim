@@ -217,16 +217,20 @@ real("the vertical slice", () => {
 		const forgeDb = d.stack.admin as unknown as ForgeDb;
 		const authz = new Authz(forgeDb, { allowedRepos: ["acme/*"], branchPrefix: "pim/" });
 		const actor = { ownerId, role: "admin" as const };
-		// Without a grant, coding is refused; the grant is an admin's explicit record.
+		// Without a grant, coding is refused.
 		expect((await web.call("POST", "/api/coding/threads", { operationId: "op-0", task: "Nothing", repo: REPO, chat: chatId })).status).toBe(403);
-		// With one but no compute pool configured, it is unavailable (not forbidden): the deployment has nothing to run it on.
-		await authz.grant({ subjectType: "user", subjectId: ownerId, permission: "coding:start", grantedBy: ownerId });
+		// The admin grants through the Gate; Forge enforces the same grant. With one but no compute pool configured, it is unavailable (not forbidden): the deployment has nothing to run it on.
+		const granted = await web.call("POST", "/api/admin/coding-grants", { ownerId, permissions: ["coding:start", "coding:merge"], repositories: ["github.com/acme/*"] });
+		expect(granted.status).toBe(201);
 		expect((await web.call("POST", "/api/coding/threads", { operationId: "op-0", task: "Nothing", repo: REPO, chat: chatId })).status).toBe(503);
 		await new ForgeScheduler(forgeDb, new ForgeStore(forgeDb), Date.now).upsertPool({ poolId: "default", provider: "local", size: 10 });
-		await authz.grant({ subjectType: "user", subjectId: ownerId, permission: "coding:merge", grantedBy: ownerId, requiresApproval: true });
+		// Merge is permitted but needs a person; a standing approval, recorded by the admin and auditable, stands in for them.
 		expect((await authz.check(actor, "coding:merge", { repo: REPO })).requiresApproval).toBe(true);
-		await authz.grantStanding({ approvalId: "standing-1", ownerId, action: "coding:merge", scope: { repository: "github.com/acme/app" }, grantedBy: ownerId });
-		expect((await authz.check(actor, "coding:merge", { repo: REPO })).viaStandingApproval).toBe("standing-1");
+		const standing = await web.call("POST", "/api/admin/standing-approvals", { ownerId, action: "coding:merge", scope: { repository: "github.com/acme/app" } });
+		expect(standing.status).toBe(201);
+		expect((await authz.check(actor, "coding:merge", { repo: REPO })).viaStandingApproval).toBe(standing.json.approvalId);
+		expect((await web.call("DELETE", `/api/admin/standing-approvals/${ownerId}/${standing.json.approvalId}`)).status).toBe(200);
+		expect((await authz.check(actor, "coding:merge", { repo: REPO })).requiresApproval).toBe(true);
 
 		const started = await web.call("POST", "/api/coding/threads", { operationId: "op-1", task: "Fix the flaky login test", repo: REPO, chat: chatId });
 		expect(started.status).toBe(201);

@@ -79,3 +79,33 @@ export function forgeRoutes(handler: Handler): Route[] {
 		{ method, pattern: /^\/api\/admin\/coding(\/.*)?$/, run },
 	]);
 }
+
+/** The admin's door to coding authority, through the application's Authorizer (which Forge's tables follow, see `mirrorCodingGrants`). */
+export function codingAdminRoutes(): Route[] {
+	return [
+		{
+			method: "POST",
+			pattern: /^\/api\/admin\/coding-grants$/,
+			run: async ({ app, principal, json }): Promise<Reply> => {
+				const b = await json();
+				return ok({ grantId: await app.identity.authz.grantCoding(await principal(), { ownerId: String(b.ownerId), permissions: b.permissions ?? [], ...(b.pools ? { pools: b.pools } : {}), ...(b.repositories ? { repositories: b.repositories } : {}), ...(b.quota ? { quota: b.quota } : {}) }) }, 201);
+			},
+		},
+		{
+			method: "POST",
+			pattern: /^\/api\/admin\/standing-approvals$/,
+			run: async ({ app, principal, json }): Promise<Reply> => {
+				const b = await json();
+				return ok({ approvalId: await app.identity.authz.grantStanding(await principal(), { ownerId: String(b.ownerId), action: String(b.action), scope: b.scope ?? {}, ...(b.expiresAt ? { expiresAt: new Date(b.expiresAt) } : {}) }) }, 201);
+			},
+		},
+		{
+			method: "DELETE",
+			pattern: /^\/api\/admin\/standing-approvals\/([^/]+)\/([^/]+)$/,
+			run: async ({ app, principal, params }): Promise<Reply> => {
+				await app.identity.authz.revokeStanding(await principal(), params[0]!, params[1]!);
+				return ok({ ok: true });
+			},
+		},
+	];
+}

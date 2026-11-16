@@ -27,10 +27,11 @@ import { deliverCosts } from "./deliveries.ts";
 import { assembleForge } from "./forge-assembly.ts";
 import { combineSources, forgeOutboxSource } from "./forge-source.ts";
 import { deliverForgeWakes } from "./forge-wakes.ts";
-import { forgeAuthenticator, forgeRoutes, projectedTranscripts, snapshotRoutes } from "./gate-extras.ts";
+import { codingAdminRoutes, forgeAuthenticator, forgeRoutes, projectedTranscripts, snapshotRoutes } from "./gate-extras.ts";
 import type { Host } from "./host.ts";
-import { AppLiveIdentity, deliverApprovalDecisions, LiveAuthorizer, publishRevocations } from "./identity.ts";
+import { AppLiveIdentity, deliverApprovalDecisions, LiveAuthorizer, mirrorCodingGrants, publishRevocations } from "./identity.ts";
 import { runtimeOutboxSource } from "./runtime-source.ts";
+import { sweepApprovals, trimForgeOutbox } from "./sweeps.ts";
 
 export type Env = Record<string, string | undefined>;
 export type Hooks = {
@@ -84,8 +85,9 @@ export async function startGate(config: ProcessConfig, env: Env, host: Host, nat
 	deliverApprovalDecisions(app);
 	const secure = config.publicUrl.startsWith("https:");
 	const forge = assembleForge(db.pool as never, objects, env);
+	mirrorCodingGrants(app, forge.authz as never);
 	const coding = codingRest({ forge: forge.forge, scheduler: forge.scheduler, store: forge.store, db: forge.db, authenticate: forgeAuthenticator(app, secure) });
-	const options = { publicUrl: config.publicUrl, ...(env.PIM_APPS_ORIGIN ? { appsOrigin: env.PIM_APPS_ORIGIN } : {}), routes: [...snapshotRoutes(db.pool), ...forgeRoutes(coding)] };
+	const options = { publicUrl: config.publicUrl, ...(env.PIM_APPS_ORIGIN ? { appsOrigin: env.PIM_APPS_ORIGIN } : {}), routes: [...snapshotRoutes(db.pool), ...codingAdminRoutes(), ...forgeRoutes(coding)] };
 	const gate = createGate(app, options);
 	const listener = gate.listeners("request")[0] as (req: never, res: never) => void;
 	host.handle((req, res) => (listener(req as never, res as never), true));
@@ -241,7 +243,15 @@ export async function startMaintenance(config: ProcessConfig, env: Env, host: Ho
 	app.pool.on("error", () => {});
 	const { Usage } = await import("@pim/v2-app/usage");
 	const usage = new Usage(app);
+	let lastTrim = 0;
+	const { App } = await import("@pim/v2-app/app");
+	const sweeper = new App(app, objects);
 	const pass = async () => {
+		await sweepApprovals(sweeper, maint).catch((e) => console.error("approval sweep", e));
+		if (Date.now() - lastTrim > 60_000) {
+			lastTrim = Date.now();
+			await trimForgeOutbox(maint).catch((e) => console.error("outbox trim", e));
+		}
 		await deliverForgeWakes({ forge: parts.forge, forgeDb: maint as never, runtime, inbox, onUnroutable: (id, why) => console.warn("wake dropped", id, why) });
 		await deliverCosts({ forge: parts.forge, forgeDb: maint as never, usage, onUnroutable: (id, why) => console.warn("cost dropped", id, why) });
 	};

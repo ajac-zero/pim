@@ -1,0 +1,25 @@
+# The one Pim v2 image. It runs one role per container, chosen by the command: `migrate`, `gate`, `live`, `runner`, `forge`, `canvas`,
+# `relay`, `maintenance` or `all-in-one` (deploy/compose/compose.yaml and deploy/k8s/ set `command: [<role>]` and PIM_IMAGE to this image).
+#
+#   docker build -f deploy/Dockerfile.v2 -t registry.example.test/pim:2.0.0 .
+#
+# The sources run under tsx, which keeps every package's own paths (its migrations, its SQL) where the code expects them; there is no bundle.
+# Not built in CI (no Docker daemon there); see docs/architecture/v2-implementation-status.md.
+FROM node:26-bookworm-slim AS build
+ENV PNPM_HOME=/pnpm PATH=/pnpm:$PATH
+RUN corepack enable
+WORKDIR /app
+COPY pnpm-lock.yaml pnpm-workspace.yaml package.json ./
+COPY patches ./patches
+COPY packages ./packages
+# Only the v2 server and what it imports are installed, production dependencies only.
+RUN pnpm install --frozen-lockfile --prod --filter "@pim/v2-server..."
+
+FROM node:26-bookworm-slim
+ENV NODE_ENV=production
+WORKDIR /app/packages/v2-server
+COPY --from=build /app /app
+# The roles listen on PIM_HTTP_PORT (8080) and PIM_METRICS_PORT (9464); the filesystem is read-only in both deployments, and /tmp is a tmpfs.
+USER node
+EXPOSE 8080 9464
+ENTRYPOINT ["node", "--import", "tsx", "src/main.ts"]

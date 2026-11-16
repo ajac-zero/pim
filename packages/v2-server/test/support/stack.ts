@@ -23,7 +23,7 @@ export const hasNats = (): boolean => {
 	}
 };
 
-const freePort = () =>
+export const freePort = () =>
 	new Promise<number>((resolve, reject) => {
 		const probe = createServer();
 		probe.listen(0, "127.0.0.1", () => {

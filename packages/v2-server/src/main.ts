@@ -5,6 +5,8 @@
  * `PIM_METRICS_PORT` (9464), and drains on SIGTERM.
  */
 import { loadProcessConfig, PROCESS_ROLES, rolesOf, type PimProcessRole } from "@pim/v2-contracts/platform";
+import { realpathSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 import pg from "pg";
 import { createHost, type Host } from "./host.ts";
 import { migrateAll } from "./migrate.ts";
@@ -87,7 +89,7 @@ export async function main(argv = process.argv.slice(2), env: Env = process.env)
 	process.on("SIGINT", () => void stop("SIGINT"));
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && pathToFileURL(realpathSync(process.argv[1])).href === import.meta.url) {
 	main().catch((error) => {
 		console.error(JSON.stringify({ event: "pim.failed", error: String(error?.message ?? error) }));
 		process.exit(1);

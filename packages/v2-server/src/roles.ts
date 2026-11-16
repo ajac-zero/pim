@@ -55,6 +55,14 @@ export function keyringFromProcessEnv(env: Env): KeyringCrypto | undefined {
 	return new KeyringCrypto((env.PIM_KEK_CURRENT ?? Object.keys(keys).at(-1)!).toLowerCase(), keys);
 }
 
+/** One set of metrics per process, whatever roles it runs: the registry refuses a name twice. */
+const metricsByHost = new WeakMap<Host, ReturnType<typeof createPimMetrics>>();
+const metricsOf = (host: Host) => {
+	let m = metricsByHost.get(host);
+	if (!m) metricsByHost.set(host, (m = createPimMetrics(host.registry)));
+	return m;
+};
+
 const s3Of = (config: ProcessConfig, env: Env) =>
 	new S3ObjectStore(config.s3.bucket, { endpoint: config.s3.endpoint, region: config.s3.region, ...(env.PIM_S3_ACCESS_KEY && env.PIM_S3_SECRET_KEY ? { credentials: { accessKeyId: env.PIM_S3_ACCESS_KEY, secretAccessKey: env.PIM_S3_SECRET_KEY } } : {}) });
 
@@ -65,7 +73,7 @@ const pool = (config: ProcessConfig, name: keyof ProcessConfig["pools"]) => {
 
 /** The Gate: the application's HTTP API and sockets, the projections' snapshots, Forge's coding API. It also runs the Canvas and Relay sockets, which `canvas` and `relay` containers serve with the same code. */
 export async function startGate(config: ProcessConfig, env: Env, host: Host, nats?: NatsPulse): Promise<Role> {
-	const metrics = createPimMetrics(host.registry);
+	const metrics = metricsOf(host);
 	const db = connectApp(config.databaseUrl, config.pools.foreground.max, config.pools.foreground.statementTimeoutMs);
 	db.pool.on("error", () => {});
 	instrumentPool(db.pool, metrics, "gate");
@@ -127,7 +135,7 @@ function projectorLoop(projector: Projector, listenerUrl: string, pollMs: number
 
 /** Live: the WebSocket at `/api/ws`, the snapshots, and the projector. Stateless: any replica serves any reconnect from a cursor. */
 export async function startLive(config: ProcessConfig, env: Env, host: Host, hooks: Hooks, pulse: NatsPulse): Promise<Role> {
-	const metrics = createPimMetrics(host.registry);
+	const metrics = metricsOf(host);
 	const live = instrumentPool(pool(config, "foreground"), metrics, "live");
 	const secure = config.publicUrl.startsWith("https:");
 	const hub = new LiveHub(new LogStore(live), pulse, new AppLiveIdentity(live, secure), new LiveAuthorizer());
@@ -159,7 +167,7 @@ export async function startLive(config: ProcessConfig, env: Env, host: Host, hoo
 
 /** A Runner may claim work only once any restore has had its safety pass: until then it is alive but not ready. */
 export async function startRunner(config: ProcessConfig, env: Env, host: Host, hooks: Hooks): Promise<Role> {
-	const metrics = createPimMetrics(host.registry);
+	const metrics = metricsOf(host);
 	const runtimePool = pool(config, "runtime");
 	const db = new RuntimeDb(runtimePool);
 	instrumentPool(runtimePool, metrics, "runner", "runtime");
@@ -212,7 +220,8 @@ export async function startRunner(config: ProcessConfig, env: Env, host: Host, h
 
 /** Forge: the coding control plane's worker. It steps threads when a compute provider is configured; without one a coding thread cannot start, and the Gate says so. */
 export async function startForge(config: ProcessConfig, env: Env, host: Host, hooks: Hooks): Promise<Role> {
-	const forgePool = pool(config, "forge");
+	const forgePool = instrumentPool(pool(config, "forge"), metricsOf(host), "forge", "forge");
+	monitorEventLoop(metricsOf(host), "forge");
 	const parts = assembleForge(forgePool as never, s3Of(config, env), env);
 	host.readiness(async () => (await forgePool.query("SELECT 1"), true));
 	void hooks;
@@ -221,7 +230,8 @@ export async function startForge(config: ProcessConfig, env: Env, host: Host, ho
 
 /** Maintenance: what moves work between schemas that no single service may touch, with the grants only this role holds: Forge's wakes into the chats that started threads, and Forge's costs into the ledger. */
 export async function startMaintenance(config: ProcessConfig, env: Env, host: Host, hooks: Hooks): Promise<Role> {
-	const maint = pool(config, "maintenance");
+	const maint = instrumentPool(pool(config, "maintenance"), metricsOf(host), "maintenance", "maintenance");
+	monitorEventLoop(metricsOf(host), "maintenance");
 	const objects = s3Of(config, env);
 	const parts = assembleForge(maint as never, objects, env);
 	const runtime = new RuntimeDb(maint);

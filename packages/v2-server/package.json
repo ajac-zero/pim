@@ -10,9 +10,12 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "start": "node --import tsx src/main.ts"
   },
   "dependencies": {
+    "@earendil-works/chord": "1.1.0",
+    "@earendil-works/pi-ai": "1.1.0",
     "@earendil-works/pi-durable": "1.1.0",
     "@pim/shared": "workspace:*",
     "@pim/v2-app": "workspace:*",
@@ -21,14 +24,14 @@
     "@pim/v2-live": "workspace:*",
     "@pim/v2-ops": "workspace:*",
     "@pim/v2-runtime": "workspace:*",
-    "pg": "^8.16.3"
+    "pg": "^8.16.3",
+    "tsx": "^4.23.15"
   },
   "devDependencies": {
-    "@earendil-works/chord": "1.1.0",
-    "@earendil-works/pi-ai": "1.1.0",
     "@types/node": "^24.19.1",
     "@types/pg": "^8.15.5",
     "@types/ws": "^8.18.1",
+    "s3rver": "^3.7.1",
     "typescript": "^6.0.3",
     "vitest": "^4.1.11",
     "ws": "^8.22.0"

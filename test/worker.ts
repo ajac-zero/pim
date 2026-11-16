@@ -390,7 +390,7 @@ export const codingEvents: CodingThreadEvent[] = [];
  * workspace that fails and doesn't answer for a second counts as down; a running turn's work is autosaved every three
  * minutes, which a test may set to 0, to autosave at each heartbeat.
  */
-const DEFAULT_CODING_TIMINGS = { stallMs: 300, lostGraceMs: 1_000, autosaveMs: 3 * 60_000, autopushMs: 20_000, resumeWaitMs: 120_000, retryMs: 30_000, orbPollMs: 30_000 };
+const DEFAULT_CODING_TIMINGS = { stallMs: 300, lostGraceMs: 1_000, autosaveMs: 3 * 60_000, autopushMs: 20_000, resumeWaitMs: 120_000, retryMs: 30_000, orbPollMs: 30_000, orbSyncTtlMs: 0 };
 export const codingTimings = { ...DEFAULT_CODING_TIMINGS };
 
 /** The coding threads' clock in tests: real time until a test sets it, as the stuck timeout needs (test/coding-thread-do.test.ts). */
@@ -489,6 +489,10 @@ export class CodingThreadDO extends RealCodingThreadDO {
 	/** How often a test has an agent-hosted thread's turn looked at. */
 	protected override orbPollMs(): number {
 		return codingTimings.orbPollMs;
+	}
+
+	protected override orbSyncTtlMs(): number {
+		return codingTimings.orbSyncTtlMs;
 	}
 
 	/** The orb clients a test registered, as a deployment's factory would answer with. */

@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { codingVault } from "../src/coding/vault/worker";
 import { OWNER } from "./helpers";
 import { FakeOrbClient } from "@pim/coding/orb/fake";
+import { OrbAuthError, OrbLostError } from "@pim/coding/orb/types";
 import { codingThread, type StartThread } from "../src/coding/thread-do";
 import { type CodingThreadDO, codingEvents, codingOrbs, codingTimings } from "./worker";
 
@@ -60,6 +61,7 @@ const evict = (stub: Stub) => runInDurableObject(stub, (_instance: CodingThreadD
 beforeEach(() => {
 	codingOrbs.factory = null;
 	codingTimings.orbPollMs = 30_000;
+	codingTimings.orbSyncTtlMs = 0;
 	codingEvents.length = 0;
 });
 
@@ -295,6 +297,115 @@ describe("what an agent-hosted thread reports about itself", () => {
 
 afterEach(() => vi.restoreAllMocks());
 
+describe("a turn continued on the agent's own site", () => {
+	/** A thread whose first turn is over, as when the person then goes on in the agent's own site. */
+	async function idleThread(options: ConstructorParameters<typeof FakeOrbClient>[0] = {}) {
+		const fake = new FakeOrbClient(options);
+		const made = await orbThread(fake);
+		await heartbeat(made.stub);
+		fake.say(made.orb(), "assistant", "Done.");
+		fake.setState(made.orb(), "idle");
+		await heartbeat(made.stub);
+		expect(await made.stub.status()).toMatchObject({ state: "idle", currentOperation: null });
+		codingEvents.length = 0;
+		return { ...made, fake };
+	}
+	const texts = async (stub: Stub) => (await said(stub)).map(([role, parts]) => `${role}: ${(parts as unknown as { text?: string }[]).map((part) => part.text ?? "").join("")}`);
+
+	it("mirrors a completed continuation when the thread is read, records its end, wakes nobody, and repeats nothing", async () => {
+		const { id, stub, fake, orb } = await idleThread();
+		const before = await stub.status();
+		fake.say(orb(), "user", "Now add a farewell");
+		fake.say(orb(), "assistant", "On it.", [{ type: "toolCall", id: "c1", name: "edit", arguments: { path: "a.ts" } }]);
+		fake.say(orb(), "user", "", [{ type: "toolResult", id: "c1", name: "edit", text: "ok", isError: false }]);
+		fake.say(orb(), "assistant", "Added a farewell.");
+		const after = await stub.status();
+		expect(after).toMatchObject({ state: "idle", currentOperation: null });
+		expect(after.updatedAt).toBeGreaterThan(before.updatedAt);
+		expect(await texts(stub)).toEqual(expect.arrayContaining(["user: Now add a farewell", "assistant: Added a farewell."]));
+		expect((await said(stub)).map(([role]) => role)).toEqual(expect.arrayContaining(["user", "assistant", "tool"]));
+		const events = ended(id);
+		expect(events).toEqual([expect.objectContaining({ outcome: "completed", state: "idle", operationId: expect.stringMatching(/^external:/) })]);
+		const size = (await inside(stub, (thread) => thread.transcript())).length;
+		await stub.status();
+		expect((await inside(stub, (thread) => thread.transcript())).length).toBe(size);
+		expect(ended(id)).toHaveLength(1);
+	});
+
+	it("follows a continuation that is still running, and ends it when the agent does", async () => {
+		const { id, stub, fake, orb } = await idleThread();
+		fake.say(orb(), "user", "Keep going");
+		fake.setState(orb(), "working");
+		const running = await stub.status();
+		expect(running).toMatchObject({ state: "running", currentOperation: expect.stringMatching(/^external:/) });
+		fake.say(orb(), "assistant", "Halfway.");
+		await heartbeat(stub);
+		expect(await texts(stub)).toEqual(expect.arrayContaining(["assistant: Halfway."]));
+		expect(ended(id)).toEqual([]);
+		fake.say(orb(), "assistant", "All done.");
+		fake.setState(orb(), "idle");
+		await heartbeat(stub);
+		expect(await stub.status()).toMatchObject({ state: "idle", currentOperation: null });
+		expect(ended(id)).toEqual([expect.objectContaining({ outcome: "completed", operationId: running.currentOperation })]);
+		expect(await texts(stub)).toContain("assistant: All done.");
+	});
+
+	it("can stop a continuation it follows", async () => {
+		const { id, stub, fake, orb } = await idleThread();
+		fake.setState(orb(), "working");
+		expect(await stub.status()).toMatchObject({ state: "running" });
+		await stub.abort();
+		expect(fake.cancelCount(orb())).toBe(1);
+		expect(await stub.status()).toMatchObject({ state: "idle", currentOperation: null });
+		expect(ended(id)).toEqual([expect.objectContaining({ outcome: "cancelled" })]);
+	});
+
+	it("mirrors what was said there before the turn it steers next", async () => {
+		const { stub, fake, orb } = await idleThread();
+		fake.say(orb(), "user", "Said on the site");
+		fake.say(orb(), "assistant", "Answered on the site");
+		await stub.steer("Said in Pim", { operationId: "steer-2" });
+		await heartbeat(stub);
+		expect(fake.queued(orb())).toEqual(["Said in Pim"]);
+		const stored = JSON.stringify(await inside(stub, (thread) => thread.harness.messages()));
+		expect(stored).toContain("Said on the site");
+		expect(stored).toContain("Answered on the site");
+	});
+
+	it("never fails a read because the agent's cloud can't be asked", async () => {
+		const { stub, fake, orb } = await idleThread();
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		const before = await stub.status();
+		fake.unreachable("messages", true);
+		expect(await stub.status()).toMatchObject({ state: "idle", currentOperation: null, updatedAt: before.updatedAt });
+		expect(await inside(stub, (thread) => thread.transcript())).toBeInstanceOf(Array);
+		fake.unreachable("messages", false);
+		vi.spyOn(fake, "messages").mockRejectedValueOnce(new OrbAuthError("sign in again"));
+		expect(await stub.status()).toMatchObject({ state: "idle", stateReason: null });
+		vi.spyOn(fake, "state").mockRejectedValueOnce(new OrbLostError("gone"));
+		expect(await stub.status()).toMatchObject({ state: "idle", stateReason: null });
+		expect(warn.mock.calls.filter(([line]) => String(line).includes("orb_sync_failed")).length).toBeGreaterThanOrEqual(3);
+		vi.restoreAllMocks();
+		fake.say(orb(), "assistant", "Back again.");
+		fake.setState(orb(), "idle");
+		await stub.status();
+		expect(await texts(stub)).toContain("assistant: Back again.");
+	});
+
+	it("looks at the orb once for reads close together", async () => {
+		const { stub, fake } = await idleThread();
+		const messages = vi.spyOn(fake, "messages");
+		await stub.status();
+		expect(messages).toHaveBeenCalledTimes(1);
+		// The reads just after it, within the window, share that look.
+		codingTimings.orbSyncTtlMs = 2_000;
+		await stub.status();
+		await inside(stub, (thread) => thread.transcript());
+		expect(messages).toHaveBeenCalledTimes(1);
+		vi.restoreAllMocks();
+	});
+});
+
 describe("Amp HTTP placement", () => {
 	it("starts Amp Orbs without a sandbox backend, slot or workspace", async () => {
 		const fake = new FakeOrbClient({ id: "amp-http" });
@@ -440,6 +551,22 @@ describe("Amp attachment images in an agent-hosted thread", () => {
 		fetcher.mockClear();
 		expect(await firstText(stub)).toBe(text);
 		expect(fetcher).not.toHaveBeenCalled();
+	});
+
+	it("mirrors an image from a continuation on Amp's site while the thread is idle", async () => {
+		vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(PNG, { headers: { "content-type": "image/png" } }));
+		const { stub, fake, orb } = await ampThread();
+		fake.say(orb(), "assistant", "First.");
+		fake.setState(orb(), "idle");
+		await heartbeat(stub);
+		fake.say(orb(), "user", "Draw it");
+		fake.say(orb(), "assistant", `![Light](${LIGHT})`);
+		await stub.status();
+		const reply = (await inside(stub, (thread) => thread.transcript())).filter((entry) => entry.role === "assistant").at(-1)!;
+		const text = (reply.parts[0] as { text: string }).text;
+		const url = /!\[Light\]\((\/api\/images\/[\w-]+)\)/.exec(text)?.[1];
+		expect(url).toBeDefined();
+		expect(await stored(url!)).toEqual({ type: "image/png", bytes: PNG });
 	});
 
 	it("copies what an earlier turn left with Amp's addresses the first time the transcript is read, once", async () => {

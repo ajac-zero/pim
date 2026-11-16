@@ -1152,12 +1152,19 @@ function BackLink() {
   );
 }
 
+/** Whether the thread runs on Amp's cloud: the thread's status names its provider `amp-orbs`, and a stored record may still say `amp-http`. */
+function isAmpOrb(thread: { provider: string }): boolean {
+  return thread.provider === "amp-http" || thread.provider === "amp-orbs";
+}
+
 /** One thread: what it works on and how far, its conversation live, its diff and tests, and what can be done with it now. */
 export function CodingThreadPage({ id }: { id: string }) {
   const { t } = useI18n();
   const api = useCodingApi();
   const thread = useQuery({
     ...codingThreadQuery(api, id),
+    // Coming back from the agent's own site, where the thread may have gone on without Pim.
+    refetchOnWindowFocus: "always",
     refetchInterval: (query) =>
       query.state.data &&
       (isActive(query.state.data.state) ||
@@ -1574,7 +1581,7 @@ function ThreadControls({
       (thread.stateReason === "aborted" || thread.stateReason === "cancelled"));
   return (
     <div className="flex shrink-0 items-center self-center">
-      {stopped && !continuing && thread.provider !== "amp-http" && (
+      {stopped && !continuing && !isAmpOrb(thread) && (
         <ContinueButton thread={thread} onExpand={() => setContinuing(true)} />
       )}
       {!waiting && <PushButton thread={thread} push={push} />}
@@ -1630,7 +1637,7 @@ function ThreadActions({
       {confirming && (
         <Confirm
           text={
-            thread.provider === "amp-http"
+            isAmpOrb(thread)
               ? "Archive this thread? It is archived on Amp too. Use Stop first to halt a run that is still going."
               : t("codingArchiveConfirm")
           }
@@ -1897,10 +1904,26 @@ function PushApproval({ requested }: { requested: CodingPushRequested }) {
  * snapshot each opening starts with names messages already shown, which
  * stay one row each.
  */
-function useLiveTranscript(id: string, follow: boolean) {
+function useLiveTranscript(
+  id: string,
+  follow: boolean,
+  syncedAt: number | null,
+) {
   const api = useCodingApi();
   const queryClient = useQueryClient();
-  const transcript = useQuery(codingTranscriptQuery(api, id));
+  const transcript = useQuery({
+    ...codingTranscriptQuery(api, id),
+    refetchOnWindowFocus: "always",
+  });
+  // Reading an agent-hosted thread mirrors what was said on the agent's own site, which moves its updatedAt.
+  const seenAt = useRef(syncedAt);
+  useEffect(() => {
+    if (seenAt.current === syncedAt) return;
+    seenAt.current = syncedAt;
+    void queryClient.invalidateQueries({
+      queryKey: ["coding", "transcript", id],
+    });
+  }, [syncedAt, id, queryClient]);
   const [live, dispatch] = useReducer(reduceLive, EMPTY_LIVE);
   const [connected, setConnected] = useState(false);
   const [dropped, setDropped] = useState(false);
@@ -1915,7 +1938,11 @@ function useLiveTranscript(id: string, follow: boolean) {
     }
     if (message.type !== "events") return;
     for (const event of message.events) {
-      if (event.type === "run_start" || event.type === "message_end") {
+      if (
+        event.type === "run_start" ||
+        event.type === "message_end" ||
+        event.type === "entry_appended"
+      ) {
         invalidate("thread");
         invalidate("transcript");
       }
@@ -1995,7 +2022,11 @@ function Transcript({
   onSuggestion: (text: string, edit: boolean) => void;
 }) {
   const { t } = useI18n();
-  const live = useLiveTranscript(thread.id, thread.state !== "archived");
+  const live = useLiveTranscript(
+    thread.id,
+    thread.state !== "archived",
+    thread.providerKind === "agent-hosted" ? thread.updatedAt : null,
+  );
   // What the agent offers to say next is shown only while it is the end of the conversation, and the person can answer it.
   const last = live.rows[live.rows.length - 1];
   const suggestions =

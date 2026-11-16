@@ -1,7 +1,11 @@
 // @vitest-environment happy-dom
 import type { EntryRecord } from "@earendil-works/pi-durable";
 import { HARNESS_DISCLOSURES } from "@pim/shared/harnesses";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import {
+  focusManager,
+  QueryClient,
+  QueryClientProvider,
+} from "@tanstack/react-query";
 import {
   createMemoryHistory,
   createRootRoute,
@@ -1112,6 +1116,66 @@ describe("a thread's page", () => {
       expect(screen.getAllByText("Fix the flaky date test")).toHaveLength(2); // the header's title and the transcript's first message, not repeated
       expect(screen.getAllByText("Looking at the test.")).toHaveLength(1);
       expect(screen.getAllByText("Fixed it.")).toHaveLength(1);
+    });
+  });
+
+  it("offers no Continue for a stopped Amp thread named amp-orbs, and warns that archiving reaches Amp", async () => {
+    const { api } = fakeApi(
+      view({
+        harness: "amp",
+        provider: "amp-orbs",
+        providerKind: "agent-hosted",
+        state: "failed",
+        stateReason: "orb_error",
+        orb: { url: "https://ampcode.com/threads/T-http" },
+      }),
+    );
+    threadPage(api);
+    fireEvent.click(await screen.findByRole("button", { name: "Archive" }));
+    expect(screen.getByText(/It is archived on Amp too/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Continue" })).toBeNull();
+  });
+
+  it("reads an agent-hosted thread again when an entry is appended, and when the page is focused again", async () => {
+    const { api, connections } = fakeApi(
+      view({
+        harness: "amp",
+        provider: "amp-orbs",
+        providerKind: "agent-hosted",
+      }),
+    );
+    threadPage(api);
+    await screen.findByPlaceholderText(
+      "Tell the coding agent what to do next…",
+    );
+    await waitFor(() => expect(connections).toHaveLength(1));
+    const threads = api.thread.mock.calls.length;
+    const transcripts = api.transcript.mock.calls.length;
+    (connections[0] as Connection).send({
+      type: "events",
+      events: [
+        {
+          type: "entry_appended",
+          entry: assistantEntry("9", [{ type: "text", text: "From Amp." }]),
+        },
+      ],
+    } as unknown as CodingStreamMessage);
+    await waitFor(() => {
+      expect(api.thread.mock.calls.length).toBeGreaterThan(threads);
+      expect(api.transcript.mock.calls.length).toBeGreaterThan(transcripts);
+    });
+    // Back from the agent's own site, the thread and its transcript are read again, though they aren't stale.
+    const focused = {
+      threads: api.thread.mock.calls.length,
+      transcripts: api.transcript.mock.calls.length,
+    };
+    focusManager.setFocused(false);
+    focusManager.setFocused(true);
+    await waitFor(() => {
+      expect(api.thread.mock.calls.length).toBeGreaterThan(focused.threads);
+      expect(api.transcript.mock.calls.length).toBeGreaterThan(
+        focused.transcripts,
+      );
     });
   });
 

@@ -2,7 +2,7 @@ import { getAgentByName } from "agents";
 import { deploymentSettings } from "../deployment";
 import { threadPath } from "./api";
 import { codingScheduler } from "./scheduler-do";
-import type { CodingEventSink, TurnEndedEvent } from "./thread-do";
+import { type CodingEventSink, EXTERNAL_ORB_PREFIX, type TurnEndedEvent } from "./thread-do";
 
 /**
  * Hearing of a coding thread's turns, for the agent that started it: when a
@@ -15,6 +15,8 @@ import type { CodingEventSink, TurnEndedEvent } from "./thread-do";
 export function supervisorSink(env: Env): CodingEventSink {
 	return {
 		async emit(event) {
+			// A person continuing the thread on ampcode.com isn't asking the agent that started it for anything.
+			if (event.operationId.startsWith(EXTERNAL_ORB_PREFIX)) return;
 			const thread = await codingScheduler(env, event.space).thread(event.threadId);
 			if (thread?.createdBy.type !== "agent") return;
 			const pim = await getAgentByName(env.Pim, event.space);

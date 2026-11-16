@@ -3,7 +3,7 @@ import type pg from "pg";
 import { type Q, withTenant } from "../db.ts";
 import { KeyRing, putSecret } from "../secrets.ts";
 import type { BlobStore } from "./blobs.ts";
-import { BundleReader, PI_TABLES, rowDigest } from "./format.ts";
+import { BundleReader, PI_TABLES, isLiveHandle, rowDigest } from "./format.ts";
 import { type TenantPlan, planTenant } from "./plan.ts";
 import { decryptSecretsFile } from "./secrets-bundle.ts";
 
@@ -281,7 +281,7 @@ async function importHandles(q: Q, bundle: BundleReader, tenantId: string, repor
 	let n = 0;
 	for (const h of await bundle.all<any>("external/handles.ndjson")) {
 		if (h.tenant !== tenantId) continue;
-		const live = !["done", "cancelled", "failed", "archived"].includes(String(h.state));
+		const live = isLiveHandle(h);
 		// Never restarted and never assumed finished: a live handle is for the reconciler to adopt or cancel, exactly once.
 		await q.run(
 			"INSERT INTO app.external_ops (tenant_id, op_id, kind, state, idempotent, handle, request) VALUES ($1, $2, $3, $4, false, $5, $6)",

@@ -6,7 +6,7 @@ import type { IdAllocator } from "../ids.ts";
 import { KeyRing, getSecret } from "../secrets.ts";
 import { PgStorage } from "../storage.ts";
 import type { BlobStore } from "./blobs.ts";
-import { BundleReader, PI_TABLES, rowDigest } from "./format.ts";
+import { BundleReader, PI_TABLES, isLiveHandle, rowDigest } from "./format.ts";
 import { decryptSecretsFile } from "./secrets-bundle.ts";
 
 export interface Check {
@@ -147,7 +147,7 @@ export async function verifyImport(bundle: BundleReader, options: VerifyOptions)
 			const meta2 = await q((c) => c.get<{ n: number }>("SELECT count(*) AS n FROM app.objects WHERE tenant_id = $1", tenantId));
 			add(tenantId, "files, notes and artifacts: every object body is in the store with its checksum, and has metadata", good === blobs.length && meta2?.n === blobs.length, `${good}/${blobs.length} bodies, ${meta2?.n} metadata rows`);
 		}
-		const live = (await bundle.all<any>("external/handles.ndjson")).filter((h) => h.tenant === tenantId && !["done", "cancelled", "failed", "archived"].includes(String(h.state)));
+		const live = (await bundle.all<any>("external/handles.ndjson")).filter((h) => h.tenant === tenantId && isLiveHandle(h));
 		const ops = await q((c) => c.get<{ n: number }>("SELECT count(*) AS n FROM app.external_ops WHERE tenant_id = $1 AND state = 'reconciliation_needed' AND op_id LIKE 'import:%'", tenantId));
 		add(tenantId, "external handles: every live coding or remote session is held for reconciliation, none restarted", ops?.n === live.length, `${ops?.n}/${live.length}`);
 

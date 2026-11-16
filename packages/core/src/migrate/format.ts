@@ -141,3 +141,7 @@ export const rowDigest = (lines: Iterable<string>): string => {
 	for (const line of lines) hash.update(`${line}\n`);
 	return hash.digest("hex");
 };
+
+const TERMINAL_STATES = new Set(["done", "cancelled", "failed", "archived", "aborted", "stopped"]);
+/** Whether an exported external handle (a coding thread, a remote session) may still be doing work on the other side. */
+export const isLiveHandle = (h: { state?: unknown; terminal?: boolean }): boolean => (h.terminal === undefined ? !TERMINAL_STATES.has(String(h.state)) : !h.terminal);

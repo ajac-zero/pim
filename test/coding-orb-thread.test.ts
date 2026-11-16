@@ -1,8 +1,10 @@
+import { Buffer } from "node:buffer";
 import { env, runInDurableObject } from "cloudflare:test";
+import { exports } from "cloudflare:workers";
 import type { Pim } from "../src/pim";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { codingVault } from "../src/coding/vault/worker";
-import { OWNER } from "./helpers";
+import { OWNER, apiUrl, TOKEN } from "./helpers";
 import { FakeOrbClient } from "@pim/coding/orb/fake";
 import { OrbAuthError, OrbLostError } from "@pim/coding/orb/types";
 import { codingThread, type StartThread } from "../src/coding/thread-do";
@@ -503,7 +505,7 @@ describe("Amp attachment images in an agent-hosted thread", () => {
 	const pim = () => env.Pim.getByName(OWNER);
 	const stored = (url: string) => runInDurableObject(pim(), async (instance: Pim) => {
 		const image = await instance.images.read(url.replace("/api/images/", ""));
-		return image ? { type: image.type, bytes: new Uint8Array(await new Response(image.body).arrayBuffer()) } : null;
+		return image && "body" in image ? { type: image.type, bytes: new Uint8Array(await new Response(image.body).arrayBuffer()) } : null;
 	});
 	const attachmentCalls = (fetcher: { mock: { calls: unknown[][] } }) => fetcher.mock.calls.filter(([url]) => String(url).startsWith("https://ampcode.com/user-content/"));
 
@@ -642,5 +644,137 @@ describe("Amp attachment images in an agent-hosted thread", () => {
 		} finally {
 			await runInDurableObject(pim(), (instance: Pim) => instance.setLimits(null));
 		}
+	});
+});
+
+describe("Amp video attachments in an agent-hosted thread", () => {
+	const MP4_URL = "https://ampcode.com/user-content/attachments/c595-robot_wave.mp4#amp-media-source=file%3A%2F%2F%2Ftmp%2Fr.mp4&amp-media-width=320";
+	const MP4 = new Uint8Array([0, 0, 0, 0x20, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d, 1, 2, 3, 4, 5, 6, 7, 8]);
+	const WEBM = new Uint8Array([0x1a, 0x45, 0xdf, 0xa3, 9, 8, 7]);
+	const PNG = new Uint8Array([137, 80, 78, 71, 1, 2, 3]);
+	const TOKEN_AMP = "sgamp_VIDEO_TOKEN";
+	const pim = () => env.Pim.getByName(OWNER);
+	const served = (path: string, headers: Record<string, string> = {}) => exports.default.fetch(new Request(apiUrl(path), { headers: { Authorization: `Bearer ${TOKEN}`, ...headers } }));
+	const reply = (bytes: Uint8Array, type: string) => new Response(bytes, { headers: { "content-type": type } });
+	const attachmentCalls = (fetcher: { mock: { calls: unknown[][] } }) => fetcher.mock.calls.filter(([url]) => String(url).startsWith("https://ampcode.com/user-content/"));
+
+	async function ampThread(text: string) {
+		const fake = new FakeOrbClient({ id: "amp-http" });
+		codingOrbs.factory = () => fake;
+		const id = crypto.randomUUID();
+		const stub = codingThread(env, id);
+		await stub.start(startInput(id, { space: OWNER, harness: "amp", provider: "orbs" }));
+		await heartbeat(stub);
+		fake.say(fake.started[0]!.threadId, "assistant", text);
+		await heartbeat(stub);
+		const read = async () => {
+			const message = (await runInDurableObject(stub, (instance: CodingThreadDO) => instance.transcript())).find((entry) => entry.role === "assistant");
+			return (message!.parts[0] as { text: string }).text;
+		};
+		return { stub, read };
+	}
+
+	beforeEach(async () => {
+		await codingVault(env).saveApiKey(OWNER, "amp", TOKEN_AMP);
+	});
+	afterEach(async () => {
+		vi.restoreAllMocks();
+		await codingVault(env).delete(OWNER, "amp");
+	});
+
+	it("keeps an MP4 and a WebM as videos the space counts, serves, and erases", async () => {
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => (String(url).endsWith(".webm") ? reply(WEBM, "video/webm") : reply(MP4, "video/mp4")));
+		const before = await runInDurableObject(pim(), (instance: Pim) => instance.storedBytes());
+		const { read } = await ampThread(`![Wave](${MP4_URL})\n![Clip](https://ampcode.com/user-content/attachments/d1-clip.webm#amp-media-width=1)`);
+		const text = await read();
+		const mp4 = /!\[Wave\]\((\/api\/images\/[\w-]+\.mp4)\)/.exec(text)?.[1];
+		const webm = /!\[Clip\]\((\/api\/images\/[\w-]+\.webm)\)/.exec(text)?.[1];
+		expect(mp4).toBeDefined();
+		expect(webm).toBeDefined();
+		expect(await runInDurableObject(pim(), (instance: Pim) => instance.storedBytes())).toBe(before + MP4.length + WEBM.length);
+
+		const whole = await served(mp4!.replace("/api", ""));
+		expect(whole.status).toBe(200);
+		expect(Object.fromEntries(["content-type", "accept-ranges", "content-length", "x-content-type-options", "content-security-policy"].map((name) => [name, whole.headers.get(name)]))).toEqual({
+			"content-type": "video/mp4",
+			"accept-ranges": "bytes",
+			"content-length": String(MP4.length),
+			"x-content-type-options": "nosniff",
+			"content-security-policy": "default-src 'none'; sandbox",
+		});
+		expect(new Uint8Array(await whole.arrayBuffer())).toEqual(MP4);
+
+		const head = await served(mp4!.replace("/api", ""), { range: "bytes=0-3" });
+		expect(head.status).toBe(206);
+		expect(head.headers.get("content-range")).toBe(`bytes 0-3/${MP4.length}`);
+		expect(head.headers.get("content-length")).toBe("4");
+		expect(new Uint8Array(await head.arrayBuffer())).toEqual(MP4.slice(0, 4));
+		const tail = await served(mp4!.replace("/api", ""), { range: "bytes=-4" });
+		expect(tail.status).toBe(206);
+		expect(new Uint8Array(await tail.arrayBuffer())).toEqual(MP4.slice(-4));
+		const past = await served(mp4!.replace("/api", ""), { range: "bytes=99999-100000" });
+		expect(past.status).toBe(416);
+		expect(past.headers.get("content-range")).toBe(`bytes */${MP4.length}`);
+		await past.body?.cancel();
+
+		// The extension must be the type's own, and a video is never served through a bare name or a signed link.
+		const bare = mp4!.replace("/api", "").replace(".mp4", "");
+		for (const path of [bare, mp4!.replace("/api", "").replace(".mp4", ".webm")]) {
+			const miss = await served(path);
+			expect(miss.status).toBe(404);
+			await miss.body?.cancel();
+		}
+		await runInDurableObject(pim(), async (instance: Pim) => {
+			const png = await instance.images.keepBytes("coding:x", PNG, "image/png", null);
+			expect(png).toMatch(/^\/api\/images\/[\w-]+$/);
+			expect(await instance.images.read(png!.replace("/api/images/", ""), "mp4")).toBeNull();
+			await instance.images.deleteSession("coding:x");
+		});
+		// A thread's images, videos too, go with its session.
+		await runInDurableObject(pim(), async (instance: Pim) => {
+			// A signed link, correctly signed, still opens no video.
+			const store = (instance as unknown as { store: { meta(key: string): string | undefined; setMeta(key: string, value: string): void } }).store;
+			store.meta("images_signing_key") ?? store.setMeta("images_signing_key", Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64"));
+			const key = await crypto.subtle.importKey("raw", Buffer.from(store.meta("images_signing_key")!, "base64"), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+			const mp4Id = mp4!.replace("/api/images/", "").replace(".mp4", "");
+			const expires = Date.now() + 60_000;
+			const signature = Buffer.from(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(`${mp4Id}:${expires}`))).toString("hex");
+			expect(await instance.images.readSigned(mp4Id, new URL(`https://pim.test/images/o/${mp4Id}?expires=${expires}&signature=${signature}`))).toBeNull();
+			expect(instance.images.bytes()).toBeGreaterThanOrEqual(MP4.length + WEBM.length);
+			await instance.images.deleteAll();
+			expect(instance.images.bytes()).toBe(0);
+		});
+		expect((await served(mp4!.replace("/api", ""))).status).toBe(404);
+	});
+
+	it("refuses bytes that aren't of the type they came labeled with", async () => {
+		vi.spyOn(globalThis, "fetch").mockImplementation(async () => reply(new TextEncoder().encode("<html><script>alert(1)</script></html>"), "video/mp4"));
+		const { read } = await ampThread(`![Wave](${MP4_URL})`);
+		expect(await read()).toContain(MP4_URL);
+		await runInDurableObject(pim(), async (instance: Pim) => {
+			expect(await instance.images.keepBytes("coding:x", MP4.slice(0, 8), "video/mp4", null)).toBeNull();
+			expect(await instance.images.keepBytes("coding:x", new TextEncoder().encode("<svg xmlns='x'/>"), "image/png", null)).toBeNull();
+			expect(await instance.images.keepBytes("coding:x", MP4, "video/mp4", 0)).toBeNull();
+			expect(await instance.images.keepBytes("coding:x", MP4, "video/quicktime", null)).toBeNull();
+		});
+	});
+
+	it("tries again a video an earlier version turned away, once, and keeps the images it had copied", async () => {
+		const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async () => reply(MP4, "video/mp4"));
+		await codingVault(env).delete(OWNER, "amp");
+		const light = "https://ampcode.com/user-content/attachments/9fbe-light.png";
+		const { stub, read } = await ampThread(`![Wave](${MP4_URL})\n![Light](${light})`);
+		await runInDurableObject(stub, async (_instance, state) => {
+			await state.storage.put("amp:attachment:https://ampcode.com/user-content/attachments/c595-robot_wave.mp4", { failed: 3 });
+			await state.storage.put(`amp:attachment:${light}`, "/api/images/3f1beb2b-bded-4fda-96cc-1af7192f24b6");
+		});
+		await codingVault(env).saveApiKey(OWNER, "amp", TOKEN_AMP);
+		const text = await read();
+		expect(text).toMatch(/!\[Wave\]\(\/api\/images\/[\w-]+\.mp4\)/);
+		expect(text).toContain("![Light](/api/images/3f1beb2b-bded-4fda-96cc-1af7192f24b6)");
+		expect(attachmentCalls(fetcher)).toHaveLength(1);
+		fetcher.mockClear();
+		expect(await read()).toBe(text);
+		expect(fetcher).not.toHaveBeenCalled();
 	});
 });

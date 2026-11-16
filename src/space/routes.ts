@@ -1933,17 +1933,25 @@ function sharingRoutes(space: SpaceRouteHost): Route[] {
 		[
 			"GET",
 			"/images/:image",
-			async ({ image }) => {
-				const found = await space.images.read(image!);
+			async ({ image }, request) => {
+				const name = /^([\w-]+)(?:\.(mp4|webm))?$/.exec(image!);
+				const found = name && (await space.images.read(name[1]!, name[2], request.headers.get("range")));
 				if (!found) throw new HttpError(404, "No such image");
-				return new Response(found.body, {
-					headers: {
-						"content-type": found.type,
-						"x-content-type-options": "nosniff",
-						"content-security-policy": "default-src 'none'; sandbox",
-						"cache-control": "private, max-age=31536000, immutable",
-					},
-				});
+				const headers: Record<string, string> = {
+					"x-content-type-options": "nosniff",
+					"content-security-policy": "default-src 'none'; sandbox",
+					"cross-origin-resource-policy": "same-origin",
+					"referrer-policy": "no-referrer",
+					"accept-ranges": "bytes",
+				};
+				if ("unsatisfiable" in found) return new Response(null, { status: 416, headers: { ...headers, "content-range": `bytes */${found.unsatisfiable}` } });
+				headers["content-type"] = found.type;
+				headers["cache-control"] = "private, max-age=31536000, immutable";
+				const { range } = found;
+				if (!range) return new Response(found.body, { headers: { ...headers, "content-length": String(found.size) } });
+				headers["content-length"] = String(range.end - range.start + 1);
+				headers["content-range"] = `bytes ${range.start}-${range.end}/${found.size}`;
+				return new Response(found.body, { status: 206, headers });
 			},
 		],
 		[

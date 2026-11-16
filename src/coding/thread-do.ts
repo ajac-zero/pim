@@ -74,7 +74,7 @@ import { authEnv } from "@pim/coding/harness/auth";
 import { type CliHarness, cliHarness } from "@pim/coding/harness/index";
 import { AmpHttpOrbClient, AMP_HTTP_UNSUPPORTED } from "@pim/coding/orb/amp-http";
 import { ampAttachments, fetchAmpImage, replaceAmpAttachments } from "@pim/coding/orb/amp-attachments";
-import { IMAGE_TYPES, MAX_IMAGE_BYTES } from "../images";
+import { MAX_IMAGE_BYTES, MAX_VIDEO_BYTES, MEDIA_TYPES } from "../images";
 import { type OrbClient, type OrbClientFactory, OrbAuthError, OrbLostError, type OrbMessage, type OrbThread, OrbUnreachableError, OrbUnsupportedError } from "@pim/coding/orb/types";
 
 const LEGACY_AMP_WORKSPACE_MESSAGE = "legacy Amp workspace thread; start a new Amp (Orbs) thread";
@@ -366,7 +366,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 	}
 
 	/**
-	 * `text` with the Amp attachment images it shows (`![…](https://ampcode.com/user-content/attachments/…)`)
+	 * `text` with the Amp attachment images and videos it shows (`![…](https://ampcode.com/user-content/attachments/…)`)
 	 * replaced by Pim's own copies, which the person's browser can load where it can't load Amp's. Each
 	 * attachment is fetched once, with the space's Amp login, and its copy remembered in the thread's storage;
 	 * one that can't be fetched is tried again a few times, then left as it is. At most `MAX_AMP_FETCHES` are
@@ -377,7 +377,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 		if (found.length === 0) return text;
 		const thread = this.store.required();
 		const keys = found.map((attachment) => `${AMP_ATTACHMENT_KEY}${attachment.canonical}`);
-		const known = await this.ctx.storage.get<string | { failed: number }>(keys);
+		const known = await this.ctx.storage.get<string | { failed: number; v?: number }>(keys);
 		const copies = new Map<string, string>();
 		let token: string | null | undefined;
 		for (const [index, attachment] of found.entries()) {
@@ -386,14 +386,15 @@ export class CodingThreadDO extends DurableObject<Env> {
 				copies.set(attachment.url, entry);
 				continue;
 			}
-			const failed = entry?.failed ?? 0;
+			// A failure recorded before videos were kept (no version) was a video turned away, so it is tried once more.
+			const failed = entry?.v === AMP_ATTACHMENT_VERSION ? entry.failed : 0;
 			if (failed >= AMP_ATTACHMENT_ATTEMPTS || budget.fetches <= 0) continue;
 			budget.fetches--;
 			token ??= await codingVault(this.env).loadApiKey(thread.space, "amp").catch(() => null);
 			let copy: string | null = null;
 			let retry = true;
 			if (token) {
-				const image = await fetchAmpImage(attachment.canonical, { token, types: IMAGE_TYPES, maxBytes: MAX_IMAGE_BYTES });
+				const image = await fetchAmpImage(attachment.canonical, { token, types: MEDIA_TYPES, maxBytes: (type) => (type.startsWith("video/") ? MAX_VIDEO_BYTES : MAX_IMAGE_BYTES) });
 				if (image.ok) {
 					try {
 						copy = await (await getAgentByName(this.env.Pim, thread.space)).codingKeepImage(thread.threadId, image.bytes, image.type);
@@ -408,7 +409,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 			if (copy !== null) {
 				await this.ctx.storage.put(keys[index]!, copy);
 				copies.set(attachment.url, copy);
-			} else await this.ctx.storage.put(keys[index]!, { failed: retry ? failed + 1 : AMP_ATTACHMENT_ATTEMPTS });
+			} else await this.ctx.storage.put(keys[index]!, { failed: retry ? failed + 1 : AMP_ATTACHMENT_ATTEMPTS, v: AMP_ATTACHMENT_VERSION });
 		}
 		return replaceAmpAttachments(text, copies);
 	}
@@ -4682,6 +4683,8 @@ const ORB_SYNC_TTL_MS = 2_000;
 const AMP_ATTACHMENT_KEY = "amp:attachment:";
 /** How many times an Amp attachment that couldn't be fetched is tried, and how many are fetched in one message-mirroring or transcript read. */
 const AMP_ATTACHMENT_ATTEMPTS = 3;
+/** The version of a failure record: 2 once videos were kept, so an earlier record is not trusted. */
+const AMP_ATTACHMENT_VERSION = 2;
 const MAX_AMP_FETCHES = 20;
 const ORB_UNKNOWN_LIMIT = 10;
 /** The most calls one look at an agent-hosted thread's transcript may page through. */

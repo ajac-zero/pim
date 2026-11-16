@@ -11,6 +11,7 @@ import {
 import type { Models } from "@earendil-works/pi-ai/models";
 import type { UserInput } from "@earendil-works/pi-durable";
 import { HttpError } from "@pim/shared/http";
+import { byteRange, imageType, videoType } from "./files";
 import { failedResponse, wrapStreams } from "./usage";
 
 /**
@@ -26,12 +27,22 @@ export const IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"
 export const MAX_MESSAGE_IMAGES = 4;
 /** One image's size: the most any provider takes (Anthropic's 5 MB). */
 export const MAX_IMAGE_BYTES = 5_000_000;
+/** Videos a coding thread's agent may show, kept beside images (never sent to a model). */
+export const VIDEO_TYPES = ["video/mp4", "video/webm"] as const;
+export const MEDIA_TYPES = [...IMAGE_TYPES, ...VIDEO_TYPES];
+/** One kept video's size. */
+export const MAX_VIDEO_BYTES = 20_000_000;
+/** The extension a kept video's URL ends with; a still image's has none. */
+const VIDEO_EXTENSIONS: Record<string, string> = { "video/mp4": "mp4", "video/webm": "webm" };
 const BASE64 = /^[A-Za-z0-9+/]+={0,2}$/;
 /** APIs that fetch an image from its URL (pi-ai is patched to send `url`). Workers AI takes only inline images. */
 const URL_APIS = new Set(["openai-responses", "openai-codex-responses", "azure-openai-responses", "anthropic-messages"]);
 /** How long a provider has to fetch an image from its signed URL. */
 const SIGNED_URL_MS = 15 * 60_000;
 const SECRET_KEY = "images_signing_key";
+
+/** A kept image or video read: its bytes (those of `range`, if asked), type and whole size. */
+export type ImageRead = { readonly body: ReadableStream; readonly type: string; readonly size: number; readonly range: { start: number; end: number } | null };
 
 /** An image as a message keeps it: its URL, and no bytes. */
 export type StoredImage = ImageContent & { readonly url: string };
@@ -209,9 +220,17 @@ export class ImageStore {
 		return this.#store(session, bytes, type);
 	}
 
-	/** Keeps `bytes` of an image as `session`'s: its URL here, or null when it isn't a PNG, JPEG, WebP or GIF of at most `MAX_IMAGE_BYTES` or `room` bytes. */
+	/**
+	 * Keeps `bytes` of an image or MP4/WebM video as `session`'s: its URL here (`/api/images/<id>`, with `.mp4`
+	 * or `.webm` for a video), or null when its first bytes aren't of its type, it is over its size limit
+	 * (`MAX_IMAGE_BYTES`, `MAX_VIDEO_BYTES`) or `room` bytes, or it isn't a type kept.
+	 */
 	async keepBytes(session: string, bytes: Uint8Array, type: string, room: number | null): Promise<string | null> {
-		if (!IMAGE_TYPES.includes(type) || bytes.byteLength === 0 || bytes.byteLength > Math.min(MAX_IMAGE_BYTES, room ?? MAX_IMAGE_BYTES)) return null;
+		const video = VIDEO_EXTENSIONS[type] !== undefined;
+		if (!video && !IMAGE_TYPES.includes(type)) return null;
+		if (room !== null && room <= 0) return null;
+		if (bytes.byteLength === 0 || bytes.byteLength > Math.min(video ? MAX_VIDEO_BYTES : MAX_IMAGE_BYTES, room ?? Infinity)) return null;
+		if ((video ? videoType(bytes) : imageType(bytes)) !== type) return null;
 		return this.#store(session, bytes, type);
 	}
 
@@ -219,15 +238,23 @@ export class ImageStore {
 		const id = crypto.randomUUID();
 		await this.#bucket.put(this.#key(id), bytes, { httpMetadata: { contentType: type } });
 		this.#sql.exec("INSERT INTO pim_images (id, session, type, bytes, created_at) VALUES (?, ?, ?, ?, ?)", id, session, type, bytes.byteLength, Date.now());
-		return `/api/images/${id}`;
+		const ext = VIDEO_EXTENSIONS[type];
+		return `/api/images/${id}${ext ? `.${ext}` : ""}`;
 	}
 
-	/** One of the owner's images, or null. */
-	async read(id: string): Promise<{ body: ReadableStream; type: string } | null> {
-		const row = this.#sql.exec<{ type: string }>("SELECT type FROM pim_images WHERE id = ?", id).toArray()[0];
-		if (!row) return null;
-		const object = await this.#bucket.get(this.#key(id));
-		return object ? { body: object.body, type: row.type } : null;
+	/**
+	 * One of the owner's kept images or videos, or null. `ext` is the URL's extension, which must be the one its
+	 * type has (none for an image), so a name can't pass one kind off as the other. `range` is a `Range`
+	 * header: a video's player seeks with it, so only the bytes it asks for are read; one past the end gives
+	 * the whole size to answer with.
+	 */
+	async read(id: string, ext?: string, range: string | null = null): Promise<ImageRead | { unsatisfiable: number } | null> {
+		const row = this.#sql.exec<{ type: string; bytes: number }>("SELECT type, bytes FROM pim_images WHERE id = ?", id).toArray()[0];
+		if (!row || VIDEO_EXTENSIONS[row.type] !== ext) return null;
+		const asked = byteRange(range, row.bytes);
+		if (asked === "unsatisfiable") return { unsatisfiable: row.bytes };
+		const object = await this.#bucket.get(this.#key(id), asked ? { range: { offset: asked.start, length: asked.end - asked.start + 1 } } : undefined);
+		return object ? { body: object.body, type: row.type, size: row.bytes, range: asked } : null;
 	}
 
 	/**
@@ -296,7 +323,9 @@ export class ImageStore {
 		const signature = url.searchParams.get("signature") ?? "";
 		if (!Number.isSafeInteger(expires) || expires < Date.now() || !/^[0-9a-f]{64}$/.test(signature)) return null;
 		const valid = await crypto.subtle.verify("HMAC", await this.#signingKey(), Buffer.from(signature, "hex"), signed(id, expires));
-		return valid ? this.read(id) : null;
+		if (!valid) return null;
+		const found = await this.read(id);
+		return found && "body" in found ? found : null;
 	}
 
 	async #signingKey(): Promise<CryptoKey> {

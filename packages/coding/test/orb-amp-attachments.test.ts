@@ -15,6 +15,15 @@ describe("finding Amp attachment images", () => {
 		]);
 	});
 
+	it("finds video attachments with Amp's media fragment", () => {
+		const mp4 = `${BASE}/user-content/attachments/c595-robot_wave.mp4#amp-media-source=file%3A%2F%2F%2Ftmp%2Fr.mp4&amp-media-width=320`;
+		const webm = `${BASE}/user-content/attachments/d1-clip.webm#amp-media-width=320`;
+		expect(ampAttachments(`![Robot wave video](${mp4})\n![Clip](${webm})`)).toEqual([
+			{ url: mp4, canonical: `${BASE}/user-content/attachments/c595-robot_wave.mp4` },
+			{ url: webm, canonical: `${BASE}/user-content/attachments/d1-clip.webm` },
+		]);
+	});
+
 	it("takes Amp's other attachment paths and no other origin or path", () => {
 		const uuid = "3f1beb2b-bded-4fda-96cc-1af7192f24b6";
 		const ok = [`${BASE}/attachments/a.png`, `${BASE}/user-content/temporary-files/a.png`, `${BASE}/user-content/artifacts/a`, `${BASE}/user-content/artifact-files/${uuid}/a.png`];
@@ -76,6 +85,23 @@ describe("fetching an Amp attachment", () => {
 		expect(await fetchAmpImage(canonical, { ...OPTIONS, fetch: async () => png(new Uint8Array(101)) })).toEqual({ ok: false, retry: false });
 		expect(await fetchAmpImage(canonical, { ...OPTIONS, fetch: async () => png(new Uint8Array(1), { "content-length": "101" }) })).toEqual({ ok: false, retry: false });
 		expect(await fetchAmpImage(canonical, { ...OPTIONS, fetch: async () => png(new Uint8Array(0)) })).toEqual({ ok: false, retry: false });
+	});
+
+	it("takes MP4 and WebM videos by their own size limit, and follows signed storage without the login", async () => {
+		const sized = { token: "sgamp_secret", types: ["image/png", "video/mp4", "video/webm"], maxBytes: (type: string) => (type.startsWith("video/") ? 20 : 5) };
+		const media = (type: string, size: number, headers: Record<string, string> = {}) => new Response(new Uint8Array(size), { headers: { "content-type": type, ...headers } });
+		expect(await fetchAmpImage(canonical, { ...sized, fetch: async () => media("image/png", 6) })).toEqual({ ok: false, retry: false });
+		expect(await fetchAmpImage(canonical, { ...sized, fetch: async () => media("video/mp4", 20) })).toMatchObject({ ok: true, type: "video/mp4" });
+		expect(await fetchAmpImage(canonical, { ...sized, fetch: async () => media("video/webm", 20) })).toMatchObject({ ok: true, type: "video/webm" });
+		expect(await fetchAmpImage(canonical, { ...sized, fetch: async () => media("video/mp4", 21) })).toEqual({ ok: false, retry: false });
+		expect(await fetchAmpImage(canonical, { ...sized, fetch: async () => media("video/mp4", 1, { "content-length": "21" }) })).toEqual({ ok: false, retry: false });
+		for (const type of ["video/quicktime", "text/html", "image/svg+xml"]) expect(await fetchAmpImage(canonical, { ...sized, fetch: async () => media(type, 3) })).toEqual({ ok: false, retry: false });
+
+		const video = `${BASE}/user-content/attachments/c595-robot_wave.mp4`;
+		const away = vi.fn<typeof fetch>(async (url) => (String(url).startsWith(BASE) ? new Response(null, { status: 307, headers: { location: "https://amp-attachments-prod-0.storage.googleapis.com/o?response-content-type=video%2Fmp4" } }) : media("video/mp4", 8)));
+		expect(await fetchAmpImage(video, { ...sized, fetch: away })).toMatchObject({ ok: true, type: "video/mp4" });
+		expect(headersOf(away, 0).authorization).toBe("Bearer sgamp_secret");
+		expect(headersOf(away, 1).authorization).toBeUndefined();
 	});
 
 	it("says which failures are worth another try", async () => {

@@ -6,6 +6,7 @@ export const SCHEMA = "pim_runtime";
 export type Rows<R> = { rows: R[]; rowCount: number | null };
 
 const tenantOf = new WeakMap<pg.PoolClient, string>();
+const guarded = new WeakSet<pg.PoolClient>();
 
 /**
  * A pool plus the tenant a connection is working for. Row-level security reads `pim.tenant_id`, so each connection is
@@ -17,6 +18,21 @@ export class Db {
 	readonly pool: pg.Pool;
 	constructor(pool: pg.Pool) {
 		this.pool = pool;
+		// An idle connection that drops is replaced by the pool; without a listener its error would end the process.
+		pool.on("error", () => {});
+	}
+
+	/**
+	 * A connection from the pool. A connection that fails while a query is in flight reports the failure to that query;
+	 * the extra error event it also emits is absorbed here, so it cannot become an uncaught exception.
+	 */
+	async checkout(): Promise<pg.PoolClient> {
+		const client = await this.pool.connect();
+		if (!guarded.has(client)) {
+			guarded.add(client);
+			client.on("error", () => {});
+		}
+		return client;
 	}
 
 	static connect(options: pg.PoolConfig): Db {
@@ -25,7 +41,7 @@ export class Db {
 
 	/** One read-only statement for a tenant. */
 	async read<R extends pg.QueryResultRow = pg.QueryResultRow>(tenantId: string, text: string, values: unknown[] = []): Promise<Rows<R>> {
-		const client = await this.pool.connect();
+		const client = await this.checkout();
 		let destroy: Error | undefined;
 		try {
 			if (tenantOf.get(client) !== tenantId) {
@@ -46,7 +62,7 @@ export class Db {
 
 	/** Run `body` in one transaction with `pim.tenant_id` set locally; commits when it returns, rolls back when it throws. */
 	async transaction<T>(tenantId: string, body: (client: pg.PoolClient) => Promise<T>, options: { scope?: "all" } = {}): Promise<T> {
-		const client = await this.pool.connect();
+		const client = await this.checkout();
 		let destroy: Error | undefined;
 		try {
 			await client.query(`BEGIN; ${setLocalSql(client, tenantId, options.scope)}`);

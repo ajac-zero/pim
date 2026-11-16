@@ -166,7 +166,7 @@ export class PgPiStorage implements Storage {
 		const batchId = randomUUID();
 		const batch = prepareBatch(writes);
 		await this.#ids.observe(batch.maxId);
-		const client = await this.db.pool.connect();
+		const client = await this.db.checkout();
 		let backendPid: number | undefined;
 		let destroy: Error | undefined;
 		let commitSent = false;

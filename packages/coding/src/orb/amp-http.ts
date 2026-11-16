@@ -61,7 +61,7 @@ export type AmpHttpOptions = {
 	/** How long cancel waits for the answer. Defaults to 10s. */
 	cancelTimeoutMs?: number;
 };
-type Progress = { startedAt: number; working: boolean; errorAt: number | null };
+type Progress = { startedAt: number; working: boolean; errorAt: number | null; lastState?: OrbStatus["state"]; minMessage?: number };
 type StartRecord = { pending: true; failure?: string } | { thread: OrbThread };
 type Retry = { attempts: number; at: number; failure?: string };
 const redact = (text: string): string => text.replace(/sgamp_[A-Za-z0-9_.-]*/g, "[redacted]").replace(/eyJ[A-Za-z0-9_.-]+/g, "[redacted]").replace(/rivet_conn_params\.[^\s,"']*/g, "rivet_conn_params.[redacted]").replace(/Bearer\s+[^\s"',;]+/gi, "Bearer [redacted]");
@@ -202,7 +202,14 @@ export class AmpHttpOrbClient implements OrbClient {
 	}
 
 	async steer(id: string, message: string): Promise<void> {
-		await this.#call("sendMessageToThread", { threadID: id, content: textContent(message), userState: userState() }, id);
+		const result = object(await this.#call("sendMessageToThread", { threadID: id, content: textContent(message), userState: userState() }, id));
+		const key = `amp:progress:${id}`;
+		const progress = (await this.options.store.get(key)) as Progress | null;
+		// A steer after the thread went idle starts a turn: an idle that Amp still reports from before it picked the message up isn't the turn's end.
+		// A steer mid-turn leaves `working` as it is.
+		if (progress?.lastState !== "idle") return;
+		const cursor = Number.parseInt(String(result.latestCursor), 10);
+		await this.options.store.put(key, { startedAt: this.#now(), working: false, errorAt: null, ...(Number.isFinite(cursor) ? { minMessage: cursor } : {}) } satisfies Progress);
 	}
 
 	/** Archives the thread. It may not halt a running agent (unverified). */
@@ -294,10 +301,14 @@ export class AmpHttpOrbClient implements OrbClient {
 		const { thread } = await this.#tail(id, 1);
 		const agent = object(object(object(thread.data).meta).lastKnownAgentState);
 		const key = `amp:progress:${id}`;
-		const progress = (await this.options.store.get(key) as Progress | null) ?? { startedAt: this.#now(), working: false, errorAt: null };
+		const stored = (await this.options.store.get(key)) as Progress | null;
+		const progress: Progress = stored ?? { startedAt: this.#now(), working: false, errorAt: null };
+		const messageId = typeof agent.messageID === "number" ? agent.messageID : Number.parseInt(String(agent.messageID), 10);
+		// Amp may have taken the steered message and finished before the first look: a newer message id says so.
+		const advanced = progress.minMessage !== undefined && Number.isFinite(messageId) && messageId > progress.minMessage;
 		let state: OrbStatus["state"] = "working";
 		if (agent.state === "working") progress.working = true;
-		if (agent.state === "idle" && (progress.working || this.#now() - progress.startedAt >= 60_000)) state = "idle";
+		if (agent.state === "idle" && (stored === null || progress.working || advanced || this.#now() - progress.startedAt >= 60_000)) state = "idle";
 		if (agent.state === "awaiting_approval") state = "awaiting_approval";
 		if (agent.state !== undefined && !["working", "idle", "awaiting_approval", "error"].includes(String(agent.state))) {
 			// Unknown states are treated as still working, never as finished.
@@ -307,6 +318,8 @@ export class AmpHttpOrbClient implements OrbClient {
 			progress.errorAt ??= this.#now();
 			if (this.#now() - progress.errorAt >= 120_000) state = "error";
 		} else progress.errorAt = null;
+		if (state === "idle") delete progress.minMessage;
+		progress.lastState = state;
 		await this.options.store.put(key, progress);
 		return { state, lastEventAt: timestamp(agent.updatedAt) };
 	}

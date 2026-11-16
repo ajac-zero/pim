@@ -204,6 +204,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 	#watching: string | null = null;
 	/** How many looks in a row at an agent-hosted thread said its client can't tell what it is doing; a bound on them fails the turn as unknown. */
 	#orbUnknowns = 0;
+	#syncingOrb: Promise<void> | null = null;
+	#orbSyncedAt = 0;
 	#advancing: Promise<void> | null = null;
 	#advanceAgain = false;
 	/** A tool asked for the workspace (`#ensureWorkspace`): the thread gets a slot and a workspace for it, with no turn, and then goes back to idle. */
@@ -409,6 +411,11 @@ export class CodingThreadDO extends DurableObject<Env> {
 			} else await this.ctx.storage.put(keys[index]!, { failed: retry ? failed + 1 : AMP_ATTACHMENT_ATTEMPTS });
 		}
 		return replaceAmpAttachments(text, copies);
+	}
+
+	/** How long a look at an idle agent-hosted thread's orb serves the reads right after it. */
+	protected orbSyncTtlMs(): number {
+		return ORB_SYNC_TTL_MS;
 	}
 
 	/** How often a turn on an agent-hosted thread is polled: what its client says it is doing. */
@@ -1128,6 +1135,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 
 	async status(): Promise<CodingThreadStatus> {
 		await this.lifecycle.start();
+		await this.#syncIdleOrb();
 		const thread = this.store.required();
 		const queue = thread.slot === "queued" ? await codingScheduler(this.env, thread.space).position(thread.threadId) : null;
 		// For amp-http orb threads, display as 'amp-orbs' in pool/provider
@@ -1446,6 +1454,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 	/** The conversation as the web app shows chats, with the thread's own notices, such as a budget stop. */
 	async transcript(): Promise<TranscriptMessage[]> {
 		await this.lifecycle.start();
+		await this.#syncIdleOrb();
 		const messages = transcriptOf(await this.harness.messages());
 		// What an Amp thread showed before its attachments were mirrored is mirrored now, once.
 		if (this.store.required().providerId === "amp-http") {
@@ -2611,6 +2620,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 				this.store.dequeue(input.seq);
 				return this.#failOrb("orb_steer_unsupported", `${client.id} takes no messages for a thread it has started, so this thread can't be told anything more`);
 			}
+			// What was said on the agent's own site while the thread was idle comes before this turn.
+			await this.#mirrorOrb(client, orb);
 			await client.steer(orb.threadId, input.text);
 			this.ctx.storage.transactionSync(() => {
 				this.store.dequeue(input.seq);
@@ -2689,7 +2700,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 	 * page at a time, from the message after the last one mirrored — which is
 	 * kept on the thread's record, so a restart repeats nothing.
 	 */
-	async #mirrorOrb(client: OrbClient, orb: OrbThread): Promise<void> {
+	async #mirrorOrb(client: OrbClient, orb: OrbThread): Promise<boolean> {
 		const thread = this.store.required();
 		const before = thread.orbLastMessage;
 		const budget = { fetches: MAX_AMP_FETCHES };
@@ -2730,7 +2741,66 @@ export class CodingThreadDO extends DurableObject<Env> {
 			for (const result of results) await this.#writeMessage({ role: "toolResult", toolCallId: result.id, toolName: result.name, content: [{ type: "text", text: result.text }], isError: result.isError, timestamp: message.at });
 			if (message.role === "user" && (message.text || results.length === 0)) await this.#writeMessage({ role: "user", content: message.text, timestamp: message.at });
 		}
-		if (after !== before) this.store.update({ orbLastMessage: after });
+		if (after === before) return false;
+		this.store.update({ orbLastMessage: after });
+		return true;
+	}
+
+	/**
+	 * A person may continue an agent-hosted thread on the agent's own site
+	 * while Pim holds it idle. Reading the thread then looks at the orb, so
+	 * what was said there is mirrored, a turn still running there is followed
+	 * to its end like any turn, and one that has ended is recorded as ended.
+	 * Reads close together share one look, and a look that fails is only
+	 * logged: a read never fails for an orb that can't be reached.
+	 */
+	#syncIdleOrb(): Promise<void> {
+		const thread = this.store.thread();
+		if (!thread || thread.providerKind !== "agent-hosted" || thread.orb === null || thread.state === "archived" || thread.currentOperation !== null) return Promise.resolve();
+		if (this.#syncingOrb) return this.#syncingOrb;
+		if (Date.now() - this.#orbSyncedAt < this.orbSyncTtlMs()) return Promise.resolve();
+		const look = this.#lookAtIdleOrb(thread.threadId)
+			.catch((error) => console.warn(JSON.stringify({ event: "pim.coding.orb_sync_failed", thread: thread.threadId, error: errorText(error).slice(0, 300) })))
+			.finally(() => {
+				this.#orbSyncedAt = Date.now();
+				this.#syncingOrb = null;
+			});
+		this.#syncingOrb = look;
+		return look;
+	}
+
+	async #lookAtIdleOrb(threadId: string): Promise<void> {
+		const open = (): CodingThreadRow | null => {
+			const thread = this.store.thread();
+			return thread && thread.providerKind === "agent-hosted" && thread.orb !== null && thread.state !== "archived" && thread.currentOperation === null ? thread : null;
+		};
+		const thread = open();
+		if (!thread?.orb) return;
+		const client = await this.#orbClient();
+		if (client === null) return;
+		const mirrored = await this.#mirrorOrb(client, thread.orb);
+		const fresh = open();
+		if (!fresh?.orb) return;
+		const status = await client.state(fresh.orb.threadId);
+		const operationId = `${EXTERNAL_ORB_PREFIX}${crypto.randomUUID()}`;
+		if (status.state === "working" || status.state === "awaiting_approval") {
+			const approval = status.state === "awaiting_approval";
+			this.#orbUnknowns = 0;
+			this.ctx.storage.transactionSync(() => {
+				this.store.update({ state: "running", currentOperation: operationId, budgetStopped: false, stateReason: approval ? "needs_attention" : null, stateDetail: approval ? "The agent needs attention; open its remote thread to review its approval" : null });
+				this.store.recordEvent("thread.turn_started", { operationId, provider: client.id, orb: fresh.orb!.threadId, external: true });
+			});
+			await this.#schedule(Date.now() + this.orbPollMs());
+			return;
+		}
+		if (status.state !== "idle" || !mirrored) return;
+		await this.#orbCost(client, fresh.orb);
+		const event: TurnEndedEvent = { type: "thread.turn_ended", threadId, space: fresh.space, operationId, outcome: "completed", state: "idle", spentUsd: fresh.spentUsd, budgetUsd: fresh.budgetUsd, unmetered: true, at: this.now() };
+		this.ctx.storage.transactionSync(() => {
+			if (fresh.state === "failed" || fresh.state === "waiting_input" || fresh.stateReason !== null) this.store.update({ state: "idle", stateReason: null, stateDetail: null });
+			this.store.recordEvent(event.type, event);
+		});
+		await this.#emit(event);
 	}
 
 	/**
@@ -4358,6 +4428,9 @@ const NO_RUN: RunResult = { status: "unanswered", sessionId: null, sessionCostUs
 /** How a turn ended. `needs_approval` is for a turn held for the person, such as for a CLI harness's login. `interrupted` is for a turn that was interrupted by a restart and auto-resumed. */
 export type TurnOutcome = "completed" | "error" | "cancelled" | "needs_approval" | "interrupted";
 
+/** What an operation's key starts with when the turn was a person's, made on the agent's own site rather than through Pim. */
+export const EXTERNAL_ORB_PREFIX = "external:";
+
 export type TurnEndedEvent = {
 	readonly type: "thread.turn_ended";
 	readonly threadId: string;
@@ -4603,6 +4676,8 @@ const ADVANCE_JOB = "advance";
 const HEARTBEAT_MS = 30_000;
 /** How often a turn on an agent-hosted thread is looked at, and how many looks in a row may say the client can't tell what it is doing before the turn is failed as unknown. */
 const ORB_POLL_MS = 30_000;
+/** How long a look at an idle agent-hosted thread's orb is reused by the reads that follow it. */
+const ORB_SYNC_TTL_MS = 2_000;
 /** Where a thread remembers each Amp attachment image's copy in Pim, by the attachment's address without its fragment. */
 const AMP_ATTACHMENT_KEY = "amp:attachment:";
 /** How many times an Amp attachment that couldn't be fetched is tried, and how many are fetched in one message-mirroring or transcript read. */

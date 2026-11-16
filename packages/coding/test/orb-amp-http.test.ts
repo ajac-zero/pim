@@ -252,6 +252,41 @@ describe("AmpHttpOrbClient contract", () => {
 		expect(bodies(fetcher)[0]).toEqual({ method: "sendMessageToThread", params: { threadID: "T-abc-1", content: [{ type: "text", text: "also add tests" }], userState: { currentlyVisibleFiles: [], timeZone: "UTC" } } });
 	});
 
+	it("doesn't take an idle from before a steered message was picked up as the end of its turn", async () => {
+		let now = 0;
+		const { client, fetcher } = fixture({ now: () => now });
+		await client.start(start);
+		const tail = (state: string, messageID: number) => json({ ok: true, result: { thread: { data: { meta: { lastKnownAgentState: { state, messageID } } } }, messages: [] } });
+		let cursor = 0;
+		fetcher.mockImplementation(async (_url, init) => (methodOf(init) === "sendMessageToThread" ? json({ ok: true, result: { latestCursor: String(cursor) } }) : tail(next.state, next.id)));
+		const next = { state: "working", id: 0 };
+		const look = async (state: string, messageID: number) => {
+			Object.assign(next, { state, id: messageID });
+			cursor = messageID;
+			return (await client.state("T-abc-1")).state;
+		};
+		expect(await look("working", 0)).toBe("working");
+		expect(await look("idle", 1)).toBe("idle");
+		// Steered after idle (cursor 1): Amp still says idle with the old message until it picks the new one up.
+		await client.steer("T-abc-1", "again");
+		expect(await look("idle", 1)).toBe("working");
+		expect(await look("working", 1)).toBe("working");
+		expect(await look("idle", 1)).toBe("idle");
+		// A turn that was taken and finished before the first look has a newer message.
+		await client.steer("T-abc-1", "quick");
+		expect(await look("idle", 2)).toBe("idle");
+		// Or it is trusted after a minute.
+		await client.steer("T-abc-1", "slow");
+		expect(await look("idle", 2)).toBe("working");
+		now += 60_000;
+		expect(await look("idle", 2)).toBe("idle");
+		// A steer in the middle of a turn leaves its progress alone.
+		await client.steer("T-abc-1", "more");
+		expect(await look("working", 2)).toBe("working");
+		await client.steer("T-abc-1", "mid-turn");
+		expect(await look("idle", 2)).toBe("idle");
+	});
+
 	it("stops by archiving with the `thread` key", async () => {
 		const { client, fetcher } = fixture();
 		await client.stop("T-abc-1");

@@ -521,6 +521,11 @@ export class CodingThreadStore {
 		this.#sql.exec("UPDATE coding_inbox SET not_before = ?, retried = 1 WHERE seq = ?", notBefore, seq);
 	}
 
+	/** Holds the input until `notBefore` without marking it retried: the wait is for Pim's own overload, not a failure of the input. */
+	deferInput(seq: number, notBefore: number): void {
+		this.#sql.exec("UPDATE coding_inbox SET not_before = ? WHERE seq = ?", notBefore, seq);
+	}
+
 	/** A person has said something: automatic retries waiting for their backoff are withdrawn, and held inputs go at once. */
 	releaseRetries(): void {
 		this.#sql.exec("DELETE FROM coding_inbox WHERE operation_id LIKE 'retry-%'");

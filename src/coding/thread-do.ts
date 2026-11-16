@@ -99,9 +99,10 @@ import {
 } from "@pim/coding/thread-store";
 import { ownsLegacySnapshots, type PlacementPool, placementPools, type SandboxPool, type SkippedPool } from "@pim/coding/pools";
 import { type CodingOutputEvent, createCodingTools, REPO_DIR, type ToolJournal } from "@pim/coding/tools/index";
-import { isLoginHarness } from "@pim/shared/harnesses";
+import { type Harness as HarnessName, isLoginHarness } from "@pim/shared/harnesses";
 import { HARNESS_HOME, harnessEnv, restoreHarnessCredentials, writeBackHarnessCredentials } from "@pim/coding/vault/inject";
-import { codingVault, threadOwnership } from "./vault/worker";
+import { codingVault, forgetVaultReads, threadOwnership } from "./vault/worker";
+import { isTransientDoOverload } from "@pim/coding/transient";
 import { ComposeManagerError } from "@pim/coding/workspace/compose";
 import { COMPUTE_KINDS, type ComputeProvider, type ComputeQuota } from "../compute";
 import { egressPolicy, gatewayInjection, gitBrokerInjection, placeSecret } from "@pim/coding/workspace/egress";
@@ -202,6 +203,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 	#kill = new AbortController();
 	/** The pi operation whose end is being waited for in memory. */
 	#watching: string | null = null;
+	/** Pim's overload being waited out: since when, and how many looks it has cost. Memory only: a restart starts the count over, and the thread's own state is what it was. */
+	#overload: { since: number; attempts: number } | null = null;
 	/** How many looks in a row at an agent-hosted thread said its client can't tell what it is doing; a bound on them fails the turn as unknown. */
 	#orbUnknowns = 0;
 	#syncingOrb: Promise<void> | null = null;
@@ -390,7 +393,11 @@ export class CodingThreadDO extends DurableObject<Env> {
 			const failed = entry?.v === AMP_ATTACHMENT_VERSION ? entry.failed : 0;
 			if (failed >= AMP_ATTACHMENT_ATTEMPTS || budget.fetches <= 0) continue;
 			budget.fetches--;
-			token ??= await codingVault(this.env).loadApiKey(thread.space, "amp").catch(() => null);
+			// A Pim too busy to answer is no sign the key is missing: the attachment is tried again later, not counted as failed.
+			token ??= await codingVault(this.env).loadApiKey(thread.space, "amp").catch((error) => {
+				if (isTransientDoOverload(error)) throw error;
+				return null;
+			});
 			let copy: string | null = null;
 			let retry = true;
 			if (token) {
@@ -402,6 +409,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 					} catch (error) {
 						// While a deploy rolls out, the space may still run the version before this method: that is no failure of the attachment, which is tried again once it has rolled.
 						if (error instanceof Error && /does not implement the method/i.test(error.message)) continue;
+						// A busy space is the same: the message is mirrored again from where it left off, once the space has room.
+						if (isTransientDoOverload(error)) throw error;
 						// Whatever else goes wrong keeping it, the message still shows, with Amp's address for now.
 					}
 				} else retry = image.retry;
@@ -1287,6 +1296,15 @@ export class CodingThreadDO extends DurableObject<Env> {
 				await client.steer(orb.threadId, text);
 				this.store.recordEvent("orb.steered", { operationId: options.operationId, provider: client.id, orb: orb.threadId });
 			} catch (error) {
+				if (error instanceof OrbAuthError) forgetVaultReads(thread.space, "amp");
+				// Pim's own overload stopped it before anything was sent: the message waits for the turn's end like one the client can't steer, and the running turn is untouched.
+				if (isTransientDoOverload(error)) {
+					this.ctx.storage.transactionSync(() => {
+						this.store.enqueue(options.operationId, text);
+						this.store.recordEvent("orb.local_overload", { operationId: options.operationId, steer: true, error: errorText(error).slice(0, 300) });
+					});
+					return this.status();
+				}
 				if (error instanceof OrbUnsupportedError) {
 					this.ctx.storage.transactionSync(() => {
 						this.store.releaseRetries();
@@ -2038,11 +2056,25 @@ export class CodingThreadDO extends DurableObject<Env> {
 
 	/** Hands an event, recorded already, to the sink; best-effort. */
 	async #emit(event: CodingThreadEvent): Promise<void> {
-		try {
-			await this.eventSink().emit(event);
-		} catch (error) {
-			console.warn(JSON.stringify({ event: "pim.coding.sink_failed", operation: event.operationId, error: String(error) }));
+		// A space too busy to be woken is asked again a few times, so a turn's end isn't lost to a moment's overload.
+		for (let attempt = 1; ; attempt++) {
+			try {
+				await this.eventSink().emit(event);
+				return;
+			} catch (error) {
+				if (attempt < EMIT_ATTEMPTS && isTransientDoOverload(error)) {
+					await new Promise((resolve) => setTimeout(resolve, this.emitRetryMs(attempt)));
+					continue;
+				}
+				console.warn(JSON.stringify({ event: "pim.coding.sink_failed", operation: event.operationId, attempt, error: String(error) }));
+				return;
+			}
 		}
+	}
+
+	/** The wait before delivering an event again after the space was overloaded. */
+	protected emitRetryMs(attempt: number): number {
+		return 1_000 * 2 ** (attempt - 1) * (1 + Math.random() / 2);
 	}
 
 	/** The thread's ID: this object's name. */
@@ -2615,6 +2647,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 					this.store.update({ state: "running", stateReason: null, stateDetail: null, currentOperation: input.operationId, budgetStopped: false });
 					this.store.recordEvent("thread.turn_started", { operationId: input.operationId, provider: client.id, orb: started.threadId });
 				});
+				this.#overload = null;
 				return;
 			}
 			if (!client.capabilities().steer) {
@@ -2629,6 +2662,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 				this.store.update({ state: "running", stateReason: null, stateDetail: null, currentOperation: input.operationId, budgetStopped: false });
 				this.store.recordEvent("thread.turn_started", { operationId: input.operationId, provider: client.id, orb: orb.threadId, steered: true });
 			});
+			this.#overload = null;
 		} catch (error) {
 			if (error instanceof OrbLostError) return this.#failOrb("orb_lost", error.message);
 			if (error instanceof OrbAuthError) return this.#orbAuth(error);
@@ -2642,6 +2676,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 				return;
 			}
 			if (error instanceof OrbUnsupportedError) return this.#failOrb("orb_unsupported", error.message);
+			// Pim's own Durable Objects are overloaded: the agent's cloud was not reached, or not wrongly, so the input stays and is tried again, with the same operation and key.
+			if (isTransientDoOverload(error)) return this.#orbOverloaded(error, input.operationId, input);
 			return this.#failOrb("orb_error", errorText(error));
 		}
 	}
@@ -2667,6 +2703,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 		try {
 			await this.#mirrorOrb(client, orb);
 			const status = await client.state(orb.threadId);
+			this.#overload = null;
 			this.store.update(status.state === "awaiting_approval" ? { stateReason: "needs_attention", stateDetail: "The agent needs attention; open its remote thread to review its approval" } : { stateReason: null, stateDetail: null });
 			if (status.state === "idle") {
 				this.#orbUnknowns = 0;
@@ -2690,6 +2727,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 				await this.#schedule(Date.now() + Math.max(this.orbPollMs(), error.retryAfterMs ?? 0));
 				return;
 			} else if (error instanceof OrbUnsupportedError) return this.#failOrb("orb_unsupported", error.message);
+			// Pim's own objects are overloaded, not the agent's cloud: the turn goes on there, and the next look picks up from the last message mirrored.
+			else if (isTransientDoOverload(error)) return await this.#orbOverloaded(error, operation, null);
 			else return await this.#endTurn(operation, { status: "unanswered", reason: "orb_error", detail: errorText(error) });
 		}
 		await this.#schedule(Date.now() + this.orbPollMs());
@@ -2741,6 +2780,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 			}
 			for (const result of results) await this.#writeMessage({ role: "toolResult", toolCallId: result.id, toolName: result.name, content: [{ type: "text", text: result.text }], isError: result.isError, timestamp: message.at });
 			if (message.role === "user" && (message.text || results.length === 0)) await this.#writeMessage({ role: "user", content: message.text, timestamp: message.at });
+			// Kept as each message is done, so a pass cut short by an overloaded space goes on after this one and repeats nothing.
+			this.store.update({ orbLastMessage: message.id });
 		}
 		if (after === before) return false;
 		this.store.update({ orbLastMessage: after });
@@ -2829,7 +2870,52 @@ export class CodingThreadDO extends DurableObject<Env> {
 		return await factory({ space: thread.space, threadId: thread.threadId, providerId: thread.providerId });
 	}
 
+	/**
+	 * Waits out Pim's own overload, which says nothing about the agent's cloud
+	 * and must not fail work that runs there. The thread keeps its orb, its
+	 * turn and its inbox; what waits is the next try, after a backoff that
+	 * grows with jitter, in this isolate's memory. Only an overload that
+	 * lasts the whole window gives the thread up, as one Pim couldn't serve.
+	 */
+	async #orbOverloaded(error: unknown, operationId: string, input: InboxItem | null): Promise<void> {
+		const thread = this.store.required();
+		const now = Date.now();
+		const overload = (this.#overload ??= { since: now, attempts: 0 });
+		overload.attempts++;
+		if (now - overload.since > this.orbOverloadWindowMs()) {
+			this.#overload = null;
+			if (input) this.store.dequeue(input.seq);
+			return this.#failOrb("pim_overloaded", `Pim was too busy to look after this thread for ${Math.round(this.orbOverloadWindowMs() / 60_000)} minutes (${errorText(error).slice(0, 200)}). The thread on the agent's site is unaffected; start a new turn to go on`);
+		}
+		const notBefore = now + this.orbOverloadDelayMs(overload.attempts);
+		this.ctx.storage.transactionSync(() => {
+			if (input) this.store.deferInput(input.seq, notBefore);
+			this.store.update({ stateReason: "orb_unreachable", stateDetail: "Pim is too busy just now to reach the agent's cloud; the thread there is fine, and Pim tries again shortly" });
+			this.store.recordEvent("orb.local_overload", { operationId, attempt: overload.attempts, retryAt: notBefore, error: errorText(error).slice(0, 300) });
+		});
+		console.warn(JSON.stringify({ event: "pim.coding.orb_local_overload", thread: thread.threadId, operation: operationId, attempt: overload.attempts }));
+		await this.#schedule(notBefore);
+	}
+
+	/** The wait before the nth look after Pim's overload: 5 seconds, doubling to a minute, with up to half as much again added so threads don't return together. */
+	protected orbOverloadDelayMs(attempt: number): number {
+		return Math.min(60_000, 5_000 * 2 ** (attempt - 1)) * (1 + Math.random() / 2);
+	}
+
+	/** How long Pim's overload is waited out before a thread is given up. */
+	protected orbOverloadWindowMs(): number {
+		return ORB_OVERLOAD_WINDOW_MS;
+	}
+
+	/** Forgets the credentials this isolate kept for the thread's space, when the person rotates or disconnects one. */
+	forgetCredentials(harness: HarnessName): void {
+		const thread = this.store.thread();
+		if (thread) forgetVaultReads(thread.space, harness);
+	}
+
 	async #orbAuth(error: OrbAuthError): Promise<void> {
+		// The key was refused: read again whichever the person has now, never serve this one until its time is up.
+		forgetVaultReads(this.store.required().space, "amp");
 		this.store.update({ state: "waiting_input", stateReason: "login_required", stateDetail: error.message });
 		await this.#report("waiting");
 	}
@@ -2848,7 +2934,12 @@ export class CodingThreadDO extends DurableObject<Env> {
 		const client = await this.#orbClient();
 		if (client === null || !client.capabilities().cancel || !client.cancel) return false;
 		// A failure is the person's to see: typed errors propagate and the turn goes on.
-		await client.cancel(thread.orb.threadId);
+		try {
+			await client.cancel(thread.orb.threadId);
+		} catch (error) {
+			if (error instanceof OrbAuthError) forgetVaultReads(thread.space, "amp");
+			throw error;
+		}
 		this.store.recordEvent("orb.cancelled", { provider: client.id, orb: thread.orb.threadId });
 		return true;
 	}
@@ -4677,6 +4768,10 @@ const ADVANCE_JOB = "advance";
 const HEARTBEAT_MS = 30_000;
 /** How often a turn on an agent-hosted thread is looked at, and how many looks in a row may say the client can't tell what it is doing before the turn is failed as unknown. */
 const ORB_POLL_MS = 30_000;
+/** How long Pim's own overload is waited out for an agent-hosted thread before it is given up: the agent's cloud runs on meanwhile. */
+const ORB_OVERLOAD_WINDOW_MS = 30 * 60_000;
+/** How many times an event is delivered to the space before it is let go. */
+const EMIT_ATTEMPTS = 4;
 /** How long a look at an idle agent-hosted thread's orb is reused by the reads that follow it. */
 const ORB_SYNC_TTL_MS = 2_000;
 /** Where a thread remembers each Amp attachment image's copy in Pim, by the attachment's address without its fragment. */

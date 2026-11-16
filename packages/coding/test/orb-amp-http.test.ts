@@ -51,6 +51,29 @@ describe("AmpHttpOrbClient contract", () => {
 	afterEach(() => vi.restoreAllMocks());
 	const logs = () => vi.spyOn(console, "warn").mockImplementation(() => {});
 
+	it("never reserves a start whose token couldn't be read, but keeps the reservation once the request is sent", async () => {
+		// The project is already known, so the first call to the API is the create itself, whose token is read after the claim.
+		let broken = false;
+		const overloaded = Object.assign(new Error("Durable Object is overloaded. Requests queued for too long."), { overloaded: true });
+		const { client, fetcher, store } = fixture({ token: async () => { if (broken) throw overloaded; return TOKEN; } });
+		await client.start({ ...start, idempotencyKey: "warm" });
+		const before = fetcher.mock.calls.length;
+		broken = true;
+		await expect(client.start({ ...start, idempotencyKey: "two" })).rejects.toBe(overloaded);
+		expect(fetcher.mock.calls.length).toBe(before);
+		// Nothing was sent, so nothing is held against the key: the same key goes through once the token can be read.
+		expect(store.values.get("amp:start:two")).toBeNull();
+		broken = false;
+		await expect(client.start({ ...start, idempotencyKey: "two" })).resolves.toMatchObject({ threadId: expect.any(String) });
+		// A request that was sent and then lost still holds the key.
+		const lost = fixture();
+		await lost.client.start({ ...start, idempotencyKey: "warm" });
+		lost.fetcher.mockRejectedValueOnce(new TypeError("fetch failed"));
+		logs();
+		await expect(lost.client.start({ ...start, idempotencyKey: "three" })).rejects.toBeInstanceOf(OrbUnreachableError);
+		expect(lost.store.values.get("amp:start:three")).toMatchObject({ pending: true });
+	});
+
 	it("declares steer and stop (archive) but no usage", async () => {
 		const { client } = fixture();
 		expect(client.capabilities()).toEqual({ steer: true, stop: true, cancel: true, usage: false });

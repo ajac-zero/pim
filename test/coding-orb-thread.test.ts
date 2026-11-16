@@ -258,6 +258,55 @@ describe("an agent-hosted coding thread", () => {
 		expect(fake.started).toHaveLength(1);
 	});
 
+	it("waits out Pim's own overload without failing the thread, keeping the input for the same start", async () => {
+		const fake = new FakeOrbClient();
+		const { stub, input } = await orbThread(fake);
+		fake.overloaded("start", true);
+		await heartbeat(stub);
+		// The agent's cloud was never reached: nothing failed, and the input waits for its retry.
+		expect(await stub.status()).toMatchObject({ state: "provisioning", stateReason: "orb_unreachable", stateDetail: expect.stringContaining("too busy"), currentOperation: null, inbox: 1 });
+		expect((await stub.log()).filter((event) => event.kind === "orb.local_overload")).toHaveLength(1);
+		fake.overloaded("start", false);
+		// Held for its backoff: an early look starts nothing.
+		await heartbeat(stub);
+		expect(fake.started).toHaveLength(0);
+		await new Promise((resolve) => setTimeout(resolve, 120));
+		await heartbeat(stub);
+		expect(await stub.status()).toMatchObject({ state: "running", stateReason: null, currentOperation: input.operationId, inbox: 0 });
+		expect(fake.started).toHaveLength(1);
+	});
+
+	it("keeps a running turn when Pim is overloaded mid-poll, and finishes it once the overload passes", async () => {
+		const fake = new FakeOrbClient();
+		const { id, stub, input, orb } = await orbThread(fake);
+		await heartbeat(stub);
+		fake.say(orb(), "assistant", "Working on it.");
+		fake.overloaded("state", true);
+		await heartbeat(stub);
+		expect(await stub.status()).toMatchObject({ state: "running", stateReason: "orb_unreachable", currentOperation: input.operationId, orb: { url: "https://orb.example.test/threads/T-1" } });
+		expect(ended(id)).toEqual([]);
+		fake.say(orb(), "assistant", "Done.");
+		fake.setState(orb(), "idle");
+		fake.overloaded("state", false);
+		await heartbeat(stub);
+		expect(await stub.status()).toMatchObject({ state: "idle", stateReason: null, currentOperation: null });
+		expect(ended(id)).toEqual([expect.objectContaining({ outcome: "completed" })]);
+		// Every message was mirrored once, though the first look was cut short.
+		const texts = JSON.stringify(await said(stub));
+		expect(texts.match(/Working on it\./g)).toHaveLength(1);
+		expect(fake.started).toHaveLength(1);
+	});
+
+	it("queues a message for the next turn when Pim is overloaded before it could be steered", async () => {
+		const fake = new FakeOrbClient();
+		const { stub, input, orb } = await orbThread(fake);
+		await heartbeat(stub);
+		fake.overloaded("steer", true);
+		const status = await inside(stub, (thread) => thread.steer("More please", { operationId: "more-1" }));
+		expect(status).toMatchObject({ state: "running", currentOperation: input.operationId, inbox: 1 });
+		expect(fake.queued(orb())).toEqual([]);
+	});
+
 	it("fails cleanly when this Pim has no orb client, saying the agent-hosted provider isn't available", async () => {
 		const { stub } = await orbThread(new FakeOrbClient());
 		codingOrbs.factory = null;

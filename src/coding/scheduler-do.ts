@@ -446,6 +446,23 @@ export class CodingSchedulerDO extends DurableObject<Env> {
 	/** The person connected `harness` some other way than a sign-in here, such as by giving its API key: their threads that waited for it go on. */
 	harnessConnected(harness: Harness): void {
 		this.#resumeWaiting(harness);
+		this.#forgetCredentials(harness);
+	}
+
+	/** The person disconnected `harness`: threads running now stop reusing the credential they read a moment ago. */
+	harnessDisconnected(harness: Harness): void {
+		this.#forgetCredentials(harness);
+	}
+
+	/** Tells the threads at work on `harness` to read its credential afresh, wherever they run; the rest read it afresh anyway when they next have a turn. */
+	#forgetCredentials(harness: Harness): void {
+		for (const thread of this.#threads.list()) {
+			if (thread.harness !== harness || thread.state !== "running") continue;
+			const told = this.env.CodingThread.getByName(thread.threadId)
+				.forgetCredentials(harness)
+				.catch((error) => console.warn(JSON.stringify({ event: "pim.coding.forget_credentials_failed", thread: thread.threadId, error: String(error) })));
+			this.ctx.waitUntil(told);
+		}
 	}
 
 	/** Goes on with the person's threads that waited for their login to `harness`, now that they signed in. */

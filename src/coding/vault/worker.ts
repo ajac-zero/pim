@@ -1,6 +1,8 @@
 import { getAgentByName } from "agents";
 import { base64UrlDecode } from "@pim/shared/encoding";
+import { CachingVaultBackend } from "@pim/coding/vault/read-cache";
 import { CodingVault, type Ownership, type VaultBackend } from "@pim/coding/vault/vault";
+import type { Harness } from "@pim/shared/harnesses";
 import { vaultKey } from "@pim/coding/vault/crypto";
 import { codingScheduler } from "../scheduler-do";
 
@@ -33,9 +35,19 @@ export function directoryVaultKey(env: Env): Promise<CryptoKey> {
 	return keyPromise;
 }
 
+// What this isolate has read of the vault lately, shared by every coding thread and route in it (see CachingVaultBackend). Its backend is whichever environment last asked; one isolate's environments all reach the same spaces.
+const reads = new CachingVaultBackend(null as unknown as VaultBackend);
+
+/** Forgets what this isolate kept of a person's vault entry, as a rotation or disconnect, or a rejected credential, asks. */
+export function forgetVaultReads(userId?: string, harness?: Harness): void {
+	if (userId === undefined) reads.clear();
+	else reads.invalidate(userId, harness);
+}
+
 /** The vault as the Worker and coding threads use it. */
 export function codingVault(env: Env): CodingVault {
-	return new CodingVault(spaceVaultBackend(env), () => directoryVaultKey(env));
+	reads.inner = spaceVaultBackend(env);
+	return new CodingVault(reads, () => directoryVaultKey(env));
 }
 
 export function threadOwnership(env: Env): Ownership {

@@ -23,7 +23,7 @@ export function nextCron(spec: string, after: Date): Date | null {
 		return out;
 	}) as [Set<number>, Set<number>, Set<number>, Set<number>, Set<number>];
 	const t = new Date(Math.floor(after.getTime() / 60_000) * 60_000 + 60_000);
-	for (let i = 0; i < 366 * 24 * 60; i++, t.setTime(t.getTime() + 60_000)) {
+	for (let i = 0; i < 4 * 366 * 24 * 60; i++, t.setTime(t.getTime() + 60_000)) {
 		if (sets[0].has(t.getUTCMinutes()) && sets[1].has(t.getUTCHours()) && sets[3].has(t.getUTCMonth() + 1) && sets[2].has(t.getUTCDate()) && sets[4].has(t.getUTCDay())) return new Date(t);
 	}
 	return null;

@@ -92,7 +92,7 @@ export async function stack(o: { allowedRepos?: string[]; ampConfigured?: boolea
 	const close = async () => {
 		await pool.end();
 	};
-	return { db, pool, store, authz, scheduler, credentials, objects, orb, forge, worker, sandboxes, git: gitHost, bare, dir, grantAll, checkout, commit, sh, advance, clock, stall: new StallSupervisor(db, store, clock), journal: new Journal(db), close };
+	return { db, pool, store, authz, scheduler, credentials, objects, orb, forge, worker, sandboxes, git: gitHost, bare, dir, grantAll, checkout, commit, sh, advance, clock, stall: new StallSupervisor(db, store, clock), journal: new Journal(db, clock), close };
 }
 
 /** A turn runner a test scripts: each call takes the next script entry (a result or a function). */

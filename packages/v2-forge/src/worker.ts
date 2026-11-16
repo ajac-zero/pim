@@ -323,7 +323,9 @@ export class ForgeWorker {
 			if (error instanceof OrbUnreachableError) return "retry";
 			throw error;
 		}
-		const mirrored = await Promise.all(messages.map(async (m) => ({ m, text: await this.mirrorAttachments(thread, m.text) })));
+		// One at a time, so the same attachment in two messages is fetched once.
+		const mirrored: { m: OrbMessage; text: string }[] = [];
+		for (const m of messages) mirrored.push({ m, text: await this.mirrorAttachments(thread, m.text) });
 		await store.fenced(thread.threadId, epoch, async (q, t) => {
 			let turn = (t.orb?.turn as string | undefined) ?? thread.startOperation;
 			for (const { m, text } of mirrored) {

@@ -16,10 +16,13 @@ export function progressOf(a: Activity): number {
 }
 
 export class Journal {
-	constructor(private readonly db: Db) {}
+	constructor(
+		private readonly db: Db,
+		private readonly clock: () => number = Date.now,
+	) {}
 	/** `timeoutMs: null` marks a status or wait tool: it may be quiet for as long as it likes inside its own wait, and is shown, never woken for. */
 	async begin(threadId: string, callId: string, tool: string, args: { timeoutMs?: number | null } & Record<string, unknown> = {}) {
-		await this.db.query("insert into pim_forge.forge_tool_journal (thread_id, call_id, tool, args) values ($1,$2,$3,$4) on conflict do nothing", [threadId, callId, tool, args]);
+		await this.db.query("insert into pim_forge.forge_tool_journal (thread_id, call_id, tool, args, at) values ($1,$2,$3,$4,$5) on conflict do nothing", [threadId, callId, tool, args, new Date(this.clock())]);
 	}
 	async end(threadId: string, callId: string, result: object) {
 		await this.db.query("update pim_forge.forge_tool_journal set result = $3 where thread_id = $1 and call_id = $2", [threadId, callId, result]);

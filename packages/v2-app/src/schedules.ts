@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { Authorizer } from "./authz.ts";
 import type { Db, Tx } from "./db.ts";
 import { Conversations } from "./conversations.ts";
@@ -76,25 +77,32 @@ export class Schedules {
 			}
 			const latest = occurrences.at(-1)!;
 			const fire = now.getTime() - latest.getTime() <= FIRE_GRACE_MS;
-			await this.db.owner(ownerId, async (tx) => {
+			// The command is admitted before the schedule moves on. Its id and its new chat's id come from the occurrence, so a second tick, or one
+			// repeating after a crash between the two steps, admits nothing new.
+			if (fire) {
+				const commandId = `sched:${s.id}:${latest.toISOString()}`;
+				let chatId: string | undefined = s.chat_id ?? undefined;
+				if (s.target === "new_chat") {
+					chatId = createHash("sha256").update(commandId).digest("hex").replace(/^(.{8})(.{4}).(.{3}).(.{3})(.{12}).*$/, "$1-$2-5$3-a$4-$5");
+					await this.conversations.create(principal, { id: chatId, agentId: s.agent_id ?? undefined, title: s.prompt.slice(0, 60), kind: "trigger" }).catch((error) => {
+						if ((error as { code?: string }).code !== "23505") throw error;
+					});
+				}
+				const admission = await this.conversations.admit(principal, { commandId, kind: "trigger_fire", chatId, payload: { text: s.prompt, schedule: s.id } });
+				if (!admission.duplicate) fired++;
+			}
+			const won = await this.db.owner(ownerId, async (tx) => {
 				const locked = await tx.query("SELECT 1 FROM pim_app.schedules WHERE id = $1 AND next_run_at = $2 FOR UPDATE SKIP LOCKED", [s.id, s.next_run_at]);
-				if (!locked.rowCount) return; // another tick took it
+				if (!locked.rowCount) return false; // another tick took it
 				for (const occ of occurrences) {
 					const isFire = fire && occ === latest;
 					await tx.query("INSERT INTO pim_app.schedule_runs (owner_id, schedule_id, occurrence, outcome, command_id) VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING", [ownerId, s.id, occ, isFire ? "fired" : "missed", isFire ? `sched:${s.id}:${occ.toISOString()}` : null]);
 				}
 				await tx.query("UPDATE pim_app.schedules SET next_run_at = $2, enabled = $3 WHERE id = $1", [s.id, at, at !== null]);
 				await wake(tx, ownerId);
+				return true;
 			});
-			missed += occurrences.length - (fire ? 1 : 0);
-			if (fire) {
-				const commandId = `sched:${s.id}:${latest.toISOString()}`;
-				let chatId: string | undefined = s.chat_id ?? undefined;
-				if (s.target === "new_chat") chatId = undefined;
-				const created = s.target === "new_chat" ? await this.conversations.create(principal, { agentId: s.agent_id ?? undefined, title: s.prompt.slice(0, 60), kind: "trigger", id: undefined }) : chatId;
-				const admission = await this.conversations.admit(principal, { commandId, kind: "trigger_fire", chatId: created, payload: { text: s.prompt, schedule: s.id } });
-				if (!admission.duplicate) fired++;
-			}
+			if (won) missed += occurrences.length - (fire ? 1 : 0);
 		}
 		return { fired, missed };
 	}

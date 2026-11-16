@@ -420,11 +420,30 @@ export function piProvider(catalogId: string, provider: CustomProvider): Provide
 function withKnownCompat<T extends StreamOptions>(stream: StreamFunction<Api, T>): StreamFunction<Api, T> {
 	return (model, context, options) => lazyStream(model, async () => {
 		const known = (await knownModels()).get(model.id);
-		const catalogued = known?.api === "anthropic-messages" ? { ...model, compat: known.compat, thinkingLevelMap: known.thinkingLevelMap } : model;
+		const catalogued = known?.api === "anthropic-messages" ? { ...model, compat: gatewayCompat(known.compat as Model<"anthropic-messages">["compat"]), thinkingLevelMap: known.thinkingLevelMap } : model;
 		const claude = known?.api === "anthropic-messages" || /claude/i.test(model.id);
 		const sent = withoutThinkingMidToolRound(context, options);
 		return stream(catalogued, withoutEmptyAnswers(context, catalogued), claude ? sent : withTypedTools(sent));
 	});
+}
+
+/**
+ * A catalogued Claude model's compat flags for a custom endpoint. The ones that
+ * only say how the model's own thinking and tools are sent are kept, but not the
+ * ones that switch on Anthropic's own pre-release features: mid-conversation
+ * effort and system messages, tool changes by value, and server-side fallback.
+ * pi-ai turns each of those into a beta header (`mid-conversation-output-config`,
+ * `thinking-binding-controls`, `inline-tools`, `server-side-fallback`), a
+ * `block_binding` on thinking, a trailing system message with its own effort and
+ * a deferred placeholder tool, and a gateway in front of the Messages API cannot
+ * be known to take any of them. Without them the request is the one pi-ai makes
+ * for the same model's plain Messages API: adaptive thinking with the effort the
+ * chat asked for.
+ */
+function gatewayCompat(compat: Model<"anthropic-messages">["compat"]): Model<"anthropic-messages">["compat"] {
+	if (!compat) return compat;
+	const { supportsMidConvoEffort: _effort, supportsMidConvoSystemMessages: _system, supportsMidConvoToolChanges: _tools, allowedFallbackModels: _fallback, ...kept } = compat;
+	return kept;
 }
 
 /** `options` whose request, once whoever else reads it has, goes with its tool schemas typed throughout and its tool results plain. */

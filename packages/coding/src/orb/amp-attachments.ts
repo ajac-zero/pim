@@ -1,5 +1,5 @@
 /**
- * Amp's attachment images in an agent's reply (`![Light](https://ampcode.com/user-content/attachments/…)`):
+ * Amp's attachment images and videos in an agent's reply (`![Light](https://ampcode.com/user-content/attachments/…)`):
  * only Amp's signed-in clients can load them, so Pim copies each into the space's own images. Finding them in
  * Markdown, and fetching one as the space's Amp login, with the login never sent anywhere but Amp.
  */
@@ -68,8 +68,8 @@ export type AmpImageOptions = {
 	readonly token: string;
 	readonly baseUrl?: string;
 	readonly types: readonly string[];
-	/** The most the image may be: the size limit, or the space's room if less. */
-	readonly maxBytes: number;
+	/** The most the attachment may be, by its type: the size limit, or the space's room if less. */
+	readonly maxBytes: number | ((type: string) => number);
 	readonly timeoutMs?: number;
 	readonly fetch?: typeof fetch;
 };
@@ -85,7 +85,7 @@ export type AmpImageResult = { readonly ok: true; readonly bytes: Uint8Array; re
 export async function fetchAmpImage(canonical: string, options: AmpImageOptions): Promise<AmpImageResult> {
 	const origin = new URL(options.baseUrl ?? DEFAULT_BASE).origin;
 	const doFetch = options.fetch ?? ((input, init) => fetch(input, init));
-	const signal = AbortSignal.timeout(options.timeoutMs ?? 15_000);
+	const signal = AbortSignal.timeout(options.timeoutMs ?? 20_000);
 	let url = new URL(canonical);
 	let withLogin = true;
 	try {
@@ -108,11 +108,12 @@ export async function fetchAmpImage(canonical: string, options: AmpImageOptions)
 				await response.body?.cancel();
 				return { ok: false, retry: response.status === 401 || response.status === 429 || response.status >= 500 };
 			}
-			if (!options.types.includes(type) || Number(response.headers.get("content-length") ?? 0) > options.maxBytes) {
+			const maxBytes = typeof options.maxBytes === "number" ? options.maxBytes : options.maxBytes(type);
+			if (!options.types.includes(type) || Number(response.headers.get("content-length") ?? 0) > maxBytes) {
 				await response.body?.cancel();
 				return { ok: false, retry: false };
 			}
-			const bytes = await readAtMost(response.body, options.maxBytes);
+			const bytes = await readAtMost(response.body, maxBytes);
 			return bytes && bytes.byteLength > 0 ? { ok: true, bytes, type } : { ok: false, retry: false };
 		}
 	} catch {

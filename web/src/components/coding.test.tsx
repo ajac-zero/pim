@@ -688,6 +688,18 @@ describe("a thread's page", () => {
       },
     ];
 
+    it("shows a mirrored video attachment as a video with controls", async () => {
+      const mp4 = "/api/images/3f1beb2b-bded-4fda-96cc-1af7192f24b6.mp4";
+      const { api } = fakeApi(view(), said(`![Robot wave video](${mp4})`));
+      threadPage(api);
+      const list = await screen.findByRole("list", { name: "Conversation" });
+      await waitFor(() => expect(list.querySelector("video")).not.toBeNull());
+      const video = list.querySelector("video")!;
+      expect(video.getAttribute("src")).toBe(mp4);
+      expect(video.hasAttribute("controls")).toBe(true);
+      expect(list.textContent).not.toContain("Image blocked");
+    });
+
     it("shows only Pim's own images, no tag, and the suggestions as buttons that steer", async () => {
       const { api } = fakeApi(view(), said(REPLY));
       threadPage(api);

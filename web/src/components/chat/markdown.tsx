@@ -535,6 +535,9 @@ export const UNTRUSTED_SCHEMA = {
 
 /** Where Pim serves its own images: those a person sent, and the copies Pim keeps of those an agent's reply shows. */
 const OWN_IMAGE = /^\/api\/images\/[\w-]+$/;
+/** A video Pim kept, which an agent's reply shows with the browser's own controls. */
+const OWN_VIDEO = /^\/api\/images\/[\w-]+\.(?:mp4|webm)$/;
+const OWN_MEDIA = /^\/api\/images\/[\w-]+(?:\.(?:mp4|webm))?$/;
 
 /**
  * `UNTRUSTED_SCHEMA` for text shown to the signed-in person that may show Pim's own stored images, such as
@@ -545,7 +548,7 @@ export const OWN_IMAGES_SCHEMA = {
   ...UNTRUSTED_SCHEMA,
   attributes: {
     ...UNTRUSTED_SCHEMA.attributes,
-    img: ["alt", ["src", OWN_IMAGE]],
+    img: ["alt", ["src", OWN_MEDIA]],
   },
 };
 
@@ -602,6 +605,9 @@ const agentComponents = {
   img: (props: object) => {
     const { src, alt } = props as { src?: unknown; alt?: unknown };
     const label = typeof alt === "string" ? alt : "";
+    if (typeof src === "string" && OWN_VIDEO.test(src)) {
+      return <OwnVideo src={src} label={label} />;
+    }
     const shown = typeof src === "string" ? ownImage(src) : null;
     return shown ? (
       <img src={shown} alt={label} className="my-3 max-w-full rounded-xl" />
@@ -613,11 +619,29 @@ const agentComponents = {
   source: () => null,
 };
 
-/** `untrustedComponents`, but Pim's own stored images are shown. */
+/** A kept video: controls, no autoplay, and only its metadata loaded until played. */
+function OwnVideo({ src, label }: { src: string; label: string }) {
+  return (
+    // biome-ignore lint/a11y/useMediaCaption: an attachment clip an agent made has no caption track.
+    <video
+      src={src}
+      controls
+      playsInline
+      preload="metadata"
+      aria-label={label || "video"}
+      className="my-3 max-h-[32rem] max-w-full rounded-xl"
+    />
+  );
+}
+
+/** `untrustedComponents`, but Pim's own stored images and videos are shown. */
 const ownImagesComponents = {
   img: (props: object) => {
     const { src, alt } = props as { src?: unknown; alt?: unknown };
     const label = typeof alt === "string" ? alt : "";
+    if (typeof src === "string" && OWN_VIDEO.test(src)) {
+      return <OwnVideo src={src} label={label} />;
+    }
     return typeof src === "string" && OWN_IMAGE.test(src) ? (
       <img src={src} alt={label} className="my-3 max-w-full rounded-xl" />
     ) : (

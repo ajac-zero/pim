@@ -141,6 +141,13 @@ export function imageType(bytes: Uint8Array): string | null {
 	return null;
 }
 
+/** An MP4 or WebM video's type, from its first bytes (an ISO file's `ftyp` box, or WebM's EBML header); else null. */
+export function videoType(bytes: Uint8Array): string | null {
+	if (bytes.length >= 12 && String.fromCharCode(...bytes.subarray(4, 8)) === "ftyp") return "video/mp4";
+	if (bytes.length >= 4 && bytes[0] === 0x1a && bytes[1] === 0x45 && bytes[2] === 0xdf && bytes[3] === 0xa3) return "video/webm";
+	return null;
+}
+
 function isMissing(error: unknown): boolean {
 	return (error as { code?: string } | null)?.code === "ENOENT";
 }

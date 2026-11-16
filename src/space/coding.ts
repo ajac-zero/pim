@@ -96,9 +96,9 @@ export class SpaceCoding {
 	}
 
 	/**
-	 * Keeps an image a coding thread's agent showed, such as an Amp attachment the thread fetched with the
+	 * Keeps an image or MP4/WebM video a coding thread's agent showed, such as an Amp attachment the thread fetched with the
 	 * space's Amp login, as the thread's own: its `/api/images/<id>` URL, or null when it isn't an image
-	 * Pim keeps or the space has no room for it. Archiving the thread keeps it, as the transcript stays readable.
+	 * or video Pim keeps or the space has no room for it. Archiving the thread keeps it, as the transcript stays readable.
 	 */
 	async codingKeepImage(threadId: string, bytes: Uint8Array, type: string): Promise<string | null> {
 		if (this.host.closed()) return null;

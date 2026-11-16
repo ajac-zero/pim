@@ -809,7 +809,49 @@ describe("untrusted Markdown that may show Pim's own images", () => {
     expect(srcs(html)).toEqual([]);
   });
 
+  it("shows a kept video with controls, never playing by itself", () => {
+    const html = shown(
+      `![Wave](${own}.mp4)\n\n![Clip](${own}.webm)\n\n![Light](${own})`,
+    );
+    const found = elements(html);
+    const videos = found.filter((element) => element.tag === "video");
+    expect(
+      videos.map((v) => v.attributes.find((a) => a.name === "src")?.value),
+    ).toEqual([`${own}.mp4`, `${own}.webm`]);
+    for (const video of videos) {
+      const names = video.attributes.map((a) => a.name.toLowerCase());
+      expect(names).toEqual(
+        expect.arrayContaining(["controls", "playsinline", "preload"]),
+      );
+      expect(names).not.toContain("autoplay");
+    }
+    expect(found.filter((element) => element.tag === "img")).toHaveLength(1);
+    expect(html).not.toContain("Image blocked");
+  });
+
+  it("blocks every other video address and raw video HTML", () => {
+    const html = shown(
+      [
+        '<video poster="https://evil.example/poster.png" src="https://evil.example/v.mp4"><source src="https://evil.example/v.mp4"></video>',
+        "![v](https://evil.example/v.mp4)",
+        "![v](https://ampcode.com/user-content/attachments/x.mp4)",
+        "![v](//evil.example/v.mp4)",
+        "![v](data:video/mp4;base64,AAAA)",
+        "![v](/api/images/abc.svg)",
+        `![v](${own}.mp4?x=1)`,
+        "![v](/workspace/clip.mp4)",
+      ].join("\n\n"),
+    );
+    expect(srcs(html)).toEqual([]);
+    expect(elements(html).map((element) => element.tag)).not.toContain("video");
+  });
+
   it("stays strict without the opt-in", () => {
+    expect(
+      srcs(
+        renderToStaticMarkup(<Markdown text={`![v](${own}.mp4)`} untrusted />),
+      ),
+    ).toEqual([]);
     const html = renderToStaticMarkup(
       <Markdown text={`![Light](${own})`} untrusted />,
     );

@@ -9,7 +9,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { RouteError } from "~/components/route-error";
 import { authSessionQuery, deviceCode } from "~/lib/auth";
-import { NoAddress, SignInRequired } from "~/lib/pim-api";
+import { ApiError, NoAddress, SignInRequired } from "~/lib/pim-api";
 import { registerServiceWorker } from "~/lib/push";
 import {
   accountQuery,
@@ -35,7 +35,9 @@ deviceCode();
  */
 function onError(error: Error) {
   if (
-    error instanceof SignInRequired &&
+    (error instanceof SignInRequired ||
+      // An account that was removed answers 410: it is no one's to read.
+      (error instanceof ApiError && error.status === 410)) &&
     !queryClient.isFetching({ queryKey: ["auth", "session"] })
   ) {
     queryClient.invalidateQueries({ queryKey: ["auth", "session"] });

@@ -76,6 +76,7 @@ import {
   appsQuery,
 } from "~/lib/queries";
 import { useForkChat } from "~/lib/start-chat";
+import { useTranscriptWindow } from "~/lib/transcript-window";
 
 /**
  * Tools whose answer names an app's or a note's version, shown as the app itself: one made, changed or shown again.
@@ -519,6 +520,12 @@ export const Thread = memo(function Thread({
       liveKeys.has(row.key),
   );
 
+  const { start: windowStart, earlier: showEarlier } = useTranscriptWindow(
+    sessionId,
+    rows.length,
+  );
+  const earlierRows = windowStart;
+
   const empty =
     !view.running &&
     working.length === 0 &&
@@ -551,7 +558,10 @@ export const Thread = memo(function Thread({
       >
         {startedBy && <StartedFrom startedBy={startedBy} />}
         {continuedFrom && <ContinuedFrom session={continuedFrom} />}
-        {rows.map((row) => {
+        {earlierRows > 0 && (
+          <EarlierRows hidden={earlierRows} onShow={showEarlier} />
+        )}
+        {rows.slice(windowStart).map((row) => {
           if (row.kind === "sent" && row.sent.channel === "email") {
             return (
               <EmailedMessage
@@ -865,6 +875,45 @@ function SendStatus({
         {t("discard")}
       </Button>
     </span>
+  );
+}
+
+/**
+ * Where the transcript's drawn rows begin, when older ones are held back
+ * (see `transcript-window.ts`): scrolling up to it draws the next ones, and
+ * so does the button, for those who can't scroll.
+ */
+function EarlierRows({
+  hidden,
+  onShow,
+}: {
+  hidden: number;
+  onShow: () => void;
+}) {
+  const { t } = useI18n();
+  const ref = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    const button = ref.current;
+    if (!button || typeof IntersectionObserver === "undefined") return;
+    const observer = new IntersectionObserver(
+      (seen) => {
+        if (seen.some((one) => one.isIntersecting)) onShow();
+      },
+      { rootMargin: "400px 0px 0px 0px" },
+    );
+    observer.observe(button);
+    return () => observer.disconnect();
+  }, [onShow]);
+  return (
+    <Button
+      ref={ref}
+      variant="ghost"
+      size="sm"
+      className="mx-auto text-muted-foreground"
+      onClick={onShow}
+    >
+      {t("earlierMessages", { count: String(hidden) })}
+    </Button>
   );
 }
 

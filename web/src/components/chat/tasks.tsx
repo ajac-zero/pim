@@ -18,6 +18,7 @@ import {
 import { Button } from "~/components/ui/button";
 import { type AgentTask, pim, type StartedBy } from "~/lib/pim-api";
 import { sessionsQuery } from "~/lib/queries";
+import { revealWholeTranscript } from "~/lib/transcript-window";
 import { cn } from "~/lib/utils";
 
 /** How often a chat with tasks at work looks again, besides the server's `tasks` message. */
@@ -241,10 +242,22 @@ export function TaskJump({
       href={`#${target}`}
       className="inline-flex items-center gap-1 rounded-full text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring"
       onClick={(event) => {
-        const element = contentRef.current?.querySelector<HTMLElement>(
-          `#${CSS.escape(target)}`,
-        );
-        if (!element) return;
+        const find = () =>
+          contentRef.current?.querySelector<HTMLElement>(
+            `#${CSS.escape(target)}`,
+          );
+        const element = find();
+        if (!element) {
+          // A row held back by the transcript's window: draw them all, then go there.
+          event.preventDefault();
+          revealWholeTranscript();
+          requestAnimationFrame(() =>
+            requestAnimationFrame(() =>
+              find()?.scrollIntoView({ block: "center" }),
+            ),
+          );
+          return;
+        }
         event.preventDefault();
         stopScroll();
         const reduced = window.matchMedia(

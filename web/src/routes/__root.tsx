@@ -49,6 +49,7 @@ import { closeScreen } from "~/lib/computer-screen";
 import { pimClient } from "~/lib/pim-client";
 import { pushEnabled, pushSupported } from "~/lib/push";
 import { majordomoQuery } from "~/lib/queries";
+import { adoptOwner, wipeSavedQueries } from "~/lib/saved-queries";
 import { cn } from "~/lib/utils";
 
 export interface RouterContext {
@@ -206,15 +207,18 @@ function SignedIn({
   });
   // An open socket would keep streaming after signing out. The sign-in screen takes the
   // app's place, which unmounts every app frame; everything read of the space goes
-  // too, with what this device kept of it (see `saved-queries.ts`).
+  // too, with what this device kept of it, for every account (see `saved-queries.ts`).
   useEffect(() => {
     if (!signedOut) return;
     pimClient.close();
     closeScreen();
-    queryClient.removeQueries({
-      predicate: (query) => query.queryKey[0] !== "auth",
-    });
+    void wipeSavedQueries(queryClient);
   }, [signedOut, queryClient]);
+  // Lists this device kept belong to one account: a different one signing in is never shown them.
+  const owner = data?.signedIn ? data.account?.username : undefined;
+  useEffect(() => {
+    if (owner) void adoptOwner(queryClient, import.meta.env.PIM_BUILD, owner);
+  }, [owner, queryClient]);
   if (error) {
     return (
       <div className="flex h-svh">

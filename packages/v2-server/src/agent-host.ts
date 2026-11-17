@@ -16,6 +16,7 @@
 import { randomUUID } from "node:crypto";
 import { createModels, type Models, type MutableModels, type Provider } from "@earendil-works/pi-ai";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
+import { anthropicMessagesApi } from "@earendil-works/pi-ai/api/anthropic-messages.lazy";
 import { createProvider } from "@earendil-works/pi-ai/models";
 import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
 import { googleProvider } from "@earendil-works/pi-ai/providers/google";
@@ -83,7 +84,8 @@ const asModelRef = (v: unknown): ModelRef | null => {
 };
 
 /** A pi-ai provider for an OpenAI-compatible endpoint: a gateway, a local server, or an owner's own. A server without a key is sent a placeholder. */
-export function compatibleProvider(id: string, name: string, baseUrl: string, models: { id: string; name?: string; contextWindow?: number; maxTokens?: number; reasoning?: boolean; images?: boolean }[], key: () => string | undefined): Provider {
+export function compatibleProvider(id: string, name: string, baseUrl: string, models: { id: string; name?: string; contextWindow?: number; maxTokens?: number; reasoning?: boolean; images?: boolean }[], key: () => string | undefined, api: "openai-completions" | "anthropic-messages" = "openai-completions"): Provider {
+	if (api === "anthropic-messages") return messagesProvider(id, name, baseUrl, models, key);
 	return createProvider({
 		id,
 		name,
@@ -104,6 +106,64 @@ export function compatibleProvider(id: string, name: string, baseUrl: string, mo
 		})),
 		api: { "openai-completions": openAICompletionsApi() },
 	} as never) as Provider;
+}
+
+/**
+ * A person's own endpoint that speaks Anthropic's Messages API, such as a gateway in front of Claude (v1's `api: "anthropic-messages"` providers). A gateway
+ * may want the key as a bearer token rather than `x-api-key`, so it gets both. A model pi-ai knows by its id takes that model's request shape (adaptive
+ * thinking and the like), without the flags that turn on Anthropic's pre-release features, which a gateway cannot be known to take.
+ */
+function messagesProvider(id: string, name: string, baseUrl: string, models: { id: string; name?: string; contextWindow?: number; maxTokens?: number; reasoning?: boolean; images?: boolean }[], key: () => string | undefined): Provider {
+	const known = new Map((anthropicProvider() as unknown as Provider).getModels().map((m: any) => [m.id, m]));
+	const configured = createProvider({
+		id,
+		name,
+		baseUrl,
+		auth: { apiKey: { name: `${name} key`, resolve: async () => ({ auth: { apiKey: key() ?? "none", ...(key() ? { headers: { Authorization: `Bearer ${key()}` } } : {}) } }) } },
+		models: models.map((m) => {
+			const catalogued = known.get(m.id) as any;
+			const { supportsMidConvoEffort: _e, supportsMidConvoSystemMessages: _s, supportsMidConvoToolChanges: _t, allowedFallbackModels: _f, ...compat } = catalogued?.compat ?? {};
+			return {
+				id: m.id,
+				name: m.name ?? m.id,
+				api: "anthropic-messages",
+				provider: id,
+				baseUrl,
+				input: m.images ? ["text", "image"] : ["text"],
+				reasoning: m.reasoning ?? false,
+				contextWindow: m.contextWindow ?? 200_000,
+				maxTokens: m.maxTokens ?? 8_192,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				...(catalogued ? { compat, ...(catalogued.thinkingLevelMap ? { thinkingLevelMap: catalogued.thinkingLevelMap } : {}) } : {}),
+			};
+		}),
+		api: { "anthropic-messages": anthropicMessagesApi() },
+	} as never) as any;
+	// Requests are the ones v1 sent such an endpoint: no empty answers in the history (Claude refuses the system message they displace), and no thinking
+	// asked for in the middle of a tool round that began without it.
+	const wrap = (stream: (model: any, context: any, options?: any) => any) => (model: any, context: any, options?: any) => stream(model, withoutEmptyAnswers(context, model), withoutThinkingMidToolRound(context, options));
+	return { ...configured, stream: wrap(configured.stream), streamSimple: wrap(configured.streamSimple) } as Provider;
+}
+
+function withoutEmptyAnswers(context: { messages: any[] }, model: any) {
+	const says = (message: any) => {
+		if (message.role !== "assistant") return true;
+		const same = message.provider === model.provider && message.api === model.api && message.model === model.id;
+		return message.content.some((block: any) => block.type === "toolCall" || (block.type === "text" ? block.text.trim() !== "" : block.type === "thinking" ? (same && (block.redacted === true || !!block.thinkingSignature?.trim())) || block.thinking.trim() !== "" : true));
+	};
+	return context.messages.every(says) ? context : { ...context, messages: context.messages.filter(says) };
+}
+
+function withoutThinkingMidToolRound(context: { messages: any[] }, options: any) {
+	if (!options) return options;
+	const messages = context.messages.filter((m: any) => m.role === "toolResult" || m.role === "user" || (m.role === "assistant" && m.stopReason !== "error" && m.stopReason !== "aborted"));
+	let last = messages.length - 1;
+	while (last >= 0 && messages[last]?.role === "toolResult") last--;
+	const starter = messages[last];
+	if (last === messages.length - 1 || starter?.role !== "assistant") return options;
+	if (starter.content.some((b: any) => b.type === "thinking" && (b.redacted || !!b.thinkingSignature) && starter.api === "anthropic-messages")) return options;
+	const { reasoning: _r, thinkingEnabled: _t, ...rest } = options;
+	return rest;
 }
 
 /** Counts every model call of an owner into the ledger. */
@@ -233,7 +293,7 @@ export function createAgentHost(options: AgentHostOptions) {
 		for (const row of rows) {
 			const url = row.config.baseUrl ?? row.config.url;
 			if (["openai_compatible", "custom"].includes(row.kind) && typeof url === "string" && Array.isArray(row.config.models)) {
-				models.setProvider(compatibleProvider(row.id, String(row.config.name ?? row.id), url, row.config.models.filter((m: any) => typeof m?.id === "string"), () => keys.get(row.id)) as never);
+				models.setProvider(compatibleProvider(row.id, String(row.config.name ?? row.id), url, row.config.models.filter((m: any) => typeof m?.id === "string"), () => keys.get(row.id), row.config.api === "anthropic-messages" ? "anthropic-messages" : "openai-completions") as never);
 			}
 		}
 		for (const extra of (await options.providers?.(ownerId)) ?? []) models.setProvider(extra as never);

@@ -499,7 +499,7 @@ async function promoteDomain(pool: Pool, owner: string, options: PromoteOptions,
 
 	// Custom model providers: one JSON array in `pim_meta`, sealed whole on landing, each with its API key. The id stays the legacy one, so an agent's model reference still names it.
 	const ownMeta = meta.find((m) => m.key === "own_providers");
-	const ownProviders: { id: string; name?: string; url?: string; key?: string; models?: unknown[]; structuredOutput?: boolean }[] = ownMeta ? parseJson(await secret(ownMeta.value, "own-providers"), []) : [];
+	const ownProviders: { id: string; name?: string; url?: string; key?: string; models?: unknown[]; structuredOutput?: boolean; api?: string }[] = ownMeta ? parseJson(await secret(ownMeta.value, "own-providers"), []) : [];
 	if (ownMeta && ownProviders.length === 0 && !options.crypto) d.skipped.push("custom model providers: not promoted, no keys were given to open them");
 	const ownSecrets = new Map<string, string>();
 	for (const p of ownProviders) if (p.key) ownSecrets.set(p.id, await sealed(p.key, `provider:${owner}/${p.id}`));
@@ -648,7 +648,7 @@ async function promoteDomain(pool: Pool, owner: string, options: PromoteOptions,
 		}
 		// Custom providers, with their keys sealed under the application's own keys.
 		for (const p of ownProviders) {
-			const r = await c.query("INSERT INTO pim_app.providers (id, owner_id, kind, config, secret) VALUES ($1,$2,'openai_compatible',$3,$4) ON CONFLICT DO NOTHING", [p.id, owner, JSON.stringify({ name: p.name ?? p.id, url: p.url, models: p.models ?? [], structuredOutput: p.structuredOutput === true }), ownSecrets.get(p.id) ?? null]);
+			const r = await c.query("INSERT INTO pim_app.providers (id, owner_id, kind, config, secret) VALUES ($1,$2,'openai_compatible',$3,$4) ON CONFLICT DO NOTHING", [p.id, owner, JSON.stringify({ name: p.name ?? p.id, url: p.url, models: p.models ?? [], structuredOutput: p.structuredOutput === true, ...(p.api === "anthropic-messages" ? { api: p.api } : {}) }), ownSecrets.get(p.id) ?? null]);
 			bump(d, "providers", r.rowCount ?? 0);
 		}
 		// Apps: every version with its files; notes: the Yjs document as the first update of the log.

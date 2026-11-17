@@ -48,11 +48,11 @@ export type RunnerOptions = {
 	readonly db: Db;
 	readonly steward?: Partial<Omit<StewardOptions, "db">> & { holderId: string };
 	/** pi-durable options for one partition. `models` is wrapped by the Runner's admission; the registry must be the same for every partition. */
-	readonly harnessOptions: (partition: PartitionContext) => HarnessOptions;
+	readonly harnessOptions: (partition: PartitionContext) => HarnessOptions | Promise<HarnessOptions>;
 	/** The agent and init for the home partition's root conversation; called only for the home partition. */
-	readonly homeRoot?: (ownerId: string) => Parameters<Harness["root"]>[1];
-	/** The agent a conversation made by the built-in `create_conversation` command starts with. */
-	readonly chatAgent?: (ownerId: string) => NonNullable<Parameters<Harness["createConversation"]>[0]["agent"]>;
+	readonly homeRoot?: (ownerId: string) => Parameters<Harness["root"]>[1] | Promise<Parameters<Harness["root"]>[1]>;
+	/** The agent a conversation made by the built-in `create_conversation` command starts with; `publicChatId` names the chat when the command carries one. */
+	readonly chatAgent?: (ownerId: string, publicChatId?: string) => NonNullable<Parameters<Harness["createConversation"]>[0]["agent"]> | Promise<NonNullable<Parameters<Harness["createConversation"]>[0]["agent"]>>;
 	/** Handlers that replace or add to the built-in ones for the contract's command kinds. */
 	readonly commands?: Readonly<Record<string, CommandHandler>>;
 	readonly admission?: AdmissionOptions;
@@ -140,11 +140,11 @@ export class ResidentPartition {
 		const partition: PartitionContext = { ownerId: lease.ownerId, partitionId: lease.partitionId, home: this.home, lease };
 		// The fence is checked in PostgreSQL before Harness.open reads live tasks, because open rewrites running tasks to pending.
 		this.#storage = await PgPiStorage.openForOwner({ db: runner.db, fence: lease, onFault: (error) => this.#fault(error) });
-		const options = runner.harnessOptions(partition);
+		const options = await runner.harnessOptions(partition);
 		const models = runner.admission === undefined ? options.models : admitModels(options.models, { admission: runner.admission, ownerId: lease.ownerId, signal: lease.signal });
 		const raw = await Harness.open(this.#storage, { ...options, models }, this.context);
 		this.#harness = this.home ? raw : forbidRoot(raw, lease.partitionId);
-		if (this.home) await raw.root(this.context, runner.homeRoot?.(lease.ownerId));
+		if (this.home) await raw.root(this.context, await runner.homeRoot?.(lease.ownerId));
 		this.#unsubscribe.push(
 			raw.subscribeCommits((publication) => {
 				this.#dirty = true;
@@ -398,7 +398,7 @@ const createConversationCommand: CommandHandler = async (resident, command, cont
 	const conversation =
 		existing.items[0] !== undefined
 			? await resident.harness.conversation(existing.items[0].id, context)
-			: await resident.harness.createConversation({ ownership: { kind: "ownerless" }, ...(resident.runner.chatAgent === undefined ? {} : { agent: resident.runner.chatAgent(resident.ownerId) }) }, context);
+			: await resident.harness.createConversation({ ownership: { kind: "ownerless" }, ...(resident.runner.chatAgent === undefined ? {} : { agent: await resident.runner.chatAgent(resident.ownerId, command.publicChatId) }) }, context);
 	if (conversation === undefined) throw new CommandRejected("The new conversation cannot be found");
 	const first = command.payload.firstInput as Input | null | undefined;
 	if (first !== undefined && first !== null) await conversation.submit({ type: "input", content: first, requestId: `${command.commandId}:first` }, context);

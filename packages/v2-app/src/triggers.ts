@@ -55,6 +55,21 @@ export class Triggers {
 		);
 	}
 
+	/** Replaces a trigger's spec. An ended or deleted trigger is for good. A time trigger that is running counts from now, so a changed timetable never replays the past. */
+	async update(p: Principal, id: string, input: { spec: unknown }): Promise<Trigger> {
+		await this.authz.enforce(p, "trigger:write");
+		const spec = validated(input.spec);
+		if (runsOnComputer(spec.source)) await this.authz.enforce(p, "trigger:computer");
+		if (spec.source.kind === "time" && spec.source.schedule === "cron" && !previewFirings(spec.source, { now: Date.now(), count: 1 }).firings.length) throw new BadRequestError("That cron expression never fires");
+		return this.db.owner(p.ownerId, async (tx) => {
+			const r = await load(tx, id);
+			if (r.lifecycle === "ended" || r.lifecycle === "deleted") throw new ConflictError(`A ${r.lifecycle} trigger cannot be changed`, "bad_trigger_transition");
+			if (r.lifecycle === "enabled" && runsOnComputer(spec.source) && !(await tx.query("SELECT 1 FROM pim_app.trigger_computer_grants WHERE trigger_id = $1 AND revoked_at IS NULL", [id])).rowCount) throw new CapabilityUnavailableError("computer trigger", "grant it a paired computer first");
+			const row = (await tx.query("UPDATE pim_app.triggers SET spec = $2, source = $3, title = $4, agent_id = $5, updated_at = now(), watermark = CASE WHEN $3 = 'time' AND lifecycle = 'enabled' THEN $6 ELSE watermark END WHERE id = $1 RETURNING *", [id, JSON.stringify(spec), SOURCE_COLUMN[spec.source.kind], String(spec.label ?? id).slice(0, 120), spec.owningAgentId, Date.now()])).rows[0];
+			return this.#row(row);
+		});
+	}
+
 	async list(p: Principal, query: { lifecycle?: string; limit?: number } = {}): Promise<Trigger[]> {
 		await this.authz.enforce(p, "api:read");
 		if (query.lifecycle !== undefined && !TRIGGER_LIFECYCLES.includes(query.lifecycle as TriggerLifecycle)) throw new BadRequestError(`lifecycle is one of ${TRIGGER_LIFECYCLES.join(", ")}`);

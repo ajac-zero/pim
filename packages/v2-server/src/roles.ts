@@ -26,6 +26,7 @@ import { liveEndpoint } from "@pim/v2-live/server/ws-server";
 import { runtimePoolConfig, Db as RuntimeDb } from "@pim/v2-runtime/db";
 import { Runner, type RunnerOptions } from "@pim/v2-runtime/runner";
 import pg from "pg";
+import { createAgentHost, type AgentHostOptions } from "./agent-host.ts";
 import { CommandRelay } from "./command-relay.ts";
 import { deliverCosts } from "./deliveries.ts";
 import { assembleForge } from "./forge-assembly.ts";
@@ -43,6 +44,9 @@ export type Hooks = {
 	harnessOptions?: RunnerOptions["harnessOptions"];
 	homeRoot?: RunnerOptions["homeRoot"];
 	chatAgent?: RunnerOptions["chatAgent"];
+	/** Model providers added to every owner's catalog by the default agent host, which runs the agents when `harnessOptions` is not given. */
+	providers?: AgentHostOptions["providers"];
+	fetch?: AgentHostOptions["fetch"];
 	/** How often the loops that move work between processes look for it, in ms. */
 	pollMs?: number;
 };
@@ -186,12 +190,21 @@ export async function startRunner(config: ProcessConfig, env: Env, host: Host, h
 	const db = new RuntimeDb(runtimePool);
 	instrumentPool(runtimePool, metrics, "runner", "runtime");
 	const holderId = config.runnerHolderId ?? `${hostname()}-${process.pid}`;
-	const defaultOptions = (): HarnessOptions => ({ models: createModels(), registry: createRegistry() } as HarnessOptions);
+	// What runs the agents: the injected options when a test or a deployment supplies them, else the portable agent host with the application's and Forge's services when this
+	// Runner was given their databases (`PIM_APP_DATABASE_URL`, `PIM_FORGE_DATABASE_URL`).
+	const crypto = keyringFromProcessEnv(env);
+	const appDb = !hooks.harnessOptions && env.PIM_APP_DATABASE_URL ? connectApp(env.PIM_APP_DATABASE_URL, 4, config.pools.foreground.statementTimeoutMs) : undefined;
+	appDb?.pool.on("error", () => {});
+	const forgePool = !hooks.harnessOptions && env.PIM_FORGE_DATABASE_URL ? new pg.Pool({ connectionString: env.PIM_FORGE_DATABASE_URL, max: 4 }).on("error", () => {}) : undefined;
+	const objects = appDb || forgePool ? s3Of(config, env) : undefined;
+	const app = appDb && objects ? new App(appDb, objects, { ...(crypto ? { crypto } : {}), ...(env.PIM_APP_SECRET_KEY ? { appKey: env.PIM_APP_SECRET_KEY } : {}) }) : undefined;
+	const forge = forgePool && objects ? assembleForge(forgePool as never, objects, env) : undefined;
+	const host_ = hooks.harnessOptions ? undefined : createAgentHost({ db, env, crypto, app, forge, providers: hooks.providers, fetch: hooks.fetch });
 	const runner = new Runner({
 		db,
-		harnessOptions: hooks.harnessOptions ?? defaultOptions,
-		...(hooks.homeRoot ? { homeRoot: hooks.homeRoot } : {}),
-		...(hooks.chatAgent ? { chatAgent: hooks.chatAgent } : {}),
+		harnessOptions: hooks.harnessOptions ?? host_!.harnessOptions,
+		...(hooks.homeRoot ?? host_?.homeRoot ? { homeRoot: (hooks.homeRoot ?? host_!.homeRoot)! } : {}),
+		...(hooks.chatAgent ?? host_?.chatAgent ? { chatAgent: (hooks.chatAgent ?? host_!.chatAgent)! } : {}),
 		steward: { holderId },
 		...(hooks.pollMs ? { pollMs: hooks.pollMs } : {}),
 		onEvent: (e) => {
@@ -228,6 +241,8 @@ export async function startRunner(config: ProcessConfig, env: Env, host: Host, h
 			relay.stop();
 			await runner.stop();
 			await runtimePool.end();
+			await appDb?.end();
+			await forgePool?.end();
 		},
 	};
 }

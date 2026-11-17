@@ -11,11 +11,11 @@ const SESSION_ONLY = new Set(["token:create", "token:revoke", "session:revoke", 
 /** Actions a guest never takes. */
 const GUEST_DENIED = /^(admin:|coding:|computer:|token:|mcp:|app:deploy|trigger:computer)/;
 /** What an agent acting in its owner's space may do. It never decides approvals (its scopes omit approval:), administers, or touches credentials. */
-const AGENT_SCOPES = ["api:*", "app:*", "coding:*", "computer:*", "trigger:*"];
+const AGENT_SCOPES = ["api:*", "app:*", "coding:*", "computer:*", "trigger:*", "http:*"];
 /** Coding actions: the permission an admin's CodingGrant must list. */
 const CODING_ACTIONS = new Set<string>(CODING_PERMISSIONS);
-/** Coding actions, and deploying an app's backend onto a personal computer, have effects outside Pim that a person approves each time unless a StandingApproval covers them. */
-const NEEDS_APPROVAL = new Set<string>(["coding:push", "coding:pr", "coding:merge", "app:deploy"]);
+/** Coding actions, an HTTP request that writes, and deploying an app's backend onto a personal computer, have effects outside Pim that a person approves each time unless a StandingApproval covers them. */
+const NEEDS_APPROVAL = new Set<string>(["coding:push", "coding:pr", "coding:merge", "app:deploy", "http:request"]);
 
 export const principalId = (p: Principal): string => {
 	switch (p.kind) {

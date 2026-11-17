@@ -11,7 +11,7 @@ import type { Triggers } from "./triggers.ts";
 import type { SignIn } from "./signin.ts";
 
 export type ConnectorKind = "builtin" | "native" | "custom_mcp";
-export type Tool = { name: string; description?: string };
+export type Tool = { name: string; description?: string; annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean } };
 export type Connector = { id: string; kind: ConnectorKind; name: string; url: string | null; status: string; hasCredential: boolean; discoveredTools: Tool[]; enabledTools: string[]; eventsPath: string };
 
 /** Fetches a connector's tools (`tools/list`). Injected so the Gate never reaches a third party without a bound. */
@@ -24,7 +24,7 @@ export const fetchTools: ToolFetcher = async (url, credential) => {
 	if (!res.ok) throw new BadRequestError(`The connector answered ${res.status}`);
 	const body = (await res.json().catch(() => null)) as { result?: { tools?: Tool[] } } | null;
 	if (!Array.isArray(body?.result?.tools)) throw new BadRequestError("The connector sent no tool list");
-	return body!.result!.tools!.filter((t) => typeof t?.name === "string").map((t) => ({ name: t.name, ...(t.description ? { description: String(t.description).slice(0, 500) } : {}) }));
+	return body!.result!.tools!.filter((t) => typeof t?.name === "string").map((t) => ({ name: t.name, ...(t.description ? { description: String(t.description).slice(0, 500) } : {}), ...(t.annotations ? { annotations: { ...(typeof t.annotations.readOnlyHint === "boolean" ? { readOnlyHint: t.annotations.readOnlyHint } : {}), ...(typeof t.annotations.destructiveHint === "boolean" ? { destructiveHint: t.annotations.destructiveHint } : {}) } } : {}) }));
 };
 
 /**

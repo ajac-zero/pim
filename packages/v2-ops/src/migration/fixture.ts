@@ -258,14 +258,21 @@ export async function buildLegacySnapshot(dir: string, options: { cutoverAt?: nu
 				pim_meta: table(["key", "value"], [
 					// Explicit settings only: every key the person never changed is absent, and must stay absent.
 					{ key: "settings", value: json({ timeZone: "Europe/Madrid", approvalPolicy: "auto" }) },
+					{ key: "chatgpt_host_id", value: "urn:uuid:11111111-1111-4111-8111-111111111111" },
 					{ key: "hosted_key", value: Buffer.alloc(32, 5).toString("base64url") },
 					{ key: "vapid_keys", value: json({ kty: "EC", crv: "P-256", d: "example-private-scalar", x: "x", y: "y" }) },
 				]),
-				pim_credentials: table(["provider", "credential"], [{ provider: "anthropic", credential: json({ apiKey: "sk-ant-example-789" }) }]),
+				pim_credentials: table(["provider", "credential"], [{ provider: "anthropic", credential: json({ apiKey: "sk-ant-example-789" }) }, { provider: "openai", credential: json({ type: "oauth", access: "chatgpt-access-example", refresh: "chatgpt-refresh-example", expires: cutoverAt + 3_600_000, clientId: "client-example", scopes: ["chatgpt.tokens.use.direct"], idToken: "id.example.token", subject: "acct-example", email: "ada@example.test" }) }]),
 				pim_app_connections: table(["id", "app", "name", "state", "credential", "sign_in_state", "pending", "auth_url", "error", "created_at", "generation"], [
 					{ id: "conn_gmail", app: "gmail", name: "Gmail", state: "connected", credential: sealLegacyCredential(gmailCredential, keys.appCredentialsKey, credBinding("conn_gmail", "gmail")), sign_in_state: null, pending: null, auth_url: null, error: null, created_at: cutoverAt - 60 * 86_400_000, generation: "g1" },
 					{ id: "conn_spot", app: "spotify", name: "Spotify", state: "connected", credential: json({ accessToken: "unsealed-example" }), sign_in_state: null, pending: null, auth_url: null, error: null, created_at: cutoverAt - 30 * 86_400_000, generation: "g1" },
 				]),
+				pim_tool_permissions: table(["audience", "app", "tool", "permission", "definition", "updated_at"], [
+					{ audience: "", app: "conn_gmail", tool: "send_email", permission: "ask", definition: null, updated_at: cutoverAt - 86_400_000 },
+					{ audience: "agent:ag_1", app: "conn_gmail", tool: "send_email", permission: "ask", definition: null, updated_at: cutoverAt - 86_400_000 },
+					{ audience: "circle_1", app: "conn_gmail", tool: "send_email", permission: "on", definition: null, updated_at: cutoverAt - 86_400_000 },
+				]),
+				pim_mcp_servers: table(["id", "approval"], [{ id: "conn_gmail", approval: "all" }]),
 				pim_push_subscriptions: table(["endpoint", "p256dh", "auth", "created_at"], [{ endpoint: "https://push.example.test/abc", p256dh: "p256", auth: "push-auth-secret", created_at: cutoverAt - 40 * 86_400_000 }]),
 				pim_tasks: table(["id", "title", "status", "conversation", "operation_id"], [{ id: "t1", title: "Research hostels", status: "done", conversation: String(delegated), operation_id: "task:t1" }]),
 				// A real space keeps apps in three tables, their files content-addressed in the ARTIFACTS bucket at `<owner>/<sha256>`; a note is an app of kind markdown with one README.md.

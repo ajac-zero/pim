@@ -134,6 +134,9 @@ real("a cutover rehearsal", () => {
 		// Ada's space came across: agents, skills with their files, memories, goals, circles, shares, apps, notes, and the secrets under the new keys.
 		const as = async <T>(sql: string, args: unknown[] = []) => (await d.stack.admin.query(sql, args)).rows as T[];
 		expect((await as("SELECT instructions, config FROM pim_app.agents WHERE owner_id = $1 AND id = 'ag_poet'", [ADA]))[0]).toMatchObject({ instructions: "Answer in verse.", config: { model: { provider: "faux", id: "m" }, skills: ["Haiku"] } });
+		// What the person chose for a connector's tool is carried: their own choice as it was, an agent's as on or off (asking meant off), a circle's not at all; the connector keeps its approval policy.
+		expect(await as("SELECT audience, app, tool, permission FROM pim_app.tool_permissions WHERE owner_id = $1 ORDER BY audience", [ADA])).toEqual([{ audience: "agent:ag_1", app: "conn_gmail", tool: "send_email", permission: "off" }, { audience: "owner", app: "conn_gmail", tool: "send_email", permission: "ask" }]);
+		expect(await as("SELECT approval FROM pim_app.connectors WHERE owner_id = $1 AND id = 'conn_gmail'", [ADA])).toEqual([{ approval: "all" }]);
 		expect(await count(`SELECT count(*) n FROM pim_app.conversations WHERE owner_id = '${ADA}' AND agent_id = 'ag_poet'`)).toBeGreaterThan(0);
 		expect((await as("SELECT body, files, version FROM pim_app.skills WHERE owner_id = $1 AND name = 'Haiku'", [ADA]))[0]).toMatchObject({ body: "Five, seven, five.", files: { "ref.md": "# reference\n" }, version: 1 });
 		expect((await as("SELECT title, body FROM pim_app.memories WHERE owner_id = $1", [ADA]))[0]).toMatchObject({ title: "Ada likes tea", body: "Ada likes tea\nblack, no sugar" });
@@ -142,6 +145,11 @@ real("a cutover rehearsal", () => {
 		expect(await count(`SELECT count(*) n FROM pim_app.shares WHERE owner_id = '${ADA}' AND link = 'lnk1'`)).toBe(1);
 		expect(await count(`SELECT count(*) n FROM pim_app.artifact_versions WHERE owner_id = '${ADA}'`)).toBeGreaterThan(0);
 		expect(await count(`SELECT count(*) n FROM pim_app.note_updates WHERE owner_id = '${ADA}'`)).toBeGreaterThan(0);
+		// The ChatGPT sign-in came across as it was, sealed under the application's keys, with the same agent host id: nobody signs in again.
+		const plan = (await as<{ secret: string; email: string; host_id: string }>("SELECT secret, email, host_id FROM pim_app.chatgpt_credentials WHERE owner_id = $1", [ADA]))[0]!;
+		expect(plan).toMatchObject({ email: "ada@example.test", host_id: "urn:uuid:11111111-1111-4111-8111-111111111111" });
+		expect(JSON.parse(await openString(appKeys, plan.secret, `chatgpt:${ADA}`))).toMatchObject({ type: "oauth", access: "chatgpt-access-example", refresh: "chatgpt-refresh-example", clientId: "client-example" });
+		expect(await as("SELECT 1 FROM pim_app.providers WHERE owner_id = $1 AND kind = 'openai'", [ADA])).toHaveLength(0);
 		for (const p of await as<{ id: string; secret: string | null }>("SELECT id, secret FROM pim_app.providers WHERE owner_id = $1 AND secret IS NOT NULL", [ADA])) expect((await openString(appKeys, p.secret!, `provider:${ADA}/${p.id}`)).length).toBeGreaterThan(0);
 		// Nothing that was due while the fence stood comes back: a time trigger counts from the activation.
 		const stale = await count(`SELECT count(*) n FROM pim_app.triggers WHERE owner_id = '${ADA}' AND source = 'time' AND watermark < ${ACTIVATED_AT}`);

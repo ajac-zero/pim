@@ -124,6 +124,19 @@ jobs:
           PIM_NATS_BIN: /usr/local/bin/nats-server
       - run: pnpm exec vitest run --project node
 
+  # Pim v2 as it is deployed: builds deploy/Dockerfile.v2, boots deploy/compose (Caddy, PostgreSQL behind PgBouncer, NATS, SeaweedFS and every
+  # role), then signs up, chats, approves a tool, stores an object, and backs up and restores (scripts/v2-compose/smoke.sh).
+  compose:
+    needs: scope
+    if: needs.scope.outputs.unit == 'true' || startsWith(github.ref, 'refs/heads/pim/v2')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - run: scripts/v2-compose/smoke.sh
+      - if: failure()
+        run: deploy/compose/pim.sh logs --no-color --tail 200
+
   # The Worker's tests in workerd, a quarter of the files each, so one job's files don't wait for the
   # other three quarters'. Vitest sharding splits by file size, which tracks duration. None of them
   # browses, so none needs Chrome.

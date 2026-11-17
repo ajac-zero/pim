@@ -1,6 +1,6 @@
 # TLS and routing for the Compose stack. Caddy gets and renews certificates itself (ports 80 and 443 reachable, DNS pointing here).
 # Routes, by what the path is for: HTTP and the API to `gate`; the realtime WebSocket to `live`; shared notes to `canvas`; the personal computer's
-# media and relay to `relay`. The last two exist only with their Compose profiles; when they are off Caddy answers 503 for those paths.
+# media and relay to `relay`. The last two exist only with their Compose profiles; when they are off the Gate, which runs the same sockets, answers.
 {
 	email {$PIM_ACME_EMAIL}
 	# Caddy trusts no client's X-Forwarded-*, and sets its own.
@@ -33,7 +33,10 @@
 
 	@canvas path /api/notes/live /api/notes/live/*
 	handle @canvas {
-		reverse_proxy canvas:8080 {
+		# Without the canvas profile the Gate serves these sockets itself: it is the fallback when canvas is absent or unhealthy.
+		reverse_proxy canvas:8080 gate:8080 {
+			lb_policy first
+			fail_duration 30s
 			import headers
 			flush_interval -1
 			health_uri /healthz
@@ -43,7 +46,10 @@
 
 	@relay path /api/computer /api/computer/* /api/browser/live /api/browser/live/*
 	handle @relay {
-		reverse_proxy relay:8080 {
+		# Without the relay profile the Gate serves these sockets itself: it is the fallback when relay is absent or unhealthy.
+		reverse_proxy relay:8080 gate:8080 {
+			lb_policy first
+			fail_duration 30s
 			import headers
 			flush_interval -1
 			health_uri /healthz
@@ -60,7 +66,8 @@
 	}
 }
 
-# Public app links and hosted-app origins go to the same Gate, which dispatches on Host.
+# Public app links and hosted-app origins go to the same Gate, which dispatches on Host. PIM_APPS_SITE is `*.<PIM_APPS_DOMAIN>` unless .env sets it
+# (a plain-HTTP trial sets `http://*.apps.localhost:8088`, see init-env.sh).
 {$PIM_CONTENT_DOMAIN} {
 	encode zstd gzip
 	reverse_proxy gate:8080 {
@@ -68,7 +75,7 @@
 	}
 }
 
-*.{$PIM_APPS_DOMAIN} {
+{$PIM_APPS_SITE} {
 	# A wildcard certificate needs a DNS-challenge build of Caddy (add your DNS provider's module); ordinary deployments use one hostname per app or skip hosted apps.
 	reverse_proxy gate:8080 {
 		import headers

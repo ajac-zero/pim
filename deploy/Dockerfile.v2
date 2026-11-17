@@ -4,10 +4,26 @@
 #   docker build -f deploy/Dockerfile.v2 -t registry.example.test/pim:2.0.0 .
 #
 # The sources run under tsx, which keeps every package's own paths (its migrations, its SQL) where the code expects them; there is no bundle.
-# Not built in CI (no Docker daemon there); see docs/architecture/v2-implementation-status.md.
+# The web app (web/) is built in its own stage and served by the Gate from PIM_WEB_DIR (packages/v2-server/src/web-assets.ts).
+FROM node:26-bookworm-slim AS web
+
+# Node 26 no longer ships corepack; pnpm is the version package.json pins.
+RUN npm install -g pnpm@12.0.0
+WORKDIR /app
+COPY pnpm-lock.yaml pnpm-workspace.yaml package.json ./
+COPY patches ./patches
+COPY packages ./packages
+# pim-computer, which the Gate serves at /pim-computer.ts (machines update themselves from it) and the `local-computer` Compose profile runs.
+COPY computer/pim-computer.ts ./computer/pim-computer.ts
+COPY web ./web
+COPY computer ./computer
+COPY displayd ./displayd
+RUN pnpm install --frozen-lockfile --filter "pim-web..." && pnpm --filter pim-web build
+
 FROM node:26-bookworm-slim AS build
-ENV PNPM_HOME=/pnpm PATH=/pnpm:$PATH
-RUN corepack enable
+
+# Node 26 no longer ships corepack; pnpm is the version package.json pins.
+RUN npm install -g pnpm@12.0.0
 WORKDIR /app
 COPY pnpm-lock.yaml pnpm-workspace.yaml package.json ./
 COPY patches ./patches
@@ -19,6 +35,8 @@ FROM node:26-bookworm-slim
 ENV NODE_ENV=production
 WORKDIR /app/packages/v2-server
 COPY --from=build /app /app
+COPY --from=web /app/web/dist /app/web/dist
+ENV PIM_WEB_DIR=/app/web/dist
 # The roles listen on PIM_HTTP_PORT (8080) and PIM_METRICS_PORT (9464); the filesystem is read-only in both deployments, and /tmp is a tmpfs.
 USER node
 EXPOSE 8080 9464

@@ -5,6 +5,7 @@
 #   docker compose up -d --scale runner=3       # more Runners; partitions are leased between them
 #   docker compose --profile canvas up -d       # shared-notes canvas server (/api/notes/live)
 #   docker compose --profile computer up -d     # personal-computer relay and TURN (relay, coturn)
+#   docker compose --profile local-computer up -d  # pim-computer on this machine, paired like any other computer (docs/v2-operations.md "A computer on the same machine")
 #   docker compose --profile coding up -d       # sandbox-manager for coding workspaces
 #   docker compose --profile observability up -d  # Prometheus (with the alert rules) and Grafana (with the Pim dashboard) on 127.0.0.1:3000
 #
@@ -59,6 +60,7 @@ services:
       PIM_DOMAIN: ${PIM_DOMAIN:?set PIM_DOMAIN in .env}
       PIM_CONTENT_DOMAIN: ${PIM_CONTENT_DOMAIN:-content.invalid}
       PIM_APPS_DOMAIN: ${PIM_APPS_DOMAIN:-apps.invalid}
+      PIM_APPS_SITE: ${PIM_APPS_SITE:-*.${PIM_APPS_DOMAIN:-apps.invalid}}
       PIM_ACME_EMAIL: ${PIM_ACME_EMAIL:-}
       PIM_INGRESS_SECRET: ${PIM_INGRESS_SECRET:?}
     volumes:
@@ -140,7 +142,8 @@ services:
       SEAWEED_SECRET_KEY: ${SEAWEED_SECRET_KEY:?}
     networks: [internal]
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:9333/cluster/status >/dev/null"]
+      # Healthy once the master, the filer and the S3 gateway all answer: the bucket is created through the filer.
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:9333/cluster/status >/dev/null && wget -qO- http://127.0.0.1:8888/ >/dev/null && wget -qO- http://127.0.0.1:8333/ 2>&1 | grep -qv 'Connection refused'"]
       interval: 5s
       timeout: 3s
       retries: 30
@@ -149,7 +152,7 @@ services:
     image: chrislusf/seaweedfs:3.80
     restart: "no"
     # Creates the bucket through SeaweedFS's own shell; idempotent (an existing bucket is left alone).
-    entrypoint: ["/bin/sh", "-c", "echo \"s3.bucket.create -name $$BUCKET\" | weed shell -master=seaweedfs:9333 || true; echo s3.bucket.list | weed shell -master=seaweedfs:9333 | grep -q \"$$BUCKET\""]
+    entrypoint: ["/bin/sh", "-c", "for i in $$(seq 1 30); do echo \"s3.bucket.create -name $$BUCKET\" | weed shell -master=seaweedfs:9333 -filer=seaweedfs:8888 >/dev/null 2>&1; echo s3.bucket.list | weed shell -master=seaweedfs:9333 -filer=seaweedfs:8888 2>/dev/null | grep -q \"$$BUCKET\" && exit 0; sleep 2; done; exit 1"]
     environment:
       BUCKET: ${PIM_S3_BUCKET:-pim-objects}
     networks: [internal]
@@ -174,7 +177,8 @@ services:
     environment: { <<: *pim-env, PIM_ROLE: gate, PIM_HTTP_PORT: "8080", PIM_DATABASE_URL: "postgres://pim_gate_login:${PIM_GATE_DB_PASSWORD:?}@pgbouncer:6432/pim" }
     depends_on: *pim-deps
     healthcheck: &http-health
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:${PIM_HTTP_PORT_CHECK:-8080}/healthz"]
+      # The image is node:*-slim, which has no wget or curl.
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/healthz').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
       interval: 10s
       timeout: 3s
       retries: 6
@@ -236,6 +240,34 @@ services:
     network_mode: host
     command: ["-n", "--realm=${PIM_DOMAIN}", "--use-auth-secret", "--static-auth-secret=${TURN_SHARED_SECRET:?}", "--no-cli", "--fingerprint", "--no-tcp-relay", "--min-port=49160", "--max-port=49200"]
 
+  # A personal computer on the same machine as the stack. It is NOT one of the Pim roles: it gets no env_file, so no database, NATS, object-store or key credential, and it joins none of
+  # the stack's networks. It connects out to the stack's public address with the `pimc_` token a person paired in Settings → Computer, exactly as a computer elsewhere would.
+  # What agents run on it (after a person approves each command) runs inside this container as the unprivileged `node` user, with only the `pim-files` volume to write to.
+  # A container is not a security sandbox for arbitrary code: do not mount the Docker socket or host paths here you would not give an agent.
+  pim-computer:
+    image: ${PIM_IMAGE:?set PIM_IMAGE in .env}
+    profiles: [local-computer]
+    restart: unless-stopped
+    read_only: true
+    tmpfs: [/tmp, /home/node]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    user: node
+    entrypoint: ["node", "/app/computer/pim-computer.ts"]
+    command: []
+    working_dir: /workspace
+    environment:
+      # The stack's public address as this host reaches it, such as https://pim.example.com, or http://host.docker.internal:8088 for the plain-HTTP trial stack.
+      PIM_URL: ${PIM_COMPUTER_URL:-}
+      PIM_COMPUTER_TOKEN: ${PIM_COMPUTER_TOKEN:-}
+      PIM_COMPUTER_ROOT: /workspace
+      HOME: /home/node
+    volumes: [pim-files:/workspace]
+    networks: [computer]
+    # The host's own address, so the localhost trial stack is reachable from inside the container; set PIM_COMPUTER_HOST_ALIAS to the public hostname
+    # when the host cannot reach its own public address (no hairpin NAT).
+    extra_hosts: ["host.docker.internal:host-gateway", "${PIM_COMPUTER_HOST_ALIAS:-pim.invalid}:host-gateway"]
+
   sandbox-manager:
     build: { context: ../../sandbox-manager }
     restart: unless-stopped
@@ -274,8 +306,11 @@ networks:
   # `internal` carries service-to-service traffic; only caddy is on `edge` and publishes ports. `sandbox` is where the sandbox manager's workspaces live: nothing there can reach PostgreSQL, NATS or object storage.
   internal: {}
   sandbox: {}
+  # pim-computer's own: it reaches the host (and so the stack's published ports) and the internet, and nothing inside the stack.
+  computer: {}
 
 volumes:
+  pim-files: {}
   postgres-data: {}
   seaweedfs-data: {}
   caddy-data: {}

@@ -13,7 +13,11 @@ import { OwnerId, PartitionId, type Principal } from "@pim/v2-contracts/identity
 import { ExternalOperations } from "@pim/v2-runtime/external";
 import type { Db as RuntimeDb } from "@pim/v2-runtime/db";
 import type { Actor } from "@pim/v2-forge/authz";
+import type { RelayBus } from "@pim/v2-app/relay";
+import { computerTools } from "./computer-tools.ts";
 import type { ForgeParts } from "./forge-assembly.ts";
+import type { EnvelopeCrypto } from "@pim/v2-contracts/platform";
+import { connectorToolset, type Transport } from "./connector-tools.ts";
 
 export type ToolDeps = {
 	ownerId: string;
@@ -21,8 +25,13 @@ export type ToolDeps = {
 	runtime: RuntimeDb;
 	app: App | undefined;
 	forge: ForgeParts | undefined;
+	/** The Relay's bus, made when first needed: how the computer, browser and desktop tools reach the owner's paired computer. */
+	relay?: (() => Promise<RelayBus>) | undefined;
 	fetch: typeof fetch;
 	now: () => number;
+	/** The deployment's keys, which open a connector's sealed credential; and whether a connector may live at a private address. */
+	crypto?: EnvelopeCrypto | undefined;
+	allowPrivateConnectors?: boolean | undefined;
 	/** The public id of the chat that a pi conversation is. */
 	chatOf(conversationId: number | string): Promise<string | null>;
 };
@@ -44,7 +53,7 @@ function privateAddress(address: string): boolean {
 	return a === 10 || a === 127 || a === 0 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127);
 }
 
-async function publicUrl(raw: string): Promise<URL> {
+export async function publicUrl(raw: string): Promise<URL> {
 	let url: URL;
 	try {
 		url = new URL(raw);
@@ -254,7 +263,7 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 					if (!signal) {
 						const filed = await app.db.owner(ownerId, async (tx) => (await tx.query("SELECT id FROM pim_app.approvals WHERE tool = 'http:request' AND args->>'taskId' = $1 LIMIT 1", [taskId])).rows[0]?.id as string | undefined);
 						if (filed) return { content: [{ type: "text", text: "Waiting for a person's approval." }], control: { suspend: true } } as never;
-						const gate = await app.approvals.gate(p, { action: "http:request", resource: { host: url.host, method: args.method }, ...(chat ? { chatId: chat } : {}), args: { taskId, method: args.method, url: url.href, headers: redactHeaders(args.headers), body: typeof args.body === "string" ? args.body.slice(0, 2000) : undefined }, timeoutMs: 24 * 3600_000, onTimeout: "deny" });
+						const gate = await app.approvals.gate(p, { action: "http:request", resource: { host: url.host, method: args.method }, ...(chat ? { chatId: chat } : {}), args: { taskId, callId: api.callId, method: args.method, url: url.href, headers: redactHeaders(args.headers), body: typeof args.body === "string" ? args.body.slice(0, 2000) : undefined }, timeoutMs: 24 * 3600_000, onTimeout: "deny" });
 						if (gate.outcome === "waiting") return { content: [{ type: "text", text: "Waiting for a person's approval." }], control: { suspend: true } } as never;
 					}
 					// The request itself, once: its outcome is on the operation, so a replay or a new owner finds it there, and one that was in flight is reconciled, not sent again.
@@ -337,5 +346,13 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 		coding("coding_merge", "Merge a coding thread's branch into the default branch, fast-forward or rebase, never forced. A person approves it first, unless they have said it may go ahead.", Type.Object({ thread }), "coding:merge", (f, actor, _c, a) => f.forge.merge(actor, a.thread)),
 	);
 
-	return defineExtension({ name: "pim", tools, sections });
+	// The person's computer: files, shell, browser, desktop (`./computer-tools.ts`).
+	tools.push(...computerTools({ ownerId, partitionId, runtime, app: deps.app, relay: deps.relay, chatOf: deps.chatOf }, { ops, principalOf }));
+
+	// The owner's connected MCP servers: their tools, with each one's Off, Ask or On.
+	const transport: Transport = { fetch: deps.fetch, allowPrivate: deps.allowPrivateConnectors === true, check: publicUrl };
+	const connectors = connectorToolset({ ownerId, partitionId, runtime, app: deps.app, crypto: deps.crypto, transport, ops, owner, now: deps.now, chatOf: deps.chatOf, principalOf });
+	tools.push(...connectors.tools);
+
+	return defineExtension({ name: "pim", tools, sections: [...sections, ...connectors.sections] });
 }

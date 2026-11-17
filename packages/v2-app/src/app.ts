@@ -1,3 +1,4 @@
+import { ChatGPT, type ChatGPTOptions } from "./chatgpt.ts";
 import { Agents } from "./agents.ts";
 import { Apps } from "./apps.ts";
 import { Canvas } from "./canvas.ts";
@@ -37,13 +38,14 @@ export class App {
 	readonly mcp: McpOAuth;
 	readonly agents: Agents;
 	readonly providers: Providers;
+	readonly chatgpt: ChatGPT;
 	readonly connectors: ConnectorsType;
 	readonly usage: Usage;
 	readonly triggers: Triggers;
 	readonly apps: Apps;
 	readonly sharing: Sharing;
 	readonly crypto: EnvelopeCrypto;
-	constructor(readonly db: Db, store: ObjectStore, opts: { hideSuspended?: boolean; providers?: Partial<Record<ProviderId, ProviderSettings>>; crypto?: EnvelopeCrypto; appKey?: string; fetchTools?: ToolFetcher; exchange?: CodeExchanger; transcripts?: TranscriptSource } = {}) {
+	constructor(readonly db: Db, store: ObjectStore, opts: { hideSuspended?: boolean; providers?: Partial<Record<ProviderId, ProviderSettings>>; crypto?: EnvelopeCrypto; appKey?: string; fetchTools?: ToolFetcher; exchange?: CodeExchanger; transcripts?: TranscriptSource; chatgpt?: ChatGPTOptions } = {}) {
 		this.identity = new Identity(db);
 		this.conversations = new Conversations(db);
 		this.memories = new Memories(db);
@@ -60,6 +62,7 @@ export class App {
 		this.crypto = opts.crypto ?? new KeyringCrypto("ephemeral", { ephemeral: new Uint8Array(randomBytes(32)) });
 		this.agents = new Agents(db);
 		this.providers = new Providers(db, this.crypto);
+		this.chatgpt = new ChatGPT(db, this.crypto, opts.chatgpt);
 		this.usage = new Usage(db);
 		this.triggers = new Triggers(db, this.conversations);
 		this.connectors = new Connectors(db, this.crypto, this.triggers, this.signin, { ...(opts.fetchTools ? { fetchTools: opts.fetchTools } : {}), ...(opts.exchange ? { exchange: opts.exchange } : {}) });

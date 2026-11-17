@@ -6,6 +6,7 @@ import { createModels } from "@earendil-works/pi-ai";
 import { createRegistry, type HarnessOptions } from "@earendil-works/pi-durable";
 import type { ProcessConfig } from "@pim/v2-contracts/platform";
 import { App } from "@pim/v2-app/app";
+import { OPENAI_ENDPOINTS } from "@pim/v2-app/chatgpt";
 import { KeyringCrypto } from "@pim/v2-app/crypto";
 import { connect as connectApp } from "@pim/v2-app/db";
 import { createGate } from "@pim/v2-app/gate";
@@ -28,11 +29,16 @@ import { assembleForge, forgeHttp, startForgeLoops } from "./forge-assembly.ts";
 import { combineSources, forgeOutboxSource } from "./forge-source.ts";
 import { deliverForgeWakes } from "./forge-wakes.ts";
 import { codingAdminRoutes, forgeAuthenticator, forgeRoutes, projectedTranscripts, snapshotRoutes } from "./gate-extras.ts";
+import { mcpFetchTools } from "./connector-tools.ts";
+import { publicUrl } from "./agent-tools.ts";
 import type { Host } from "./host.ts";
 import { AppLiveIdentity, deliverApprovalDecisions, LiveAuthorizer, mirrorCodingGrants, publishRevocations } from "./identity.ts";
 import { runtimeOutboxSource } from "./runtime-source.ts";
 import { natsRelayBus } from "./relay-bus.ts";
 import { sweepApprovals, trimForgeOutbox } from "./sweeps.ts";
+import { webAssets } from "./web-assets.ts";
+import { poolRoutes } from "./compat/admin.ts";
+import { webCompatRoutes } from "./compat/index.ts";
 
 export type Env = Record<string, string | undefined>;
 export type Hooks = {
@@ -60,6 +66,9 @@ export function keyringFromProcessEnv(env: Env): KeyringCrypto | undefined {
 	return new KeyringCrypto((env.PIM_KEK_CURRENT ?? Object.keys(keys).at(-1)!).toLowerCase(), keys);
 }
 
+/** Where Sign in with ChatGPT goes when not to OpenAI's own servers (`PIM_CHATGPT_ISSUER`: a proxy or a test double); unset, OpenAI's. */
+const chatgptFromEnv = (env: Env) => (env.PIM_CHATGPT_ISSUER ? { endpoints: { ...OPENAI_ENDPOINTS, issuer: env.PIM_CHATGPT_ISSUER.replace(/\/+$/, "") } } : undefined);
+
 /** One set of metrics per process, whatever roles it runs: the registry refuses a name twice. */
 const metricsByHost = new WeakMap<Host, ReturnType<typeof createPimMetrics>>();
 const metricsOf = (host: Host) => {
@@ -84,7 +93,7 @@ export async function startGate(config: ProcessConfig, env: Env, host: Host, nat
 	instrumentPool(db.pool, metrics, "gate");
 	const objects = s3Of(config, env);
 	const crypto = keyringFromProcessEnv(env);
-	const app = new App(db, objects, { ...(crypto ? { crypto } : {}), ...(env.PIM_APP_SECRET_KEY ? { appKey: env.PIM_APP_SECRET_KEY } : {}), transcripts: projectedTranscripts(db.pool) });
+	const app = new App(db, objects, { fetchTools: mcpFetchTools({ fetch, allowPrivate: env.PIM_CONNECTOR_ALLOW_PRIVATE === "1", check: publicUrl }), ...(crypto ? { crypto } : {}), ...(env.PIM_APP_SECRET_KEY ? { appKey: env.PIM_APP_SECRET_KEY } : {}), transcripts: projectedTranscripts(db.pool), ...(chatgptFromEnv(env) ? { chatgpt: chatgptFromEnv(env)! } : {}) });
 	if (nats) publishRevocations(app, nats);
 	// A computer paired to another process (the `relay` container, another Gate) is reached over NATS.
 	if (nats) app.relay.useBus(natsRelayBus(nats));
@@ -95,9 +104,13 @@ export async function startGate(config: ProcessConfig, env: Env, host: Host, nat
 	const authenticate = forgeAuthenticator(app, secure);
 	// Forge's whole HTTP surface (the coding API, harness logins, the git broker, Gitea, the model gateway), each request under its owner's row-level security scope.
 	const coding = forgeHttp(forge, { authenticate, crypto: app.crypto });
-	const options = { publicUrl: config.publicUrl, ...(env.PIM_APPS_ORIGIN ? { appsOrigin: env.PIM_APPS_ORIGIN } : {}), routes: [...snapshotRoutes(db.pool), ...codingAdminRoutes(), ...forgeRoutes(coding)] };
+	const options = { publicUrl: config.publicUrl, ...(env.PIM_APPS_ORIGIN ? { appsOrigin: env.PIM_APPS_ORIGIN } : {}), routes: [...snapshotRoutes(db.pool), ...codingAdminRoutes(), ...poolRoutes(coding), ...forgeRoutes(coding)],
+		// The web app's v1 API over v2's services (packages/v2-server/src/compat/), tried before the built-in routes so its shapes win.
+		first: [...webCompatRoutes] };
 	const gate = createGate(app, options);
 	const listener = gate.listeners("request")[0] as (req: never, res: never) => void;
+	const web = webAssets(env.PIM_WEB_DIR);
+	if (web) host.handle(web);
 	host.handle((req, res) => (listener(req as never, res as never), true));
 	// The host owns the server's `upgrade` event and destroys a socket none of its handlers claims, so the Gate's sockets (a computer connecting, the desktop,
 	// the browser, notes, a hosted app's own) are claimed by path here rather than listened for on the server.
@@ -199,7 +212,10 @@ export async function startRunner(config: ProcessConfig, env: Env, host: Host, h
 	const objects = appDb || forgePool ? s3Of(config, env) : undefined;
 	const app = appDb && objects ? new App(appDb, objects, { ...(crypto ? { crypto } : {}), ...(env.PIM_APP_SECRET_KEY ? { appKey: env.PIM_APP_SECRET_KEY } : {}) }) : undefined;
 	const forge = forgePool && objects ? assembleForge(forgePool as never, objects, env) : undefined;
-	const host_ = hooks.harnessOptions ? undefined : createAgentHost({ db, env, crypto, app, forge, providers: hooks.providers, fetch: hooks.fetch });
+	// The computer's tools reach a paired computer over the Relay's bus (NATS). The connection is made when an agent first uses one, so a Runner that never does needs no NATS.
+	let relayPulse: Promise<NatsPulse> | undefined;
+	const relayBus = async () => natsRelayBus(await (relayPulse ??= NatsPulse.connect(config.natsUrl)));
+	const host_ = hooks.harnessOptions ? undefined : createAgentHost({ db, env, crypto, app, forge, relay: relayBus, providers: hooks.providers, fetch: hooks.fetch, ...(chatgptFromEnv(env) ? { chatgpt: { ...chatgptFromEnv(env), ...(env.PIM_CHATGPT_BASE_URL ? { baseUrl: env.PIM_CHATGPT_BASE_URL } : {}) } } : {}), ...(env.PIM_PROVIDER_COOLDOWN_MS ? { cooldowns: { transientMs: Number(env.PIM_PROVIDER_COOLDOWN_MS) } } : {}) });
 	const runner = new Runner({
 		db,
 		harnessOptions: hooks.harnessOptions ?? host_!.harnessOptions,
@@ -243,6 +259,7 @@ export async function startRunner(config: ProcessConfig, env: Env, host: Host, h
 			await runtimePool.end();
 			await appDb?.end();
 			await forgePool?.end();
+			await (await relayPulse?.catch(() => undefined))?.close();
 		},
 	};
 }

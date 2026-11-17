@@ -264,6 +264,12 @@ export async function buildLegacySnapshot(dir: string, options: { cutoverAt?: nu
 					{ id: "conn_gmail", app: "gmail", name: "Gmail", state: "connected", credential: sealLegacyCredential(gmailCredential, keys.appCredentialsKey, credBinding("conn_gmail", "gmail")), sign_in_state: null, pending: null, auth_url: null, error: null, created_at: cutoverAt - 60 * 86_400_000, generation: "g1" },
 					{ id: "conn_spot", app: "spotify", name: "Spotify", state: "connected", credential: json({ accessToken: "unsealed-example" }), sign_in_state: null, pending: null, auth_url: null, error: null, created_at: cutoverAt - 30 * 86_400_000, generation: "g1" },
 				]),
+				pim_tool_permissions: table(["audience", "app", "tool", "permission", "definition", "updated_at"], [
+					{ audience: "", app: "conn_gmail", tool: "send_email", permission: "ask", definition: null, updated_at: cutoverAt - 86_400_000 },
+					{ audience: "agent:ag_1", app: "conn_gmail", tool: "send_email", permission: "ask", definition: null, updated_at: cutoverAt - 86_400_000 },
+					{ audience: "circle_1", app: "conn_gmail", tool: "send_email", permission: "on", definition: null, updated_at: cutoverAt - 86_400_000 },
+				]),
+				pim_mcp_servers: table(["id", "approval"], [{ id: "conn_gmail", approval: "all" }]),
 				pim_push_subscriptions: table(["endpoint", "p256dh", "auth", "created_at"], [{ endpoint: "https://push.example.test/abc", p256dh: "p256", auth: "push-auth-secret", created_at: cutoverAt - 40 * 86_400_000 }]),
 				pim_tasks: table(["id", "title", "status", "conversation", "operation_id"], [{ id: "t1", title: "Research hostels", status: "done", conversation: String(delegated), operation_id: "task:t1" }]),
 				pim_notes: table(["id", "title", "ydoc", "updated_at"], [{ id: "note_1", title: "Packing list", ydoc: b64(noteDoc), updated_at: cutoverAt - 3_600_000 }]),

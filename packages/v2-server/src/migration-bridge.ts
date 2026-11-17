@@ -346,6 +346,8 @@ async function promoteDomain(pool: Pool, owner: string, options: PromoteOptions,
 	const memories = await rows("optmem_log");
 	const goals = await rows("pim_goals");
 	const connections = await rows("pim_app_connections");
+	const toolPermissions = await rows("pim_tool_permissions");
+	const mcpServers = await rows("pim_mcp_servers");
 	const credentials = await rows("pim_credentials");
 	const triggers = await rows("pim_triggers");
 	const revisions = await rows("pim_trigger_revisions");
@@ -458,6 +460,21 @@ async function promoteDomain(pool: Pool, owner: string, options: PromoteOptions,
 			);
 			bump(d, "connectors", r.rowCount ?? 0);
 			if (!credential) d.skipped.push(`connector ${k.id} (${k.app}): connected again by its owner`);
+		}
+		// What the person chose for each connector tool (Off, Ask, On), and each connector's approval policy. A choice for Pim's own tools or a circle has no home here yet.
+		for (const m of mcpServers) {
+			if (["writes", "all", "none"].includes(String(m.approval))) await c.query("UPDATE pim_app.connectors SET approval = $2 WHERE id = $1", [m.id, m.approval]);
+		}
+		for (const t of toolPermissions) {
+			const audience = t.audience === "" ? "owner" : String(t.audience).startsWith("agent:") ? String(t.audience) : null;
+			if (!audience || !t.app || !["off", "ask", "on"].includes(String(t.permission))) {
+				d.skipped.push(`tool permission ${t.audience || "owner"}/${t.app || "pim"}/${t.tool}: ${audience && t.app ? "unknown choice" : "only the owner's and an agent's choices for a connector's tools are carried"}`);
+				continue;
+			}
+			// An agent's switch is on or off; asking meant off there.
+			const permission = audience === "owner" ? t.permission : t.permission === "on" ? "on" : "off";
+			const r = await c.query("INSERT INTO pim_app.tool_permissions (owner_id, audience, app, tool, permission) VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING", [owner, audience, t.app, t.tool, permission]);
+			bump(d, "tool permissions", r.rowCount ?? 0);
 		}
 		// Triggers. A time trigger is counted from the later of the cutover's skip guard and the activation, so what the cutover missed never fires.
 		const activated = options.activatedAt ?? Date.now();

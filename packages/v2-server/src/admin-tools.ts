@@ -77,10 +77,11 @@ export function adminTools(deps: AdminToolsDeps): ToolRegistration[] {
 	const { ownerId } = deps;
 	const admin: Principal = { kind: "user", ownerId: OwnerId.parse(ownerId), role: "admin", sessionId: "majordomo" };
 
-	/** The majordomo of an active admin: the home chat's agent (not another agent, not a delegate), on an account that is an admin and active. */
+	/** The majordomo of an active admin: the agent a chat answers as when none is chosen, or the one the person's settings name (not another agent, not a delegate), on an account that is an admin and active. */
 	const allowed = async (app: App, chat: string | null): Promise<string | null> => {
 		const p = await deps.principalOf(app, chat);
-		if (p.kind !== "agent" || p.agentId !== "pim") return "Only your majordomo runs the deployment: another agent, or a delegate, may not.";
+		const majordomo = p.kind === "agent" && p.agentId !== "pim" ? await app.db.owner(ownerId, async (tx) => (await tx.query("SELECT value FROM pim_app.owner_settings WHERE key = 'majordomo'")).rows[0]?.value as string | undefined) : undefined;
+		if (p.kind !== "agent" || (p.agentId !== "pim" && p.agentId !== majordomo)) return "Only your majordomo runs the deployment: another agent, or a delegate, may not.";
 		const account = await app.identity.authz.account(ownerId);
 		if (!account || account.status !== "active" || account.role !== "admin") return "Only the admin of this Pim runs it.";
 		return null;

@@ -35,7 +35,7 @@ export const coreRoutes: Route[] = [
 	// ---- chats ("sessions" in the API) ----
 	route("POST", "/api/sessions", async ({ app, principal, json }) => {
 		const b = await json();
-		return ok({ id: await app.conversations.create(await principal(), { agentId: b.agentId, title: b.title }) }, 201);
+		return ok({ id: await app.conversations.create(await principal(), { agentId: b.agentId ?? b.agent, title: b.title }) }, 201);
 	}),
 	route("GET", "/api/sessions/:id", async ({ app, principal, params }) => ok(await app.conversations.get((await principal()).ownerId, params[0]!))),
 	route("GET", "/api/sessions/:id/pending", async ({ app, principal, params }) => ok({ commands: await app.conversations.pending((await principal()).ownerId, params[0]!) })),

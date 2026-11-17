@@ -1,0 +1,34 @@
+# Development on top of the local trial (compose.local.yaml): the Pim containers run this checkout's sources (tsx reads TypeScript directly) and its
+# web build, so a change needs only a restart, not an image build. New npm dependencies still need `docker build`.
+#
+#   pnpm --filter pim-web build                                   # when web/ changed
+#   docker compose -f deploy/compose/compose.yaml -f deploy/compose/compose.local.yaml -f deploy/compose/compose.dev.yaml up -d
+#   docker compose -f ... restart gate                            # after editing a package's src/; rerun `up -d migrator` after adding a migration
+x-sources: &sources
+    - ../../packages/coding/src:/app/packages/coding/src:ro
+    - ../../packages/shared/src:/app/packages/shared/src:ro
+    - ../../packages/triggers/src:/app/packages/triggers/src:ro
+    - ../../packages/ui-lang/src:/app/packages/ui-lang/src:ro
+    - ../../packages/v2-app/migrations:/app/packages/v2-app/migrations:ro
+    - ../../packages/v2-app/src:/app/packages/v2-app/src:ro
+    - ../../packages/v2-contracts/migrations:/app/packages/v2-contracts/migrations:ro
+    - ../../packages/v2-contracts/src:/app/packages/v2-contracts/src:ro
+    - ../../packages/v2-forge/migrations:/app/packages/v2-forge/migrations:ro
+    - ../../packages/v2-forge/src:/app/packages/v2-forge/src:ro
+    - ../../packages/v2-live/migrations:/app/packages/v2-live/migrations:ro
+    - ../../packages/v2-live/src:/app/packages/v2-live/src:ro
+    - ../../packages/v2-ops/sql:/app/packages/v2-ops/sql:ro
+    - ../../packages/v2-ops/src:/app/packages/v2-ops/src:ro
+    - ../../packages/v2-runtime/migrations:/app/packages/v2-runtime/migrations:ro
+    - ../../packages/v2-runtime/src:/app/packages/v2-runtime/src:ro
+    - ../../packages/v2-server/migrations:/app/packages/v2-server/migrations:ro
+    - ../../packages/v2-server/src:/app/packages/v2-server/src:ro
+    - ../../web/dist:/app/web/dist:ro
+
+services:
+  migrator: { volumes: *sources }
+  gate: { volumes: *sources }
+  live: { volumes: *sources }
+  runner: { volumes: *sources }
+  forge: { volumes: *sources }
+  maintenance: { volumes: *sources }

@@ -8,6 +8,7 @@ import type { App } from "@pim/v2-app/app";
 import type { Principal } from "@pim/v2-contracts/identity";
 import { BadRequestError, NotFoundError } from "@pim/v2-app/errors";
 import { ok, route, type Route } from "@pim/v2-app/http";
+import { approvalsOf } from "./compat/boot.ts";
 import { type Approval, type ConnectorRow, type McpTool, type Permission, type PermissionRow, resolvePermission } from "./connector-tools.ts";
 
 const CHOICES: Permission[] = ["off", "ask", "on"];
@@ -77,7 +78,7 @@ export function permissionRoutes(): Route[] {
 					const { connector, tool } = filed.args?.resource ?? {};
 					if (typeof connector === "string" && typeof tool === "string") await app.db.owner(p.ownerId, (tx) => tx.query("INSERT INTO pim_app.tool_permissions (owner_id, audience, app, tool, permission) VALUES ($1,'owner',$2,$3,'on') ON CONFLICT (owner_id, audience, app, tool) DO UPDATE SET permission = 'on', updated_at = now()", [p.ownerId, connector, tool]));
 				}
-				return ok({ id, status: approve ? "approved" : "denied", ...(approve && body.always === true ? { always: true } : {}) });
+				return ok((await approvalsOf(app, p.ownerId, "WHERE id = $1", [id]))[0]);
 		})),
 	];
 }

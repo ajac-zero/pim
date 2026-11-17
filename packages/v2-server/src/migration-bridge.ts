@@ -695,6 +695,18 @@ async function promoteDomain(pool: Pool, owner: string, options: PromoteOptions,
 				bump(d, "settings", r.rowCount ?? 0);
 			}
 		}
+		// The models the person chose in Settings: the default, the fallbacks in order, and the utility model. Without them a chat with no agent of its own
+		// would run on whatever the catalog lists first. A model of the person's own provider loses v1's `own:` prefix.
+		const chosen = (m: any) => (m && typeof m.provider === "string" && typeof m.id === "string" ? { provider: m.provider.replace(/^own:/, ""), id: m.id } : null);
+		for (const [legacy, key] of [["model", "model"], ["utility_model", "model_utility"], ["model_fallbacks", "model_fallbacks"]] as const) {
+			const row = meta.find((x) => x.key === legacy);
+			if (!row) continue;
+			const parsed = parseJson(row.value, null);
+			const value = legacy === "model_fallbacks" ? (Array.isArray(parsed) ? parsed.map(chosen).filter((m) => m !== null) : null) : chosen(parsed);
+			if (!value) continue;
+			const r = await c.query("INSERT INTO pim_app.owner_settings (owner_id, key, value) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING", [owner, key, JSON.stringify(value)]);
+			bump(d, "settings", r.rowCount ?? 0);
+		}
 	});
 }
 

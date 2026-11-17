@@ -1,4 +1,5 @@
 /** What each process role runs. One process may run several (`all-in-one` runs every one): each role adds its handlers and checks to the shared host. */
+import { adminCompatRoutes } from "./compat/admin.ts";
 import { readdirSync, readFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
@@ -96,7 +97,7 @@ export async function startGate(config: ProcessConfig, env: Env, host: Host, nat
 	const authenticate = forgeAuthenticator(app, secure);
 	// Forge's whole HTTP surface (the coding API, harness logins, the git broker, Gitea, the model gateway), each request under its owner's row-level security scope.
 	const coding = forgeHttp(forge, { authenticate, crypto: app.crypto });
-	const options = { publicUrl: config.publicUrl, ...(env.PIM_APPS_ORIGIN ? { appsOrigin: env.PIM_APPS_ORIGIN } : {}), routes: [...snapshotRoutes(db.pool), ...codingAdminRoutes(), ...forgeRoutes(coding)] };
+	const options = { publicUrl: config.publicUrl, ...(env.PIM_APPS_ORIGIN ? { appsOrigin: env.PIM_APPS_ORIGIN } : {}), routes: [...adminCompatRoutes(env, coding), ...snapshotRoutes(db.pool), ...codingAdminRoutes(), ...forgeRoutes(coding)] };
 	const gate = createGate(app, options);
 	const listener = gate.listeners("request")[0] as (req: never, res: never) => void;
 	const web = webAssets(env.PIM_WEB_DIR);

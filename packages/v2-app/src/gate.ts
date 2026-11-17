@@ -17,14 +17,14 @@ export type GateOptions = {
 	publicUrl?: string;
 	/** Where apps with a backend get an origin of their own, `https://<label>.<this host>`. Unset, they are reached only at `/hosted/<owner>/<id>/<token>/`. */
 	appsOrigin?: string;
-	/** Extra routes, tried after the built-in ones. */
+	/** Extra routes, tried before the built-in ones: a compatibility route may answer a path the application also does, in another shape. */
 	routes?: Route[];
 };
 
 export const builtInRoutes: Route[] = [...hostedRoutes, ...domainRoutes, ...coreRoutes, ...authRoutes];
 
 export function createGate(app: App, options: GateOptions = {}): Server {
-	const routes = [...builtInRoutes, ...(options.routes ?? [])];
+	const routes = [...(options.routes ?? []), ...builtInRoutes];
 	return createServer(async (req, res) => {
 		try {
 			await handle(app, routes, options, req, res);

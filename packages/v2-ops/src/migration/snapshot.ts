@@ -30,6 +30,12 @@ export type SnapshotManifest = {
 	readonly keyMaterial: readonly { readonly name: string; readonly fingerprint: string }[];
 };
 
+/**
+ * PostgreSQL's jsonb cannot hold U+0000, which some legacy records have inside strings (a tool's binary output kept as text). This turns each one in a
+ * JSON text into U+FFFD, the character for a byte that could not be kept, leaving an escaped backslash before `u0000` alone. The importer writes what it
+ * returns and the auditor compares through it, so the two agree.
+ */
+export const jsonbText = (json: string) => json.replace(/(?<!\\)((?:\\\\)*)\\u0000/g, "$1\uFFFD");
 export const sha256 = (data: string | Uint8Array) => createHash("sha256").update(data).digest("hex");
 export const b64 = (bytes: Uint8Array): Cell => ({ $b64: Buffer.from(bytes).toString("base64") });
 export const isBlob = (cell: unknown): cell is { $b64: string } => typeof cell === "object" && cell !== null && "$b64" in cell;

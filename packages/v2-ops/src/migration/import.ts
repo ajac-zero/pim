@@ -6,7 +6,7 @@ import { inTransaction } from "../pg/migrate.ts";
 import type { ObjectStore } from "./objects.ts";
 import { type QuiescencePlan, planQuiescence } from "./quiesce.ts";
 import { META_TABLE, SECRET_COLUMNS, SECRET_KV, SECRET_META_KEYS, legacyKey, canonical } from "./secrets.ts";
-import { type DoDump, type Row, type SnapshotReader, rowsOf, sha256, isBlob } from "./snapshot.ts";
+import { type DoDump, jsonbText, type Row, type SnapshotReader, rowsOf, sha256, isBlob } from "./snapshot.ts";
 import { ownerIdOf, partitionUuid } from "./ids.ts";
 import { HOME_PARTITION, readPi, splitFamilies } from "./split.ts";
 
@@ -45,7 +45,7 @@ async function bulk(client: PoolClient, table: string, columns: readonly Column[
 	const names = columns.map(([name]) => `"${name}"`).join(", ");
 	const typed = columns.map(([name, type]) => `"${name}" ${type}`).join(", ");
 	for (let i = 0; i < rows.length; i += 2000) {
-		await client.query(`INSERT INTO pim_ops.${table} (${names}) SELECT ${names} FROM jsonb_to_recordset($1::jsonb) AS x(${typed}) ON CONFLICT DO NOTHING`, [JSON.stringify(rows.slice(i, i + 2000))]);
+		await client.query(`INSERT INTO pim_ops.${table} (${names}) SELECT ${names} FROM jsonb_to_recordset($1::jsonb) AS x(${typed}) ON CONFLICT DO NOTHING`, [jsonbText(JSON.stringify(rows.slice(i, i + 2000)))]);
 	}
 }
 

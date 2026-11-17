@@ -1,7 +1,7 @@
 import type { Pool } from "pg";
 import type { ObjectStore } from "./objects.ts";
 import { canonical } from "./secrets.ts";
-import { type Row, type SnapshotReader, rowsOf, sha256 } from "./snapshot.ts";
+import { jsonbText, type Row, type SnapshotReader, rowsOf, sha256 } from "./snapshot.ts";
 import { HOME_PARTITION, readPi, splitFamilies, visibleEntryIds } from "./split.ts";
 import { DEPLOYMENT_TENANT } from "./import.ts";
 import { ownerIdOf, partitionUuid } from "./ids.ts";
@@ -16,7 +16,7 @@ const PROMOTED: Readonly<Record<string, ReadonlySet<string>>> = {
 	Pim: new Set(["pi_durable_metadata", "pi_record_ids", "pi_conversations", "pi_entries", "pi_tasks", "pi_submissions", "pi_documents", "pi_document_revisions", "pim_session_ids", "pim_sessions"]),
 };
 
-const hashJson = (value: unknown) => sha256(canonical(value));
+const hashJson = (value: unknown) => sha256(jsonbText(canonical(value)));
 const sorted = <T>(items: T[], key: (item: T) => string) => [...items].sort((a, b) => (key(a) < key(b) ? -1 : 1));
 
 /**
@@ -28,7 +28,7 @@ export async function auditImport(pool: Pool, reader: SnapshotReader, objects: O
 	const checks: Check[] = [];
 	const counts: Record<string, { source: number; target: number }> = {};
 	const check = (name: string, ok: boolean, extra: Partial<Check> = {}) => checks.push({ name, ok, ...extra });
-	const equal = (name: string, expected: unknown, actual: unknown) => check(name, canonical(expected) === canonical(actual), { expected, actual });
+	const equal = (name: string, expected: unknown, actual: unknown) => check(name, jsonbText(canonical(expected)) === jsonbText(canonical(actual)), { expected, actual });
 	const count = async (sql: string, params: unknown[] = []) => Number((await pool.query<{ n: string }>(sql, params)).rows[0]!.n);
 	const countCheck = (name: string, source: number, target: number) => {
 		counts[name] = { source, target };

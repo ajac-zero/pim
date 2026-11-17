@@ -7,6 +7,7 @@ import { connect } from "@pim/v2-app/db";
 import { createGate } from "@pim/v2-app/gate";
 import { MemoryObjectStore } from "@pim/v2-app/objects";
 import { chatRoutes } from "../src/compat/chat.ts";
+import { usageRoutes } from "../src/compat/usage.ts";
 import { createStack, type Stack } from "./support/stack.ts";
 
 let stack: Stack;
@@ -25,8 +26,8 @@ const call = async (token: string, method: string, path: string, body?: unknown,
 
 beforeAll(async () => {
 	stack = await createStack();
-	app = new App(connect(stack.url("gate"), 4), new MemoryObjectStore());
-	server = createGate(app, { first: chatRoutes });
+	app = new App(connect(stack.url("gate"), 4), new MemoryObjectStore()).limitSpaces();
+	server = createGate(app, { first: [...chatRoutes, ...usageRoutes()] });
 	await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
 	base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
 	const claim = await app.identity.issueClaim("bootstrap", null, 3600_000);
@@ -121,3 +122,40 @@ describe("chats and the account", () => {
 		expect((await call(ada, "GET", "/api/email")).body).toEqual({ available: false, address: null, pending: null });
 	});
 });
+
+describe("usage and per-space limits", () => {
+	it("meters runs, refuses past the admin's limit for one person, and shows the day in the shape the usage screens read", async () => {
+		const set = (limits: unknown) => call(ada, "PUT", "/api/admin/accounts/bob/limits", { limits });
+		expect((await set({ dailyRuns: 1, sessions: 2 })).body.limits).toMatchObject({ dailyRuns: 1, sessions: 2, schedules: null });
+		expect((await set({ dailyRuns: -1 })).status).toBe(400);
+		expect((await call(bob, "PUT", "/api/admin/accounts/bob/limits", { limits: null })).status).toBe(403);
+		const chat = (await call(bob, "POST", "/api/sessions", { title: "one" })).body.id as string;
+		const send = (commandId: string) => call(bob, "POST", `/api/sessions/${chat}/messages`, { commandId, text: "hi" });
+		expect((await send("u1")).status).toBe(202);
+		expect((await send("u1")).status).toBe(200); // a retry of an accepted command is not a second run
+		const refused = await send("u2");
+		expect(refused).toMatchObject({ status: 429, body: { error: "quota_exceeded" } });
+		expect(refused.body.message).toMatch(/^Space usage quota exceeded:/);
+		expect((await call(bob, "POST", "/api/sessions", {})).status).toBe(201);
+		expect((await call(bob, "POST", "/api/sessions", {})).status).toBe(429);
+		const usage = (await call(bob, "GET", "/api/usage")).body;
+		expect(usage.limits.dailyRuns).toBe(1);
+		expect(usage.today).toMatchObject({ runs: 1, toolCalls: 0, tokens: 0 });
+		// Back to the deployment's: nothing set means no limit here, and the admin never had one.
+		expect((await set(null)).body.limits.dailyRuns).toBeNull();
+		expect((await call(ada, "GET", "/api/usage")).body.limits.dailyRuns).toBeNull();
+	});
+
+	it("reports what calls cost in the cost report's shape, with the ledger's cost in dollars", async () => {
+		await app.usage.record(await ownerOf(ada), { id: "mc1", runKind: "chat", provider: "gateway", model: "m", inputTokens: 1000, outputTokens: 2000, costMicroUsd: 30_000 });
+		await app.usage.record(await ownerOf(ada), { id: "mc2", runKind: "background", provider: "gateway", model: "free", inputTokens: 10, outputTokens: 20, costMicroUsd: 0 });
+		const report = (await call(ada, "GET", "/api/usage/costs?days=7")).body;
+		expect(report).toMatchObject({ days: 7, totalCostUsd: 0.03, calls: 2, unpricedCalls: 1, errors: 0, costPer1kOutputTokens: expect.closeTo(0.0149, 3) });
+		expect(report.byDay).toHaveLength(1);
+		expect(report.byDay[0].byRunKind).toEqual([{ key: "chat", costUsd: 0.03 }, { key: "background", costUsd: 0 }]);
+		expect(report.byDay[0].byModel.map((m: { key: string }) => m.key)).toEqual(["gateway/m", "gateway/free"]);
+		expect((await call(bob, "GET", "/api/usage/costs")).body.calls).toBe(0);
+	});
+});
+
+const ownerOf = async (token: string) => (await app.identity.authenticate(token))!.ownerId;

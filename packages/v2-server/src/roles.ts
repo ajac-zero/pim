@@ -93,7 +93,7 @@ export async function startGate(config: ProcessConfig, env: Env, host: Host, nat
 	instrumentPool(db.pool, metrics, "gate");
 	const objects = s3Of(config, env);
 	const crypto = keyringFromProcessEnv(env);
-	const app = new App(db, objects, { fetchTools: mcpFetchTools({ fetch, allowPrivate: env.PIM_CONNECTOR_ALLOW_PRIVATE === "1", check: publicUrl }), ...(crypto ? { crypto } : {}), ...(env.PIM_APP_SECRET_KEY ? { appKey: env.PIM_APP_SECRET_KEY } : {}), transcripts: projectedTranscripts(db.pool), ...(chatgptFromEnv(env) ? { chatgpt: chatgptFromEnv(env)! } : {}) });
+	const app = new App(db, objects, { fetchTools: mcpFetchTools({ fetch, allowPrivate: env.PIM_CONNECTOR_ALLOW_PRIVATE === "1", check: publicUrl }), ...(crypto ? { crypto } : {}), ...(env.PIM_APP_SECRET_KEY ? { appKey: env.PIM_APP_SECRET_KEY } : {}), transcripts: projectedTranscripts(db.pool), ...(chatgptFromEnv(env) ? { chatgpt: chatgptFromEnv(env)! } : {}), env }).limitSpaces();
 	if (nats) publishRevocations(app, nats);
 	// A computer paired to another process (the `relay` container, another Gate) is reached over NATS.
 	if (nats) app.relay.useBus(natsRelayBus(nats));
@@ -295,7 +295,7 @@ export async function startMaintenance(config: ProcessConfig, env: Env, host: Ho
 	const usage = new Usage(app);
 	let lastTrim = 0;
 	const { App } = await import("@pim/v2-app/app");
-	const sweeper = new App(app, objects);
+	const sweeper = new App(app, objects, { env }).limitSpaces();
 	const pass = async () => {
 		await sweepApprovals(sweeper, maint).catch((e) => console.error("approval sweep", e));
 		if (Date.now() - lastTrim > 60_000) {

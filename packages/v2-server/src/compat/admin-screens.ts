@@ -6,6 +6,7 @@
 import type { App } from "@pim/v2-app/app";
 import { BadRequestError, NotFoundError } from "@pim/v2-app/errors";
 import { route, type Reply, type Route } from "@pim/v2-app/http";
+import { deploymentLimits } from "@pim/v2-app/quota";
 import { configuredProviders, PROVIDER_IDS, providerName, providerSecrets } from "@pim/v2-app/oauth";
 import type { Principal } from "@pim/v2-contracts/identity";
 import type { IncomingMessage } from "node:http";
@@ -97,7 +98,7 @@ export function screenRoutes(env: Env): Route[] {
 		route("GET", "/api/admin/deployment", async ({ app, principal, origin, appsOrigin }) => {
 			await admin(app, await principal(), "admin:settings");
 			const open = (await app.db.anonymous(async (tx) => (await tx.query("SELECT value FROM pim_app.instance_settings WHERE key = 'registration_open'")).rows[0]))?.value === true;
-			const limits = { dailyTokens: null, dailyModelRequests: null, dailyRuns: null, dailyToolCalls: null, sessions: null, schedules: null, storageBytes: null, artifacts: null, artifactVersions: null, artifactBytes: null, artifactStorageBytes: null };
+			const limits = deploymentLimits(env);
 			const settings = { registration: open ? "open" : "invite", maxAccounts: null, registrationsPerAddress: 5, approvalPolicy: "explicit", timeZone: env.TZ ?? "UTC", model: env.PIM_DEFAULT_MODEL ?? "", models: gatewayModels(env), utilityModel: null, memoryModel: null, memoryLines: 0, imageModel: null, limits, publicUrl: env.PIM_PUBLIC_URL ?? origin, contentOrigin: appsOrigin ?? env.PIM_CONTENT_ORIGIN ?? null, emailFrom: null };
 			const secrets = PROVIDER_IDS.flatMap((id) => providerSecrets(id));
 			const variables = [...PLAIN_VARIABLES.map((name) => ({ name, value: env[name]?.trim() || null, problem: null })), ...secrets.map((name) => ({ name, value: env[name]?.trim() ? "(set)" : null, problem: null }))];

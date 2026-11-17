@@ -8,6 +8,7 @@ import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import { Type } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool, type PromptSection, type ToolRegistration } from "@earendil-works/pi-durable";
+import { QUOTA_MESSAGE } from "@pim/v2-app/quota";
 import type { App } from "@pim/v2-app/app";
 import { OwnerId, PartitionId, type Principal } from "@pim/v2-contracts/identity";
 import { ExternalOperations } from "@pim/v2-runtime/external";
@@ -128,8 +129,14 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 				return text(error instanceof Error ? error.message : String(error), true);
 			}
 		};
+	/** Every tool call counts against the owner's day (migration 0621); once the day's allowance is used the call is refused with the space's usual message. */
+	const defaultToolCalls = /^\d+$/.test(process.env.PIM_LIMIT_DAILY_TOOL_CALLS?.trim() ?? "") ? Number(process.env.PIM_LIMIT_DAILY_TOOL_CALLS) : null;
+	const counted = (execute: (args: any, api: any, context: any) => Promise<Result>) => async (args: any, api: any, context: any): Promise<Result> => {
+		const allowed = await runtime.read<{ ok: boolean }>(ownerId, "SELECT pim_app.runner_count_tool_call($1, $2) AS ok", [ownerId, defaultToolCalls]).then((r) => r.rows[0]?.ok !== false, () => true);
+		return allowed ? execute(args, api, context) : text(`${QUOTA_MESSAGE} too many tool calls today. It resets at midnight UTC.`, true);
+	};
 	const tool = (name: string, description: string, parameters: any, execute: (args: any, api: any, context: any) => Promise<Result>, replay: "safe" | "unsafe" = "unsafe") =>
-		defineTool({ name, description, parameters, replay, execute } as never) as ToolRegistration;
+		defineTool({ name, description, parameters, replay, execute: counted(execute) } as never) as ToolRegistration;
 	const read = (name: string, description: string, parameters: any, run: (app: App, call: Call, args: any) => Promise<Result>) => tool(name, description, parameters, withApp(run), "safe");
 	const write = (name: string, description: string, parameters: any, run: (app: App, call: Call, args: any) => Promise<Result>) => tool(name, description, parameters, withApp(run), "unsafe");
 

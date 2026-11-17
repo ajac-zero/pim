@@ -3,6 +3,7 @@ import { Authorizer } from "./authz.ts";
 import type { Db, Tx } from "./db.ts";
 import { BadRequestError, ConflictError, NotFoundError } from "./errors.ts";
 import { CommandSubmission, type CommandKind } from "@pim/v2-contracts/runtime-seam";
+import type { Quota } from "./quota.ts";
 import { effectivePrincipal, OwnerId, type Principal } from "@pim/v2-contracts/identity";
 
 /** What a client can submit: the runtime's commands, and three application operations that only change metadata here (fork, unarchive, delegate). */
@@ -30,6 +31,8 @@ const TASK_NEXT: Record<string, string[]> = {
  */
 export class Conversations {
 	readonly authz: Authorizer;
+	/** Per-space limits, when the deployment's application has them: a refused chat or run is not made. */
+	quota: Quota | undefined;
 	constructor(private readonly db: Db) {
 		this.authz = new Authorizer(db);
 	}
@@ -37,7 +40,10 @@ export class Conversations {
 	/** A new chat starts a new family (partition) with the next id of the tenant-wide sequence. */
 	async create(p: Principal, input: { agentId?: string; title?: string; kind?: "normal" | "group" | "task" | "trigger" | "review" | "visit"; roomMode?: string; id?: string }): Promise<string> {
 		await this.authz.enforce(p, "api:write");
-		return this.db.owner(p.ownerId, (tx) => createChat(tx, p.ownerId, input));
+		return this.db.owner(p.ownerId, async (tx) => {
+			if (!input.kind || input.kind === "normal" || input.kind === "group") await this.quota?.admitNew(tx, p.ownerId, "sessions");
+			return createChat(tx, p.ownerId, input);
+		});
 	}
 
 	/**
@@ -61,6 +67,8 @@ export class Conversations {
 				if (rows[0].payload._fingerprint !== fingerprint) throw new ConflictError("That commandId was already used for a different command", "command_id_reused");
 				return { commandId: input.commandId, piRequestId, duplicate: true, state: rows[0].state, chatId: rows[0].public_chat_id, result: rows[0].payload._result };
 			}
+			// A message or a firing trigger starts a run: it counts against the day, and a space that has used its day's allowance is refused.
+			if (input.kind === "user_message" || input.kind === "trigger_fire") await this.quota?.admitRun(tx, p.ownerId);
 			let chatId = input.chatId ?? null;
 			let result: Record<string, unknown> | undefined;
 			if (chatId) await requireChat(tx, chatId);

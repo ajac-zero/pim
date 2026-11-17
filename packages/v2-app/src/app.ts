@@ -9,6 +9,7 @@ import { type Db } from "./db.ts";
 import { Identity } from "./identity.ts";
 import { McpOAuth } from "./mcp.ts";
 import { Memories } from "./memory.ts";
+import { Quota } from "./quota.ts";
 import { Providers } from "./providers.ts";
 import { Sharing, type TranscriptSource } from "./sharing.ts";
 import { Triggers } from "./triggers.ts";
@@ -41,11 +42,22 @@ export class App {
 	readonly chatgpt: ChatGPT;
 	readonly connectors: ConnectorsType;
 	readonly usage: Usage;
+	readonly quota: Quota;
 	readonly triggers: Triggers;
 	readonly apps: Apps;
 	readonly sharing: Sharing;
 	readonly crypto: EnvelopeCrypto;
-	constructor(readonly db: Db, store: ObjectStore, opts: { hideSuspended?: boolean; providers?: Partial<Record<ProviderId, ProviderSettings>>; crypto?: EnvelopeCrypto; appKey?: string; fetchTools?: ToolFetcher; exchange?: CodeExchanger; transcripts?: TranscriptSource; chatgpt?: ChatGPTOptions } = {}) {
+	/**
+	 * Makes chats, schedules and runs count against per-space limits. It needs `pim_app.usage_days` (migration 0621 of the server's band), so it is
+	 * the deployed processes' wiring, not the constructor's: the services alone work on the application's own migrations.
+	 */
+	limitSpaces(): this {
+		this.conversations.quota = this.quota;
+		this.schedules.quota = this.quota;
+		return this;
+	}
+
+	constructor(readonly db: Db, store: ObjectStore, opts: { hideSuspended?: boolean; providers?: Partial<Record<ProviderId, ProviderSettings>>; crypto?: EnvelopeCrypto; appKey?: string; fetchTools?: ToolFetcher; exchange?: CodeExchanger; transcripts?: TranscriptSource; chatgpt?: ChatGPTOptions; env?: Record<string, string | undefined> } = {}) {
 		this.identity = new Identity(db);
 		this.conversations = new Conversations(db);
 		this.memories = new Memories(db);
@@ -64,6 +76,7 @@ export class App {
 		this.providers = new Providers(db, this.crypto);
 		this.chatgpt = new ChatGPT(db, this.crypto, opts.chatgpt);
 		this.usage = new Usage(db);
+		this.quota = new Quota(opts.env);
 		this.triggers = new Triggers(db, this.conversations);
 		this.connectors = new Connectors(db, this.crypto, this.triggers, this.signin, { ...(opts.fetchTools ? { fetchTools: opts.fetchTools } : {}), ...(opts.exchange ? { exchange: opts.exchange } : {}) });
 		this.apps = new Apps(db, this.signin, { hideSuspended: opts.hideSuspended ?? false });

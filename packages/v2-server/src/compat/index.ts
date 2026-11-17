@@ -10,6 +10,7 @@ import { modelRoutes } from "./model.ts";
 import { computerRoutes } from "./computer.ts";
 import { connectorRoutes } from "../connector-routes.ts";
 import { chatRoutes } from "./chat.ts";
+import { usageRoutes } from "./usage.ts";
 
 export const webCompatRoutes: Route[] = [
 	// Connectors come first: their approve and deny add "always approve" to the plain decision the boot routes make.
@@ -20,4 +21,5 @@ export const webCompatRoutes: Route[] = [
 	...computerRoutes(),
 	...adminCompatRoutes,
 	...chatRoutes,
+	...usageRoutes(),
 ];

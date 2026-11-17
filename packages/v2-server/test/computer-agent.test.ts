@@ -19,7 +19,8 @@ import { createStack, describeWith, freePort, hasNats, startNats } from "./suppo
 
 const real = describeWith(hasNats());
 /** A Chrome for the browser test: `PIM_TEST_CHROME`, or the one the orb's agent-browser keeps; the test is skipped without one. */
-const CHROME = process.env.PIM_TEST_CHROME ?? readdirSync(join(homedir(), ".agent-browser/browsers"), { withFileTypes: true }).map((e) => join(homedir(), ".agent-browser/browsers", e.name, "chrome")).find(existsSync);
+const browsers = join(homedir(), ".agent-browser/browsers");
+const CHROME = process.env.PIM_TEST_CHROME ?? (existsSync(browsers) ? readdirSync(browsers, { withFileTypes: true }).map((e) => join(browsers, e.name, "chrome")).find(existsSync) : undefined);
 const COMPUTER = fileURLToPath(new URL("../../../computer/pim-computer.ts", import.meta.url));
 
 real("an agent on a paired computer", () => {

@@ -127,9 +127,12 @@ export function createBridge(app: App, env: Env, fetcher: typeof fetch = fetch):
 				const input = args.input ?? {};
 				if (typeof input !== "object" || input === null || Array.isArray(input)) throw new BadRequestError("A tool's input must be an object");
 				const { connector } = t;
+				// Native connectors (Gmail, Drive, Spotify) are called through their own clients in the Runner, not over MCP; apps reach MCP servers only.
+				if (!connector.url) throw new PimError(501, "not_supported", `An app cannot call ${connector.name}'s tools yet; ask the agent instead.`);
+				const url = connector.url;
 				const bearer = connector.credential ? parseCredential(await openString(app.crypto, connector.credential, `connector:${p.ownerId}/${connector.id}`)).bearer : null;
 				try {
-					const result = await withSession(transport, connector.url, bearer, (rpc) => rpc("tools/call", { name: t.tool.name, arguments: input }), 30_000);
+					const result: any = await withSession(transport, url, bearer, (rpc) => rpc("tools/call", { name: t.tool.name, arguments: input }), 30_000);
 					if (result?.isError === true) throw new PimError(502, "tool_failed", resultText(result));
 					return { value: resultText(result) };
 				} catch (error) {

@@ -217,7 +217,7 @@ export function createAgentHost(options: AgentHostOptions) {
 				.catch(() => {});
 		});
 		const registry = createRegistry();
-		const deps: ToolDeps = { ownerId, partitionId: partition.partitionId, runtime: db, app: options.app, forge: options.forge, relay: options.relay, fetch: options.fetch ?? fetch, now, chatOf: (conversationId) => publicChatId(ownerId, conversationId) };
+		const deps: ToolDeps = { ownerId, partitionId: partition.partitionId, runtime: db, app: options.app, forge: options.forge, relay: options.relay, fetch: options.fetch ?? fetch, now, crypto: options.crypto, allowPrivateConnectors: env.PIM_CONNECTOR_ALLOW_PRIVATE === "1", chatOf: (conversationId) => publicChatId(ownerId, conversationId) };
 		const ctx = (conversationId: number | string) => publicChatId(ownerId, conversationId).then((chat) => readContext(ownerId, chat));
 		registry.install(pimExtension(deps, [
 			section("agent", async (input) => {

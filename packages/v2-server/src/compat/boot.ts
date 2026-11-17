@@ -169,7 +169,7 @@ const webApproval = (r: any) => {
 		requestedBy: null,
 	};
 };
-const approvalsOf = (app: App, ownerId: string, where = "", params: unknown[] = []) =>
+export const approvalsOf = (app: App, ownerId: string, where = "", params: unknown[] = []) =>
 	app.db.owner(ownerId, async (tx) => (await tx.query(`SELECT * FROM pim_app.approvals ${where} ORDER BY created_at DESC LIMIT 200`, params)).rows.map(webApproval));
 
 export const bootRoutes: Route[] = [

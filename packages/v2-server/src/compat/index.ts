@@ -8,8 +8,11 @@ import { adminCompatRoutes } from "./admin.ts";
 import { bootRoutes } from "./boot.ts";
 import { modelRoutes } from "./model.ts";
 import { computerRoutes } from "./computer.ts";
+import { connectorRoutes } from "../connector-routes.ts";
 
 export const webCompatRoutes: Route[] = [
+	// Connectors come first: their approve and deny add "always approve" to the plain decision the boot routes make.
+	...connectorRoutes(),
 	...bootRoutes,
 	// Model settings first: /api/providers/built-in is answered by both, and the model work's answer is the one the provider forms use.
 	...modelRoutes(process.env),

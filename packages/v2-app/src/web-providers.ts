@@ -27,7 +27,7 @@ export async function toServiceInput(body: Record<string, any>, existing?: Provi
 	const builtin = (body.builtin ?? existing?.config.builtin) as string | undefined;
 	if (builtin !== undefined && !BUILTIN.includes(builtin)) throw new BadRequestError(`builtin is one of ${BUILTIN.join(", ")}`);
 	if (existing && body.builtin !== undefined && body.builtin !== existing.config.builtin) throw new BadRequestError("A provider's type cannot be changed. Add another provider instead.");
-	const url = builtin ? undefined : ((body.url ?? existing?.config.baseUrl) as string | undefined);
+	const url = builtin ? undefined : ((body.url ?? existing?.config.baseUrl ?? existing?.config.url) as string | undefined);
 	if (!builtin && !(typeof url === "string" && /^https?:\/\//.test(url))) throw new BadRequestError("url must be an http(s) address, such as http://localhost:1234/v1");
 	const config: Record<string, unknown> = {};
 	if (builtin) config.builtin = builtin;
@@ -54,7 +54,7 @@ export function toWebProvider(p: Provider) {
 		id: p.id,
 		...(c.builtin ? { builtin: c.builtin } : {}),
 		name: p.name,
-		url: c.baseUrl ?? "",
+		url: c.baseUrl ?? c.url ?? "",
 		hasKey: p.hasKey,
 		chosen: (c.chosen ?? null) as string[] | null,
 		models,

@@ -6,8 +6,8 @@ export function cn(...inputs: ClassValue[]) {
 }
 
 /** Model catalogs may prefix a display name with its provider, as in "Anthropic: Claude Sonnet". */
-export function modelName(name: string) {
-  return name.replace(/^[^:]+:\s+/, "");
+export function modelName(name: string | undefined, id = "") {
+  return (name ?? id).replace(/^[^:]+:\s+/, "");
 }
 
 /** Whether this computer's shortcuts use ⌘ rather than Ctrl. */

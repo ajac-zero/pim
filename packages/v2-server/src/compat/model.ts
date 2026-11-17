@@ -108,6 +108,13 @@ export function modelRoutes(env: Env): Route[] {
 			if (!changed) throw new NotFoundError("No such chat");
 			return ok({ model: found ?? now.model });
 		}),
+		// The saved fallbacks are bare `{ provider, id }` (the cutover carries them so); the web app lists them by name.
+		route("GET", "/api/model/fallbacks", async ({ app, principal }) => {
+			const p = await principal();
+			const refs = await app.providers.fallbacks(p);
+			const { choices } = await settings(app, p);
+			return ok({ models: refs.map((r: ModelRef) => choices.find((c) => same(c, r)) ?? { ...r, name: r.id, images: false }) });
+		}),
 		route("GET", "/api/providers/built-in", async ({ app, principal }) => {
 			await app.identity.authz.enforce(await principal(), "api:read");
 			return ok({ providers: Object.entries(CATALOGS).map(([id, c]) => ({ id, name: c.name, models: c.models().map(catalogInfo) })) });

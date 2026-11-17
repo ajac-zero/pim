@@ -3,7 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "~/components/i18n";
-import { SettingsDialog } from "~/components/settings-dialog";
+import { SettingsDialog, WorkspaceFallbacks } from "~/components/settings-dialog";
 import { ThemeProvider } from "~/components/theme";
 
 beforeEach(() => {
@@ -57,5 +57,29 @@ describe("Appearance settings", () => {
     fireEvent.click(screen.getByRole("button", { name: "Appearance" }));
     expect(screen.getByRole("radiogroup", { name: "Mode" })).toBeTruthy();
     expect(screen.getByRole("radiogroup", { name: "Theme" })).toBeTruthy();
+  });
+});
+
+describe("Workspace fallbacks", () => {
+  it("lists a saved fallback that carries no name, by its id", async () => {
+    const choice = { provider: "own:ai-gateway", id: "gemini-4-argon", name: "gemini-4-argon", images: false };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) =>
+        input === "/api/model/fallbacks"
+          ? Response.json({ models: [{ provider: "own:ai-gateway", id: "gemini-4-argon" }] })
+          : new Response("{}", { status: 404 }),
+      ),
+    );
+    render(
+      <QueryClientProvider client={new QueryClient()}>
+        <I18nProvider>
+          <WorkspaceFallbacks
+            settings={{ model: choice, default: choice, choices: [choice], providers: [] } as never}
+          />
+        </I18nProvider>
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByText("gemini-4-argon")).toBeTruthy();
   });
 });

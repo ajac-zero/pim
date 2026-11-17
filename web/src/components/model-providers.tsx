@@ -154,8 +154,8 @@ function CustomProvider({
     },
     onError: (error) => toast.error(error.message),
   });
-  const host = URL.parse(provider.url)?.host ?? provider.url;
-  const models = provider.models
+  const host = URL.parse(provider.url ?? "")?.host ?? provider.url;
+  const models = (provider.models ?? [])
     .map((model) => modelName(model.name))
     .join(", ");
   return (

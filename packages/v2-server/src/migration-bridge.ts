@@ -561,7 +561,8 @@ async function promoteDomain(pool: Pool, owner: string, options: PromoteOptions,
 			const r = await c.query("INSERT INTO pim_app.chatgpt_credentials (owner_id, host_id, secret, email, version) VALUES ($1,$2,$3,$4,1) ON CONFLICT DO NOTHING", [owner, typeof hostId === "string" && hostId ? parseJson(hostId, hostId) : `urn:uuid:${randomUUID()}`, chatgpt.sealed, chatgpt.email]);
 			bump(d, "chatgpt", r.rowCount ?? 0);
 		}
-		for (const p of credentials.filter((x) => !(chatgpt && x.provider === "openai" && !providerSecrets.has("openai")))) {
+		// `chatgpt-images` is the ChatGPT image sign-in, not a model provider: it has no endpoint or models to promote.
+		for (const p of credentials.filter((x) => x.provider !== "chatgpt-images" && !(chatgpt && x.provider === "openai" && !providerSecrets.has("openai")))) {
 			const kind = ["anthropic", "openai", "google"].includes(String(p.provider)) ? String(p.provider) : "custom";
 			const r = await c.query("INSERT INTO pim_app.providers (id, owner_id, kind, config, secret) VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING", [`pv_legacy_${slug(String(p.provider))}`, owner, kind, JSON.stringify({ name: p.provider }), providerSecrets.get(String(p.provider)) ?? null]);
 			bump(d, "providers", r.rowCount ?? 0);

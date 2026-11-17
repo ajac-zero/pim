@@ -279,7 +279,7 @@ export function createOps(cfg, { state, save, log = () => {} }) {
 			state.deploy = null
 			await save()
 			const verb = kind === 'deploy' ? 'Deployed' : 'Rolled back to'
-			return { result: done(op.id, 'succeeded', `${verb} ${short(target)} (was ${short(previous)}); the manager is healthy at it.`, { ...commits, health: r.health }), restartSelf: await ownCodeChanged() }
+			return { result: done(op.id, 'succeeded', `${verb} ${short(target)} (was ${short(previous)}); ${composeMode ? 'the stack is up and healthy' : 'the manager is healthy'} at it.`, { ...commits, health: r.health }), restartSelf: await ownCodeChanged() }
 		}
 		const moved = r.step !== 'checkout' || (await head().catch(() => null)) !== previous
 		if (!revert || !moved) {
@@ -410,7 +410,7 @@ export function createOps(cfg, { state, save, log = () => {} }) {
 			const waited = await waitIdle(op)
 			const before = await runningSessions()
 			const out = await changeCheckout(op, { kind: 'deploy', previous, target, revert: true })
-			if (out.result.state === 'succeeded') {
+			if (out.result.state === 'succeeded' && !(composeMode && !cfg.managerToken)) {
 				const c = await compareSessions(before)
 				out.result = done(op.id, 'succeeded', `${out.result.summary} ${c.text}`, { ...out.result.data, sessions: c.sessions })
 			}

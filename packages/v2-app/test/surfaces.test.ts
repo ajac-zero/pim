@@ -232,6 +232,20 @@ describe("connectors", () => {
 	});
 });
 
+describe("API clients on another site", () => {
+	it("answers a preflight for /api with the allowed methods and headers, and marks API answers open to any origin, but not other paths", async () => {
+		const pre = await fetch(`${base}/api/triggers/x`, { method: "OPTIONS", headers: { origin: "https://client.example", "access-control-request-method": "PATCH" } });
+		expect(pre.status).toBe(204);
+		expect(pre.headers.get("access-control-allow-origin")).toBe("*");
+		expect(pre.headers.get("access-control-allow-methods")).toContain("PATCH");
+		expect(pre.headers.get("access-control-allow-headers")).toMatch(/Authorization.*If-Match/);
+		const got = await fetch(`${base}/api/account`);
+		expect(got.status).toBe(401);
+		expect(got.headers.get("access-control-allow-origin")).toBe("*");
+		expect((await fetch(`${base}/health`)).headers.get("access-control-allow-origin")).toBeNull();
+	});
+});
+
 describe("triggers", () => {
 	const cron = (agentId: string, expression = "0 * * * *") => ({ version: 1, owningAgentId: agentId, originChatId: "api", label: "Hourly", instruction: "check in", source: { kind: "time", schedule: "cron", expression, timeZone: "UTC" }, condition: null, destination: { type: "new_chat" }, delivery: {}, authorizationRef: null });
 

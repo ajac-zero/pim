@@ -27,7 +27,7 @@ export function failureKind(message: AssistantMessage): "transient" | "auth" | n
 const refKey = (ownerId: string, provider: string, id: string) => `${ownerId}\u0000${provider}/${id}`;
 
 /** How long a model stream may stay silent, before its first event or between two, before the request is cut off as stalled. */
-export const DEFAULT_STREAM_STALL_MS = 180_000;
+export const DEFAULT_STREAM_STALL_MS = 120_000;
 
 const failureMessage = (model: any, text: string, stopReason: "error" | "aborted", at: number): AssistantMessage =>
 	({ role: "assistant", content: [], api: model.api, provider: model.provider, model: model.id, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason, errorMessage: text, timestamp: at }) as AssistantMessage;

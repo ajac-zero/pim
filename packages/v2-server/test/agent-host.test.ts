@@ -22,6 +22,7 @@ real("the default agent host", () => {
 	let d: Deployment;
 	let gate: Process;
 	let runner: Process;
+	let maintenance: Process;
 	let web: Client;
 	let app: App;
 	let ownerId: string;
@@ -74,9 +75,11 @@ real("the default agent host", () => {
 			},
 			{ PIM_DEFAULT_MODEL: "faux/m", PIM_APP_DATABASE_URL: stack.url("gate"), PIM_FORGE_DATABASE_URL: stack.url("forge"), PIM_CODING_ALLOWED_REPOS: "acme/*" },
 		);
+		// Maintenance applies approval timeouts, as the auto policy needs.
+		maintenance = await start(d, "maintenance", { pollMs: 100 });
 	}, 180_000);
 	afterAll(async () => {
-		await Promise.allSettled([runner?.close(), gate?.close()]);
+		await Promise.allSettled([maintenance?.close(), runner?.close(), gate?.close()]);
 		await app?.db.end();
 		d?.nats.stop();
 		await d?.s3.stop();
@@ -141,6 +144,49 @@ real("the default agent host", () => {
 		expect(sent).toHaveLength(1);
 		expect((await d.stack.admin.query("SELECT state FROM pim_runtime.external_operations WHERE owner_id = $1 ORDER BY created_at", [ownerId])).rows.map((r) => r.state)).toEqual(["completed", "needs_reconciliation"]);
 	}, 120_000);
+
+	it("answers the approval policies: auto approves what is not answered, the majordomo decides or hands back, explicit waits for the person", async () => {
+		const other = "http://93.184.216.35/orders";
+		const order = (sku: number) => toolUse(fauxToolCall("http_request", { method: "POST", url: other, body: `{"sku":${sku}}` }));
+		const ask = async (words: string, ...script: unknown[]) => {
+			faux.setResponses([...script, fauxAssistantMessage(`done ${++n}`)] as never);
+			expect((await web.call("POST", `/api/sessions/${chatId}/messages`, { commandId: `m-${n}`, text: words })).status).toBe(202);
+		};
+		const sentBefore = sent.length;
+		const approvalOf = async (sku: number) => waitFor(`the approval of order ${sku}`, async () => (await d.stack.admin.query("SELECT id, state, decided_by, args FROM pim_app.approvals WHERE args->>'body' = $1", [`{"sku":${sku}}`])).rows[0], 60_000);
+
+		// auto: nobody answers; the call goes ahead when the timeout passes, and the approval says the timeout decided.
+		expect((await web.call("PUT", "/api/settings", { approvalPolicy: "auto", approvalTimeoutSeconds: 1 })).status).toBe(200);
+		await ask("order 10", order(10));
+		await waitFor("the unanswered order to go ahead", async () => ((await transcript()).includes(`done ${n}`) ? true : undefined), 90_000);
+		expect((await approvalOf(10)).state).toBe("timed_out_approved");
+		expect(sent.length).toBe(sentBefore + 1);
+
+		// majordomo: the review is one model call; approve goes ahead as the majordomo's own decision.
+		expect((await web.call("PUT", "/api/settings", { approvalPolicy: "majordomo" })).status).toBe(200);
+		await ask("order 11", order(11), fauxAssistantMessage('{"decision":"approve","note":"A routine order."}'));
+		await waitFor("the approved order to go ahead", async () => ((await transcript()).includes(`done ${n}`) ? true : undefined), 90_000);
+		expect(await approvalOf(11)).toMatchObject({ state: "approved", decided_by: "majordomo", args: { review: { status: "decided", note: "A routine order." } } });
+		expect(sent.length).toBe(sentBefore + 2);
+
+		// majordomo deny: the call does not go ahead.
+		await ask("order 12", order(12), fauxAssistantMessage('{"decision":"deny","note":"Not something they ordered."}'));
+		await waitFor("the denied order to end", async () => ((await transcript()).includes(`done ${n}`) ? true : undefined), 90_000);
+		expect(await approvalOf(12)).toMatchObject({ state: "denied", decided_by: "majordomo" });
+		expect(sent.length).toBe(sentBefore + 2);
+
+		// majordomo unsure, or an answer that is not a decision: handed back, and the person answers as usual.
+		await ask("order 13", order(13), fauxAssistantMessage("I think so?"));
+		const handed = await waitFor("the review to hand it back", async () => ((await approvalOf(13)).args.review?.status === "escalated" ? await approvalOf(13) : undefined), 60_000);
+		expect(handed.state).toBe("waiting");
+		const listed = (await web.call("GET", "/api/approvals?status=pending")).json.approvals as { id: string; review: { status: string } | null }[];
+		expect(listed.find((a) => a.id === handed.id)?.review?.status).toBe("escalated");
+		expect((await web.call("POST", `/api/approvals/${handed.id}/decision`, { approve: true })).status).toBe(200);
+		await waitFor("the order to go ahead after the person's yes", async () => ((await transcript()).includes(`done ${n}`) ? true : undefined), 60_000);
+		expect(sent.length).toBe(sentBefore + 3);
+		expect((await approvalOf(13)).decided_by).not.toBe("majordomo");
+		expect((await web.call("PUT", "/api/settings", { approvalPolicy: "explicit" })).status).toBe(200);
+	}, 360_000);
 
 	it("starts a coding thread only under an admin's grant, through Forge", async () => {
 		await say("start a coding thread", toolUse(fauxToolCall("coding_start", { task: "Fix the flaky test", repo: REPO })));

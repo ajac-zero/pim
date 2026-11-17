@@ -261,5 +261,18 @@ export function createAgentHost(options: AgentHostOptions) {
 		return { model: await choose(ownerId, [...own, await chosenModel(ownerId), ...(c?.fallbacks ?? []).map(asModelRef)]) };
 	};
 
-	return { harnessOptions, homeRoot, chatAgent };
+	/** One model call as an owner's own models, for what is not a chat turn (an approval review): the same catalog, failover and ledger, no tools. */
+	async function ask(ownerId: string, chat: string | null, system: string, question: string, signal: AbortSignal): Promise<string> {
+		const models = await buildModels(ownerId);
+		modelsByOwner.set(ownerId, models);
+		const c = await readContext(ownerId, chat).catch(() => undefined);
+		const pick = await choose(ownerId, [await chosenModel(ownerId), ...(c?.fallbacks ?? []).map(asModelRef)]);
+		const model = models.getModel(pick.provider, pick.modelId);
+		if (!model) throw new Error(`The model ${pick.provider}/${pick.modelId} is not available`);
+		const message: any = await failover.wrap(models, ownerId).completeSimple(model, { systemPrompt: system, messages: [{ role: "user", content: question, timestamp: now() }] } as never, { signal } as never);
+		if (message.stopReason === "error" || message.stopReason === "aborted") throw new Error(message.errorMessage ?? "The model did not answer");
+		return (message.content as { type: string; text?: string }[]).filter((p) => p.type === "text").map((p) => p.text ?? "").join("");
+	}
+
+	return { harnessOptions, homeRoot, chatAgent, ask, context: (ownerId: string, chat: string | null) => readContext(ownerId, chat) };
 }

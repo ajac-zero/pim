@@ -35,6 +35,7 @@ import type { Host } from "./host.ts";
 import { AppLiveIdentity, deliverApprovalDecisions, LiveAuthorizer, mirrorCodingGrants, publishRevocations } from "./identity.ts";
 import { runtimeOutboxSource } from "./runtime-source.ts";
 import { natsRelayBus } from "./relay-bus.ts";
+import { startApprovalReviews } from "./approval-review.ts";
 import { sweepApprovals, trimForgeOutbox } from "./sweeps.ts";
 import { webAssets } from "./web-assets.ts";
 import { poolRoutes } from "./compat/admin.ts";
@@ -235,6 +236,8 @@ export async function startRunner(config: ProcessConfig, env: Env, host: Host, h
 	});
 	const relay = new CommandRelay({ pool: runtimePool, db, inbox: runner.inbox, directory: runner.directory, holder: holderId, onError: (e) => console.error("relay", e) });
 	metrics.leasesHeld.collect(() => metrics.leasesHeld.set(runner.residents.length, { service: "runner" }));
+	// The majordomo reviews approvals for people whose policy says so; it needs the application's services and the person's models.
+	const reviews = host_ && app ? startApprovalReviews({ pool: runtimePool, app, host: host_, defaultPolicy: env.PIM_APPROVAL_POLICY ?? "explicit", onError: (e) => console.error("approval review", e) }) : undefined;
 	let started = false;
 	let stopped = false;
 	const tryStart = async () => {
@@ -259,6 +262,7 @@ export async function startRunner(config: ProcessConfig, env: Env, host: Host, h
 			stopped = true;
 			clearInterval(retry);
 			relay.stop();
+			await reviews?.stop();
 			await runner.stop();
 			await runtimePool.end();
 			await appDb?.end();

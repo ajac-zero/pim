@@ -2487,7 +2487,7 @@ export class Pim extends DurableAgent<Env> {
 			triggerApi: (...args) => self.#triggers.triggerApi(...args),
 			scheduleHost: (...args) => self.#triggers.scheduleHost(...args),
 			stopConnectorTriggers: (...args) => self.#triggers.stopConnectorTriggers(...args),
-			turns: (...args) => self.#reports.turns(...args),
+			latestTurn: (...args) => self.#reports.latestTurn(...args),
 			uiBlocks: (...args) => self.#views.uiBlocks(...args),
 			submitTo: (...args) => self.submitTo(...args),
 			withReplies: (...args) => self.#withReplies(...args),

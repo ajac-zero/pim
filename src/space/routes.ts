@@ -129,7 +129,7 @@ export interface SpaceRouteHost {
 	readonly triggerApi: () => TriggerApi | null;
 	readonly scheduleHost: () => ScheduleHost;
 	readonly stopConnectorTriggers: (which: (source: ConnectorEventSource, destination: TriggerDestination) => boolean) => Promise<void>;
-	readonly turns: (chat: string | null, since: number) => Promise<{ chat: string; agent: string; turn: Turn; }[]>;
+	readonly latestTurn: (chat: string) => Promise<Turn | undefined>;
 	readonly uiBlocks: (id: string, within?: string) => Promise<Map<string, UiProgram>>;
 	readonly submitTo: Submit;
 	readonly withReplies: (result: PiOperationResult) => Promise<PiOperationResult & { replies: string[]; }>;
@@ -537,8 +537,8 @@ function chatRoutes(space: SpaceRouteHost): Route[] {
 			"/sessions/:session/activity",
 			async ({ session }) => {
 				await space.session(session!);
-				const turns = (await space.turns(session!, 0)).map((item) => item.turn);
-				return activityOf(turns, Date.now(), { running: turns.at(-1)?.inProgress ?? false, startedAt: turns.at(-1)?.startedAt ?? 0 });
+				const turn = await space.latestTurn(session!);
+				return activityOf(turn ? [turn] : [], Date.now(), { running: turn?.inProgress ?? false, startedAt: turn?.startedAt ?? 0 });
 			},
 		],
 		[

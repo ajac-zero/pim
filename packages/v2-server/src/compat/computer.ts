@@ -76,7 +76,12 @@ async function withBrowser<T>(computer: Computer, thread: string | null, use: (s
 		}
 	};
 	try {
-		return (await open(thread ?? undefined))?.value ?? null;
+		const own = await open(thread ?? undefined);
+		if (own || !thread) return own?.value ?? null;
+		// A chat that hasn't leased a browser of its own shows the shared one when the computer has no displays at all (displayd is not there), as the agent's tools do.
+		const shown = await computer.call<{ displays: unknown[]; queue: unknown[] }>("displays_list", {}).catch(() => null);
+		const none = !shown || (shown.displays.length === 0 && shown.queue.length === 0);
+		return none ? ((await open(undefined))?.value ?? null) : null;
 	} catch (error) {
 		// A computer without displayd has one browser, which the chats share.
 		if (thread && /no display allocated|displayd is not reachable/.test((error as Error).message)) return (await open(undefined))?.value ?? null;

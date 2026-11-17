@@ -1,0 +1,17 @@
+# The `local-computer` Compose profile's pim-computer: Node, the computer's own sources and a headless Chromium for the agents' browser. It carries no Pim server code,
+# no dependencies from the workspace and no credentials; it dials out to the stack with the `pimc_` token a person paired (docs/v2-operations.md "A computer on the same machine").
+#
+#   docker build -f deploy/Dockerfile.computer -t pim-computer:local .
+FROM node:26-bookworm-slim
+RUN apt-get update \
+	&& apt-get install -y --no-install-recommends chromium fonts-noto-color-emoji ca-certificates \
+	&& rm -rf /var/lib/apt/lists/*
+# Chromium's own sandbox needs user namespaces, which the container's dropped capabilities and seccomp profile deny; the container is the boundary here (and is not a sandbox for agent code).
+RUN printf '#!/bin/sh\nexec /usr/bin/chromium --no-sandbox --disable-dev-shm-usage "$@"\n' > /usr/local/bin/pim-chromium && chmod +x /usr/local/bin/pim-chromium
+COPY computer /app/computer
+# A named volume mounted here takes this owner on first use, so the unprivileged user can write its files.
+RUN mkdir /workspace && chown node:node /workspace
+ENV PIM_CHROME=/usr/local/bin/pim-chromium
+USER node
+WORKDIR /workspace
+ENTRYPOINT ["node", "/app/computer/pim-computer.ts"]

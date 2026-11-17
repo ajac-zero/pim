@@ -195,7 +195,7 @@ async function viewBrowser(app: App, p: Principal, ws: WebSocket, url: URL): Pro
 	let sessionId: string | undefined;
 	const waiting = new Map<number, (result: any) => void>();
 	const send = (message: object) => ws.readyState === WebSocket.OPEN && ws.send(JSON.stringify(message));
-	const transport = await conn.openBrowser((raw) => {
+	const open = (t: string | undefined) => conn.openBrowser((raw) => {
 		if (raw === null) return ws.close(1001, "The browser closed");
 		const m = JSON.parse(raw) as { id?: number; result?: unknown; method?: string; params?: any; sessionId?: string };
 		if (m.id !== undefined) return waiting.get(m.id)?.(m.result), void waiting.delete(m.id);
@@ -205,7 +205,9 @@ async function viewBrowser(app: App, p: Principal, ws: WebSocket, url: URL): Pro
 			void command("Page.screencastFrameAck", { sessionId: m.params.sessionId });
 		} else if (m.method === "Page.frameNavigated" && !m.params.frame.parentId) send({ type: "page", url: m.params.frame.url, title: "" });
 		else if (m.method === "Target.targetInfoChanged") send({ type: "page", url: m.params.targetInfo.url, title: m.params.targetInfo.title });
-	}, thread).catch((error: Error) => (send({ type: "error", message: error.message }), ws.close(1011, "No browser"), null));
+	}, t);
+	// A computer without displayd has one browser, which the chats share: a chat with no display of its own takes that one over.
+	const transport = await open(thread).catch((error: Error) => (/no display allocated|displayd is not reachable/.test(error.message) ? open(undefined) : Promise.reject(error))).catch((error: Error) => (send({ type: "error", message: error.message }), ws.close(1011, "No browser"), null));
 	if (!transport) return;
 	const command = (method: string, params: object = {}, session = sessionId): Promise<any> =>
 		new Promise((resolve) => {
@@ -228,6 +230,15 @@ async function viewBrowser(app: App, p: Principal, ws: WebSocket, url: URL): Pro
 		}
 		if (input.type === "mouse") void command("Input.dispatchMouseEvent", { type: input.event, x: input.x, y: input.y, button: input.button ?? "none", clickCount: input.clickCount ?? 0, deltaX: input.deltaX ?? 0, deltaY: input.deltaY ?? 0, modifiers: input.modifiers ?? 0 });
 		else if (input.type === "key") void command("Input.dispatchKeyEvent", { type: input.event, key: input.key, code: input.code, ...(input.text ? { text: input.text } : {}), windowsVirtualKeyCode: input.keyCode ?? 0, modifiers: input.modifiers ?? 0 });
+		else if (input.type === "text" && typeof input.text === "string") void command("Input.insertText", { text: input.text });
+		else if (input.type === "navigate" && typeof input.url === "string") void command("Page.navigate", { url: input.url });
+		else if (input.type === "reload") void command("Page.reload");
+		else if (input.type === "back" || input.type === "forward") {
+			void command("Page.getNavigationHistory").then((history) => {
+				const entry = history?.entries?.[history.currentIndex + (input.type === "back" ? -1 : 1)];
+				if (entry) void command("Page.navigateToHistoryEntry", { entryId: entry.id });
+			});
+		}
 	});
 	ws.on("close", () => transport.close());
 	ws.on("error", () => undefined);

@@ -245,16 +245,16 @@ services:
   # What agents run on it (after a person approves each command) runs inside this container as the unprivileged `node` user, with only the `pim-files` volume to write to.
   # A container is not a security sandbox for arbitrary code: do not mount the Docker socket or host paths here you would not give an agent.
   pim-computer:
-    image: ${PIM_IMAGE:?set PIM_IMAGE in .env}
+    # Its own image (deploy/Dockerfile.computer): Node, computer/ and a headless Chromium, with none of the server. `up --build` makes it.
+    build: { context: ../.., dockerfile: deploy/Dockerfile.computer }
+    image: pim-computer:local
     profiles: [local-computer]
     restart: unless-stopped
     read_only: true
-    tmpfs: [/tmp, /home/node]
+    tmpfs: [/tmp]
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     user: node
-    entrypoint: ["node", "/app/computer/pim-computer.ts"]
-    command: []
     working_dir: /workspace
     environment:
       # The stack's public address as this host reaches it, such as https://pim.example.com, or http://host.docker.internal:8088 for the plain-HTTP trial stack.
@@ -262,7 +262,8 @@ services:
       PIM_COMPUTER_TOKEN: ${PIM_COMPUTER_TOKEN:-}
       PIM_COMPUTER_ROOT: /workspace
       HOME: /home/node
-    volumes: [pim-files:/workspace]
+    # pim-computer-home keeps the browser's profile (what a person signed in to there) and the computer's own state across restarts.
+    volumes: [pim-files:/workspace, pim-computer-home:/home/node]
     networks: [computer]
     # The host's own address, so the localhost trial stack is reachable from inside the container; set PIM_COMPUTER_HOST_ALIAS to the public hostname
     # when the host cannot reach its own public address (no hairpin NAT).
@@ -311,6 +312,7 @@ networks:
 
 volumes:
   pim-files: {}
+  pim-computer-home: {}
   postgres-data: {}
   seaweedfs-data: {}
   caddy-data: {}

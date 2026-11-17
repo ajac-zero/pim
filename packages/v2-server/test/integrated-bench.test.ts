@@ -308,9 +308,18 @@ async function runProfile(n: number) {
 		const pgTicksBefore = pgTicks();
 		const generatorBefore = process.cpuUsage();
 		const ticksBefore = new Map(children.map((c) => [c.name, cpuTicks(c.proc.pid!)]));
+		/** WAL flush counts: pg_stat_wal has them through PostgreSQL 17 and not after, so a newer server reports none. */
+		const walStats = async (): Promise<{ sync: number; time: number } | null> => {
+			try {
+				const r = (await stack.admin.query("SELECT wal_sync, wal_sync_time FROM pg_stat_wal")).rows[0];
+				return { sync: Number(r.wal_sync), time: Number(r.wal_sync_time) };
+			} catch {
+				return null;
+			}
+		};
 		const machineBefore = machineTicks();
 		const commitsBefore = Number((await stack.admin.query("SELECT count(*) n FROM pim_runtime.commit_receipts")).rows[0].n);
-		const walBefore = (await stack.admin.query("SELECT wal_sync, wal_sync_time, wal_records FROM pg_stat_wal")).rows[0];
+		const walBefore = await walStats();
 		const xactBefore = Number((await stack.admin.query("SELECT xact_commit FROM pg_stat_database WHERE datname = current_database()")).rows[0].xact_commit);
 		const updatesBefore = stats.updates;
 		const floodedBefore = flooded;
@@ -360,7 +369,7 @@ async function runProfile(n: number) {
 		windowOpen = false;
 		const machineAfter = machineTicks();
 		const commitsAfter = Number((await stack.admin.query("SELECT count(*) n FROM pim_runtime.commit_receipts")).rows[0].n);
-		const walAfter = (await stack.admin.query("SELECT wal_sync, wal_sync_time, wal_records FROM pg_stat_wal")).rows[0];
+		const walAfter = await walStats();
 		const xactAfter = Number((await stack.admin.query("SELECT xact_commit FROM pg_stat_database WHERE datname = current_database()")).rows[0].xact_commit);
 		const cpuSeconds: Record<string, number> = {};
 		for (const c of children) {
@@ -432,7 +441,7 @@ async function runProfile(n: number) {
 				in_flight_note: "in flight = chats with a turn sent whose answer the 200 ms poll of the projection has not yet seen, sampled once a second",
 				note: "turn latency is the time from the Gate accepting the send to a 200 ms poll of the projection seeing the answer, so it includes up to 200 ms of polling",
 			},
-			runtime: { commits_in_window: commitsAfter - commitsBefore, commits_per_s: r1((commitsAfter - commitsBefore) / seconds), pg_transactions_per_s: r1((xactAfter - xactBefore) / seconds), wal_flushes_per_s: r1((walAfter.wal_sync - walBefore.wal_sync) / seconds), wal_flush_mean_ms: walAfter.wal_sync > walBefore.wal_sync ? r1((walAfter.wal_sync_time - walBefore.wal_sync_time) / (walAfter.wal_sync - walBefore.wal_sync)) : null },
+			runtime: { commits_in_window: commitsAfter - commitsBefore, commits_per_s: r1((commitsAfter - commitsBefore) / seconds), pg_transactions_per_s: r1((xactAfter - xactBefore) / seconds), wal_flushes_per_s: walBefore && walAfter ? r1((walAfter.sync - walBefore.sync) / seconds) : null, wal_flush_mean_ms: walBefore && walAfter && walAfter.sync > walBefore.sync ? r1((walAfter.time - walBefore.time) / (walAfter.sync - walBefore.sync)) : null },
 			projection: { max_lag_commits: Math.max(0, ...lagSamples), p95_lag_commits: pct(lagSamples, 95), mean_lag_commits: r1(lagSamples.reduce((a, b) => a + b, 0) / Math.max(1, lagSamples.length)), caught_up_after_load: caught, catch_up_ms: Math.round(catchUpMs), forge_max_lag_events: Math.max(0, ...forgeLagSamples) },
 			live: { updates_delivered_per_s: r1(updatesInWindow / seconds), slow_client: { frames_read: stats.slowFrames, coalesced_progress_frames: stats.slowCoalescedFrames, progress_updates_folded: stats.slowSkipped, closed_as_slow: stats.slowClosed } },
 			coding_flood: { threads: threads.length, events_appended_in_window: floodedInWindow, events_per_s: r1(floodedInWindow / seconds) },

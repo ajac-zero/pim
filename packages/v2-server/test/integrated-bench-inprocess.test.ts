@@ -24,10 +24,10 @@ import { MemoryObjectStore } from "@pim/v2-app/objects";
 import type { Process } from "../src/main.ts";
 import { waitFor } from "../../v2-runtime/test/support/rig.ts";
 import { type Deployment, base, start, startS3 } from "./support/processes.ts";
-import { createStack, describeWith, freePort, hasNats, startNats } from "./support/stack.ts";
+import { createStack, freePort, hasNats, startNats } from "./support/stack.ts";
 
 // Opt-in (scripts/v2-bench/integrated-inprocess.mjs sets PIM_BENCH_INPROCESS): the multi-process harness in integrated-bench.test.ts is what CI runs.
-const real = describeWith(hasNats() && Boolean(process.env.PIM_BENCH_INPROCESS));
+const real = describe.skipIf(!process.env.PIM_BENCH_INPROCESS || !hasNats());
 const PROFILES = (process.env.PIM_BENCH_PROFILES ?? "5,50").split(",").map(Number);
 const pct = (xs: number[], p: number) => [...xs].sort((a, b) => a - b)[Math.min(xs.length - 1, Math.floor((p / 100) * xs.length))] ?? 0;
 const ms = (n: number) => Math.round(n);

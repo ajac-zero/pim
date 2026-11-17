@@ -292,7 +292,7 @@ describe("run guard and watchdog", () => {
 		await runner.stop();
 	});
 
-	it("the watchdog stops a run that makes no progress, and leaves a run parked for a decision alone", async () => {
+	it("the watchdog stops a run that makes no progress and says so, and leaves a run parked for a decision alone", async () => {
 		const ownerId = uniqueOwner();
 		const rig = createRig(database.db, ownerId);
 		const home = await new PartitionDirectory(database.db).createPartition(ownerId, { kind: "home" });
@@ -319,5 +319,20 @@ describe("run guard and watchdog", () => {
 		await command(second.inbox, stuckOwner, stuckHome, "m2", 1, { content: "again" });
 		await waitFor("the chat to answer again", async () => (await readTranscript(database.db, stuckOwner, stuckHome, 1)).some((e) => textOf(e) === "recovered"));
 		await second.stop();
+	});
+
+	it("tells the person why when the watchdog stopped a run that ended at once", async () => {
+		const ownerId = uniqueOwner();
+		const rig = createRig(database.db, ownerId);
+		const home = await new PartitionDirectory(database.db).createPartition(ownerId, { kind: "home" });
+		// A call that waits on something that never comes, but ends when it is stopped.
+		rig.state.gateLatch = latch();
+		rig.faux.setResponses([fauxAssistantMessage(fauxToolCall("gate", {}), { stopReason: "toolUse" })]);
+		const runner = rig.runner({ idleUnloadMs: 60_000, stallMs: 600, abortGraceMs: 2_000 });
+		await runner.start();
+		await command(runner.inbox, ownerId, home, "m1", 1, { content: "go" });
+		await waitFor("the watchdog to say why", async () => ((await readTranscript(database.db, ownerId, home, 1)).some((e) => JSON.stringify(e).includes("Pim stopped this turn")) ? true : undefined), 20_000);
+		expect(rig.events.some((e) => e.type === "stalled" && !e.recycled)).toBe(true);
+		await runner.stop();
 	});
 });

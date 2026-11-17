@@ -248,7 +248,10 @@ export class ResidentPartition {
 			if (this.#disposed) return;
 			this.runner.emit({ type: "stalled", ownerId: this.ownerId, partitionId: this.partitionId, conversationId: id, recycled: false });
 			const conversation = await this.#harness.conversation(id as ConversationId, this.context);
-			if (conversation) await this.stopRun(conversation, this.context);
+			if (!conversation) continue;
+			await this.stopRun(conversation, this.context);
+			// The person finds out why the chat stopped: an error answer, which the model's context leaves out as it does any failed request. A recycled partition is gone, and says nothing.
+			if (!this.#disposed) await conversation.submit({ type: "write", entry: { kind: "pi.assistant", model: [stalledNote(stallMs, this.runner.clock())] } } as never, this.context);
 		}
 	}
 
@@ -392,6 +395,19 @@ export class ResidentPartition {
 		return ++this.#seq;
 	}
 }
+
+/** The answer that tells a person the watchdog stopped their chat's run. */
+const stalledNote = (stallMs: number, at: number) => ({
+	role: "assistant",
+	content: [],
+	api: "pim",
+	provider: "pim",
+	model: "watchdog",
+	usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+	stopReason: "error",
+	errorMessage: `Pim stopped this turn: nothing had happened in it for ${stallMs >= 60_000 ? `${Math.round(stallMs / 60_000)} minutes` : `${Math.round(stallMs / 1000)} seconds`}, so a tool or the model was stuck. Send your message again to retry.`,
+	timestamp: at,
+});
 
 /** A command the partition cannot ever run: it is completed, not retried. */
 export class CommandRejected extends Error {

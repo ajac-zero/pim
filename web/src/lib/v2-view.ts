@@ -108,7 +108,7 @@ export function streamOf(messages: readonly V2Message[]): StreamState {
   const writing = messages.findLast(
     (m) => m.partial && m.role === "assistant" && !final.has(m.id),
   );
-  return reduce(
+  const state = reduce(
     EMPTY_STREAM,
     asEvent({
       type: "snapshot",
@@ -118,6 +118,20 @@ export function streamOf(messages: readonly V2Message[]): StreamState {
       inbox: [],
       generation: writing ? { message: assistantOf(writing) } : undefined,
     }),
+  );
+  // A chat whose last word is a failed model request shows why, as v1's view did from the failed task.
+  const last = messages.findLast((m) => !m.partial);
+  return last ? failed(state, last) : state;
+}
+
+/** The view's error for a committed assistant message that ended in a model error: a stalled stream, a refused credential, a provider's failure. */
+function failed(state: StreamState, m: V2Message): StreamState {
+  if (m.role !== "assistant" || m.stopReason !== "error" || !m.error) {
+    return state;
+  }
+  return reduce(
+    state,
+    asEvent({ type: "task_failed", kind: "pi.generation", message: m.error }),
   );
 }
 
@@ -135,12 +149,15 @@ export function applyMessage(state: StreamState, m: V2Message): StreamState {
   }
   const entry = entryOf(m);
   if (!entry) return state;
-  return reduce(
-    state,
-    asEvent({
-      type: m.role === "assistant" ? "message_end" : "entry_appended",
-      entry,
-    }),
+  return failed(
+    reduce(
+      state,
+      asEvent({
+        type: m.role === "assistant" ? "message_end" : "entry_appended",
+        entry,
+      }),
+    ),
+    m,
   );
 }
 

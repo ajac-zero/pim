@@ -1,5 +1,7 @@
 import type { AgentEvent } from "@earendil-works/pi-durable";
 import type { UiState } from "@pim/ui-lang";
+import { probeServer } from "~/lib/server-capabilities";
+import { fetchSidebar } from "~/lib/v2-link";
 
 /**
  * Pim's REST API, reached through this app's own `/api` path: the app's
@@ -1795,8 +1797,15 @@ export const pim = {
     call<unknown>(`/memory/scopes/${encodeURIComponent(key)}`, {
       method: "DELETE",
     }),
-  sessions: () =>
-    call<{ sessions: Session[] }>("/sessions").then((body) => body.sessions),
+  sessions: async () => {
+    // Pim v2 lists chats from the sidebar's bounded snapshot; which Pim this is is learned before the first list is asked for.
+    if ((await probeServer()) === "v2") {
+      return (await fetchSidebar()).sessions;
+    }
+    return call<{ sessions: Session[] }>("/sessions").then(
+      (body) => body.sessions,
+    );
+  },
   createSession: (options: { title?: string; agent?: string } = {}) =>
     call<Session>("/sessions", {
       method: "POST",
@@ -2067,7 +2076,18 @@ export const pim = {
       `/sessions/${session}/messages`,
       {
         method: "POST",
-        body: JSON.stringify({ content, operationId: options.operationId }),
+        // Pim v2 admits a command by its own id and reads its text; v1 reads the rest.
+        body: JSON.stringify({
+          content,
+          operationId: options.operationId,
+          commandId: options.operationId,
+          text:
+            typeof content === "string"
+              ? content
+              : content
+                  .flatMap((part) => (part.type === "text" ? [part.text] : []))
+                  .join("\n"),
+        }),
         signal: options.signal,
       },
     ),
@@ -2105,6 +2125,7 @@ export const pim = {
   abort: (session: string) =>
     call<{ aborted: boolean }>(`/sessions/${session}/abort`, {
       method: "POST",
+      body: JSON.stringify({ commandId: crypto.randomUUID() }),
     }),
   /** Asks the model again in a chat held after a model error. */
   retry: (session: string) =>

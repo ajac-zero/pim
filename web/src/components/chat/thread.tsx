@@ -57,7 +57,7 @@ import {
   type StartedBy,
   type UserContent,
 } from "~/lib/pim-api";
-import { type PendingSend, pimClient } from "~/lib/pim-client";
+import { type PendingSend, pimClient, usePimClient } from "~/lib/pim-client";
 import {
   layoutThread,
   type ModelProblem,
@@ -525,6 +525,7 @@ export const Thread = memo(function Thread({
     rows.length,
   );
   const earlierRows = windowStart;
+  const earlierOnServer = usePimClient((state) => state.earlier);
 
   const empty =
     !view.running &&
@@ -558,8 +559,13 @@ export const Thread = memo(function Thread({
       >
         {startedBy && <StartedFrom startedBy={startedBy} />}
         {continuedFrom && <ContinuedFrom session={continuedFrom} />}
-        {earlierRows > 0 && (
+        {earlierRows > 0 ? (
           <EarlierRows hidden={earlierRows} onShow={showEarlier} />
+        ) : (
+          // Pim v2 holds older messages than the snapshot had: they come a page at a time.
+          earlierOnServer && (
+            <EarlierRows hidden={null} onShow={() => pimClient.loadEarlier()} />
+          )
         )}
         {rows.slice(windowStart).map((row) => {
           if (row.kind === "sent" && row.sent.channel === "email") {
@@ -887,7 +893,7 @@ function EarlierRows({
   hidden,
   onShow,
 }: {
-  hidden: number;
+  hidden: number | null;
   onShow: () => void;
 }) {
   const { t } = useI18n();
@@ -912,7 +918,9 @@ function EarlierRows({
       className="mx-auto text-muted-foreground"
       onClick={onShow}
     >
-      {t("earlierMessages", { count: String(hidden) })}
+      {hidden === null
+        ? t("earlierMessagesMore")
+        : t("earlierMessages", { count: String(hidden) })}
     </Button>
   );
 }

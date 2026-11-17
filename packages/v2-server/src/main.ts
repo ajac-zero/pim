@@ -47,8 +47,8 @@ export async function startProcess(command: string, env: Env, hooks: Hooks = {})
 	const roles = rolesOf(config.role as PimProcessRole);
 	const host = await createHost({ port: Number(env.PIM_HTTP_PORT ?? 8080), metricsPort: Number(env.PIM_METRICS_PORT ?? 9464), ingressSecret: env.PIM_INGRESS_SECRET });
 	const started: Role[] = [];
-	// Gate, Live and the Forge-facing loops publish and hear on Pulse; a deployment without NATS reaches Live by polling alone.
-	const pulse = roles.includes("gate") || roles.includes("live") ? await NatsPulse.connect(config.natsUrl) : undefined;
+	// Gate, Live and the Forge-facing loops publish and hear on Pulse, and the Gate's relay and canvas containers reach each other's computers on it; a deployment without NATS reaches Live by polling alone.
+	const pulse = roles.includes("gate") || roles.includes("live") || roles.includes("relay") || roles.includes("canvas") ? await NatsPulse.connect(config.natsUrl) : undefined;
 	try {
 		for (const role of roles) {
 			if (role === "gate" || role === "canvas" || role === "relay") {

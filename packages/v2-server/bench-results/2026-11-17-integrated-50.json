@@ -1,0 +1,121 @@
+[
+  {
+    "people": 50,
+    "rounds": 8,
+    "active_streaming_runs": 50,
+    "idle_stored_chats": 150,
+    "tenants": 50,
+    "admission_ms": {
+      "p50": 144,
+      "p95": 238,
+      "max": 286
+    },
+    "all_admitted_after_ms": 185,
+    "answer_readable_ms": {
+      "p50": 4548,
+      "p95": 6315,
+      "p99": 7121,
+      "max": 7447
+    },
+    "foreground": {
+      "baseline": {
+        "sessions": {
+          "n": 252,
+          "p50": 8,
+          "p95": 12,
+          "p99": 14,
+          "max": 15
+        },
+        "sidebar": {
+          "n": 252,
+          "p50": 8,
+          "p95": 12,
+          "p99": 14,
+          "max": 15
+        }
+      },
+      "under_load": {
+        "sessions": {
+          "n": 1558,
+          "p50": 22,
+          "p95": 54,
+          "p99": 98,
+          "max": 277
+        },
+        "sidebar": {
+          "n": 1538,
+          "p50": 23,
+          "p95": 54,
+          "p99": 90,
+          "max": 275
+        }
+      },
+      "budget_absolute_p95_under_250ms": true,
+      "p95_regression_pct": {
+        "sessions": 350,
+        "sidebar": 350
+      },
+      "p50_regression_pct": {
+        "sessions": 175,
+        "sidebar": 187.5
+      },
+      "budget_relative_within_20pct": false
+    },
+    "foreground_read_ms": {
+      "reads": 3096,
+      "p50": 23,
+      "p95": 54,
+      "max": 277
+    },
+    "max_projection_lag_commits": 523,
+    "total_s": 51.2,
+    "runtime_commits_total": 4875,
+    "runtime_commits_per_second": 95.1,
+    "pg_transactions_per_second": 3811,
+    "pg_wal_flushes_per_second": 317,
+    "pg_wal_flush_mean_ms": 0.251,
+    "machine_cpu_busy_pct": 58.8,
+    "stack_node_process_cpu_pct_of_one_core": 87.8,
+    "rss_mb_max": {
+      "stack_node_process": 274,
+      "postgres_sum_of_backends": 2902,
+      "nats": 11
+    },
+    "event_loop_delay_ms": {
+      "p50": 10.04,
+      "p99": 18.06,
+      "max": 30.11
+    },
+    "live": {
+      "slow_client_status": "live",
+      "slow_client_updates_received": 0,
+      "reconnect_cut_to_live_ms": 468,
+      "reconnecting_client_updates": 80,
+      "reconnecting_client_final_status": "live",
+      "coalesced_progress_updates": 0,
+      "coalesced_updates_skipped": 0
+    },
+    "coding_projection_flood_rows": 20000,
+    "environment": {
+      "cpus": 4,
+      "cpu_model": "Intel(R) Xeon(R) Processor @ 2.60GHz",
+      "mem_gb": 7.8,
+      "node": "v26.13.1",
+      "postgres": "17.11",
+      "postgres_settings": {
+        "fsync": "on",
+        "full_page_writes": "on",
+        "max_connections": "1000",
+        "shared_buffers": "32768",
+        "synchronous_commit": "on"
+      },
+      "knobs": {
+        "runtime_pool": "20",
+        "gate_pool": "20",
+        "runners": 2
+      },
+      "shape": "Gate, Live, the Runners and the Projector in one Node process; PostgreSQL and nats-server separate; scripted model at 25 tokens/s"
+    },
+    "cpus": 4
+  }
+]

@@ -14,6 +14,8 @@ import { ExternalOperations } from "@pim/v2-runtime/external";
 import type { Db as RuntimeDb } from "@pim/v2-runtime/db";
 import type { Actor } from "@pim/v2-forge/authz";
 import type { ForgeParts } from "./forge-assembly.ts";
+import type { EnvelopeCrypto } from "@pim/v2-contracts/platform";
+import { connectorToolset, type Transport } from "./connector-tools.ts";
 
 export type ToolDeps = {
 	ownerId: string;
@@ -23,6 +25,9 @@ export type ToolDeps = {
 	forge: ForgeParts | undefined;
 	fetch: typeof fetch;
 	now: () => number;
+	/** The deployment's keys, which open a connector's sealed credential; and whether a connector may live at a private address. */
+	crypto?: EnvelopeCrypto | undefined;
+	allowPrivateConnectors?: boolean | undefined;
 	/** The public id of the chat that a pi conversation is. */
 	chatOf(conversationId: number | string): Promise<string | null>;
 };
@@ -44,7 +49,7 @@ function privateAddress(address: string): boolean {
 	return a === 10 || a === 127 || a === 0 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127);
 }
 
-async function publicUrl(raw: string): Promise<URL> {
+export async function publicUrl(raw: string): Promise<URL> {
 	let url: URL;
 	try {
 		url = new URL(raw);
@@ -337,5 +342,10 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 		coding("coding_merge", "Merge a coding thread's branch into the default branch, fast-forward or rebase, never forced. A person approves it first, unless they have said it may go ahead.", Type.Object({ thread }), "coding:merge", (f, actor, _c, a) => f.forge.merge(actor, a.thread)),
 	);
 
-	return defineExtension({ name: "pim", tools, sections });
+	// The owner's connected MCP servers: their tools, with each one's Off, Ask or On.
+	const transport: Transport = { fetch: deps.fetch, allowPrivate: deps.allowPrivateConnectors === true, check: publicUrl };
+	const connectors = connectorToolset({ ownerId, partitionId, runtime, app: deps.app, crypto: deps.crypto, transport, ops, owner, now: deps.now, chatOf: deps.chatOf, principalOf });
+	tools.push(...connectors.tools);
+
+	return defineExtension({ name: "pim", tools, sections: [...sections, ...connectors.sections] });
 }

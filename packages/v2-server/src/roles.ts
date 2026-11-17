@@ -6,6 +6,8 @@ import { createModels } from "@earendil-works/pi-ai";
 import { createRegistry, type HarnessOptions } from "@earendil-works/pi-durable";
 import type { ProcessConfig } from "@pim/v2-contracts/platform";
 import { App } from "@pim/v2-app/app";
+import { startMemoryNap } from "./memory-nap.ts";
+import { installRooms } from "./rooms.ts";
 import { OPENAI_ENDPOINTS } from "@pim/v2-app/chatgpt";
 import { KeyringCrypto } from "@pim/v2-app/crypto";
 import { connect as connectApp } from "@pim/v2-app/db";
@@ -98,6 +100,7 @@ export async function startGate(config: ProcessConfig, env: Env, host: Host, nat
 	const objects = s3Of(config, env);
 	const crypto = keyringFromProcessEnv(env);
 	const app = new App(db, objects, { fetchTools: mcpFetchTools({ fetch, allowPrivate: env.PIM_CONNECTOR_ALLOW_PRIVATE === "1", check: publicUrl }), ...(crypto ? { crypto } : {}), ...(env.PIM_APP_SECRET_KEY ? { appKey: env.PIM_APP_SECRET_KEY } : {}), transcripts: projectedTranscripts(db.pool), ...(chatgptFromEnv(env) ? { chatgpt: chatgptFromEnv(env)! } : {}), allowHttpConnectors: env.PIM_CONNECTOR_ALLOW_PRIVATE === "1" });
+	installRooms(app);
 	if (nats) publishRevocations(app, nats);
 	// A computer paired to another process (the `relay` container, another Gate) is reached over NATS.
 	if (nats) app.relay.useBus(natsRelayBus(nats));
@@ -220,6 +223,8 @@ export async function startRunner(config: ProcessConfig, env: Env, host: Host, h
 	let relayPulse: Promise<NatsPulse> | undefined;
 	const relayBus = async () => natsRelayBus(await (relayPulse ??= NatsPulse.connect(config.natsUrl)));
 	const host_ = hooks.harnessOptions ? undefined : createAgentHost({ db, env, crypto, app, forge, relay: relayBus, providers: hooks.providers, fetch: hooks.fetch, ...(chatgptFromEnv(env) ? { chatgpt: { ...chatgptFromEnv(env), ...(env.PIM_CHATGPT_BASE_URL ? { baseUrl: env.PIM_CHATGPT_BASE_URL } : {}) } } : {}), ...(env.PIM_PROVIDER_COOLDOWN_MS ? { cooldowns: { transientMs: Number(env.PIM_PROVIDER_COOLDOWN_MS) } } : {}), stallMs: { ...(env.PIM_MODEL_STALL_MS ? { stream: Number(env.PIM_MODEL_STALL_MS) } : {}), ...(env.PIM_TOOL_TIMEOUT_MS ? { tool: Number(env.PIM_TOOL_TIMEOUT_MS) } : {}) } });
+	// While nobody is in a chat, what was said in it is kept as a memory (`./memory-nap.ts`); it needs the host's model catalog and the application's services.
+	const stopNap = host_ && app ? startMemoryNap({ pool: runtimePool, db, app, complete: host_.complete, env, onError: (error) => console.error("memory nap", error) }) : undefined;
 	const runner = new Runner({
 		db,
 		harnessOptions: hooks.harnessOptions ?? host_!.harnessOptions,
@@ -266,6 +271,7 @@ export async function startRunner(config: ProcessConfig, env: Env, host: Host, h
 			clearInterval(retry);
 			relay.stop();
 			await reviews?.stop();
+			await stopNap?.();
 			await runner.stop();
 			await runtimePool.end();
 			await appDb?.end();

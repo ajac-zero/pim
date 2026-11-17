@@ -431,6 +431,11 @@ const inputCommand: CommandHandler = async (resident, command, context) => {
 	const conversation = await conversationOf(resident, command, context);
 	const content = (command.payload.content ?? command.payload.text) as Input | undefined;
 	if (content === undefined) throw new CommandRejected(`Command ${command.commandId} has no content`);
+	// A message in a room that is not for this conversation's agent is written into it without waking the agent: it is in its context from its next request.
+	if (command.payload.write === true) {
+		await conversation.submit({ type: "write", requestId: command.piRequestId, entry: { kind: "pim.room", model: [{ role: "user", content, timestamp: Date.now() }] } }, context);
+		return;
+	}
 	// The chat's model is read again before each message, so a model chosen for this chat alone (or the agent's, or Settings') is the next turn's.
 	if (command.kind === "user_message" && command.publicChatId !== undefined && resident.runner.chatAgent !== undefined) {
 		try {
@@ -465,7 +470,8 @@ const abortCommand: CommandHandler = async (resident, command, context) => {
 };
 
 const handoffCommand: CommandHandler = async (resident, command, context) => {
-	const handoff = command.payload.handoff;
+	// The application names the summary it carries `summary` (`Conversations.handoff`); `handoff` is the runtime's own word for it.
+	const handoff = command.payload.handoff ?? command.payload.summary;
 	await (await conversationOf(resident, command, context)).reset(typeof handoff === "string" ? handoff : undefined, context);
 };
 

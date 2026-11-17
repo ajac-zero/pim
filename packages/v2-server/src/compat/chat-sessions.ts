@@ -8,6 +8,7 @@
  */
 import { randomUUID } from "node:crypto";
 import type { App } from "@pim/v2-app/app";
+import { addRoomMember, removeRoomMember, roomViews } from "../rooms.ts";
 import { BadRequestError, CapabilityUnavailableError, ConflictError, NotFoundError } from "@pim/v2-app/errors";
 import { ok, type Route, route } from "@pim/v2-app/http";
 import type { Principal } from "@pim/v2-contracts/identity";
@@ -41,22 +42,7 @@ async function sessionView(app: App, p: Principal, id: string) {
 
 /** The group chat's room: how its agents take turns and who besides its host is in it; null for a chat with one agent. */
 async function roomView(app: App, p: Principal, id: string) {
-	return app.db.owner(p.ownerId, async (tx) => {
-		const chat = (await tx.query("SELECT room_mode FROM pim_app.conversations WHERE public_chat_id = $1 AND deleted_at IS NULL", [id])).rows[0];
-		if (!chat) throw new NotFoundError("No such chat");
-		const members = (await tx.query(
-			"SELECT m.member, a.name, a.model, a.config FROM pim_app.room_members m LEFT JOIN pim_app.agents a ON a.id = m.member AND a.deleted_at IS NULL WHERE m.public_chat_id = $1 ORDER BY m.member",
-			[id],
-		)).rows;
-		if (members.length === 0) return null;
-		return {
-			mode: chat.room_mode === "open" ? "open" : "mentions",
-			members: members.map((m) => {
-				const model = (m.config?.model as { provider: string; id: string } | undefined) ?? { provider: "", id: m.model ?? "" };
-				return { id: m.member as string, name: (m.name as string | null) ?? m.member, busy: false, held: false, error: null, model: { model: { provider: model.provider, id: model.id, name: model.id || "Default model", images: false }, override: false } };
-			}),
-		};
-	});
+	return (await roomViews(app, p.ownerId, [id])).get(id) ?? null;
 }
 
 /** A task as the app's `AgentTask`: who handed it out, who has it, and how it stands. */
@@ -218,27 +204,29 @@ export function sessionRoutes(env: Record<string, string | undefined> = process.
 		route("PUT", "/api/sessions/:id/queue/:item", async ({ principal }) => (await principal(), gone())),
 		route("DELETE", "/api/sessions/:id/queue/:item", async ({ principal }) => (await principal(), gone())),
 
+		// ---- the chat list, without the seats of group chats ----
+		route("GET", "/api/sessions", async ({ app, principal, url }) => {
+			const p = await principal();
+			await app.identity.authz.enforce(p, "api:read");
+			const limit = Number(url.searchParams.get("limit"));
+			const sessions = await app.conversations.list(p.ownerId, { archived: url.searchParams.get("archived") === "true", limit: Number.isInteger(limit) && limit > 0 ? limit : 100 });
+			const seats = new Set((await app.db.owner(p.ownerId, async (tx) => (await tx.query("SELECT public_chat_id FROM pim_app.conversations WHERE room_of IS NOT NULL AND public_chat_id = ANY($1::uuid[])", [sessions.map((s) => s.id)])).rows)).map((r) => r.public_chat_id as string));
+			const shown = sessions.filter((s) => !seats.has(s.id));
+			const rooms = await roomViews(app, p.ownerId, shown.map((s) => s.id));
+			return ok({ sessions: shown.map((s) => ({ ...s, room: rooms.get(s.id) ?? null })) });
+		}),
+
 		// ---- a group chat's room ----
 		route("POST", "/api/sessions/:id/room/members", async ({ app, principal, params, json }) => {
 			const p = await principal();
-			await app.identity.authz.enforce(p, "api:write");
 			const id = chatId(params[0]!);
-			const agent = String((await json()).agent ?? "");
-			await app.db.owner(p.ownerId, async (tx) => {
-				const chat = (await tx.query("SELECT agent_id FROM pim_app.conversations WHERE public_chat_id = $1 AND deleted_at IS NULL", [id])).rows[0];
-				if (!chat) throw new NotFoundError("No such chat");
-				if (!(await tx.query("SELECT 1 FROM pim_app.agents WHERE id = $1 AND deleted_at IS NULL", [agent])).rowCount) throw new NotFoundError("No such agent");
-				if (chat.agent_id === agent) throw new ConflictError("That agent is the chat's own", "already_member");
-				await tx.query("INSERT INTO pim_app.room_members (public_chat_id, owner_id, member) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING", [id, p.ownerId, agent]);
-				await tx.query("UPDATE pim_app.conversations SET kind = CASE WHEN kind = 'normal' THEN 'group' ELSE kind END, room_mode = coalesce(room_mode, 'mentions') WHERE public_chat_id = $1", [id]);
-			});
+			await addRoomMember(app, p, id, String((await json()).agent ?? ""));
 			return ok({ room: await roomView(app, p, id) }, 201);
 		}),
 		route("DELETE", "/api/sessions/:id/room/members/:agent", async ({ app, principal, params }) => {
 			const p = await principal();
-			await app.identity.authz.enforce(p, "api:write");
 			const id = chatId(params[0]!);
-			await app.db.owner(p.ownerId, (tx) => tx.query("DELETE FROM pim_app.room_members WHERE public_chat_id = $1 AND member = $2", [id, params[1]!]));
+			await removeRoomMember(app, p, id, params[1]!);
 			return ok({ room: await roomView(app, p, id) });
 		}),
 		// A held run is the runtime's to try again; the room is answered as it stands.

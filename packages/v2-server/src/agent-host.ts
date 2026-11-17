@@ -28,6 +28,8 @@ import type { Db as RuntimeDb } from "@pim/v2-runtime/db";
 import type { PartitionContext, RunnerOptions } from "@pim/v2-runtime/runner";
 import { pimExtension, type ToolDeps } from "./agent-tools.ts";
 import { BUILTIN_SKILLS } from "./builtin-skills.ts";
+import { CodexImagesClient } from "./codex-images.ts";
+import { imageEndpoints } from "./image-tools.ts";
 import { chatgptCredentialStore, chatgptProvider, type ChatGPTRunnerOptions } from "./chatgpt-auth.ts";
 import type { ForgeParts } from "./forge-assembly.ts";
 import { createFailover } from "./provider-failover.ts";
@@ -244,6 +246,12 @@ export function createAgentHost(options: AgentHostOptions) {
 		return { provider: pick.provider, modelId: pick.id };
 	}
 
+	/** Where an owner's images are drawn: their ChatGPT images sign-in, and the endpoints `PIM_IMAGE_MODEL` can name. `PIM_IMAGE_MODEL=off` has no `generate_image`. */
+	const imageSources = (ownerId: string): ToolDeps["images"] =>
+		env.PIM_IMAGE_MODEL === "off"
+			? undefined
+			: { model: env.PIM_IMAGE_MODEL, codex: () => (options.crypto ? new CodexImagesClient(db, options.crypto, ownerId, env, { fetch: options.fetch, now }) : undefined), endpoints: () => imageEndpoints(db, options.crypto, env, ownerId) };
+
 	const harnessOptions = async (partition: PartitionContext): Promise<HarnessOptions> => {
 		const ownerId = partition.ownerId;
 		const models = await refreshCatalog(ownerId);
@@ -255,7 +263,7 @@ export function createAgentHost(options: AgentHostOptions) {
 				.catch(() => {});
 		});
 		const registry = createRegistry();
-		const deps: ToolDeps = { ownerId, partitionId: partition.partitionId, runtime: db, app: options.app, forge: options.forge, relay: options.relay, fetch: options.fetch ?? fetch, now, toolTimeoutMs: options.stallMs?.tool, crypto: options.crypto, allowPrivateConnectors: env.PIM_CONNECTOR_ALLOW_PRIVATE === "1", chatOf: (conversationId) => publicChatId(ownerId, conversationId) };
+		const deps: ToolDeps = { ownerId, partitionId: partition.partitionId, runtime: db, app: options.app, forge: options.forge, relay: options.relay, fetch: options.fetch ?? fetch, now, toolTimeoutMs: options.stallMs?.tool, crypto: options.crypto, allowPrivateConnectors: env.PIM_CONNECTOR_ALLOW_PRIVATE === "1", images: imageSources(ownerId), chatOf: (conversationId) => publicChatId(ownerId, conversationId) };
 		const ctx = (conversationId: number | string) => publicChatId(ownerId, conversationId).then((chat) => readContext(ownerId, chat));
 		registry.install(pimExtension(deps, [
 			section("agent", async (input) => {
@@ -277,6 +285,14 @@ export function createAgentHost(options: AgentHostOptions) {
 				const c = await ctx(input.conversationId);
 				const scopes = c.agent ? `agent-${c.agent.id} and everyone` : "everyone";
 				return `Your memory (scopes ${scopes}). Save with note, find with recall, read in full with zoom.${c.memories.length ? `\n${c.memories.map((m) => `- [${m.id}] (${m.scope}) ${m.title}`).join("\n")}` : "\nNothing is remembered yet."}`;
+			}),
+			section("room", async (input) => {
+				const chat = await publicChatId(ownerId, input.conversationId);
+				const room = chat ? (await db.read<{ r: { role: "host" | "seat"; mode: string; host: { id: string; name: string } | null; members: { id: string; name: string }[] } | null }>(ownerId, "SELECT pim_app.runner_room($1, $2) AS r", [ownerId, chat]).catch(() => ({ rows: [] as never[] }))).rows[0]?.r : undefined;
+				if (!room) return undefined;
+				const names = (room.role === "host" ? room.members : [room.host ?? { id: "", name: "Pim" }, ...room.members]).map((m) => m.name);
+				const turns = room.mode === "open" ? "Everything the person says wakes every agent in the room; each decides whether it has something to add." : "The host answers what the person says to no one in particular; an agent answers when it is mentioned as @Name.";
+				return `This is a group chat${room.role === "seat" ? " and you are one of its agents, not its host" : " and you are its host"}. ${room.role === "host" ? "Also in it" : "Others in it"}: ${names.join(", ") || "no one else yet"}. ${turns} What another agent says reaches you as a message that starts "[From Name]"; what you send with send_to_user is shown in the chat as yours, under your name. Mention an agent by @Name to bring its attention; do not repeat what others have said.`;
 			}),
 			section("delegates", async (input) => {
 				const c = await ctx(input.conversationId);
@@ -311,5 +327,25 @@ export function createAgentHost(options: AgentHostOptions) {
 		return (message.content as { type: string; text?: string }[]).filter((p) => p.type === "text").map((p) => p.text ?? "").join("");
 	}
 
-	return { harnessOptions, homeRoot, chatAgent, ask, context: (ownerId: string, chat: string | null) => readContext(ownerId, chat) };
+	/**
+	 * One answer from a model for work no chat asked for, such as the memory nap: the deployment's `PIM_MEMORY_MODEL` (`provider/model`), else the utility model the person chose
+	 * in Settings, else the model they chose for agents, else the deployment's default. It is metered into the owner's ledger as background work. Undefined when no model can answer.
+	 */
+	async function complete(ownerId: string, system: string, prompt: string, maxTokens = 1024): Promise<string | undefined> {
+		const models = await refreshCatalog(ownerId);
+		const available = await models.getAvailable().catch(() => []);
+		const utility = asModelRef((await db.read<{ m: unknown }>(ownerId, "SELECT pim_app.runner_utility_model($1) AS m", [ownerId]).catch(() => ({ rows: [] as { m: unknown }[] }))).rows[0]?.m);
+		const wanted = [asModelRef(env.PIM_MEMORY_MODEL), utility, await chosenModel(ownerId), asModelRef(env.PIM_DEFAULT_MODEL)].filter((m): m is ModelRef => m !== null);
+		const model = wanted.map((w) => available.find((a) => a.provider === w.provider && a.id === w.id)).find((m) => m !== undefined);
+		if (!model) return undefined;
+		const answer = await models.completeSimple(model as never, { systemPrompt: system, messages: [{ role: "user", content: prompt, timestamp: now() }] } as never, { maxTokens } as never);
+		const usage = (answer as any)?.usage;
+		if (usage && (usage.input > 0 || usage.output > 0)) {
+			await db.read(ownerId, "SELECT pim_app.record_model_call($1, $2, 'background', NULL, $3, $4, $5, $6, $7)", [ownerId, `mc_${randomUUID()}`, model.provider, model.id, Math.round(usage.input ?? 0), Math.round(usage.output ?? 0), Math.round((usage.cost?.total ?? 0) * 1_000_000)]).catch(() => {});
+		}
+		if ((answer as any)?.stopReason === "error") throw new Error(String((answer as any).errorMessage ?? "The model failed"));
+		return ((answer as any).content as { type: string; text?: string }[]).flatMap((c) => (c.type === "text" ? [c.text ?? ""] : [])).join("").trim();
+	}
+
+	return { harnessOptions, homeRoot, chatAgent, ask, complete, context: (ownerId: string, chat: string | null) => readContext(ownerId, chat) };
 }

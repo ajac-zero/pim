@@ -14,7 +14,9 @@ import { ExternalOperations } from "@pim/v2-runtime/external";
 import type { Db as RuntimeDb } from "@pim/v2-runtime/db";
 import type { Actor } from "@pim/v2-forge/authz";
 import type { RelayBus } from "@pim/v2-app/relay";
+import { postToRoom } from "./rooms.ts";
 import { computerTools } from "./computer-tools.ts";
+import { type ImageSources, imageTools } from "./image-tools.ts";
 import type { ForgeParts } from "./forge-assembly.ts";
 import type { EnvelopeCrypto } from "@pim/v2-contracts/platform";
 import { loadWidgets, MAX_WIDGETS, type ShownWidget, uiDiagnostics, widgetRefs } from "./agent-widgets.ts";
@@ -38,6 +40,8 @@ export type ToolDeps = {
 	allowPrivateConnectors?: boolean | undefined;
 	/** The longest a tool may run before its call ends with an error instead of holding the chat; default 10 minutes. */
 	toolTimeoutMs?: number | undefined;
+	/** Where images can be drawn (`./image-tools.ts`); absent leaves `generate_image` out, as `PIM_IMAGE_MODEL=off` does. */
+	images?: ImageSources | undefined;
 	/** The public id of the chat that a pi conversation is. */
 	chatOf(conversationId: number | string): Promise<string | null>;
 };
@@ -199,8 +203,10 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 				let shown: ShownWidget[] = [];
 				if (app && chat) {
 					try {
-						await app.conversations.markResponse(ownerId, chat);
+						// An agent in a group chat speaks into the host chat, where the person reads it; its own seat is not a chat they open.
 						const p = await principalOf(app, chat);
+						const posted = await postToRoom(app, p, chat, `${api.taskId}:${api.callId}`, String(args.message));
+						if (!posted) await app.conversations.markResponse(ownerId, chat);
 						if (args.complete && p.kind === "delegated") await app.conversations.updateTask(p, p.delegateId, "completed", String(args.message).slice(0, 2000));
 						// Loaded once, as sent: the message and what it shows stay together, and the model is told what the person saw.
 						if (wanted.length > 0) shown = await loadWidgets(app, p, p.kind === "agent" && p.agentId !== "pim" ? p.agentId : null, wanted);
@@ -434,6 +440,9 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 
 	// The person's computer: files, shell, browser, desktop (`./computer-tools.ts`).
 	tools.push(...computerTools({ ownerId, partitionId, runtime, app: deps.app, relay: deps.relay, chatOf: deps.chatOf }, { ops, principalOf }));
+
+	// Images: `generate_image`, saved to the person's files.
+	if (deps.images) tools.push(...imageTools({ ownerId, partitionId, runtime, app: deps.app, images: deps.images, fetch: deps.fetch, now: deps.now, chatOf: deps.chatOf }, { ops, principalOf }));
 
 	// The owner's connected MCP servers: their tools, with each one's Off, Ask or On.
 	const transport: Transport = { fetch: deps.fetch, allowPrivate: deps.allowPrivateConnectors === true, check: publicUrl };

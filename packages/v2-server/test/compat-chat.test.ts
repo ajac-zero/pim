@@ -8,6 +8,7 @@ import { createGate } from "@pim/v2-app/gate";
 import { MemoryObjectStore } from "@pim/v2-app/objects";
 import { chatRoutes } from "../src/compat/chat.ts";
 import { apiClientRoutes } from "../src/compat/api-clients.ts";
+import { diagnosticsRoutes } from "../src/compat/diagnostics.ts";
 import { usageRoutes } from "../src/compat/usage.ts";
 import { createStack, type Stack } from "./support/stack.ts";
 
@@ -28,7 +29,7 @@ const call = async (token: string, method: string, path: string, body?: unknown,
 beforeAll(async () => {
 	stack = await createStack();
 	app = new App(connect(stack.url("gate"), 4), new MemoryObjectStore()).limitSpaces();
-	server = createGate(app, { first: [...chatRoutes, ...usageRoutes(), ...apiClientRoutes()] });
+	server = createGate(app, { first: [...chatRoutes, ...usageRoutes(), ...apiClientRoutes(), ...diagnosticsRoutes({ PIM_PUBLIC_URL: "https://pim.example.test" })] });
 	await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
 	base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
 	const claim = await app.identity.issueClaim("bootstrap", null, 3600_000);
@@ -188,5 +189,26 @@ describe("the API's clients", () => {
 		await app.db.owner(owner, (tx) => tx.query("INSERT INTO pim_app.trigger_runs (id, owner_id, trigger_id, phase, detail) VALUES ('tr1', $1, $2, 'fired', '{\"scheduledFor\": 1000}')", [owner, made.id]));
 		expect((await call(ada, "GET", "/api/trigger-runs/tr1")).body).toMatchObject({ id: "tr1", triggerId: made.id, phase: "fired", dueAt: 1000, evidence: { reason: "time", scheduledFor: 1000 } });
 		expect((await call(bob, "GET", "/api/trigger-runs/tr1")).status).toBe(404);
+	});
+});
+
+describe("diagnostics", () => {
+	it("gives an admin bounded, scrubbed reads of their own space by kind, and refuses a member", async () => {
+		const owner = await ownerOf(ada);
+		const made = (await call(ada, "POST", "/api/triggers", { label: "Broken", instruction: "go", agentId: agent, source: { kind: "time", schedule: "cron", expression: "0 8 * * *", timeZone: "UTC" }, destination: { type: "new_chat" } })).body;
+		await app.db.owner(owner, (tx) => tx.query("INSERT INTO pim_app.trigger_runs (id, owner_id, trigger_id, phase, detail) VALUES ('trd', $1, $2, 'failed', $3)", [owner, made.id, JSON.stringify({ message: "POST https://hooks.example.test/x?key=1 failed for ada@example.test with Bearer abcdefghijklmnop", apiKey: "hunter2" })]));
+		const triggers = (await call(ada, "GET", "/api/admin/diagnostics?kind=triggers")).body;
+		expect(triggers.failures).toHaveLength(1);
+		const text = JSON.stringify(triggers);
+		expect(text).toContain("[address]/x");
+		expect(text).toContain("[email]");
+		expect(text).not.toMatch(/hooks\.example|ada@example|abcdefghijklmnop|hunter2/);
+		expect(triggers.failures[0].detail.apiKey).toBe("[redacted]");
+		expect((await call(ada, "GET", "/api/admin/diagnostics")).body.counts).toMatchObject({ chats: expect.any(Number), waiting_approvals: 0 });
+		expect((await call(ada, "GET", "/api/admin/diagnostics?kind=provider_cooldowns")).body).toMatchObject({ available: false });
+		expect((await call(ada, "GET", "/api/admin/diagnostics?kind=nope")).status).toBe(400);
+		expect((await call(ada, "GET", "/api/admin/diagnostics?since=soon")).status).toBe(400);
+		expect((await call(bob, "GET", "/api/admin/diagnostics")).status).toBe(403);
+		expect((await call(ada, "GET", "/api/admin/health")).body.deployment).toMatchObject({ publicUrlSet: true, approvalPolicy: "explicit" });
 	});
 });

@@ -11,6 +11,7 @@ import { computerRoutes } from "./computer.ts";
 import { connectorRoutes } from "../connector-routes.ts";
 import { chatRoutes } from "./chat.ts";
 import { apiClientRoutes } from "./api-clients.ts";
+import { diagnosticsRoutes } from "./diagnostics.ts";
 import { usageRoutes } from "./usage.ts";
 
 export const webCompatRoutes: Route[] = [
@@ -24,4 +25,5 @@ export const webCompatRoutes: Route[] = [
 	...chatRoutes,
 	...usageRoutes(),
 	...apiClientRoutes(),
+	...diagnosticsRoutes(process.env),
 ];

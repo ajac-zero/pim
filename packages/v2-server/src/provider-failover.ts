@@ -26,12 +26,39 @@ export function failureKind(message: AssistantMessage): "transient" | "auth" | n
 
 const refKey = (ownerId: string, provider: string, id: string) => `${ownerId}\u0000${provider}/${id}`;
 
-export function createFailover(options: { now?: (() => number) | undefined; cooldowns?: Partial<Cooldowns> | undefined } = {}) {
+/** How long a model stream may stay silent, before its first event or between two, before the request is cut off as stalled. */
+export const DEFAULT_STREAM_STALL_MS = 120_000;
+
+const UNSHOWN = new Set(["start", "thinking_start", "thinking_delta", "thinking_end"]);
+
+const failureMessage = (model: any, text: string, stopReason: "error" | "aborted", at: number): AssistantMessage =>
+	({ role: "assistant", content: [], api: model.api, provider: model.provider, model: model.id, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason, errorMessage: text, timestamp: at }) as AssistantMessage;
+
+/** Where cooldowns are shared between Runners: an owner's models that are cooling, as `refKey` to the time (ms) they end, and one more recorded. */
+export type CooldownStore = {
+	load(ownerId: string): Promise<Map<string, number>>;
+	save(ownerId: string, provider: string, id: string, untilMs: number, reason: string): Promise<void>;
+};
+
+export function createFailover(options: { now?: (() => number) | undefined; cooldowns?: Partial<Cooldowns> | undefined; stallMs?: number | undefined; store?: CooldownStore | undefined; syncMs?: number | undefined } = {}) {
+	const stallMs = options.stallMs ?? DEFAULT_STREAM_STALL_MS;
 	const now = options.now ?? Date.now;
 	const cooldowns = { ...DEFAULT_COOLDOWNS, ...options.cooldowns };
 	const until = new Map<string, number>();
 	const chains = new Map<string, ModelRef[]>();
 	const cooling = (ownerId: string, m: ModelRef) => (until.get(refKey(ownerId, m.provider, m.id)) ?? 0) > now();
+	/** Another Runner's cooldowns are read at most this often per owner; this Runner's own are in memory at once. */
+	const syncedAt = new Map<string, number>();
+	const sync = async (ownerId: string) => {
+		if (!options.store || now() - (syncedAt.get(ownerId) ?? -Infinity) < (options.syncMs ?? 2_000)) return;
+		syncedAt.set(ownerId, now());
+		for (const [key, end] of await options.store.load(ownerId).catch(() => new Map<string, number>())) if (end > (until.get(`${ownerId}\u0000${key}`) ?? 0)) until.set(`${ownerId}\u0000${key}`, end);
+	};
+	const cool = (ownerId: string, m: ModelRef, ms: number, reason: string) => {
+		const end = now() + ms;
+		until.set(refKey(ownerId, m.provider, m.id), end);
+		void options.store?.save(ownerId, m.provider, m.id, end, reason).catch(() => {});
+	};
 
 	return {
 		/** Records the models a chat falls over to, in order, when `primary` is the one it runs. */
@@ -49,7 +76,7 @@ export function createFailover(options: { now?: (() => number) | undefined; cool
 					return (model: any, ...rest: any[]) => {
 						const out = createAssistantMessageEventStream();
 						void run(target, ownerId, model, rest, call as never, out).catch((error) => {
-							const message = { role: "assistant", content: [], api: model.api, provider: model.provider, model: model.id, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "error", errorMessage: error instanceof Error ? error.message : String(error), timestamp: now() } as AssistantMessage;
+							const message = failureMessage(model, error instanceof Error ? error.message : String(error), "error", now());
 							out.push({ type: "error", reason: "error", error: message } as AssistantMessageEvent);
 						});
 						return out;
@@ -74,6 +101,7 @@ export function createFailover(options: { now?: (() => number) | undefined; cool
 
 	async function run(models: Models, ownerId: string, model: any, rest: any[], call: (model: unknown, ...rest: unknown[]) => AsyncIterable<AssistantMessageEvent> & { result(): Promise<AssistantMessage> }, out: ReturnType<typeof createAssistantMessageEventStream>): Promise<void> {
 		const signal = (rest[1] as { signal?: AbortSignal } | undefined)?.signal;
+		await sync(ownerId);
 		const list = await candidates(models, ownerId, model);
 		for (let i = 0; i < list.length; i++) {
 			const current = list[i];
@@ -81,8 +109,28 @@ export function createFailover(options: { now?: (() => number) | undefined; cool
 			const held: AssistantMessageEvent[] = [];
 			let shown = false;
 			let failed: AssistantMessage | undefined;
-			const events = call(current, ...rest);
-			for await (const event of events) {
+			// The request is cut off when the caller stops it or the stream goes silent, even if the provider's own client ignores the signal: a hung stream must not hold a chat busy.
+			const inner = new AbortController();
+			const forward = () => inner.abort(signal?.reason);
+			if (signal?.aborted) forward();
+			else signal?.addEventListener("abort", forward, { once: true });
+			const events = call(current, rest[0], { ...(rest[1] as object | undefined), signal: inner.signal }, ...rest.slice(2));
+			const iterator = events[Symbol.asyncIterator]();
+			let stalled: AssistantMessage | undefined;
+			for (;;) {
+				let timer: ReturnType<typeof setTimeout> | undefined;
+				const cut = new Promise<"stalled" | "aborted">((resolve) => {
+					timer = setTimeout(() => resolve("stalled"), stallMs);
+					inner.signal.addEventListener("abort", () => resolve("aborted"), { once: true });
+				});
+				const next = await Promise.race([iterator.next(), cut]).finally(() => clearTimeout(timer));
+				if (next === "stalled" || next === "aborted") {
+					inner.abort(next === "stalled" ? new Error("The model stopped responding") : signal?.reason);
+					stalled = next === "stalled" ? failureMessage(current, `The model timed out: it sent nothing for ${Math.round(stallMs / 1000)} seconds`, "error", now()) : failureMessage(current, "Request was aborted", "aborted", now());
+					break;
+				}
+				if (next.done) break;
+				const event = next.value;
 				if (shown) {
 					out.push(event);
 					continue;
@@ -92,20 +140,29 @@ export function createFailover(options: { now?: (() => number) | undefined; cool
 					break;
 				}
 				held.push(event);
-				if (event.type !== "start") {
+				// What is shown stays final, so nothing before the first answer or tool call counts: the model's thinking is held too, and a request that fails during it goes to the next model.
+				if (!UNSHOWN.has(event.type)) {
 					shown = true;
 					for (const e of held) out.push(e);
 				}
 			}
+			signal?.removeEventListener("abort", forward);
+			if (stalled && !shown && !last && stalled.stopReason === "error") failed = stalled;
+			if (stalled && !failed) {
+				// Nothing more can be retried: content was shown, or the caller stopped the request. The chat ends with the error, not with a stream that never finishes.
+				if (!shown) for (const e of held) out.push(e);
+				out.push({ type: "error", reason: stalled.stopReason as "error" | "aborted", error: stalled } as AssistantMessageEvent);
+				return;
+			}
 			if (failed) {
-				until.set(refKey(ownerId, current.provider, current.id), now() + (failureKind(failed) === "auth" ? cooldowns.authMs : cooldowns.transientMs));
+				cool(ownerId, current, failureKind(failed) === "auth" ? cooldowns.authMs : cooldowns.transientMs, failed.errorMessage ?? "");
 				continue;
 			}
 			if (!shown) for (const e of held) out.push(e);
 			// A final failure of a model that was already tried still cools it for the next request.
 			const message = await events.result();
 			const kind = failureKind(message);
-			if (kind && !shown) until.set(refKey(ownerId, current.provider, current.id), now() + (kind === "auth" ? cooldowns.authMs : cooldowns.transientMs));
+			if (kind && !shown) cool(ownerId, current, kind === "auth" ? cooldowns.authMs : cooldowns.transientMs, message.errorMessage ?? "");
 			out.end(message);
 			return;
 		}

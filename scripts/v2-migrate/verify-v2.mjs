@@ -61,7 +61,31 @@ const ada = new Session(expect.tokens.ada);
 const bob = new Session(expect.tokens.bob);
 
 // ---- sign-in ----
-{
+// When the new stack's hostname is not the one the passkey was made for, the old passkey cannot sign in (a browser offers a passkey only to the host it was made for, and a
+// server given an assertion for the old host refuses it); what a person does is use a recovery code, which adds a passkey for the new host. Both are checked.
+const rpChanged = new URL(BASE).hostname !== expect.passkey.rpId;
+if (rpChanged) {
+	const anon = new Session(null);
+	const key = Passkey.from(expect.passkey);
+	const options = await anon.post("/auth/sign-in/options");
+	check("the new stack asks for its own host's passkeys, which the old passkey is not (a browser would not offer it)", options.json?.rpId === new URL(BASE).hostname && options.json.rpId !== expect.passkey.rpId, JSON.stringify(options.json));
+	const stale = await anon.post("/auth/sign-in", key.get({ challenge: options.json.challenge, rpId: expect.passkey.rpId }, BASE, Buffer.from(expect.accounts.ada.ownerId).toString("base64url")));
+	check("an assertion the old passkey makes for the old host is refused", stale.status >= 400 && !anon.cookie.includes("session"), `${stale.status} ${stale.raw.toString().slice(0, 120)}`);
+	const code = expect.recoveryCodes.codes[0];
+	const recover = new Session(null);
+	const asked = await recover.post("/auth/passkeys/options", { recovery: code, username: expect.recoveryCodes.username });
+	const fresh = Passkey.make();
+	const made = asked.status === 200 ? await recover.post("/auth/passkeys", fresh.create(asked.json, BASE, "New host")) : asked;
+	check("a recovery code and the username add a passkey for the new host and sign the person in", made.status === 200 && accountOf(await recover.get("/api/account"))?.ownerId === expect.accounts.ada.ownerId, `${asked.status} ${made.status} ${made.raw.toString().slice(0, 150)}`);
+	const again = await new Session(null).post("/auth/passkeys/options", { recovery: code, username: expect.recoveryCodes.username });
+	check("the recovery code works once", again.status >= 400, again.status);
+	const opts2 = await new Session(null).post("/auth/sign-in/options");
+	const session2 = new Session(null);
+	session2.cookie = "";
+	const o = await session2.post("/auth/sign-in/options");
+	const back = await session2.post("/auth/sign-in", fresh.get(o.json, BASE, Buffer.from(expect.accounts.ada.ownerId).toString("base64url")));
+	check("the new passkey signs in on later visits", back.status === 200 && opts2.status === 200, back.status);
+} else {
 	const anon = new Session(null);
 	const key = Passkey.from(expect.passkey);
 	const options = await anon.post("/auth/sign-in/options");
@@ -169,6 +193,36 @@ for (const p of expect.providers) {
 	check(`provider ${p.name} is ada's, with a key set and never returned`, found?.hasKey === true && !JSON.stringify(providers).includes(p.key), JSON.stringify(found));
 	check(`provider ${p.name} is not bob's`, !((await bob.get("/api/providers")).json?.providers ?? []).some((x) => x.id === p.id));
 }
+// ---- what the admin shared, and the credentials a space held ----
+{
+	const listed = (await bob.get("/api/templates")).json?.templates ?? [];
+	for (const t of expect.templates ?? []) {
+		const full = (await (t.owner === "ada" ? ada : bob).get(`/api/templates/${t.id}`)).json;
+		check(`${t.owner}'s template ${t.name} is in the gallery, with its instructions, and anyone signed in lists it`, listed.some((x) => x.id === t.id && x.name === t.name) && (full?.instructions ?? full?.template?.instructions) === t.instructions, JSON.stringify(full)?.slice(0, 200));
+	}
+	if (expect.defaultAgent) {
+		const chosen = (await ada.get("/api/admin/default-agent")).json?.agent;
+		check("the agent everyone starts with is the one the admin chose", JSON.stringify(chosen ?? null).includes(expect.templates.find((t) => t.agent === expect.defaultAgent.agent)?.name ?? "\0"), JSON.stringify(chosen));
+	}
+	for (const b of expect.bots ?? []) {
+		const bot = (await ada.get(`/api/agents/${b.agent}/bot`)).json;
+		check("the bot the admin shared keeps its link and limits", bot?.id === b.id && bot.dailyMessages === b.dailyMessages && bot.dailyToolCalls === b.dailyToolCalls, JSON.stringify(bot));
+	}
+	const model = (await ada.get("/api/model")).json;
+	if (expect.chatgpt) check("the ChatGPT sign-in came across: connected as the same account, with nobody signing in again", model?.chatgpt?.connected === true && model.chatgpt.email === expect.chatgpt.email && !JSON.stringify(model).includes(expect.chatgpt.access), JSON.stringify(model?.chatgpt));
+	for (const p of expect.sharedProviders ?? []) {
+		const bobModel = (await bob.get("/api/model")).json;
+		const offered = (m) => (m?.choices ?? []).some((c) => c.provider === `shared:${p.id}`);
+		check("the provider shared with everyone offers its models to ada and to bob, as the old Pim named it, and no response shows its key", offered(model) && offered(bobModel) && !JSON.stringify([model, bobModel]).includes(p.key), JSON.stringify(model?.choices)?.slice(0, 300));
+		const theirs = [...providers, ...((await bob.get("/api/providers")).json?.providers ?? [])];
+		check("a provider shared with everyone is the deployment's, not a copy in anyone's space", !theirs.some((x) => x.id === p.id || x.id === `shared:${p.id}`), JSON.stringify(theirs.map((x) => x.id)));
+	}
+	if (expect.mcp) {
+		const mine = ((await ada.get("/api/connectors")).json?.connectors ?? []).find((c) => c.id === expect.mcp.id);
+		check("the MCP server ada had connected is hers, connected, at its address, without its tokens ever shown", mine?.kind === "custom_mcp" && mine.url === expect.mcp.url && mine.status === "connected" && !JSON.stringify(mine).includes(expect.mcp.accessToken), JSON.stringify(mine));
+		check("the MCP server is not bob's", !((await bob.get("/api/connectors")).json?.connectors ?? []).some((c) => c.id === expect.mcp.id));
+	}
+}
 check("the circle Family has bob in it", ((await ada.get("/api/circles")).json?.circles ?? []).some((c) => c.name === "Family" && c.members.includes(expect.accounts.bob.ownerId)));
 check("the profile is kept", (await ada.get("/api/profile")).json?.displayName === "Ada L.");
 
@@ -188,10 +242,14 @@ if (!values["no-run"]) {
 			}
 			const request = JSON.parse(body || "{}");
 			const afterTool = request.messages?.at(-1)?.role === "tool";
+			const lastUser = JSON.stringify([...(request.messages ?? [])].reverse().find((m) => m.role === "user")?.content ?? "");
 			res.writeHead(200, { "content-type": "text/event-stream" });
 			const chunk = (delta, finish = null, usage) => res.write(`data: ${JSON.stringify({ id: "c1", object: "chat.completion.chunk", created: 1, model: "rehearsal-model", choices: [{ index: 0, delta, finish_reason: finish }], ...(usage ? { usage } : {}) })}\n\n`);
 			if (afterTool) chunk({ role: "assistant", content: "Done." }, "stop", { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 });
-			else {
+			else if (lastUser.includes("MCPCHECK")) {
+				chunk({ role: "assistant", tool_calls: [{ index: 0, id: "call_mcp", type: "function", function: { name: "connector_call", arguments: JSON.stringify({ connector: expect.mcp.id, tool: "echo", arguments: { text: "hello from the rehearsal" } }) } }] });
+				chunk({}, "tool_calls", { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 });
+			} else {
 				chunk({ role: "assistant", tool_calls: [{ index: 0, id: "call_rehearsal", type: "function", function: { name: "send_to_user", arguments: JSON.stringify({ message: "pong from the imported provider" }) } }] });
 				chunk({}, "tool_calls", { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 });
 			}
@@ -199,6 +257,34 @@ if (!values["no-run"]) {
 		});
 	});
 	await new Promise((resolve, reject) => fake.once("error", reject).listen(port, values["provider-host"], resolve));
+	// The MCP server ada had connected: a stand-in that accepts only the access token that was imported.
+	const mcpSeen = [];
+	const mcp = expect.mcp
+		? createServer((req, res) => {
+				let body = "";
+				req.on("data", (d) => (body += d));
+				req.on("end", () => {
+					const message = body ? JSON.parse(body) : {};
+					if (req.headers.authorization !== `Bearer ${expect.mcp.accessToken}`) {
+						res.writeHead(401);
+						return res.end();
+					}
+					if (message.method === "tools/call") mcpSeen.push({ tool: message.params.name, arguments: message.params.arguments });
+					if (message.id === undefined) {
+						res.writeHead(req.method === "DELETE" ? 200 : 202);
+						return res.end();
+					}
+					const results = {
+						initialize: { protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "rehearsal-notes", version: "1" } },
+						"tools/list": { tools: [{ name: "echo", description: "Echoes its text", inputSchema: { type: "object", properties: { text: { type: "string" } } }, annotations: { readOnlyHint: true } }] },
+						"tools/call": { content: [{ type: "text", text: `MCPECHO ${message.params?.arguments?.text}` }] },
+					};
+					res.writeHead(200, { "content-type": "application/json", "mcp-session-id": "rehearsal" });
+					res.end(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: results[message.method] ?? {} }));
+				});
+			})
+		: null;
+	if (mcp) await new Promise((resolve, reject) => mcp.once("error", reject).listen(expect.mcp.port, values["provider-host"], resolve));
 	try {
 		for (const role of ["root", "mid-tool"]) {
 			const chat = expect.chats.find((c) => c.owner === "ada" && c.role === role).id;
@@ -211,10 +297,39 @@ if (!values["no-run"]) {
 			}
 			check(`a new message in the imported ${role} chat is answered${role === "mid-tool" ? ", though its tool call was cut off and is never replayed" : ""}`, sent.status < 300 && answered, `${sent.status}; calls ${JSON.stringify(seen.slice(-2))}`);
 		}
+		if (expect.mcp) {
+			const id = expect.mcp.id;
+			const discovered = await ada.post(`/api/connectors/${id}/discover`);
+			check("the imported MCP credential lists the server's tools (the server accepted the imported access token)", discovered.status === 200 && discovered.json?.discovered === 1, `${discovered.status} ${discovered.raw.toString().slice(0, 200)}`);
+			await ada.call("PUT", `/api/connectors/${id}/tools`, { tools: ["echo"] });
+			const chat = expect.chats.find((c) => c.owner === "ada" && c.role === "root").id;
+			const before = (await ada.transcript(chat)).length;
+			await ada.post(`/api/sessions/${chat}/messages`, { commandId: randomUUID(), text: "MCPCHECK call the notes server" });
+			let called = false;
+			for (let i = 0; i < Number(values["run-timeout"]) * 2 && !called; i++) {
+				await new Promise((r) => setTimeout(r, 500));
+				called = ((await ada.transcript(chat)) ?? []).slice(before).some((m) => JSON.stringify(m).includes("MCPECHO hello from the rehearsal"));
+			}
+			check("an agent calls the imported MCP server's tool with the imported token, and reads its answer", called && mcpSeen.some((c) => c.tool === "echo" && c.arguments?.text === "hello from the rehearsal"), JSON.stringify(mcpSeen));
+		}
+		for (const p of expect.sharedProviders ?? []) {
+			const made = await ada.post("/api/agents", { name: "Shared check", instructions: "Answer.", model: { provider: `shared:${p.id}`, id: "rehearsal-model" } });
+			const agent = made.json?.agent?.id ?? made.json?.id;
+			const chat = (await ada.post("/api/sessions", { title: "Shared provider check", agentId: agent })).json?.id;
+			const mark = seen.length;
+			await ada.post(`/api/sessions/${chat}/messages`, { commandId: randomUUID(), text: "ping the shared provider" });
+			let answered = false;
+			for (let i = 0; i < Number(values["run-timeout"]) * 2 && !answered; i++) {
+				await new Promise((r) => setTimeout(r, 500));
+				answered = ((await ada.transcript(chat)) ?? []).some((m) => JSON.stringify(m).includes("pong from the imported provider"));
+			}
+			check("a chat on a model of the provider shared with everyone is answered with the deployment's key for it", answered && seen.slice(mark).some((c) => c.authorization === `Bearer ${p.key}`), `${made.status} ${JSON.stringify(seen.slice(mark))}`);
+		}
 		check("the model call used the imported API key", seen.some((s) => s.authorization === `Bearer ${expect.providers[0].key}`), JSON.stringify(seen));
 		const replayed = ((await ada.transcript(expect.chats.find((c) => c.role === "mid-tool").id)) ?? []).filter((m) => JSON.stringify(m).includes("example.com") && m.role === "tool");
 		check("the cut-off http_request did not run again", replayed.every((m) => !JSON.stringify(m).includes("Example Domain")), JSON.stringify(replayed).slice(0, 200));
 	} finally {
+		if (mcp) await new Promise((r) => mcp.close(r));
 		await new Promise((r) => fake.close(r));
 	}
 }
@@ -232,6 +347,15 @@ if (values["database-url"]) {
 		check("bob's settings are bob's own, and nothing he never set is an override", bobSettings.length === 1 && bobSettings[0] === "settings.timeZone", JSON.stringify(bobSettings));
 		const clear = (await q("SELECT count(*)::int n FROM pim_ops.legacy_rows WHERE row::text LIKE $1", [`%${expect.providers[0].key}%`]))[0].n + (await q("SELECT count(*)::int n FROM pim_app.providers WHERE secret LIKE $1 OR config::text LIKE $1", [`%${expect.providers[0].key}%`]))[0].n;
 		check("the provider key is in no table in clear", clear === 0, clear);
+		// Every credential this rehearsal planted, in no table in clear, and sealed where the new stack can use it.
+		const planted = [expect.chatgpt?.access, expect.chatgpt?.refresh, expect.mcp?.accessToken, expect.mcp?.refreshToken, ...(expect.sharedProviders ?? []).map((p) => p.key)].filter(Boolean);
+		for (const needle of planted) {
+			const where = (await q("SELECT 'legacy_rows' t FROM pim_ops.legacy_rows WHERE row::text LIKE $1 UNION ALL SELECT 'secrets' FROM pim_ops.secret_envelopes WHERE envelope::text LIKE $1 UNION ALL SELECT 'app' FROM (SELECT secret t FROM pim_app.providers UNION ALL SELECT config::text FROM pim_app.providers UNION ALL SELECT credential FROM pim_app.connectors UNION ALL SELECT secret FROM pim_app.instance_providers UNION ALL SELECT config::text FROM pim_app.instance_providers UNION ALL SELECT secret FROM pim_app.chatgpt_credentials) x WHERE t LIKE $1", [`%${needle}%`])).map((r) => r.t);
+			check(`${needle.slice(0, 18)}… is in no table in clear`, where.length === 0, where.join(","));
+		}
+		if (expect.chatgpt) check("the ChatGPT credential is sealed in the application's own table", (await q("SELECT count(*)::int n FROM pim_app.chatgpt_credentials WHERE owner_id = $1 AND secret IS NOT NULL", [expect.accounts.ada.ownerId]))[0].n === 1);
+		if (expect.mcp) check("the MCP tokens are sealed on the connector", (await q("SELECT count(*)::int n FROM pim_app.connectors WHERE owner_id = $1 AND id = $2 AND credential IS NOT NULL", [expect.accounts.ada.ownerId, expect.mcp.id]))[0].n === 1);
+		for (const p of expect.sharedProviders ?? []) check("the shared provider is one deployment-level row with its key sealed", (await q("SELECT count(*)::int n FROM pim_app.instance_providers WHERE id = $1 AND secret IS NOT NULL", [p.id]))[0].n === 1);
 		const held = (await q("SELECT count(*)::int n FROM pim_ops.external_operations WHERE status = 'needs_reconciliation' AND kind IN ('approval') AND owner_id = $1", [expect.accounts.ada.ownerId]))[0].n;
 		check("the approval that was pending at the fence is kept as an operation to reconcile, not run", held >= 1, held);
 	} finally {

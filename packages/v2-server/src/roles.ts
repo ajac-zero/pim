@@ -6,6 +6,8 @@ import { createModels } from "@earendil-works/pi-ai";
 import { createRegistry, type HarnessOptions } from "@earendil-works/pi-durable";
 import type { ProcessConfig } from "@pim/v2-contracts/platform";
 import { App } from "@pim/v2-app/app";
+import { startMemoryNap } from "./memory-nap.ts";
+import { installRooms } from "./rooms.ts";
 import { OPENAI_ENDPOINTS } from "@pim/v2-app/chatgpt";
 import { KeyringCrypto } from "@pim/v2-app/crypto";
 import { connect as connectApp } from "@pim/v2-app/db";
@@ -31,14 +33,19 @@ import { deliverForgeWakes } from "./forge-wakes.ts";
 import { codingAdminRoutes, forgeAuthenticator, forgeRoutes, projectedTranscripts, snapshotRoutes } from "./gate-extras.ts";
 import { mcpFetchTools } from "./connector-tools.ts";
 import { publicUrl } from "./agent-tools.ts";
+import { renewDue } from "./watches.ts";
 import type { Host } from "./host.ts";
 import { AppLiveIdentity, deliverApprovalDecisions, LiveAuthorizer, mirrorCodingGrants, publishRevocations } from "./identity.ts";
 import { runtimeOutboxSource } from "./runtime-source.ts";
 import { natsRelayBus } from "./relay-bus.ts";
+import { notifyPass } from "./notifier.ts";
+import { vapidFromEnv } from "./push.ts";
+import { startApprovalReviews } from "./approval-review.ts";
 import { sweepApprovals, sweepErasures, tickSchedules, tickTriggers, trimForgeOutbox } from "./sweeps.ts";
 import { webAssets } from "./web-assets.ts";
 import { poolRoutes } from "./compat/admin.ts";
 import { webCompatRoutes } from "./compat/index.ts";
+import { gateBefore, limitGuestMessages } from "./limits.ts";
 
 export type Env = Record<string, string | undefined>;
 export type Hooks = {
@@ -93,11 +100,13 @@ export async function startGate(config: ProcessConfig, env: Env, host: Host, nat
 	instrumentPool(db.pool, metrics, "gate");
 	const objects = s3Of(config, env);
 	const crypto = keyringFromProcessEnv(env);
-	const app = new App(db, objects, { fetchTools: mcpFetchTools({ fetch, allowPrivate: env.PIM_CONNECTOR_ALLOW_PRIVATE === "1", check: publicUrl }), ...(crypto ? { crypto } : {}), ...(env.PIM_APP_SECRET_KEY ? { appKey: env.PIM_APP_SECRET_KEY } : {}), transcripts: projectedTranscripts(db.pool), ...(chatgptFromEnv(env) ? { chatgpt: chatgptFromEnv(env)! } : {}), env }).limitSpaces();
+	const app = new App(db, objects, { fetchTools: mcpFetchTools({ fetch, allowPrivate: env.PIM_CONNECTOR_ALLOW_PRIVATE === "1", check: publicUrl }), ...(crypto ? { crypto } : {}), ...(env.PIM_APP_SECRET_KEY ? { appKey: env.PIM_APP_SECRET_KEY } : {}), transcripts: projectedTranscripts(db.pool), ...(chatgptFromEnv(env) ? { chatgpt: chatgptFromEnv(env)! } : {}), allowHttpConnectors: env.PIM_CONNECTOR_ALLOW_PRIVATE === "1", env }).limitSpaces();
+	installRooms(app);
 	if (nats) publishRevocations(app, nats);
 	// A computer paired to another process (the `relay` container, another Gate) is reached over NATS.
 	if (nats) app.relay.useBus(natsRelayBus(nats));
 	deliverApprovalDecisions(app);
+	limitGuestMessages(app);
 	const secure = config.publicUrl.startsWith("https:");
 	const forge = assembleForge(db.pool as never, objects, env, crypto, { scoped: true });
 	mirrorCodingGrants(app, forge.authz as never);
@@ -106,7 +115,7 @@ export async function startGate(config: ProcessConfig, env: Env, host: Host, nat
 	const coding = forgeHttp(forge, { authenticate, crypto: app.crypto });
 	const options = { publicUrl: config.publicUrl, ...(env.PIM_APPS_ORIGIN ? { appsOrigin: env.PIM_APPS_ORIGIN } : {}), routes: [...snapshotRoutes(db.pool), ...codingAdminRoutes(), ...poolRoutes(coding), ...forgeRoutes(coding)],
 		// The web app's v1 API over v2's services (packages/v2-server/src/compat/), tried before the built-in routes so its shapes win.
-		first: [...webCompatRoutes] };
+		first: [...webCompatRoutes], before: gateBefore(app, env) };
 	const gate = createGate(app, options);
 	const listener = gate.listeners("request")[0] as (req: never, res: never) => void;
 	const web = webAssets(env.PIM_WEB_DIR);
@@ -215,15 +224,21 @@ export async function startRunner(config: ProcessConfig, env: Env, host: Host, h
 	// The computer's tools reach a paired computer over the Relay's bus (NATS). The connection is made when an agent first uses one, so a Runner that never does needs no NATS.
 	let relayPulse: Promise<NatsPulse> | undefined;
 	const relayBus = async () => natsRelayBus(await (relayPulse ??= NatsPulse.connect(config.natsUrl)));
-	const host_ = hooks.harnessOptions ? undefined : createAgentHost({ db, env, crypto, app, forge, relay: relayBus, providers: hooks.providers, fetch: hooks.fetch, ...(chatgptFromEnv(env) ? { chatgpt: { ...chatgptFromEnv(env), ...(env.PIM_CHATGPT_BASE_URL ? { baseUrl: env.PIM_CHATGPT_BASE_URL } : {}) } } : {}), ...(env.PIM_PROVIDER_COOLDOWN_MS ? { cooldowns: { transientMs: Number(env.PIM_PROVIDER_COOLDOWN_MS) } } : {}) });
+	const host_ = hooks.harnessOptions ? undefined : createAgentHost({ db, env, crypto, app, forge, relay: relayBus, providers: hooks.providers, fetch: hooks.fetch, ...(chatgptFromEnv(env) ? { chatgpt: { ...chatgptFromEnv(env), ...(env.PIM_CHATGPT_BASE_URL ? { baseUrl: env.PIM_CHATGPT_BASE_URL } : {}) } } : {}), ...(env.PIM_PROVIDER_COOLDOWN_MS ? { cooldowns: { transientMs: Number(env.PIM_PROVIDER_COOLDOWN_MS) } } : {}), stallMs: { ...(env.PIM_MODEL_STALL_MS ? { stream: Number(env.PIM_MODEL_STALL_MS) } : {}), ...(env.PIM_TOOL_TIMEOUT_MS ? { tool: Number(env.PIM_TOOL_TIMEOUT_MS) } : {}) } });
+	// While nobody is in a chat, what was said in it is kept as a memory (`./memory-nap.ts`); it needs the host's model catalog and the application's services.
+	const stopNap = host_ && app ? startMemoryNap({ pool: runtimePool, db, app, complete: host_.complete, env, onError: (error) => console.error("memory nap", error) }) : undefined;
 	const runner = new Runner({
 		db,
 		harnessOptions: hooks.harnessOptions ?? host_!.harnessOptions,
 		...(hooks.homeRoot ?? host_?.homeRoot ? { homeRoot: (hooks.homeRoot ?? host_!.homeRoot)! } : {}),
 		...(hooks.chatAgent ?? host_?.chatAgent ? { chatAgent: (hooks.chatAgent ?? host_!.chatAgent)! } : {}),
 		steward: { holderId },
+		// The run watchdog and how long a stop waits before recycling the partition (`PIM_RUN_STALL_MS`, 0 turns the watchdog off; `PIM_STOP_GRACE_MS`).
+		...(env.PIM_RUN_STALL_MS ? { stallMs: Number(env.PIM_RUN_STALL_MS) } : {}),
+		...(env.PIM_STOP_GRACE_MS ? { abortGraceMs: Number(env.PIM_STOP_GRACE_MS) } : {}),
 		...(hooks.pollMs ? { pollMs: hooks.pollMs } : {}),
 		onEvent: (e) => {
+			if (e.type === "stalled") console.error("runner", `stopped a stalled run in chat ${e.conversationId} of ${e.ownerId}${e.recycled ? " and recycled its partition" : ""}`);
 			if (e.type === "fenced") metrics.fencingRejects.inc({ service: "runner", kind: "lease" });
 			if (e.type === "released" || e.type === "drained") metrics.ownershipTransfers.inc({ service: "runner", reason: e.type === "drained" ? "drained" : "released" });
 		},
@@ -231,6 +246,8 @@ export async function startRunner(config: ProcessConfig, env: Env, host: Host, h
 	});
 	const relay = new CommandRelay({ pool: runtimePool, db, inbox: runner.inbox, directory: runner.directory, holder: holderId, onError: (e) => console.error("relay", e) });
 	metrics.leasesHeld.collect(() => metrics.leasesHeld.set(runner.residents.length, { service: "runner" }));
+	// The majordomo reviews approvals for people whose policy says so; it needs the application's services and the person's models.
+	const reviews = host_ && app ? startApprovalReviews({ pool: runtimePool, app, host: host_, defaultPolicy: env.PIM_APPROVAL_POLICY ?? "explicit", onError: (e) => console.error("approval review", e) }) : undefined;
 	let started = false;
 	let stopped = false;
 	const tryStart = async () => {
@@ -255,6 +272,8 @@ export async function startRunner(config: ProcessConfig, env: Env, host: Host, h
 			stopped = true;
 			clearInterval(retry);
 			relay.stop();
+			await reviews?.stop();
+			await stopNap?.();
 			await runner.stop();
 			await runtimePool.end();
 			await appDb?.end();
@@ -297,7 +316,15 @@ export async function startMaintenance(config: ProcessConfig, env: Env, host: Ho
 	let lastTriggers = 0;
 	const { App } = await import("@pim/v2-app/app");
 	const sweeper = new App(app, objects, { env }).limitSpaces();
+	const notifier = { vapid: vapidFromEnv(env), subject: env.PIM_VAPID_SUBJECT || config.publicUrl, allowPrivate: env.PIM_PUSH_ALLOW_PRIVATE === "1" };
+	const keys = keyringFromProcessEnv(env);
+	let lastRenewal = 0;
 	const pass = async () => {
+		// Watches' grants that are running out are asked for again (`watches.ts`), once a minute.
+		if (keys && Date.now() - lastRenewal > 60_000) {
+			lastRenewal = Date.now();
+			await renewDue({ app: new App(app, objects, { crypto: keys }), crypto: keys, transport: { fetch, allowPrivate: env.PIM_CONNECTOR_ALLOW_PRIVATE === "1", check: publicUrl }, publicUrl: env.PIM_PUBLIC_URL, now: Date.now }, maint).catch((e) => console.error("watch renewal", e));
+		}
 		await sweepApprovals(sweeper, maint).catch((e) => console.error("approval sweep", e));
 		// Schedules and time triggers fire from here: a schedule's due time is looked up every pass, the triggers' every few seconds.
 		await tickSchedules(sweeper).catch((e) => console.error("schedule sweep", e));
@@ -312,6 +339,7 @@ export async function startMaintenance(config: ProcessConfig, env: Env, host: Ho
 		}
 		await deliverForgeWakes({ forge: parts.forge, forgeDb: maint as never, runtime, inbox, onUnroutable: (id, why) => console.warn("wake dropped", id, why) });
 		await deliverCosts({ forge: parts.forge, forgeDb: maint as never, usage, onUnroutable: (id, why) => console.warn("cost dropped", id, why) });
+		await notifyPass(sweeper, maint, notifier).catch((e) => console.error("notifications", e));
 	};
 	let running = true;
 	let active: Promise<void> | undefined;

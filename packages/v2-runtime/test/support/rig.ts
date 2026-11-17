@@ -34,13 +34,14 @@ export async function waitFor<T>(what: string, check: () => Promise<T | undefine
  * decision has been recorded for its task, which is how Pim holds a tool call for an approval.
  */
 export function createRig(db: Db, ownerId: string) {
-	const faux = fauxProvider({ provider: "faux", models: [{ id: "m" }] });
+	const faux = fauxProvider({ provider: "faux", models: [{ id: "m" }, { id: "m2" }] });
 	const models = createModels();
 	models.setProvider(faux.provider);
 	const state = {
 		gateRuns: [] as number[],
 		gateLatch: undefined as ReturnType<typeof latch> | undefined,
 		streamAborted: false,
+		hangs: 0,
 	};
 	const decided = async (taskId: number): Promise<boolean> => {
 		const rows = await db.read(ownerId, "SELECT 1 FROM pim_runtime.durable_signals WHERE owner_id = $1 AND task_id = $2", [ownerId, taskId]);
@@ -64,8 +65,20 @@ export function createRig(db: Db, ownerId: string) {
 			return { content: [{ type: "text", text: "approved" }] };
 		},
 	});
+	// A tool that never returns and ignores its abort signal, as a hung connection or a stuck process does.
+	const hang = defineTool({
+		name: "hang",
+		description: "Never returns",
+		parameters: Type.Object({}),
+		replay: "safe",
+		execute: async () => {
+			state.hangs++;
+			await new Promise(() => {});
+			return { content: [] };
+		},
+	});
 	const registry = createRegistry();
-	registry.install(defineExtension({ name: "gate", tools: [gate] }));
+	registry.install(defineExtension({ name: "gate", tools: [gate, hang] }));
 	const settings: { retry: { enabled: boolean; maxRetries: number; baseDelayMs: number } } = { retry: { enabled: false, maxRetries: 0, baseDelayMs: 1_000 } };
 	const harnessOptions = (): HarnessOptions => ({ models, registry, settings });
 	const agent = { model: { provider: "faux", modelId: "m" } };

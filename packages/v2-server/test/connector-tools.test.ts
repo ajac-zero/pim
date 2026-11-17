@@ -8,6 +8,7 @@ import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-work
 import { App } from "@pim/v2-app/app";
 import { connect as connectApp } from "@pim/v2-app/db";
 import { MemoryObjectStore } from "@pim/v2-app/objects";
+import { discoverTokenEndpoint, type Transport } from "../src/connector-tools.ts";
 import type { Process } from "../src/main.ts";
 import { readTranscript, waitFor } from "../../v2-runtime/test/support/rig.ts";
 import { Client } from "./support/client.ts";
@@ -192,5 +193,37 @@ real("connector tools", () => {
 		expect(bare).toMatchObject({ state: "failed" });
 		expect((await web.call("DELETE", `/api/mcp/${bare.id}`)).json).toEqual({ deleted: true });
 		expect((await web.call("GET", "/api/connections")).json).toEqual({ connections: [] });
+	});
+});
+
+describe("finding a server's token endpoint", () => {
+	/** A transport that answers from a table of documents, refusing private addresses as the deployment's does. */
+	const transportOf = (documents: Record<string, unknown>, asked: string[] = []): Transport => ({
+		allowPrivate: false,
+		check: async (url) => {
+			if (new URL(url).hostname === "10.0.0.5") throw new Error("private");
+			return new URL(url);
+		},
+		fetch: (async (url: URL | string) => {
+			asked.push(String(url));
+			const found = documents[String(url)];
+			return found === undefined ? new Response("", { status: 404 }) : Response.json(found);
+		}) as typeof fetch,
+	});
+
+	it("follows the protected resource to its authorization server, as the MCP specification says", async () => {
+		const transport = transportOf({
+			"https://mcp.example.test/.well-known/oauth-protected-resource/v1/mcp": { authorization_servers: ["https://auth.example.test/tenant"] },
+			"https://auth.example.test/.well-known/oauth-authorization-server/tenant": { token_endpoint: "https://auth.example.test/tenant/token" },
+		});
+		expect(await discoverTokenEndpoint("https://mcp.example.test/v1/mcp", transport)).toBe("https://auth.example.test/tenant/token");
+	});
+
+	it("falls back to the server's own origin, and refuses an authorization server on a private address", async () => {
+		expect(await discoverTokenEndpoint("https://mcp.example.test/mcp", transportOf({ "https://mcp.example.test/.well-known/oauth-authorization-server": { token_endpoint: "https://mcp.example.test/token" } }))).toBe("https://mcp.example.test/token");
+		const asked: string[] = [];
+		const hostile = transportOf({ "https://mcp.example.test/.well-known/oauth-protected-resource": { authorization_servers: ["http://10.0.0.5/"] } }, asked);
+		expect(await discoverTokenEndpoint("https://mcp.example.test/mcp", hostile)).toBeNull();
+		expect(asked.some((u) => u.includes("10.0.0.5"))).toBe(false);
 	});
 });

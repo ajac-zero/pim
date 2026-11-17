@@ -8,7 +8,9 @@ import type { App } from "@pim/v2-app/app";
 import { bearerOf, ok, type Reply, type Route } from "@pim/v2-app/http";
 import { principalId } from "@pim/v2-app/authz";
 import type { TranscriptSource } from "@pim/v2-app/sharing";
+import { roomViews } from "./rooms.ts";
 import { MAX_PAGE, sidebarPage, transcriptPage } from "@pim/v2-live/projections/snapshots";
+import { titleChat } from "./compat/utility.ts";
 import type { Authenticate, Caller, Handler } from "@pim/v2-forge/http/common";
 import type { Pool } from "pg";
 
@@ -29,6 +31,12 @@ export function projectedTranscripts(pool: Pool): TranscriptSource {
 	};
 }
 
+/** A chat's own model as the app's `Session.model`; the app finds the rest of it (name, images) among the choices. */
+const chosenModel = (m: { provider: string; id: string }) => ({ model: { provider: m.provider, id: m.id, name: m.id, images: false }, override: true });
+
+/** When each untitled chat was last offered to the utility model. */
+const titleTried = new Map<string, number>();
+
 /** `GET /api/snapshot/sidebar`, `/api/snapshot/chat/:id` and `/api/snapshot/coding/:id`: bounded, paginated, read as the caller. */
 export function snapshotRoutes(pool: Pool): Route[] {
 	const limit = (url: URL) => (url.searchParams.has("limit") ? Number(url.searchParams.get("limit")) : undefined);
@@ -40,9 +48,45 @@ export function snapshotRoutes(pool: Pool): Route[] {
 				const p = await principal();
 				await app.identity.authz.enforce(p, "api:read");
 				const page = await sidebarPage(pool, p.ownerId, { after: url.searchParams.get("after"), ...(limit(url) === undefined ? {} : { limit: limit(url)! }) });
-				// What the person renamed or deleted is kept on the chat itself; the projection learns of it only from the runtime.
-				const kept = new Map((await app.db.owner(p.ownerId, async (tx) => (await tx.query("SELECT public_chat_id::text AS id, title, deleted_at FROM pim_app.conversations WHERE public_chat_id::text = ANY($1)", [page.sessions.map((s) => s.chatId)])).rows)).map((r) => [r.id as string, r]));
-				return ok({ ...page, sessions: page.sessions.filter((s) => !kept.get(s.chatId)?.deleted_at).map((s) => ({ ...s, title: kept.get(s.chatId)?.title ?? s.title })) });
+				// What the person renamed, deleted or has read is kept on the chat itself; the projection learns of it only from the runtime. The chat's agent (its
+				// majordomo when it has none of its own), its own model and when it began are in the application's table too, and ride in the row's summary,
+				// where the app reads them from.
+				const chats = (where: string, params: unknown[]) =>
+					app.db.owner(p.ownerId, async (tx) => (await tx.query(
+						`SELECT c.public_chat_id::text AS id, c.title, c.deleted_at, c.room_of IS NOT NULL AS seat, (c.response_at IS NOT NULL AND (c.read_at IS NULL OR c.read_at < c.response_at)) AS unread, c.model, c.created_at, c.updated_at, c.response_at, a.id AS agent_id, a.name AS agent_name
+						 FROM pim_app.conversations c LEFT JOIN pim_app.agents a ON a.id = coalesce(c.agent_id, (SELECT value #>> '{}' FROM pim_app.owner_settings WHERE key = 'majordomo')) AND a.deleted_at IS NULL
+						 WHERE ${where}`, params)).rows);
+				const summaryOf = (r: any, own: unknown) => ({
+					...(own as Record<string, unknown> | null),
+					createdAt: new Date(r.created_at).getTime(),
+					...(r.response_at ? { responseAt: new Date(r.response_at).getTime() } : {}),
+					...(r.agent_id ? { agent: { id: r.agent_id, name: r.agent_name } } : {}),
+					...(r.model ? { model: chosenModel(r.model) } : {}),
+				});
+				const kept = new Map((await chats("c.public_chat_id::text = ANY($1)", [page.sessions.map((s) => s.chatId)])).map((r) => [r.id as string, r]));
+				// A room member's seat is not a chat the person opens; a room's members ride in the host chat's summary.
+				const rooms = await roomViews(app, p.ownerId, page.sessions.map((s) => s.chatId));
+				const sessions = page.sessions.filter((s) => !kept.get(s.chatId)?.deleted_at && !kept.get(s.chatId)?.seat).map((s) => {
+					const row = kept.get(s.chatId);
+					const summary = row ? summaryOf(row, s.summary) : s.summary;
+					return { ...s, title: row?.title ?? s.title, unread: row?.unread ?? s.unread, ...(row || rooms.has(s.chatId) ? { summary: { ...((summary as object | null) ?? {}), ...(rooms.has(s.chatId) ? { room: rooms.get(s.chatId) } : {}) } } : {}) };
+				});
+				// The projection learns of a chat only when the Runner first commits to it, a moment after the chat is made. Until then a new chat
+				// (the majordomo's welcome chat, right after the first passkey) is listed from the application's own table, so the page opening it finds it.
+				if (!url.searchParams.has("after")) {
+					const known = new Set(sessions.map((s) => s.chatId));
+					const fresh = await chats("c.deleted_at IS NULL AND c.archived_at IS NULL AND c.room_of IS NULL AND c.kind IN ('normal','group') AND c.created_at > now() - interval '10 minutes' ORDER BY c.updated_at DESC LIMIT 20", []);
+					for (const r of fresh) if (!known.has(r.id) && !kept.has(r.id)) sessions.unshift({ chatId: r.id, title: r.title, busy: true, unread: false, stalled: false, updatedAt: new Date(r.updated_at).getTime(), summary: summaryOf(r, null) } as (typeof sessions)[number]);
+				}
+				// A chat with no title is named by the utility model once its first answer is in (nothing happens with no utility model); one attempt a
+				// minute per chat, and only one chat per request, so the sidebar is never held for long.
+				const untitled = page.sessions.find((s) => !s.busy && kept.get(s.chatId) && !kept.get(s.chatId)!.title && !kept.get(s.chatId)!.deleted_at && (titleTried.get(s.chatId) ?? 0) < Date.now() - 60_000);
+				if (untitled) {
+					titleTried.set(untitled.chatId, Date.now());
+					const title = await Promise.race([titleChat(app, process.env, p, untitled.chatId).catch(() => null), new Promise<null>((resolve) => setTimeout(() => resolve(null), 8000))]);
+					if (title) for (const s of sessions) if (s.chatId === untitled.chatId) s.title = title;
+				}
+				return ok({ ...page, sessions });
 			},
 		},
 		{

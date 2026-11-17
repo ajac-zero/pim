@@ -3,14 +3,17 @@
  * ```ui block of one of its messages holds, and renaming or deleting it. Everything is read and written as the signed-in owner, through the
  * application's tables, so row-level security decides what a person can reach.
  *
- * Not here, because they need something this Pim does not run yet: the utility-model side jobs (suggestions, a regenerated title, an improved
- * prompt) and changing the queue behind a running turn, which lives in the runtime's inbox, not in the application's tables.
+ * The utility model's side jobs (a title, a summary, an improved prompt, suggestions) are in ./utility.ts and are off until one is chosen. Not here:
+ * changing the queue behind a running turn, which lives in the runtime's inbox, not in the application's tables.
  */
+import { randomUUID } from "node:crypto";
 import type { App } from "@pim/v2-app/app";
+import { addRoomMember, removeRoomMember, roomViews } from "../rooms.ts";
 import { BadRequestError, CapabilityUnavailableError, ConflictError, NotFoundError } from "@pim/v2-app/errors";
 import { ok, type Route, route } from "@pim/v2-app/http";
 import type { Principal } from "@pim/v2-contracts/identity";
 import { transcriptPage } from "@pim/v2-live/projections/snapshots";
+import { chatConversation, IMPROVE_PROMPT, runUtility, SUGGEST_PROMPTS, suggestionsIn, SUMMARIZE_CHAT, titleChat } from "./utility.ts";
 
 const ms = (value: Date | string | null | undefined): number | null => (value ? new Date(value).getTime() : null);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -39,22 +42,7 @@ async function sessionView(app: App, p: Principal, id: string) {
 
 /** The group chat's room: how its agents take turns and who besides its host is in it; null for a chat with one agent. */
 async function roomView(app: App, p: Principal, id: string) {
-	return app.db.owner(p.ownerId, async (tx) => {
-		const chat = (await tx.query("SELECT room_mode FROM pim_app.conversations WHERE public_chat_id = $1 AND deleted_at IS NULL", [id])).rows[0];
-		if (!chat) throw new NotFoundError("No such chat");
-		const members = (await tx.query(
-			"SELECT m.member, a.name, a.model, a.config FROM pim_app.room_members m LEFT JOIN pim_app.agents a ON a.id = m.member AND a.deleted_at IS NULL WHERE m.public_chat_id = $1 ORDER BY m.member",
-			[id],
-		)).rows;
-		if (members.length === 0) return null;
-		return {
-			mode: chat.room_mode === "open" ? "open" : "mentions",
-			members: members.map((m) => {
-				const model = (m.config?.model as { provider: string; id: string } | undefined) ?? { provider: "", id: m.model ?? "" };
-				return { id: m.member as string, name: (m.name as string | null) ?? m.member, busy: false, held: false, error: null, model: { model: { provider: model.provider, id: model.id, name: model.id || "Default model", images: false }, override: false } };
-			}),
-		};
-	});
+	return (await roomViews(app, p.ownerId, [id])).get(id) ?? null;
 }
 
 /** A task as the app's `AgentTask`: who handed it out, who has it, and how it stands. */
@@ -74,7 +62,10 @@ const taskView = (r: any) => ({
 const FAMILY = `WITH RECURSIVE family(chat) AS (
 	SELECT $1::uuid UNION SELECT t.task_chat FROM pim_app.tasks t JOIN family f ON t.started_by = f.chat WHERE t.task_chat IS NOT NULL)`;
 
-export function sessionRoutes(): Route[] {
+/** How long each chat's conversation was when its summary was last written, so a summary is written again only when more has been said. */
+const summarized = new Map<string, number>();
+
+export function sessionRoutes(env: Record<string, string | undefined> = process.env): Route[] {
 	const gone = () => {
 		throw new ConflictError("That message is no longer in the queue", "not_queued");
 	};
@@ -126,22 +117,49 @@ export function sessionRoutes(): Route[] {
 			const models = rows.map((r) => ({ provider: r.provider as string, model: r.model as string, input: Number(r.input), output: Number(r.output), cacheRead: 0, cacheWrite: 0, cost: Number(r.cost) / 1e6 }));
 			return ok({ total: models.reduce((sum, m) => sum + m.cost, 0), models });
 		}),
+		// The summary is written by the utility model once the chat has something in it, and again only when more has been said since.
 		route("GET", "/api/sessions/:id/summary", async ({ app, principal, params }) => {
 			const p = await principal();
 			await app.identity.authz.enforce(p, "api:read");
 			const id = chatId(params[0]!);
-			const row = await app.db.owner(p.ownerId, async (tx) => (await tx.query("SELECT summary FROM pim_app.conversations WHERE public_chat_id = $1 AND deleted_at IS NULL", [id])).rows[0]);
+			const row = await app.db.owner(p.ownerId, async (tx) => (await tx.query("SELECT summary, summary_of FROM pim_app.conversations WHERE public_chat_id = $1 AND deleted_at IS NULL", [id])).rows[0]);
 			if (!row) throw new NotFoundError("No such chat");
-			return ok({ summary: (row.summary as string | null) ?? null });
+			// A chat that carries another on keeps what its summary said of that one.
+			if (row.summary_of) return ok({ summary: (row.summary as string | null) ?? null });
+			const conversation = await chatConversation(app, p, id, 12000);
+			if (conversation === "" || summarized.get(id) === conversation.length) return ok({ summary: (row.summary as string | null) ?? null });
+			const written = await runUtility(app, env, p, SUMMARIZE_CHAT, conversation).catch((error) => (console.warn("the chat's summary failed", error), null));
+			if (written === null) return ok({ summary: (row.summary as string | null) ?? null });
+			summarized.set(id, conversation.length);
+			await app.db.owner(p.ownerId, (tx) => tx.query("UPDATE pim_app.conversations SET summary = $2 WHERE public_chat_id = $1", [id, written]));
+			return ok({ summary: written });
 		}),
-		// The utility model's side jobs: none is configured, so there are no suggestions, and a title or an improved prompt cannot be made.
-		route("GET", "/api/sessions/:id/suggestions", async ({ app, principal, params }) => {
+		// With no utility model there are no suggestions, and a title or an improved prompt cannot be made.
+		route("GET", "/api/sessions/:id/suggestions", async ({ app, principal, params, url }) => {
 			const p = await principal();
-			await sessionView(app, p, chatId(params[0]!));
-			return ok({ suggestions: [] });
+			const id = chatId(params[0]!);
+			await sessionView(app, p, id);
+			const conversation = await chatConversation(app, p, id);
+			if (conversation === "") return ok({ suggestions: [] });
+			const answer = await runUtility(app, env, p, SUGGEST_PROMPTS, `${conversation}\n\nLanguage: ${url.searchParams.get("locale") ?? "en"}`).catch(() => null);
+			return ok({ suggestions: answer === null ? [] : suggestionsIn(answer) });
 		}),
-		route("POST", "/api/sessions/:id/title", async ({ principal }) => (await principal(), needsModel("title"))),
-		route("POST", "/api/prompts/improve", async ({ principal }) => (await principal(), needsModel("prompt improvement"))),
+		route("POST", "/api/sessions/:id/title", async ({ app, principal, params }) => {
+			const p = await principal();
+			await app.identity.authz.enforce(p, "api:write");
+			const id = chatId(params[0]!);
+			await sessionView(app, p, id);
+			if ((await titleChat(app, env, p, id).catch((error) => (console.warn("the chat's title failed", error), null))) === null) needsModel("title");
+			return ok(await sessionView(app, p, id));
+		}),
+		route("POST", "/api/prompts/improve", async ({ app, principal, json }) => {
+			const p = await principal();
+			await app.identity.authz.enforce(p, "api:write");
+			const text = String((await json()).text ?? "").trim();
+			if (text === "" || text.length > 20_000) throw new BadRequestError("text is 1 to 20000 characters");
+			const improved = await runUtility(app, env, p, IMPROVE_PROMPT, text).catch((error) => (console.warn("improving a prompt failed", error), null));
+			return improved === null ? needsModel("prompt improvement") : ok({ text: improved });
+		}),
 
 		// ---- tasks ----
 		route("GET", "/api/sessions/:id/tasks", async ({ app, principal, params }) => {
@@ -159,6 +177,20 @@ export function sessionRoutes(): Route[] {
 			const messages = row.task_chat ? (await transcriptPage(app.db.pool, p.ownerId, row.task_chat as string)).messages : [];
 			return ok({ ...taskView(row), messages });
 		}),
+		// Asks the model again in a chat whose last request failed: the person's last message is sent once more, as it was written. A chat that is not waiting like that says so.
+		route("POST", "/api/sessions/:id/retry", async ({ app, principal, params, json }) => {
+			const p = await principal();
+			const id = chatId(params[0]!);
+			await sessionView(app, p, id);
+			const messages = (await transcriptPage(app.db.pool, p.ownerId, id)).messages.filter((m) => !m.partial);
+			const last = messages.at(-1);
+			const asked = messages.findLast((m) => m.role === "user");
+			const text = asked?.parts.map((part) => (part.type === "text" ? part.text : "")).join("");
+			if (last?.role !== "assistant" || last.stopReason !== "error" || !text) throw new ConflictError("This chat isn't waiting to try again", "not_held");
+			const commandId = String(((await json().catch(() => ({}))) as Record<string, unknown>).commandId ?? `retry-${randomUUID()}`);
+			await app.conversations.admit(p, { commandId, kind: "user_message", chatId: id, payload: { text } });
+			return ok({ session: id });
+		}),
 		route("POST", "/api/sessions/:id/tasks/:task/cancel", async ({ app, principal, params }) => {
 			const p = await principal();
 			const find = () => app.db.owner(p.ownerId, async (tx) => (await tx.query(`${TASKS} WHERE t.task_id = $1 AND t.started_by = $2`, [params[1]!, chatId(params[0]!)])).rows[0]);
@@ -172,27 +204,29 @@ export function sessionRoutes(): Route[] {
 		route("PUT", "/api/sessions/:id/queue/:item", async ({ principal }) => (await principal(), gone())),
 		route("DELETE", "/api/sessions/:id/queue/:item", async ({ principal }) => (await principal(), gone())),
 
+		// ---- the chat list, without the seats of group chats ----
+		route("GET", "/api/sessions", async ({ app, principal, url }) => {
+			const p = await principal();
+			await app.identity.authz.enforce(p, "api:read");
+			const limit = Number(url.searchParams.get("limit"));
+			const sessions = await app.conversations.list(p.ownerId, { archived: url.searchParams.get("archived") === "true", limit: Number.isInteger(limit) && limit > 0 ? limit : 100 });
+			const seats = new Set((await app.db.owner(p.ownerId, async (tx) => (await tx.query("SELECT public_chat_id FROM pim_app.conversations WHERE room_of IS NOT NULL AND public_chat_id = ANY($1::uuid[])", [sessions.map((s) => s.id)])).rows)).map((r) => r.public_chat_id as string));
+			const shown = sessions.filter((s) => !seats.has(s.id));
+			const rooms = await roomViews(app, p.ownerId, shown.map((s) => s.id));
+			return ok({ sessions: shown.map((s) => ({ ...s, room: rooms.get(s.id) ?? null })) });
+		}),
+
 		// ---- a group chat's room ----
 		route("POST", "/api/sessions/:id/room/members", async ({ app, principal, params, json }) => {
 			const p = await principal();
-			await app.identity.authz.enforce(p, "api:write");
 			const id = chatId(params[0]!);
-			const agent = String((await json()).agent ?? "");
-			await app.db.owner(p.ownerId, async (tx) => {
-				const chat = (await tx.query("SELECT agent_id FROM pim_app.conversations WHERE public_chat_id = $1 AND deleted_at IS NULL", [id])).rows[0];
-				if (!chat) throw new NotFoundError("No such chat");
-				if (!(await tx.query("SELECT 1 FROM pim_app.agents WHERE id = $1 AND deleted_at IS NULL", [agent])).rowCount) throw new NotFoundError("No such agent");
-				if (chat.agent_id === agent) throw new ConflictError("That agent is the chat's own", "already_member");
-				await tx.query("INSERT INTO pim_app.room_members (public_chat_id, owner_id, member) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING", [id, p.ownerId, agent]);
-				await tx.query("UPDATE pim_app.conversations SET kind = CASE WHEN kind = 'normal' THEN 'group' ELSE kind END, room_mode = coalesce(room_mode, 'mentions') WHERE public_chat_id = $1", [id]);
-			});
+			await addRoomMember(app, p, id, String((await json()).agent ?? ""));
 			return ok({ room: await roomView(app, p, id) }, 201);
 		}),
 		route("DELETE", "/api/sessions/:id/room/members/:agent", async ({ app, principal, params }) => {
 			const p = await principal();
-			await app.identity.authz.enforce(p, "api:write");
 			const id = chatId(params[0]!);
-			await app.db.owner(p.ownerId, (tx) => tx.query("DELETE FROM pim_app.room_members WHERE public_chat_id = $1 AND member = $2", [id, params[1]!]));
+			await removeRoomMember(app, p, id, params[1]!);
 			return ok({ room: await roomView(app, p, id) });
 		}),
 		// A held run is the runtime's to try again; the room is answered as it stands.

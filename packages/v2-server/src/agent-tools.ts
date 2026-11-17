@@ -15,10 +15,19 @@ import { ExternalOperations } from "@pim/v2-runtime/external";
 import type { Db as RuntimeDb } from "@pim/v2-runtime/db";
 import type { Actor } from "@pim/v2-forge/authz";
 import type { RelayBus } from "@pim/v2-app/relay";
+import { postToRoom } from "./rooms.ts";
 import { computerTools } from "./computer-tools.ts";
+import { type ImageSources, imageTools } from "./image-tools.ts";
 import type { ForgeParts } from "./forge-assembly.ts";
 import type { EnvelopeCrypto } from "@pim/v2-contracts/platform";
+import { loadWidgets, MAX_WIDGETS, type ShownWidget, uiDiagnostics, widgetRefs } from "./agent-widgets.ts";
 import { connectorToolset, type Transport } from "./connector-tools.ts";
+import { watchTools } from "./watch-tools.ts";
+import { builtinSkill } from "./builtin-skills.ts";
+import { readSkillFolder } from "./skill-sources.ts";
+import { adminTools } from "./admin-tools.ts";
+import { disabledBuiltins } from "./compat/admin-directory.ts";
+import { guestToolset } from "./guest-tools.ts";
 
 export type ToolDeps = {
 	ownerId: string;
@@ -33,6 +42,10 @@ export type ToolDeps = {
 	/** The deployment's keys, which open a connector's sealed credential; and whether a connector may live at a private address. */
 	crypto?: EnvelopeCrypto | undefined;
 	allowPrivateConnectors?: boolean | undefined;
+	/** The longest a tool may run before its call ends with an error instead of holding the chat; default 10 minutes. */
+	toolTimeoutMs?: number | undefined;
+	/** Where images can be drawn (`./image-tools.ts`); absent leaves `generate_image` out, as `PIM_IMAGE_MODEL=off` does. */
+	images?: ImageSources | undefined;
 	/** The public id of the chat that a pi conversation is. */
 	chatOf(conversationId: number | string): Promise<string | null>;
 };
@@ -93,6 +106,62 @@ export async function timeZoneOf(runtime: RuntimeDb, ownerId: string): Promise<s
 	return chosen ?? process.env.PIM_TIME_ZONE ?? "UTC";
 }
 
+/** What the web app reads from an app tool's answer to show the app as a card in the chat that opens in the canvas: `{ artifact }`, an app with a backend being `hosted` there. */
+const appCard = (ref: { id: string; title: string; kind: string; version: number; sha256: string; size: number }, note: string): Result =>
+	text(JSON.stringify({ artifact: { id: ref.id, title: ref.title, kind: ref.kind === "backend" ? "hosted" : ref.kind, version: ref.version, sha256: ref.sha256, size: ref.size }, note }));
+
+/** How an app runs, for the agent that writes one (the same words as v1's). */
+const HOW_APPS_RUN =
+	"An HTML app is a page, index.html: put its CSS in <style> and its JavaScript in <script>, or in files of its own. It runs in a sandbox: fetch, forms, anything from the web (scripts, stylesheets, fonts, images), cookies, localStorage and alert() are blocked, so images must be inline (data: URLs or SVG) or files of its own. It shows in the chat and on a full screen, including on phones, so make it responsive. " +
+	"Any app can use window.pim, whose calls return promises and can fail: pim.storage.get(key), .set(key, text), .delete(key) and .list(prefix) keep text that stays across visits and new versions (up to 1 MB; JSON.stringify anything else); " +
+	"pim.shared has the same calls, for text everyone the user shares the app with sees and changes; pim.ask(prompt) answers with text from Pim's model, which has no tools and sees only the prompt; " +
+	"pim.tools.call(name, input) runs one of the user's connector tools that runs without asking, by its tool name, and answers with its result as text. " +
+	"The user is asked once per version before ask or a tool first runs; tools that ask before they run can't be used. Show a message when a call fails. " +
+	"A jsx app is a React app, App.jsx: `export default function App() { ... }`, with hooks from \"react\"; it may import \"react\", \"recharts\", \"lucide-react\" and its own files, is styled with Tailwind classes, and is compiled when you save it: a compile error comes back to you to fix. ";
+
+/**
+ * Makes a tool stoppable: its call ends when the chat is stopped (the abort signal) even if the tool's own work ignores it, and with an error after `timeoutMs` instead of
+ * never, so a hung connection or process cannot leave a chat busy for ever. The work itself is not cancelled, only abandoned; a tool that can cancel it still should.
+ */
+export function stoppable(tool: ToolRegistration, timeoutMs = 600_000): ToolRegistration {
+	const execute = (tool as any).execute as (args: any, api: any, context: any) => Promise<Result>;
+	return {
+		...(tool as object),
+		execute: (args: any, api: any, context: any) =>
+			new Promise<Result>((resolve, reject) => {
+				const signal: AbortSignal | undefined = context?.abortSignal;
+				const stop = () => reject(signal?.reason ?? new Error("The call was stopped"));
+				if (signal?.aborted) return stop();
+				const timer = setTimeout(() => resolve(text(`${(tool as any).name} did not finish within ${Math.round(timeoutMs / 60_000)} minutes and was stopped.`, true)), timeoutMs);
+				signal?.addEventListener("abort", stop, { once: true });
+				execute(args, api, context).then(resolve, reject).finally(() => {
+					clearTimeout(timer);
+					signal?.removeEventListener("abort", stop);
+				});
+			}),
+	} as ToolRegistration;
+}
+
+/** What a guest's agent, and a bot's visitor's chat in the host's space, may use: its own memory and the clock, and a guest's calls to the host's shared tools. */
+const GUEST_TOOLS = new Set(["send_to_user", "current_time", "note", "recall", "zoom", "forget", "move_memory", "read_skill", "read_skill_file", "guest_tools", "guest_call"]);
+const VISIT_TOOLS = new Set(["send_to_user", "current_time"]);
+const kinds = new Map<string, { at: number; allowed: Set<string> | null }>();
+
+/** The tools a chat is limited to, or null when it has all of its owner's. Read fresh each half minute, so a role change or a deleted chat takes effect soon. */
+async function toolsAllowed(app: App, ownerId: string, chat: string | null): Promise<Set<string> | null> {
+	const key = `${ownerId}\u0000${chat ?? ""}`;
+	const held = kinds.get(key);
+	if (held && Date.now() - held.at < 30_000) return held.allowed;
+	const row = await app.db.owner(ownerId, async (tx) => ({
+		role: (await tx.query("SELECT role FROM pim_app.accounts WHERE owner_id = $1", [ownerId])).rows[0]?.role as string | undefined,
+		kind: chat ? ((await tx.query("SELECT kind FROM pim_app.conversations WHERE public_chat_id = $1", [chat])).rows[0]?.kind as string | undefined) : undefined,
+	}));
+	const allowed = row.role === "guest" ? GUEST_TOOLS : row.kind === "visit" ? VISIT_TOOLS : null;
+	if (kinds.size > 5000) kinds.clear();
+	kinds.set(key, { at: Date.now(), allowed });
+	return allowed;
+}
+
 export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 	const { ownerId, partitionId, runtime } = deps;
 	const owner = OwnerId.parse(ownerId);
@@ -135,14 +204,8 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 				return text(error instanceof Error ? error.message : String(error), true);
 			}
 		};
-	/** Every tool call counts against the owner's day (migration 0621); once the day's allowance is used the call is refused with the space's usual message. */
-	const defaultToolCalls = /^\d+$/.test(process.env.PIM_LIMIT_DAILY_TOOL_CALLS?.trim() ?? "") ? Number(process.env.PIM_LIMIT_DAILY_TOOL_CALLS) : null;
-	const counted = (execute: (args: any, api: any, context: any) => Promise<Result>) => async (args: any, api: any, context: any): Promise<Result> => {
-		const allowed = await runtime.read<{ ok: boolean }>(ownerId, "SELECT pim_app.runner_count_tool_call($1, $2) AS ok", [ownerId, defaultToolCalls]).then((r) => r.rows[0]?.ok !== false, () => true);
-		return allowed ? execute(args, api, context) : text(`${QUOTA_MESSAGE} too many tool calls today. It resets at midnight UTC.`, true);
-	};
 	const tool = (name: string, description: string, parameters: any, execute: (args: any, api: any, context: any) => Promise<Result>, replay: "safe" | "unsafe" = "unsafe") =>
-		defineTool({ name, description, parameters, replay, execute: counted(execute) } as never) as ToolRegistration;
+		defineTool({ name, description, parameters, replay, execute } as never) as ToolRegistration;
 	const read = (name: string, description: string, parameters: any, run: (app: App, call: Call, args: any) => Promise<Result>) => tool(name, description, parameters, withApp(run), "safe");
 	const write = (name: string, description: string, parameters: any, run: (app: App, call: Call, args: any) => Promise<Result>) => tool(name, description, parameters, withApp(run), "unsafe");
 
@@ -156,23 +219,33 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 	const tools: ToolRegistration[] = [
 		tool(
 			"send_to_user",
-			"Send the person a message. It is the only way they see anything you write: the rest of your text is private working notes. Set complete when you are finishing a delegated task.",
-			Type.Object({ message: S({ minLength: 1 }), complete: O(Type.Boolean()), widgets: O(strings) }),
+			`Send the person a message. It is the only way they see anything you write: the rest of your text is private working notes. Set complete when you are finishing a delegated task. To draw a small interactive piece, such as a quiz, a checklist or a form, put a \`\`\`ui block of ui source in the message, alone on its lines; a block that can't be drawn refuses the message with what to fix. widgets shows data under the message, by name, up to ${MAX_WIDGETS}: ${widgetRefs().join(", ")}.`,
+			Type.Object({ message: S({ minLength: 1 }), complete: O(Type.Boolean()), widgets: O(Type.Array(Type.String(), { maxItems: MAX_WIDGETS })) }),
 			async (args, api) => {
 				const app = deps.app;
+				const wanted = [...new Set<string>(args.widgets ?? [])];
+				const unknown = wanted.filter((ref) => !widgetRefs().includes(ref));
+				if (unknown.length > 0) return text(`Not sent: ${unknown.join(", ")} ${unknown.length === 1 ? "isn't a widget" : "aren't widgets"} you can show. The widgets you can show here: ${widgetRefs().join(", ")}.`, true);
+				// A block it wrote wrong is a mistake the model can fix: say what the compiler found and send nothing.
+				const ui = uiDiagnostics(String(args.message));
+				if (ui.error !== undefined) return text(`Not sent: ${ui.error}.`, true);
 				const chat = await deps.chatOf(api.conversationId);
+				let shown: ShownWidget[] = [];
 				if (app && chat) {
 					try {
-						await app.conversations.markResponse(ownerId, chat);
-						if (args.complete) {
-							const p = await principalOf(app, chat);
-							if (p.kind === "delegated") await app.conversations.updateTask(p, p.delegateId, "completed", String(args.message).slice(0, 2000));
-						}
+						// An agent in a group chat speaks into the host chat, where the person reads it; its own seat is not a chat they open.
+						const p = await principalOf(app, chat);
+						const posted = await postToRoom(app, p, chat, `${api.taskId}:${api.callId}`, String(args.message));
+						if (!posted) await app.conversations.markResponse(ownerId, chat);
+						if (args.complete && p.kind === "delegated") await app.conversations.updateTask(p, p.delegateId, "completed", String(args.message).slice(0, 2000));
+						// Loaded once, as sent: the message and what it shows stay together, and the model is told what the person saw.
+						if (wanted.length > 0) shown = await loadWidgets(app, p, p.kind === "agent" && p.agentId !== "pim" ? p.agentId : null, wanted);
 					} catch (error) {
 						return text(`Not sent: ${error instanceof Error ? error.message : String(error)}`, true);
 					}
 				}
-				return text(args.widgets?.length ? `Sent. The widgets (${args.widgets.join(", ")}) are shown with it where this deployment has them.` : "Sent.");
+				const result = { sent: "Sent.", ...(shown.length > 0 ? { widgets: shown } : {}), ...(ui.notes ? { uiNotes: ui.notes } : {}) };
+				return text(Object.keys(result).length === 1 ? "Sent." : JSON.stringify(result));
 			},
 			"safe",
 		),
@@ -198,8 +271,12 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 		write("move_memory", "Move a memory to another scope, such as everyone or another agent's.", Type.Object({ id: S(), scope: S() }), async (app, call, a) => (await app.memories.move(call.p, a.id, a.scope), text(`Moved to ${a.scope}.`))),
 
 		// Skills and goals.
-		read("read_skill", "Read a skill's instructions and the names of its files.", Type.Object({ name: S() }), async (app, call, a) => {
-			const s = await app.agents.getSkill(call.p, a.name);
+		read("read_skill", "Read a skill's instructions and the names of its files: one of the person's own, or one that comes with Pim.", Type.Object({ name: S() }), async (app, call, a) => {
+			const s = await app.agents.getSkill(call.p, a.name).catch((error) => {
+				if (builtinSkill(a.name)) return undefined;
+				throw error;
+			});
+			if (!s) return text(`${builtinSkill(a.name)!.instructions}\n\nFiles: none`);
 			return text(`${s.body}\n\nFiles: ${Object.keys(s.files ?? {}).join(", ") || "none"}`);
 		}),
 		read("read_skill_file", "Read one of a skill's supporting files.", Type.Object({ name: S(), path: S() }), async (app, call, a) => {
@@ -211,6 +288,37 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 			await (exists ? app.agents.updateSkill(call.p, a.name, { description: a.description, body: a.body, files: a.files }) : app.agents.createSkill(call.p, { name: a.name, description: a.description, body: a.body, files: a.files }));
 			return text(exists ? `Saved a new version of ${a.name}.` : `Created ${a.name}.`);
 		}),
+		tool("install_skill", "Install a skill from a GitHub folder (https://github.com/owner/repo/tree/ref/path, holding a SKILL.md and any files it uses). A person approves it first, with the files it holds listed; what is installed is exactly what they approved, at the commit the folder is at now.", Type.Object({ source: S({ minLength: 1 }), name: O(S()) }),
+			async (args, api) => {
+				const app = deps.app;
+				if (!app) return noApp();
+				const taskId = String(api.taskId);
+				try {
+					const folder = await readSkillFolder(deps.fetch, args.source);
+					const chat = await deps.chatOf(api.conversationId);
+					const p = await principalOf(app, chat);
+					const name = args.name ?? folder.name;
+					const signal = (await runtime.read<{ payload: { approved?: boolean } }>(ownerId, "SELECT payload FROM pim_runtime.durable_signals WHERE owner_id = $1 AND task_id = $2 AND kind = 'approval' ORDER BY signal_id DESC LIMIT 1", [ownerId, taskId])).rows[0];
+					if (signal && signal.payload.approved !== true) return text("A person did not approve this skill, so it was not installed.", true);
+					const filed = (await app.db.owner(ownerId, async (tx) => (await tx.query("SELECT id, args FROM pim_app.approvals WHERE tool = 'skill:install' AND args->>'taskId' = $1 LIMIT 1", [taskId])).rows[0])) as { id: string; args: { commit?: string; hashes?: Record<string, string> } } | undefined;
+					if (!signal && !filed) {
+						const names = Object.keys(folder.hashes);
+						const summary = `Install the skill ${name} from ${folder.source}: ${names.length} file${names.length === 1 ? "" : "s"} (${names.slice(0, 12).join(", ")}${names.length > 12 ? ", …" : ""})`;
+						const gate = await app.approvals.gate(p, { action: "skill:install", resource: { source: folder.source.replace(/\/tree\/.*$/, "") }, ...(chat ? { chatId: chat } : {}), args: { taskId, callId: api.callId, source: folder.source, commit: folder.commit, name, hashes: folder.hashes, summary }, timeoutMs: 24 * 3600_000, onTimeout: "deny", explicit: true });
+						if (gate.outcome === "waiting") return { content: [{ type: "text", text: "Waiting for a person's approval." }], control: { suspend: true } } as never;
+					} else if (!signal) {
+						return { content: [{ type: "text", text: "Waiting for a person's approval." }], control: { suspend: true } } as never;
+					}
+					// What was approved is what is installed: the folder read again must be the one the person was shown.
+					if (filed?.args.hashes && JSON.stringify(Object.entries(filed.args.hashes).sort()) !== JSON.stringify(Object.entries(folder.hashes).sort())) return text("The skill's files are not the ones that were approved, so it was not installed. Ask again to see them.", true);
+					const files = { ...folder.files, ".source": JSON.stringify({ source: folder.source, commit: folder.commit }) };
+					const exists = await app.agents.getSkill(p, name).then(() => true, () => false);
+					await (exists ? app.agents.updateSkill(p, name, { description: folder.description, body: folder.body, files }) : app.agents.createSkill(p, { name, description: folder.description, body: folder.body, files }));
+					return text(`${exists ? "Saved a new version of" : "Installed"} the skill ${name} from ${folder.source}.`);
+				} catch (error) {
+					return text(error instanceof Error ? error.message : String(error), true);
+				}
+			}, "safe"),
 		write("create_goal", "Start a goal, with the steps to reach it.", Type.Object({ title: S({ minLength: 1 }), steps: O(strings) }), async (app, call, a) => text(`Created goal ${await app.memories.createGoal(call.p, a.title, a.steps ?? [])}.`)),
 		write("update_goal", "Change a goal: its title, its status (active, done, dropped) or its steps; or tick a step off with complete_step (its position, from 0).", Type.Object({ id: S(), title: O(S()), status: O(Type.Union([Type.Literal("active"), Type.Literal("done"), Type.Literal("dropped")])), steps: O(strings), complete_step: O(Type.Integer({ minimum: 0 })) }), async (app, call, a) => {
 			if (a.title !== undefined || a.status !== undefined || a.steps !== undefined) await app.memories.updateGoal(call.p, a.id, { title: a.title, status: a.status, steps: a.steps });
@@ -259,9 +367,10 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 		write("note_edit", "Edit a note by replacing text. base_version is the version you read; if the note changed since, nothing is changed and you read it again. A person's typing is never lost.", Type.Object({ id: S(), base_version: Type.Integer({ minimum: 0 }), find: S({ minLength: 1 }), replace: S() }), async (app, call, a) =>
 			text(`Edited; the note is at version ${(await app.canvas.edit(call.p, a.id, a.base_version, a.find, a.replace)).version}.`)),
 		read("note_list", "Your notes.", Type.Object({}), async (app) => json((await app.db.owner(ownerId, (tx) => tx.query("SELECT note_id, title, version FROM pim_app.notes WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT 200"))).rows)),
-		write("app_create", "Create an app: kind html or jsx, or backend (with a pim.app.json). Files are by path.", Type.Object({ title: S({ minLength: 1 }), kind: Type.Union([Type.Literal("html"), Type.Literal("jsx"), Type.Literal("backend")]), files, message: O(S()) }), async (app, call, a) => json(await app.apps.create(call.p, { title: a.title, kind: a.kind, files: a.files, message: a.message }))),
+		write("app_create", `Create an app: kind html or jsx, or backend (with a pim.app.json). Files are by path. ${HOW_APPS_RUN}`, Type.Object({ title: S({ minLength: 1 }), kind: Type.Union([Type.Literal("html"), Type.Literal("jsx"), Type.Literal("backend")]), files, message: O(S()) }), async (app, call, a) => appCard(await app.apps.create(call.p, { title: a.title, kind: a.kind, files: a.files, message: a.message }), "Made it. The person sees it in the chat and opens it beside the chat.")),
 		write("app_update", "Change an app. base_version is the version you read; an app that changed since is refused.", Type.Object({ id: S(), base_version: Type.Integer({ minimum: 1 }), title: O(S()), files: O(files), delete_files: O(strings), edits: O(Type.Array(Type.Object({ path: O(S()), find: S(), replace: S() }))), message: O(S()) }), async (app, call, a) =>
-			json(await app.apps.update(call.p, a.id, { baseVersion: a.base_version, title: a.title, files: a.files, deleteFiles: a.delete_files, edits: a.edits, message: a.message }))),
+			appCard(await app.apps.update(call.p, a.id, { baseVersion: a.base_version, title: a.title, files: a.files, deleteFiles: a.delete_files, edits: a.edits, message: a.message }), "Saved. The person sees the new version in the chat.")),
+		read("app_show", "Show the person an app that already exists, such as one made in another chat, as the card in this chat that opens it beside the chat: the latest version, or the one asked for. It changes nothing; don't make a new version just to show one. Find its id with app_list.", Type.Object({ id: S(), version: O(Type.Integer({ minimum: 1 })) }), async (app, call, a) => appCard(await app.apps.read(call.p, a.id, { version: a.version, path: undefined, offset: undefined }), "Showed it. The person sees it in the chat.")),
 		read("app_read", "Read an app: its files, or one file.", Type.Object({ id: S(), version: O(Type.Integer({ minimum: 1 })), path: O(S()), offset: O(Type.Integer({ minimum: 0 })) }), async (app, call, a) => json(await app.apps.read(call.p, a.id, { version: a.version, path: a.path, offset: a.offset }))),
 		read("app_list", "Your apps.", Type.Object({ query: O(S()) }), async (app, call, a) => json(await app.apps.list(call.p, a.query ?? ""))),
 
@@ -377,10 +486,34 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 	// The person's computer: files, shell, browser, desktop (`./computer-tools.ts`).
 	tools.push(...computerTools({ ownerId, partitionId, runtime, app: deps.app, relay: deps.relay, chatOf: deps.chatOf }, { ops, principalOf }));
 
+	// Images: `generate_image`, saved to the person's files.
+	if (deps.images) tools.push(...imageTools({ ownerId, partitionId, runtime, app: deps.app, images: deps.images, fetch: deps.fetch, now: deps.now, chatOf: deps.chatOf }, { ops, principalOf }));
+
 	// The owner's connected MCP servers: their tools, with each one's Off, Ask or On.
 	const transport: Transport = { fetch: deps.fetch, allowPrivate: deps.allowPrivateConnectors === true, check: publicUrl };
 	const connectors = connectorToolset({ ownerId, partitionId, runtime, app: deps.app, crypto: deps.crypto, transport, ops, owner, now: deps.now, chatOf: deps.chatOf, principalOf });
 	tools.push(...connectors.tools);
+	// Watches: events of a connected server, delivered to the chat that asked.
+	tools.push(...watchTools({ ownerId, watch: () => (deps.app && deps.crypto ? { app: deps.app, crypto: deps.crypto, transport, publicUrl: process.env.PIM_PUBLIC_URL, now: deps.now } : undefined), chatOf: deps.chatOf, principalOf: (chat) => (deps.app ? principalOf(deps.app, chat) : Promise.resolve(undefined)) }));
 
-	return defineExtension({ name: "pim", tools, sections: [...sections, ...connectors.sections] });
+	// The admin's majordomo runs the deployment (`./admin-tools.ts`); every other agent is refused there.
+	tools.push(...adminTools({ ownerId, app: deps.app, env: process.env, principalOf, chatOf: deps.chatOf, runtime: runtime as never }));
+	// A guest's agent, and a chat that is someone's visit to a bot, work with a short list of tools: nothing of the owner's computer, files, coding or other connectors.
+	tools.push(...guestToolset({ ownerId, partitionId, runtime, app: deps.app, crypto: deps.crypto, transport, ops, owner, now: deps.now, chatOf: deps.chatOf }));
+	// Every tool call that gets this far counts against the owner's day (migration 0621); once the day's allowance is used the call is refused with the space's usual message.
+	const defaultToolCalls = /^\d+$/.test(process.env.PIM_LIMIT_DAILY_TOOL_CALLS?.trim() ?? "") ? Number(process.env.PIM_LIMIT_DAILY_TOOL_CALLS) : null;
+	const withinToolCalls = () => runtime.read<{ ok: boolean }>(ownerId, "SELECT pim_app.runner_count_tool_call($1, $2) AS ok", [ownerId, defaultToolCalls]).then((r) => r.rows[0]?.ok !== false, () => true);
+	const guarded = tools.map((t) => {
+		const name = (t as unknown as { name: string }).name;
+		const run = (t as unknown as { execute: (...a: any[]) => Promise<Result> }).execute;
+		return { ...t, execute: async (args: any, api: any, context: any): Promise<Result> => {
+			const app = deps.app;
+			const allowed = app ? await toolsAllowed(app, ownerId, await deps.chatOf(api.conversationId)) : null;
+			if (app && name.startsWith("note_") && (await disabledBuiltins(app)).includes("notes")) return text("Notes are turned off for everyone by this Pim's admin.", true);
+			if (allowed && !allowed.has(name)) return text(`${name} isn't available here: this chat only has ${[...allowed].join(", ")}.`, true);
+			if (!(await withinToolCalls())) return text(`${QUOTA_MESSAGE} too many tool calls today. It resets at midnight UTC.`, true);
+			return run(args, api, context);
+		} };
+	}) as unknown as ToolRegistration[];
+	return defineExtension({ name: "pim", tools: guarded.map((t) => stoppable(t, deps.toolTimeoutMs)), sections: [...sections, ...connectors.sections] });
 }

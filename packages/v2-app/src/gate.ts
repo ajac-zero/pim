@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { App } from "./app.ts";
 import { httpStatus, NotFoundError } from "./errors.ts";
-import { makeCtx, type Reply, type Route } from "./http.ts";
+import { type Ctx, makeCtx, type Reply, type Route } from "./http.ts";
 import { authRoutes } from "./routes/auth.ts";
 import { hostedRoutes, serveAppOrigin } from "./routes/hosted.ts";
 import { coreRoutes } from "./routes/core.ts";
@@ -22,6 +22,8 @@ export type GateOptions = {
 	routes?: Route[];
 	/** Routes tried before the built-in ones: where the web app needs a path answered in the shape it was built for (the v1 API), they win. */
 	first?: Route[];
+	/** Run on every request that matches a route, before it: an answer stops the request there (limits, and what a guest's account may reach). */
+	before?: (ctx: Ctx, route: Route) => Promise<Reply | undefined>;
 };
 
 const CORS = { "access-control-allow-origin": "*", "access-control-allow-methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS", "access-control-allow-headers": "Authorization, Content-Type, If-Match, Idempotency-Key", "access-control-expose-headers": "ETag", "access-control-max-age": "86400" };
@@ -61,7 +63,8 @@ async function handle(app: App, routes: Route[], options: GateOptions, req: Inco
 		if (r.method !== method) continue;
 		const m = r.pattern.exec(url.pathname);
 		if (!m) continue;
-		return send(res, await r.run(makeCtx(app, req, url, m.slice(1).map(decodeURIComponent), { origin, appsOrigin: options.appsOrigin })));
+		const ctx = makeCtx(app, req, url, m.slice(1).map(decodeURIComponent), { origin, appsOrigin: options.appsOrigin });
+		return send(res, (await options.before?.(ctx, r)) ?? (await r.run(ctx)));
 	}
 	throw new NotFoundError();
 }

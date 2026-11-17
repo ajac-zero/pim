@@ -3,6 +3,7 @@ import type { Principal } from "@pim/v2-contracts/identity";
 import { Authorizer } from "./authz.ts";
 import type { Db, Tx } from "./db.ts";
 import { BadRequestError, ConflictError, GoneError, NotFoundError } from "./errors.ts";
+import { compileJsxApp } from "./jsx.ts";
 import { newId, secret } from "./ids.ts";
 import type { SignIn } from "./signin.ts";
 
@@ -56,6 +57,8 @@ function checkFiles(kind: AppKind, files: AppFiles): void {
 	if (sizeOf(files) > LIMITS.total) throw new BadRequestError("An app is at most 5 MB");
 	if (kind === "html" && !/<[a-z!]/i.test(files["index.html"] ?? "")) throw new BadRequestError("index.html is not a page");
 	if (kind === "backend") parseManifest(files[MANIFEST_FILE]!);
+	// A JSX app is compiled now, so the agent that wrote it gets the error to fix.
+	if (kind === "jsx") compileJsxApp(files, MAIN.jsx.find((m) => m in files)!);
 }
 
 /**

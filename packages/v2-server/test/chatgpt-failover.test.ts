@@ -212,6 +212,8 @@ real("Sign in with ChatGPT and provider failover", () => {
 		faux.setResponses([fauxAssistantMessage("fallback again")] as never);
 		await say("and again", "fallback again");
 		expect(openai.state.responses).toHaveLength(asked);
+		// The cooldown is in the database, where every other Runner reads it.
+		expect((await d.stack.admin.query("SELECT ref FROM pim_runtime.provider_cooldowns WHERE until > now()")).rows.map((r) => r.ref)).toContain(`openai/${MODEL}`);
 		const calls = (await d.stack.admin.query("SELECT provider, model FROM pim_app.model_calls")).rows;
 		expect(calls).toContainEqual({ provider: "faux", model: "m" });
 	}, 90_000);

@@ -201,4 +201,57 @@ describe("a v2 chat drawn by the same reducer as v1's", () => {
       ["b", false],
     ]);
   });
+
+  it("keeps a chat's own model and agent when a live row, which carries neither, replaces its row", () => {
+    const pinned = sessionOf({
+      chatId: "a",
+      title: "A",
+      busy: false,
+      unread: false,
+      updatedAt: 5,
+      summary: {
+        agent: { id: "m", name: "Majordomo" },
+        model: {
+          model: { provider: "gateway", id: "u1", name: "u1", images: false },
+          override: true,
+        },
+      },
+    });
+    const live = sessionOf({
+      chatId: "a",
+      title: "A",
+      busy: true,
+      unread: false,
+      updatedAt: 9,
+    });
+    expect(upsertSession([pinned], live)[0]).toMatchObject({
+      busy: true,
+      agent: { id: "m" },
+      model: { override: true, model: { id: "u1" } },
+    });
+  });
+});
+
+describe("a model request that failed", () => {
+  const failedAnswer = (id: number): V2Message => ({
+    id: String(id),
+    role: "assistant",
+    parts: [],
+    timestamp: 1000 + id,
+    stopReason: "error",
+    error: "The model timed out: it sent nothing for 120 seconds",
+    partial: false,
+  });
+
+  it("shows why in the view, from a snapshot and from the live stream, until the next run starts", () => {
+    const snapshot = streamOf([user(1, "hi"), failedAnswer(2)]);
+    expect(snapshot.view.error).toMatchObject({ problem: "busy" });
+    const live = applyMessage(streamOf([user(1, "hi")]), failedAnswer(2));
+    expect(live.view.error).not.toBeNull();
+    expect(applyBusy(live, true).view.error).toBeNull();
+    // An answer that went well after the failure leaves nothing to show.
+    expect(
+      streamOf([user(1, "hi"), failedAnswer(2), assistant(3, "ok")]).view.error,
+    ).toBeNull();
+  });
 });

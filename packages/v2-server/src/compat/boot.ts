@@ -13,8 +13,8 @@ import { BadRequestError, ForbiddenError, NotFoundError } from "@pim/v2-app/erro
 import { usageReport, computeReport } from "./usage.ts";
 import { fromAnotherSite, ok, route, sessionCookieName, setCookie, type Route } from "@pim/v2-app/http";
 import { newId } from "@pim/v2-app/ids";
-import { AUTO_APPROVE_MS } from "@pim/v2-app/operations";
 import { LOCALES } from "@pim/shared/locales";
+import { clientAddress } from "../limits.ts";
 import { PimThemes } from "@pim/shared/themes";
 import { pimThemes } from "@pim/shared/theme-data/index";
 import { INTRODUCTION } from "@pim/shared/transcript";
@@ -139,20 +139,22 @@ const SETTINGS: Record<string, (v: unknown) => boolean> = {
 	colorMode: (v) => ["light", "dark", "system"].includes(v as string),
 	colorTheme: (v) => themeIds.includes(v as string),
 	locale: (v) => (LOCALES as readonly string[]).includes(v as string),
+	approvalTimeoutSeconds: (v) => v === null || (typeof v === "number" && v >= 0),
 };
 async function readSettings(app: App, ownerId: string) {
 	const rows = await app.db.owner(ownerId, async (tx) => (await tx.query("SELECT key, value FROM pim_app.owner_settings WHERE key LIKE 'settings.%'")).rows);
 	const own = Object.fromEntries(rows.map((r) => [r.key.slice("settings.".length), r.value]).filter(([k]) => k in SETTINGS));
-	const settings = { timeZone: process.env.PIM_TIME_ZONE ?? "UTC", approvalPolicy: process.env.PIM_APPROVAL_POLICY ?? "explicit", deviceAlerts: "important", ...own } as { approvalPolicy: string };
-	// How long an approval waits before it is approved: only `auto` has an answer, and it is not a setting of its own.
-	return { ...settings, approvalTimeoutSeconds: settings.approvalPolicy === "auto" ? AUTO_APPROVE_MS / 1000 : null };
+	const settings = { timeZone: process.env.PIM_TIME_ZONE ?? "UTC", approvalPolicy: process.env.PIM_APPROVAL_POLICY ?? "explicit", deviceAlerts: "important", approvalTimeoutSeconds: null as number | null, ...own };
+	// Only the auto policy times out: what it waits before approving is what the person set, else 30 seconds.
+	return { ...settings, approvalTimeoutSeconds: settings.approvalPolicy === "auto" ? (own.approvalTimeoutSeconds as number | null | undefined) || 30 : null };
 }
 
 // ---- approvals ----
 const STATUS: Record<string, "pending" | "approved" | "denied"> = { waiting: "pending", approved: "approved", timed_out_approved: "approved", denied: "denied", timed_out_denied: "denied" };
-const webApproval = (r: any) => {
+export const webApproval = (r: any) => {
 	// The runtime's bookkeeping (task, call, policy resource) is not what the person reads.
-	const { taskId: _task, callId, resource: _resource, ...args } = (r.args ?? {}) as Record<string, unknown>;
+	const { taskId: _task, callId, resource: _resource, review, explicit: _explicit, requestedBy, guestOwner: _g, guestChat: _c, ...args } = (r.args ?? {}) as Record<string, unknown>;
+	const reviewed = review as { status?: string; note?: string } | undefined;
 	const brief = typeof args.summary === "string" ? args.summary : Object.entries(args).slice(0, 3).map(([k, v]) => `${k}: ${typeof v === "string" ? v : JSON.stringify(v)}`.slice(0, 120)).join(", ");
 	return {
 		id: r.id,
@@ -169,8 +171,10 @@ const webApproval = (r: any) => {
 		callId: typeof callId === "string" ? callId : null,
 		expiresAt: ms(r.expires_at),
 		onTimeout: r.timeout_policy,
-		decidedBy: r.state.startsWith("timed_out") ? "timeout" : r.decided_by === null ? null : r.via_standing_grant ? "always" : "user",
-		requestedBy: null,
+		decidedBy: r.state.startsWith("timed_out") ? "timeout" : r.decided_by === null ? null : r.decided_by === "majordomo" ? "majordomo" : r.via_standing_grant ? "always" : "user",
+		requestedBy: requestedBy ?? null,
+		// While the majordomo has it the person is not asked; once it hands it back, they see what it said.
+		review: r.state === "waiting" && (reviewed?.status === "reviewing" || reviewed?.status === "escalated") ? { status: reviewed.status, note: reviewed.note ?? null } : null,
 	};
 };
 export const approvalsOf = (app: App, ownerId: string, where = "", params: unknown[] = []) =>
@@ -182,7 +186,10 @@ export const bootRoutes: Route[] = [
 	route("POST", "/auth/register", async ({ app, json, req, secure }) => {
 		if (fromAnotherSite(req)) throw new ForbiddenError("register", "csrf");
 		const b = await json();
-		const account = await app.identity.register({ username: String(b.username ?? ""), invite: b.invite, bootstrap: b.bootstrap ?? b.claim, address: req.socket.remoteAddress });
+		// Through a bot's link anyone may join as its guest (the bot must still be live); the address is the proxy's header when the deployment trusts one.
+		const bot = typeof b.bot === "string" && b.bot ? await app.guests.liveBot(b.bot) : null;
+		const account = await app.identity.register({ username: String(b.username ?? ""), invite: b.invite, bootstrap: b.bootstrap ?? b.claim, address: clientAddress(req, process.env), ...(bot ? { guestOf: { botId: bot.id, host: bot.host } } : {}) });
+		if (bot) await app.guests.enroll(account.ownerId, bot.id);
 		const session = () => app.identity.createSession(account.ownerId, { userAgent: req.headers["user-agent"] });
 		const recoveryCodes = await app.signin.newRecoveryCodes(account.ownerId);
 		const setup = await app.signin.issueSetupCode(account.ownerId);
@@ -218,13 +225,6 @@ export const bootRoutes: Route[] = [
 	route("GET", "/api/themes.css", async () => ({ status: 200, raw: themes.stylesheet(), headers: { "content-type": "text/css; charset=utf-8", "cache-control": "no-cache" } })),
 	// Extensions with widgets are not ported to v2; the app draws without them.
 	route("GET", "/api/extensions", async ({ principal }) => (await principal(), ok({ extensions: [], logo: null }))),
-	// In-app notifications are not ported to v2 (deferred); an empty list is what a space without any shows.
-	route("GET", "/api/notifications", async ({ principal }) => (await principal(), ok({ notifications: [] }))),
-	route("POST", "/api/notifications/:id/read", async ({ principal }) => {
-		await principal();
-		throw new NotFoundError("No such notification");
-	}),
-
 	route("GET", "/api/majordomo", async ({ app, principal }) => ok(await majordomoState(app, await principal()))),
 	route("PUT", "/api/majordomo/preferences", async ({ app, principal, json }) => {
 		const p = await principal();

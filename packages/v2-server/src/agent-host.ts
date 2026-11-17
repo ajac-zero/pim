@@ -27,13 +27,16 @@ import { openString, type KeyringCrypto } from "@pim/v2-app/crypto";
 import type { Db as RuntimeDb } from "@pim/v2-runtime/db";
 import type { PartitionContext, RunnerOptions } from "@pim/v2-runtime/runner";
 import { pimExtension, timeZoneOf, type ToolDeps } from "./agent-tools.ts";
+import { BUILTIN_SKILLS } from "./builtin-skills.ts";
+import { CodexImagesClient } from "./codex-images.ts";
+import { imageEndpoints } from "./image-tools.ts";
 import { chatgptCredentialStore, chatgptProvider, type ChatGPTRunnerOptions } from "./chatgpt-auth.ts";
 import type { ForgeParts } from "./forge-assembly.ts";
 import { createFailover } from "./provider-failover.ts";
 
 type Env = Record<string, string | undefined>;
 type ModelRef = { provider: string; id: string };
-type ProviderRow = { id: string; kind: string; config: Record<string, any>; secret: string | null };
+type ProviderRow = { id: string; kind: string; config: Record<string, any>; secret: string | null; /** The deployment's own (shared with everyone), named `shared:<id>`, its key sealed for the deployment rather than for the owner. */ shared?: boolean };
 export type RunnerContext = {
 	username: string | null;
 	agent: { id: string; name: string; instructions: string; config: Record<string, any> } | null;
@@ -42,6 +45,8 @@ export type RunnerContext = {
 	memories: { id: string; scope: string; title: string }[];
 	contacts: { id: string; name: string; about: string }[];
 	fallbacks: ModelRef[];
+	/** The model the person chose for this chat alone (migration 0670); it comes before the agent's own. */
+	chat_model?: ModelRef | null;
 };
 
 export type AgentHostOptions = {
@@ -60,9 +65,14 @@ export type AgentHostOptions = {
 	chatgpt?: ChatGPTRunnerOptions | undefined;
 	/** How long a failed model is skipped. */
 	cooldowns?: { transientMs?: number; authMs?: number } | undefined;
+	/** How long a model stream may stay silent before it is cut off, and how long a tool may run before its call ends with an error. */
+	stallMs?: { stream?: number; tool?: number } | undefined;
 	fetch?: typeof fetch | undefined;
 	now?: (() => number) | undefined;
 };
+
+/** What the catalog calls a provider the deployment shares with everyone. */
+const SHARED = "shared:";
 
 const asModelRef = (v: unknown): ModelRef | null => {
 	if (typeof v === "string") return v.includes("/") ? { provider: v.split("/")[0]!.replace(/^own:/, ""), id: v.split("/").slice(1).join("/") } : null;
@@ -72,7 +82,7 @@ const asModelRef = (v: unknown): ModelRef | null => {
 };
 
 /** A pi-ai provider for an OpenAI-compatible endpoint: a gateway, a local server, or an owner's own. A server without a key is sent a placeholder. */
-function compatibleProvider(id: string, name: string, baseUrl: string, models: { id: string; name?: string; contextWindow?: number; maxTokens?: number; reasoning?: boolean; images?: boolean }[], key: () => string | undefined): Provider {
+export function compatibleProvider(id: string, name: string, baseUrl: string, models: { id: string; name?: string; contextWindow?: number; maxTokens?: number; reasoning?: boolean; images?: boolean }[], key: () => string | undefined): Provider {
 	return createProvider({
 		id,
 		name,
@@ -126,8 +136,39 @@ function meter(models: Models, record: (message: any, model: any) => void): Mode
 export function createAgentHost(options: AgentHostOptions) {
 	const { db, env } = options;
 	const now = options.now ?? Date.now;
-	const modelsByOwner = new Map<string, Models>();
-	const failover = createFailover({ now, cooldowns: options.cooldowns });
+	/**
+	 * Each owner's catalog, in a holder. A Runner keeps a partition resident while chats in it are active, and the catalog it was opened with holds each provider's address and
+	 * key as they were then: a provider changed afterwards (or imported, then pointed elsewhere) would keep failing with "Connection error" until the partition was released.
+	 * So the holder is rebuilt whenever a message sets the chat's model (`choose`), and the models the harness holds read through it.
+	 */
+	const catalogs = new Map<string, { current: Models; through: Models }>();
+	async function refreshCatalog(ownerId: string): Promise<Models> {
+		const current = await buildModels(ownerId);
+		const held = catalogs.get(ownerId);
+		if (held) {
+			held.current = current;
+			return held.through;
+		}
+		const holder = { current, through: undefined as unknown as Models };
+		holder.through = new Proxy({} as Models, { get: (_target, property) => {
+			const value = Reflect.get(holder.current, property, holder.current) as unknown;
+			return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(holder.current) : value;
+		} });
+		catalogs.set(ownerId, holder);
+		return holder.through;
+	}
+	const failover = createFailover({
+		now,
+		cooldowns: options.cooldowns,
+		stallMs: options.stallMs?.stream,
+		// Every Runner reads and writes the same cooldowns, so a model one of them found down is skipped by all.
+		store: {
+			load: async (ownerId) => new Map((await db.read<{ ref: string; ms: string }>(ownerId, "SELECT ref, (extract(epoch FROM until) * 1000)::bigint AS ms FROM pim_runtime.provider_cooldowns WHERE owner_id = $1 AND until > now()", [ownerId])).rows.map((r) => [r.ref, Number(r.ms)])),
+			save: async (ownerId, provider, id, untilMs, reason) => {
+				await db.read(ownerId, "INSERT INTO pim_runtime.provider_cooldowns (owner_id, ref, until, reason) VALUES ($1, $2, to_timestamp($3 / 1000.0), $4) ON CONFLICT (owner_id, ref) DO UPDATE SET until = greatest(pim_runtime.provider_cooldowns.until, excluded.until), reason = excluded.reason", [ownerId, `${provider}/${id}`, untilMs, reason.slice(0, 300)]);
+			},
+		},
+	});
 	const chatgptOptions: ChatGPTRunnerOptions = options.chatgpt ?? {};
 	/** The reads of one request's sections share one query; the next request reads again, so what an agent just saved is in its next prompt. */
 	const contexts = new Map<string, Promise<RunnerContext>>();
@@ -147,12 +188,17 @@ export function createAgentHost(options: AgentHostOptions) {
 
 	/** The owner's providers: what the catalog offers, with their keys opened once, so a model call never waits on the application's database. */
 	async function buildModels(ownerId: string): Promise<Models> {
-		const rows = (await db.read<{ p: ProviderRow[] }>(ownerId, "SELECT pim_app.runner_providers($1) AS p", [ownerId]).catch(() => ({ rows: [{ p: [] as ProviderRow[] }] }))).rows[0]!.p;
+		const own = (await db.read<{ p: ProviderRow[] }>(ownerId, "SELECT pim_app.runner_providers($1) AS p", [ownerId]).catch(() => ({ rows: [{ p: [] as ProviderRow[] }] }))).rows[0]!.p;
+		// What an admin shared with everyone is in every catalog as `shared:<id>`, its key opened under the admin's owner id as it was sealed. An admin's own list leaves it out.
+		const sharedRows = (await db.read<{ p: (ProviderRow & { owner: string })[] }>(ownerId, "SELECT pim_app.shared_providers(true) AS p").catch(() => ({ rows: [] as { p: (ProviderRow & { owner: string })[] }[] }))).rows[0]?.p ?? [];
+		const context = new Map<string, string>(sharedRows.map((r) => [`shared:${r.id}`, `provider:${r.owner}/${r.id}`]));
+		const rows: ProviderRow[] = [...own.filter((r) => r.config.shared !== true), ...sharedRows.map((r) => ({ id: `shared:${r.id}`, kind: r.kind, config: r.config, secret: r.secret }))];
 		const keys = new Map<string, string>();
 		for (const row of rows) {
 			if (!row.secret || !options.crypto) continue;
 			try {
-				keys.set(row.id, await openString(options.crypto, row.secret, `provider:${ownerId}/${row.id}`));
+				// An admin's shared provider is sealed under the admin; one promoted from v1's deployment under `_instance`; the owner's own under them.
+				keys.set(row.id, await openString(options.crypto, row.secret, context.get(row.id) ?? (row.shared ? `provider:_instance/${row.id.slice(SHARED.length)}` : `provider:${ownerId}/${row.id}`)));
 			} catch {
 				// A key sealed under a key this process does not hold stays unavailable, and the provider with it.
 			}
@@ -196,7 +242,7 @@ export function createAgentHost(options: AgentHostOptions) {
 	/** The first of these models the catalog can run (its provider is configured); when none can, the first one, which then fails with what is missing. */
 	async function choose(ownerId: string, candidates: (ModelRef | null)[]): Promise<{ provider: string; modelId: string }> {
 		const wanted = [...candidates, asModelRef(env.PIM_DEFAULT_MODEL)].filter((m): m is ModelRef => m !== null);
-		const models = modelsByOwner.get(ownerId);
+		const models = catalogs.has(ownerId) ? await refreshCatalog(ownerId).catch(() => catalogs.get(ownerId)!.through) : undefined;
 		const available = models ? await models.getAvailable().catch(() => []) : [];
 		const found = wanted.find((w) => available.some((a) => a.provider === w.provider && a.id === w.id)) ?? (wanted.length === 0 ? available[0] : undefined);
 		const chain = wanted.filter((w, i) => wanted.findIndex((x) => x.provider === w.provider && x.id === w.id) === i);
@@ -205,10 +251,15 @@ export function createAgentHost(options: AgentHostOptions) {
 		return { provider: pick.provider, modelId: pick.id };
 	}
 
+	/** Where an owner's images are drawn: their ChatGPT images sign-in, and the endpoints `PIM_IMAGE_MODEL` can name. `PIM_IMAGE_MODEL=off` has no `generate_image`. */
+	const imageSources = (ownerId: string): ToolDeps["images"] =>
+		env.PIM_IMAGE_MODEL === "off"
+			? undefined
+			: { model: env.PIM_IMAGE_MODEL, codex: () => (options.crypto ? new CodexImagesClient(db, options.crypto, ownerId, env, { fetch: options.fetch, now }) : undefined), endpoints: () => imageEndpoints(db, options.crypto, env, ownerId) };
+
 	const harnessOptions = async (partition: PartitionContext): Promise<HarnessOptions> => {
 		const ownerId = partition.ownerId;
-		const models = await buildModels(ownerId);
-		modelsByOwner.set(ownerId, models);
+		const models = await refreshCatalog(ownerId);
 		const metered = meter(failover.wrap(models, ownerId), (message, model) => {
 			const usage = message?.usage;
 			if (!usage || !(usage.input > 0 || usage.output > 0)) return;
@@ -217,7 +268,7 @@ export function createAgentHost(options: AgentHostOptions) {
 				.catch(() => {});
 		});
 		const registry = createRegistry();
-		const deps: ToolDeps = { ownerId, partitionId: partition.partitionId, runtime: db, app: options.app, forge: options.forge, relay: options.relay, fetch: options.fetch ?? fetch, now, crypto: options.crypto, allowPrivateConnectors: env.PIM_CONNECTOR_ALLOW_PRIVATE === "1", chatOf: (conversationId) => publicChatId(ownerId, conversationId) };
+		const deps: ToolDeps = { ownerId, partitionId: partition.partitionId, runtime: db, app: options.app, forge: options.forge, relay: options.relay, fetch: options.fetch ?? fetch, now, toolTimeoutMs: options.stallMs?.tool, crypto: options.crypto, allowPrivateConnectors: env.PIM_CONNECTOR_ALLOW_PRIVATE === "1", images: imageSources(ownerId), chatOf: (conversationId) => publicChatId(ownerId, conversationId) };
 		const ctx = (conversationId: number | string) => publicChatId(ownerId, conversationId).then((chat) => readContext(ownerId, chat));
 		registry.install(pimExtension(deps, [
 			section("user_time_zone", () => timeZoneOf(db, ownerId)),
@@ -228,7 +279,9 @@ export function createAgentHost(options: AgentHostOptions) {
 			}),
 			section("your_skills", async (input) => {
 				const c = await ctx(input.conversationId);
-				return c.skills.length === 0 ? undefined : `Skills you can load with read_skill:\n${c.skills.map((s) => `- ${s.name}: ${s.description}`).join("\n")}`;
+				// The person's own skills first; a built-in one is listed unless they have written one of the same name.
+				const skills = [...c.skills, ...BUILTIN_SKILLS.filter((b) => !c.skills.some((s) => s.name === b.name)).map(({ name, description }) => ({ name, description }))];
+				return `Skills you can load with read_skill:\n${skills.map((s) => `- ${s.name}: ${s.description}`).join("\n")}`;
 			}),
 			section("active_goals", async (input) => {
 				const c = await ctx(input.conversationId);
@@ -238,6 +291,14 @@ export function createAgentHost(options: AgentHostOptions) {
 				const c = await ctx(input.conversationId);
 				const scopes = c.agent ? `agent-${c.agent.id} and everyone` : "everyone";
 				return `Your memory (scopes ${scopes}). Save with note, find with recall, read in full with zoom.${c.memories.length ? `\n${c.memories.map((m) => `- [${m.id}] (${m.scope}) ${m.title}`).join("\n")}` : "\nNothing is remembered yet."}`;
+			}),
+			section("room", async (input) => {
+				const chat = await publicChatId(ownerId, input.conversationId);
+				const room = chat ? (await db.read<{ r: { role: "host" | "seat"; mode: string; host: { id: string; name: string } | null; members: { id: string; name: string }[] } | null }>(ownerId, "SELECT pim_app.runner_room($1, $2) AS r", [ownerId, chat]).catch(() => ({ rows: [] as never[] }))).rows[0]?.r : undefined;
+				if (!room) return undefined;
+				const names = (room.role === "host" ? room.members : [room.host ?? { id: "", name: "Pim" }, ...room.members]).map((m) => m.name);
+				const turns = room.mode === "open" ? "Everything the person says wakes every agent in the room; each decides whether it has something to add." : "The host answers what the person says to no one in particular; an agent answers when it is mentioned as @Name.";
+				return `This is a group chat${room.role === "seat" ? " and you are one of its agents, not its host" : " and you are its host"}. ${room.role === "host" ? "Also in it" : "Others in it"}: ${names.join(", ") || "no one else yet"}. ${turns} What another agent says reaches you as a message that starts "[From Name]"; what you send with send_to_user is shown in the chat as yours, under your name. Mention an agent by @Name to bring its attention; do not repeat what others have said.`;
 			}),
 			section("delegates", async (input) => {
 				const c = await ctx(input.conversationId);
@@ -256,9 +317,41 @@ export function createAgentHost(options: AgentHostOptions) {
 	};
 	const chatAgent: NonNullable<RunnerOptions["chatAgent"]> = async (ownerId, chat) => {
 		const c = await readContext(ownerId, chat ?? null).catch(() => undefined);
-		const own = c?.agent ? [asModelRef(c.agent.config.model), ...((c.agent.config.fallbacks ?? []) as unknown[]).map(asModelRef)] : [];
-		return { model: await choose(ownerId, [...own, await chosenModel(ownerId), ...(c?.fallbacks ?? []).map(asModelRef)]) };
+		const own = c?.agent ? [asModelRef(c.chat_model), asModelRef(c.agent.config.model), ...((c.agent.config.fallbacks ?? []) as unknown[]).map(asModelRef)] : [];
+		return { model: await choose(ownerId, [...(c?.agent ? [] : [asModelRef(c?.chat_model)]), ...own, await chosenModel(ownerId), ...(c?.fallbacks ?? []).map(asModelRef)]) };
 	};
 
-	return { harnessOptions, homeRoot, chatAgent };
+	/** One model call as an owner's own models, for what is not a chat turn (an approval review): the same catalog, failover and ledger, no tools. */
+	async function ask(ownerId: string, chat: string | null, system: string, question: string, signal: AbortSignal): Promise<string> {
+		const models = await refreshCatalog(ownerId);
+		const c = await readContext(ownerId, chat).catch(() => undefined);
+		const pick = await choose(ownerId, [await chosenModel(ownerId), ...(c?.fallbacks ?? []).map(asModelRef)]);
+		const model = models.getModel(pick.provider, pick.modelId);
+		if (!model) throw new Error(`The model ${pick.provider}/${pick.modelId} is not available`);
+		const message: any = await failover.wrap(models, ownerId).completeSimple(model, { systemPrompt: system, messages: [{ role: "user", content: question, timestamp: now() }] } as never, { signal } as never);
+		if (message.stopReason === "error" || message.stopReason === "aborted") throw new Error(message.errorMessage ?? "The model did not answer");
+		return (message.content as { type: string; text?: string }[]).filter((p) => p.type === "text").map((p) => p.text ?? "").join("");
+	}
+
+	/**
+	 * One answer from a model for work no chat asked for, such as the memory nap: the deployment's `PIM_MEMORY_MODEL` (`provider/model`), else the utility model the person chose
+	 * in Settings, else the model they chose for agents, else the deployment's default. It is metered into the owner's ledger as background work. Undefined when no model can answer.
+	 */
+	async function complete(ownerId: string, system: string, prompt: string, maxTokens = 1024): Promise<string | undefined> {
+		const models = await refreshCatalog(ownerId);
+		const available = await models.getAvailable().catch(() => []);
+		const utility = asModelRef((await db.read<{ m: unknown }>(ownerId, "SELECT pim_app.runner_utility_model($1) AS m", [ownerId]).catch(() => ({ rows: [] as { m: unknown }[] }))).rows[0]?.m);
+		const wanted = [asModelRef(env.PIM_MEMORY_MODEL), utility, await chosenModel(ownerId), asModelRef(env.PIM_DEFAULT_MODEL)].filter((m): m is ModelRef => m !== null);
+		const model = wanted.map((w) => available.find((a) => a.provider === w.provider && a.id === w.id)).find((m) => m !== undefined);
+		if (!model) return undefined;
+		const answer = await models.completeSimple(model as never, { systemPrompt: system, messages: [{ role: "user", content: prompt, timestamp: now() }] } as never, { maxTokens } as never);
+		const usage = (answer as any)?.usage;
+		if (usage && (usage.input > 0 || usage.output > 0)) {
+			await db.read(ownerId, "SELECT pim_app.record_model_call($1, $2, 'background', NULL, $3, $4, $5, $6, $7)", [ownerId, `mc_${randomUUID()}`, model.provider, model.id, Math.round(usage.input ?? 0), Math.round(usage.output ?? 0), Math.round((usage.cost?.total ?? 0) * 1_000_000)]).catch(() => {});
+		}
+		if ((answer as any)?.stopReason === "error") throw new Error(String((answer as any).errorMessage ?? "The model failed"));
+		return ((answer as any).content as { type: string; text?: string }[]).flatMap((c) => (c.type === "text" ? [c.text ?? ""] : [])).join("").trim();
+	}
+
+	return { harnessOptions, homeRoot, chatAgent, ask, complete, context: (ownerId: string, chat: string | null) => readContext(ownerId, chat) };
 }

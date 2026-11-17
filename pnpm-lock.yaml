@@ -299,6 +299,9 @@ importers:
       pg:
         specifier: ^8.13.0
         version: 8.23.1
+      sucrase:
+        specifier: ^3.35.1
+        version: 3.35.1
       ws:
         specifier: ^8.18.0
         version: 8.22.0
@@ -520,7 +523,7 @@ importers:
     dependencies:
       '@cloudflare/puppeteer':
         specifier: 1.4.0
-        version: 1.4.0
+        version: 1.4.0(supports-color@10.2.2)
       '@earendil-works/chord':
         specifier: 1.1.0
         version: 1.1.0
@@ -536,6 +539,9 @@ importers:
       '@pim/shared':
         specifier: workspace:*
         version: link:../shared
+      '@pim/ui-lang':
+        specifier: workspace:*
+        version: link:../ui-lang
       '@pim/v2-app':
         specifier: workspace:*
         version: link:../v2-app

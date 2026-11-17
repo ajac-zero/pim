@@ -91,7 +91,10 @@ export function deliverApprovalDecisions(app: App): void {
 		await decide(p, approvalId, approve);
 		const row = await app.db.owner(p.ownerId, async (tx) => (await tx.query("SELECT public_chat_id, args FROM pim_app.approvals WHERE id = $1", [approvalId])).rows[0]);
 		const taskId = row?.args?.taskId;
-		if (row?.public_chat_id && taskId !== undefined) {
+		// A guest's call that asked the host: the parked task is in the guest's own chat, so the decision is admitted there, as the guest's.
+		if (row?.args?.guestOwner && row.args.guestChat && taskId !== undefined) {
+			await app.conversations.admit({ kind: "user", ownerId: row.args.guestOwner, role: "guest", sessionId: "guest-approval" }, { commandId: `approval:${approvalId}`, kind: "approval_decision", chatId: row.args.guestChat, payload: { taskId, approved: approve, approvalId } });
+		} else if (row?.public_chat_id && taskId !== undefined) {
 			await app.conversations.admit(p, { commandId: `approval:${approvalId}`, kind: "approval_decision", chatId: row.public_chat_id, payload: { taskId, approved: approve, approvalId } });
 		}
 	};

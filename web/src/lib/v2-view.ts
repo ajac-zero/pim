@@ -108,7 +108,7 @@ export function streamOf(messages: readonly V2Message[]): StreamState {
   const writing = messages.findLast(
     (m) => m.partial && m.role === "assistant" && !final.has(m.id),
   );
-  return reduce(
+  const state = reduce(
     EMPTY_STREAM,
     asEvent({
       type: "snapshot",
@@ -118,6 +118,20 @@ export function streamOf(messages: readonly V2Message[]): StreamState {
       inbox: [],
       generation: writing ? { message: assistantOf(writing) } : undefined,
     }),
+  );
+  // A chat whose last word is a failed model request shows why, as v1's view did from the failed task.
+  const last = messages.findLast((m) => !m.partial);
+  return last ? failed(state, last) : state;
+}
+
+/** The view's error for a committed assistant message that ended in a model error: a stalled stream, a refused credential, a provider's failure. */
+function failed(state: StreamState, m: V2Message): StreamState {
+  if (m.role !== "assistant" || m.stopReason !== "error" || !m.error) {
+    return state;
+  }
+  return reduce(
+    state,
+    asEvent({ type: "task_failed", kind: "pi.generation", message: m.error }),
   );
 }
 
@@ -135,12 +149,15 @@ export function applyMessage(state: StreamState, m: V2Message): StreamState {
   }
   const entry = entryOf(m);
   if (!entry) return state;
-  return reduce(
-    state,
-    asEvent({
-      type: m.role === "assistant" ? "message_end" : "entry_appended",
-      entry,
-    }),
+  return failed(
+    reduce(
+      state,
+      asEvent({
+        type: m.role === "assistant" ? "message_end" : "entry_appended",
+        entry,
+      }),
+    ),
+    m,
   );
 }
 
@@ -176,10 +193,17 @@ export function sessionOf(row: SidebarRow): Session {
       typeof summary.responseAt === "number" ? summary.responseAt : null,
     unread: row.unread,
     archived: summary.archived === true,
+    ...(typeof summary.model === "object" && summary.model !== null
+      ? { model: summary.model as Session["model"] }
+      : {}),
     agent:
       typeof agent === "object" && agent !== null
         ? (agent as { id: string; name: string })
         : null,
+    // A group chat's room rides in the row's summary, like its agent.
+    ...(typeof summary.room === "object" && summary.room !== null
+      ? { room: summary.room as Session["room"] }
+      : {}),
   };
 }
 
@@ -189,7 +213,12 @@ export function upsertSession(
   next: Session,
 ): Session[] {
   const others = (list ?? []).filter((s) => s.id !== next.id);
-  return [...others, next].sort(
-    (a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0),
-  );
+  // A live row does not carry the chat's agent or own model; it keeps the ones the list had.
+  const before = list?.find((s) => s.id === next.id);
+  const model = next.model ?? before?.model;
+  const agent = next.agent ?? before?.agent;
+  return [
+    ...others,
+    { ...next, ...(model ? { model } : {}), ...(agent ? { agent } : {}) },
+  ].sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
 }

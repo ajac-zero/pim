@@ -19,6 +19,7 @@
     "@pim/v2-contracts": "workspace:*",
     "lib0": "^0.2.119",
     "pg": "^8.13.0",
+    "sucrase": "^3.35.1",
     "ws": "^8.18.0",
     "y-protocols": "^1.0.7",
     "yjs": "^13.6.33",

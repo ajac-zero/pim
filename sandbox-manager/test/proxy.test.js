@@ -11,6 +11,25 @@ describe('isBlockedIp', () => {
 	})
 })
 
+describe('egress proxy to an internal host', () => {
+	test('forwards plain HTTP only to listed host:port pairs the session may reach, and refuses the rest', async () => {
+		const upstream = http.createServer((req, res) => res.end(`${req.method} ${req.url} host=${req.headers.host}`))
+		await new Promise((r) => upstream.listen(0, '127.0.0.1', r))
+		const up = upstream.address().port
+		const p = createProxy({ adminToken: 'adm', internal: ['front:8088'], forward: (o) => http.request({ ...o, host: '127.0.0.1', port: up }) })
+		await new Promise((r) => p.proxy.listen(0, '127.0.0.1', r))
+		await new Promise((r) => p.admin.listen(0, '127.0.0.1', r))
+		const ask = (url) => new Promise((resolve, reject) => http.request({ host: '127.0.0.1', port: p.proxy.address().port, method: 'GET', path: url, headers: { host: new URL(url).host } }, (res) => { let b = ''; res.on('data', (c) => (b += c)); res.on('end', () => resolve({ status: res.statusCode, body: b })) }).on('error', reject).end())
+		// No allowlist for this source yet.
+		assert.equal((await ask('http://front:8088/a')).status, 403)
+		await fetch(`http://127.0.0.1:${p.admin.address().port}/allow/127.0.0.1`, { method: 'PUT', headers: { authorization: 'Bearer adm' }, body: JSON.stringify({ hosts: ['front'] }) })
+		assert.deepEqual(await ask('http://front:8088/a?b=1'), { status: 200, body: 'GET /a?b=1 host=front:8088' })
+		// Another port, another host, and an unlisted name are refused as plain HTTP always was.
+		for (const u of ['http://front:9999/a', 'http://other:8088/a', 'http://127.0.0.1:8088/a']) assert.equal((await ask(u)).status, 405, u)
+		p.proxy.close(); p.admin.close(); upstream.close()
+	})
+})
+
 describe('egress proxy', () => {
 	let p, port, adminPort, echo
 	const dns = { 'github.com': '93.184.216.34', 'sneaky.github.com': '10.0.0.5', 'evil.com': '93.184.216.35' }

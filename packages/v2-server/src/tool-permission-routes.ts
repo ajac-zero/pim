@@ -22,7 +22,7 @@ async function person(app: App, p: Principal, write: boolean): Promise<void> {
 export function permissionRoutes(): Route[] {
 	const rows = async (app: App, ownerId: string) =>
 		app.db.owner(ownerId, async (tx) => ({
-			connectors: (await tx.query("SELECT id, kind, name, url, status, credential, enabled_tools, approval, discovered_tools FROM pim_app.connectors WHERE url IS NOT NULL ORDER BY created_at")).rows.map((r) => ({ id: r.id as string, kind: r.kind as string, name: r.name as string, url: r.url as string, status: r.status as string, credential: r.credential as string | null, enabledTools: r.enabled_tools as string[], approval: r.approval as Approval, discovered: r.discovered_tools as (McpTool)[] })),
+			connectors: (await tx.query("SELECT id, kind, name, url, status, credential, enabled_tools, approval, discovered_tools FROM pim_app.connectors WHERE url IS NOT NULL OR kind = 'native' ORDER BY created_at")).rows.map((r) => ({ id: r.id as string, kind: r.kind as string, name: r.name as string, url: r.url as string, status: r.status as string, credential: r.credential as string | null, enabledTools: r.enabled_tools as string[], approval: r.approval as Approval, discovered: r.discovered_tools as (McpTool)[] })),
 			permissions: (await tx.query("SELECT audience, app, tool, permission FROM pim_app.tool_permissions")).rows as PermissionRow[],
 		}));
 	const info = (c: ConnectorRow & { discovered: McpTool[] }, tool: McpTool, permissions: PermissionRow[], agentId?: string) => {
@@ -34,25 +34,42 @@ export function permissionRoutes(): Route[] {
 			permission: r.permission, default: agent ? (r.default === "off" ? "off" : "on") : r.default, chosen: agent ? r.agentChosen : r.chosen, changed: false, choices: agent ? ["off", "on"] : CHOICES,
 		};
 	};
+	/** A circle's permissions are the host's choices for it, off until set (a circle starts with every tool off); a destructive tool asks even when set On. */
+	const circleInfo = (c: ConnectorRow & { discovered: McpTool[] }, tool: McpTool, permissions: PermissionRow[], circle: string) => {
+		const chosen = permissions.find((x) => x.audience === `circle:${circle}` && x.app === c.id && x.tool === tool.name)?.permission ?? null;
+		const destructive = tool.annotations?.destructiveHint === true;
+		return {
+			app: c.id, appName: c.name, tool: tool.name, name: `${c.id}_${tool.name}`.replace(/[^a-zA-Z0-9_-]/g, "_"), description: tool.description ?? null,
+			readOnly: tool.annotations?.readOnlyHint === true, destructive, permission: destructive && chosen === "on" ? "ask" : (chosen ?? "off"), default: "off", chosen, changed: false, choices: CHOICES,
+		};
+	};
+	const ownCircle = async (app: App, ownerId: string, id: string) => {
+		if (!(await app.db.owner(ownerId, async (tx) => (await tx.query("SELECT 1 FROM pim_app.circles WHERE id = $1 AND owner_id = $2", [id, ownerId])).rowCount))) throw new NotFoundError("No such circle");
+	};
 	return [
 		route("GET", "/api/permissions", async ({ app, principal, url }) => {
 				const p = await principal();
 				await person(app, p, false);
-				if (url.searchParams.has("circle")) return ok({ tools: [] });
-				const agent = url.searchParams.get("agent") ?? undefined;
+				const circle = url.searchParams.get("circle");
 				const { connectors, permissions } = await rows(app, p.ownerId);
+				if (circle) {
+					await ownCircle(app, p.ownerId, circle);
+					return ok({ tools: connectors.flatMap((c) => c.discovered.map((t) => circleInfo(c, t, permissions, circle))) });
+				}
+				const agent = url.searchParams.get("agent") ?? undefined;
 				return ok({ tools: connectors.flatMap((c) => c.discovered.map((t) => info(c, t, permissions, agent))) });
 		}),
 		route("PUT", "/api/permissions", async ({ app, principal, json }) => {
 				const p = await principal();
 				await person(app, p, true);
 				const b = await json();
-				if (b.circle) throw new BadRequestError("Circles' tool permissions are not available yet.");
+				const circle = typeof b.circle === "string" && b.circle ? b.circle : undefined;
+				if (circle) await ownCircle(app, p.ownerId, circle);
 				if (typeof b.app !== "string" || !b.app || typeof b.tool !== "string" || !b.tool) throw new BadRequestError("A connector tool is named by app and tool; only connectors' tools have a permission here.");
 				const agent = typeof b.agent === "string" ? b.agent : undefined;
 				const choices = agent ? ["on", "off"] : CHOICES;
 				if (b.permission !== null && !choices.includes(b.permission)) throw new BadRequestError(`permission must be one of ${choices.join(", ")}, or null for the default`);
-				const audience = agent ? `agent:${agent}` : "owner";
+				const audience = circle ? `circle:${circle}` : agent ? `agent:${agent}` : "owner";
 				const { connectors, permissions } = await rows(app, p.ownerId);
 				const c = connectors.find((x) => x.id === b.app);
 				const tool = c?.discovered.find((t) => t.name === b.tool);
@@ -63,7 +80,7 @@ export function permissionRoutes(): Route[] {
 				});
 				const after = (await rows(app, p.ownerId)).permissions;
 				void permissions;
-				return ok(info(c, tool, after, agent));
+				return ok(circle ? circleInfo(c, tool, after, circle) : info(c, tool, after, agent));
 		}),
 		...(["approve", "deny"] as const).map((verb) => route("POST", `/api/approvals/:id/${verb}`, async ({ app, principal, json, params }) => {
 				const p = await principal();
@@ -74,7 +91,10 @@ export function permissionRoutes(): Route[] {
 				const filed = await app.db.owner(p.ownerId, async (tx) => (await tx.query("SELECT tool, args FROM pim_app.approvals WHERE id = $1", [id])).rows[0]);
 				if (!filed) throw new NotFoundError("No such approval");
 				await app.approvals.decide(p, id, approve);
-				if (approve && body.always === true && filed.tool === "connector:call") {
+				if (approve && body.always === true && filed.tool === "connector:call" && filed.args?.requestedBy) {
+					// A guest's call: always approve opens the tool to that bot's or circle's guests, not to the host's own agents, and settles their other waiting calls of it.
+					for (const other of (await app.guests.alwaysFor(p.ownerId, id)).settled) await app.approvals.decide(p, other, true).catch(() => undefined);
+				} else if (approve && body.always === true && filed.tool === "connector:call") {
 					const { connector, tool } = filed.args?.resource ?? {};
 					if (typeof connector === "string" && typeof tool === "string") await app.db.owner(p.ownerId, (tx) => tx.query("INSERT INTO pim_app.tool_permissions (owner_id, audience, app, tool, permission) VALUES ($1,'owner',$2,$3,'on') ON CONFLICT (owner_id, audience, app, tool) DO UPDATE SET permission = 'on', updated_at = now()", [p.ownerId, connector, tool]));
 				}

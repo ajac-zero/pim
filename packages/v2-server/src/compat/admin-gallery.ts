@@ -154,7 +154,8 @@ export function galleryRoutes(env: Env): Route[] {
 		}),
 		route("PUT", "/api/agents/:id/bot", async ({ app, principal, params, json, origin }) => {
 			const p = await principal();
-			await app.identity.authz.enforce(p, "api:write");
+			// Only the admin shares an agent as a bot: anyone may join through its link, and what it shares is the deployment's to give.
+			await app.identity.authz.enforce(p, "admin:bots");
 			const b = await json();
 			const limit = (v: unknown) => (v === null || v === undefined ? null : Number.isInteger(v) && (v as number) >= 0 ? (v as number) : Number.NaN);
 			const settings = { dailyMessages: limit(b.dailyMessages), dailyToolCalls: limit(b.dailyToolCalls), model: b.model ?? null, tools: Array.isArray(b.tools) ? b.tools.map(String) : [], ask: Array.isArray(b.ask) ? b.ask.map(String) : [] };
@@ -167,7 +168,7 @@ export function galleryRoutes(env: Env): Route[] {
 		}),
 		route("DELETE", "/api/agents/:id/bot", async ({ app, principal, params }) => {
 			const p = await principal();
-			await app.identity.authz.enforce(p, "api:write");
+			await app.identity.authz.enforce(p, "admin:bots");
 			const n = await app.db.owner(p.ownerId, async (tx) => (await tx.query("DELETE FROM pim_app.bots WHERE owner_id = $1 AND agent_id = $2", [p.ownerId, params[0]!])).rowCount);
 			return ok({ deleted: !!n });
 		}),
@@ -179,16 +180,12 @@ export function galleryRoutes(env: Env): Route[] {
 			const used = connectors.filter((c) => agent.apps.includes(c.id) || agent.apps.includes(c.name));
 			return ok({ tools: used.flatMap((c) => c.enabledTools.map((name) => ({ name, appName: c.name, description: c.discoveredTools.find((t) => t.name === name)?.description ?? "", destructive: false }))) });
 		}),
-		// A guest's own bot: who joined through a bot's link isn't recorded on the guest's side yet, so there is none to show.
-		route("GET", "/api/bot", async ({ app, principal }) => (await app.identity.authz.enforce(await principal(), "api:read"), ok({ bot: null, agent: null }))),
 
 		// ---- the connector directory and the model catalog ----
 		route("GET", "/api/app-directory", async ({ app, principal }) => {
 			await app.identity.authz.enforce(await principal(), "api:read");
 			return ok({ apps: (await customApps(app)).map((c) => ({ ref: `custom/${c.id}`, name: c.name, description: c.description, url: c.url, custom: true, icon: c.icon, category: c.category })) });
 		}),
-		// Pim brings no built-in apps of its own in this deployment: what an agent can do is its connectors and the application's own tools.
-		route("GET", "/api/builtin-apps", async ({ app, principal }) => (await app.identity.authz.enforce(await principal(), "api:read"), ok({ apps: [] }))),
 		route("GET", "/api/providers/built-in", async ({ app, principal }) => {
 			await app.identity.authz.enforce(await principal(), "api:read");
 			const models = gatewayModels(env);

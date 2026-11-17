@@ -206,7 +206,7 @@ describe("connectors", () => {
 		expect(runs.map((r) => r.phase)).toEqual(["fired"]);
 		const fire = await app.db.owner(o, async (tx) => (await tx.query("SELECT kind, payload FROM pim_app.accepted_commands WHERE kind = 'trigger_fire'")).rows);
 		expect(fire).toHaveLength(1);
-		expect(fire[0].payload).toMatchObject({ text: "handle it", trigger: trigger.id });
+		expect(fire[0].payload).toMatchObject({ text: expect.stringContaining("[Connector event] issue.created\nhandle it"), trigger: trigger.id });
 
 		// A paused trigger and a suspended owner receive nothing.
 		await app.triggers.setLifecycle(u.principal, trigger.id, "paused");

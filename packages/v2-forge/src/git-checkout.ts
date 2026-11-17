@@ -28,6 +28,8 @@ export async function prepareCheckout(d: CheckoutDeps, thread: ThreadRow, handle
 	};
 	if ((await d.compute.exec(handle, ["test", "-d", `${REPO_DIR}/.git`], { cwd: "/workspace" })).code === 0) return;
 	await run(["git", "config", "--global", `credential.${url}.helper`, `!node ${WORKSPACE_GIT_AUTH_DIR}/helper.mjs`]);
+	// Without this git doesn't tell the helper which repository it is asked for, and the helper then hands out nothing.
+	await run(["git", "config", "--global", `credential.${url}.useHttpPath`, "true"]);
 	await run(["git", "clone", "--quiet", url, REPO_DIR]);
 	if (thread.ref) await run(["git", "-C", REPO_DIR, "checkout", "--quiet", thread.ref]);
 	if (thread.branch) await run(["git", "-C", REPO_DIR, "checkout", "--quiet", "-B", thread.branch]);

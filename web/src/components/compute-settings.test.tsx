@@ -241,9 +241,8 @@ describe("Settings → Compute", () => {
     fireEvent.change(screen.getByLabelText("Provider"), {
       target: { value: "compose" },
     });
-    fireEvent.click(
-      screen.getAllByRole("button", { name: "Add a pool" }).at(-1)!,
-    );
+    const addPool = screen.getAllByRole("button", { name: "Add a pool" });
+    fireEvent.click(addPool[addPool.length - 1] as HTMLElement);
     await waitFor(() => expect(writes).toHaveLength(4));
     expect(writes[3]).toEqual({
       route: "POST /api/admin/coding/pools",

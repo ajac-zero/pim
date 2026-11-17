@@ -694,9 +694,9 @@ describe("a thread's page", () => {
       threadPage(api);
       const list = await screen.findByRole("list", { name: "Conversation" });
       await waitFor(() => expect(list.querySelector("video")).not.toBeNull());
-      const video = list.querySelector("video")!;
-      expect(video.getAttribute("src")).toBe(mp4);
-      expect(video.hasAttribute("controls")).toBe(true);
+      const video = list.querySelector("video");
+      expect(video?.getAttribute("src")).toBe(mp4);
+      expect(video?.hasAttribute("controls")).toBe(true);
       expect(list.textContent).not.toContain("Image blocked");
     });
 

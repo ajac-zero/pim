@@ -13,6 +13,11 @@ const at = (commit: number) => `${P}:1:${commit}`;
 /** The Live service's socket, which the test plays: it stays CONNECTING until it opens it. */
 class LiveSocket {
   static all: LiveSocket[] = [];
+  static at(index: number): LiveSocket {
+    const socket = LiveSocket.all[index];
+    if (!socket) throw new Error(`No socket ${index} was opened`);
+    return socket;
+  }
   sent: Record<string, unknown>[] = [];
   onopen: (() => void) | null = null;
   onmessage: ((event: { data: unknown }) => void) | null = null;
@@ -77,7 +82,7 @@ function server(pages: Pages) {
         json: async () => ({}),
       } as Response;
     const page =
-      pages[chat[1]! + (chat[2]?.includes("before=") ? ":older" : "")];
+      pages[`${chat[1]}${chat[2]?.includes("before=") ? ":older" : ""}`];
     return {
       ok: true,
       status: 200,
@@ -137,7 +142,7 @@ describe("a chat and the sidebar on Pim v2, with the socket still connecting", (
     expect(state.view.entries).toHaveLength(2);
     // The socket has not opened, and the chat is on screen.
     expect(LiveSocket.all).toHaveLength(1);
-    expect(LiveSocket.all[0]!.subs).toEqual([]);
+    expect(LiveSocket.at(0).subs).toEqual([]);
     // What the chat's page shows: the transcript, with a small syncing indicator in place of a blank "Connecting…".
     const Page = ({ client }: { client: PimClient }) => {
       const s = client.getState();
@@ -161,8 +166,8 @@ describe("a chat and the sidebar on Pim v2, with the socket still connecting", (
     expect(html).toContain("data-sync");
     expect(html).not.toContain("Connecting…");
     // Then the socket opens and subscribes from the snapshot's cursor.
-    LiveSocket.all[0]!.open();
-    expect(LiveSocket.all[0]!.subs).toEqual([
+    LiveSocket.at(0).open();
+    expect(LiveSocket.at(0).subs).toEqual([
       { type: "subscribe", topic: "chat:c1", cursor: at(2) },
     ]);
     expect(client.getState().connection).toBe("open");
@@ -178,7 +183,7 @@ describe("a chat and the sidebar on Pim v2, with the socket still connecting", (
     client.handlers.onActivity = activity;
     client.open("c1");
     await flush();
-    const socket = LiveSocket.all[0]!;
+    const socket = LiveSocket.at(0);
     socket.open();
     const partial = (text: string) => ({
       message: assistant(2, text),
@@ -239,7 +244,7 @@ describe("a chat and the sidebar on Pim v2, with the socket still connecting", (
       const client = new PimClient();
       client.open("c1");
       await vi.advanceTimersByTimeAsync(0);
-      const first = LiveSocket.all[0]!;
+      const first = LiveSocket.at(0);
       first.open();
       first.say({
         type: "event",
@@ -256,7 +261,7 @@ describe("a chat and the sidebar on Pim v2, with the socket still connecting", (
       });
       expect(client.getState().view.entries).toHaveLength(3);
       await vi.advanceTimersByTimeAsync(20_000);
-      const second = LiveSocket.all[1]!;
+      const second = LiveSocket.at(1);
       second.open();
       expect(second.subs).toEqual([
         { type: "subscribe", topic: "chat:c1", cursor: at(3) },
@@ -284,7 +289,7 @@ describe("a chat and the sidebar on Pim v2, with the socket still connecting", (
     const client = new PimClient();
     client.open("c1");
     await flush();
-    LiveSocket.all[0]!.open();
+    LiveSocket.at(0).open();
     client.open("c2");
     expect(client.getState()).toMatchObject({ session: "c2", loaded: false });
     await flush();
@@ -293,7 +298,7 @@ describe("a chat and the sidebar on Pim v2, with the socket still connecting", (
       requests.filter((url) => url.startsWith("/api/snapshot/chat/")),
     ).toHaveLength(2);
     expect(LiveSocket.all).toHaveLength(1);
-    expect(LiveSocket.all[0]!.subs).toEqual([
+    expect(LiveSocket.at(0).subs).toEqual([
       { type: "subscribe", topic: "chat:c1", cursor: at(1) },
       { type: "unsubscribe", topic: "chat:c1" },
       { type: "subscribe", topic: "chat:c2", cursor: `${P}:1:7` },
@@ -345,7 +350,7 @@ describe("a chat and the sidebar on Pim v2, with the socket still connecting", (
     client.followSidebar(true);
     await flush();
     expect(loadSidebar).toHaveBeenCalledTimes(1);
-    const socket = LiveSocket.all[0]!;
+    const socket = LiveSocket.at(0);
     socket.open();
     expect(socket.subs).toEqual([
       { type: "subscribe", topic: "sidebar", cursor: at(5) },
@@ -397,8 +402,8 @@ describe("a chat and the sidebar on Pim v2, with the socket still connecting", (
     client.handlers = { onUnauthorized };
     client.open("c1");
     await flush();
-    LiveSocket.all[0]!.open();
-    LiveSocket.all[0]!.drop(4003);
+    LiveSocket.at(0).open();
+    LiveSocket.at(0).drop(4003);
     expect(onUnauthorized).toHaveBeenCalledTimes(1);
     expect(client.getState().connection).toBe("closed");
   });

@@ -271,11 +271,9 @@ export function NextText({ trigger }: { trigger: Trigger }) {
     ...(next.minutes === undefined ? {} : { minutes: next.minutes }),
     ...(next.everyMs === undefined ? {} : { duration: duration(next.everyMs) }),
   };
-  return next.at === undefined ? (
-    <>{t(next.key, params)}</>
-  ) : (
-    <>{sentence(next.key, params, next.at, triggerZone(trigger))}</>
-  );
+  return next.at === undefined
+    ? t(next.key, params)
+    : sentence(next.key, params, next.at, triggerZone(trigger));
 }
 
 /** When a one-time trigger would run, in the person's own zone. */

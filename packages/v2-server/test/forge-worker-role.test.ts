@@ -287,6 +287,8 @@ real("Forge's worker role with the Gate and Maintenance", () => {
 		expect(amp.creates).toBe(1);
 		expect(amp.auth.every((a) => a === `Bearer ${key}`)).toBe(true);
 		const at = (n: string) => `${amp.baseUrl}/user-content/attachments/${n}`;
+		// The loop reports Amp idle only once it has seen the thread working (or a minute has passed), so wait for its first look before finishing the thread.
+		await waitFor("the loop's first look at the Amp thread", async () => ((await d.stack.admin.query("select 1 from pim_forge.forge_threads where thread_id = $1 and last_seen_at is not null", [id])).rows.length ? true : undefined));
 		// Scripted before the thread finishes: the wake can reach the chat as soon as it does.
 		chatModel.setResponses([fauxAssistantMessage("The docs thread is done.")]);
 		amp.say(handle, "assistant", `Done. ![shot](${at("shot.png")}) ![fake](${at("fake.png")})`);

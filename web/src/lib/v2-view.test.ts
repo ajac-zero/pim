@@ -68,7 +68,7 @@ describe("a v2 chat drawn by the same reducer as v1's", () => {
         arguments: { a: 1 },
       },
     ]);
-    expect(entryOf(call)!.model![0]).toMatchObject({
+    expect(entryOf(call)?.model?.[0]).toMatchObject({
       role: "assistant",
       content: [
         { type: "text", text: "x" },
@@ -80,7 +80,7 @@ describe("a v2 chat drawn by the same reducer as v1's", () => {
         },
       ],
     });
-    expect(entryOf(result(5, "c1"))!.model![0]).toMatchObject({
+    expect(entryOf(result(5, "c1"))?.model?.[0]).toMatchObject({
       role: "toolResult",
       toolCallId: "c1",
       toolName: "send_to_user",

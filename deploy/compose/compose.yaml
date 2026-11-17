@@ -192,7 +192,7 @@ services:
     command: ["runner"]
     # Scale with --scale runner=N. A stop gives a Runner time to hand its partition leases back before it is killed.
     stop_grace_period: 120s
-    environment: { <<: *pim-env, PIM_ROLE: runner, PIM_HTTP_PORT: "8080", PIM_DRAIN_WINDOW_SECONDS: "90", PIM_DATABASE_URL: "postgres://pim_runtime_login:${PIM_RUNTIME_DB_PASSWORD:?}@pgbouncer:6432/pim" }
+    environment: { <<: *pim-env, PIM_ROLE: runner, PIM_HTTP_PORT: "8080", PIM_DRAIN_WINDOW_SECONDS: "90", PIM_DATABASE_URL: "postgres://pim_runtime_login:${PIM_RUNTIME_DB_PASSWORD:?}@pgbouncer:6432/pim", PIM_APP_DATABASE_URL: "postgres://pim_gate_login:${PIM_GATE_DB_PASSWORD:?}@pgbouncer:6432/pim", PIM_FORGE_DATABASE_URL: "postgres://pim_forge_login:${PIM_FORGE_DB_PASSWORD:?}@pgbouncer:6432/pim" }
     depends_on: *pim-deps
     healthcheck: *http-health
     deploy:

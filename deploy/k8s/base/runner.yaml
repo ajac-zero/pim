@@ -41,6 +41,8 @@ spec:
             - { name: PIM_ROLE, value: runner }
             - { name: PIM_HTTP_PORT, value: "8080" }
             - { name: PIM_DATABASE_URL, valueFrom: { secretKeyRef: { name: pim-db, key: runtime-url } } }
+            - { name: PIM_APP_DATABASE_URL, valueFrom: { secretKeyRef: { name: pim-db, key: gate-url } } }
+            - { name: PIM_FORGE_DATABASE_URL, valueFrom: { secretKeyRef: { name: pim-db, key: forge-url } } }
             - { name: PIM_S3_ENDPOINT, valueFrom: { secretKeyRef: { name: pim-objects, key: endpoint } } }
             - { name: PIM_S3_REGION, value: us-east-1 }
             - { name: PIM_S3_BUCKET, valueFrom: { secretKeyRef: { name: pim-objects, key: bucket } } }

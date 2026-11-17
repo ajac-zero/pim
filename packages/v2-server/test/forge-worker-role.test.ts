@@ -190,18 +190,23 @@ real("Forge's worker role with the Gate and Maintenance", () => {
 
 	it("a pi thread started over the Gate is provisioned, runs its turn through pi-durable, and wakes the chat", async () => {
 		codeModel.setResponses([fauxAssistantMessage(fauxToolCall("bash", { command: "make build" }), { stopReason: "toolUse" }), fauxAssistantMessage("Built it.")]);
+		chatModel.setResponses([fauxAssistantMessage("The build thread is done.")]);
 		const started = await web.call("POST", "/api/coding/threads", { operationId: "role-pi", task: "Build the project", repo: REPO, harness: "pi", chat: chatId });
 		expect(started.status).toBe(201);
 		const id = started.json.threadId as string;
 		await threadIs(id, "idle");
 		const t = await state(id);
 		expect(t.workspaceRef).toBeTruthy();
-		const transcript = (await web.call("GET", `/api/coding/threads/${id}/transcript?limit=50`)).json.messages as { role: string; text: string }[];
+		// A thread is idle between provisioning and its first turn too, so wait for the turn's last message.
+		const readTranscript = async () => (await web.call("GET", `/api/coding/threads/${id}/transcript?limit=50`)).json.messages as { role: string; text: string }[];
+		const transcript = await waitFor("the turn's transcript", async () => {
+			const m = await readTranscript();
+			return m.length >= 4 ? m : undefined;
+		});
 		expect(transcript.map((m) => m.role)).toEqual(["user", "assistant", "tool", "assistant"]);
 		expect(transcript.at(-1)!.text).toBe("Built it.");
 		// The same start again is the same thread, over HTTP.
 		expect((await web.call("POST", "/api/coding/threads", { operationId: "role-pi", task: "Build the project", repo: REPO, harness: "pi", chat: chatId })).json).toMatchObject({ threadId: id, created: false });
-		chatModel.setResponses([fauxAssistantMessage("The build thread is done.")]);
 		await waitFor("the wake in the chat", async () => ((await chatHeard()).some((t) => t.includes(`Coding thread ${id} completed`)) ? true : undefined), 60_000);
 		const wakes = (await d.stack.admin.query("select dedupe_key, delivered_at from pim_forge.forge_outbox where topic = 'wake' and thread_id = $1", [id])).rows;
 		expect(wakes.map((w) => w.dedupe_key)).toEqual([`coding:${id}:role-pi`]);
@@ -275,6 +280,8 @@ real("Forge's worker role with the Gate and Maintenance", () => {
 		expect(amp.creates).toBe(1);
 		expect(amp.auth.every((a) => a === `Bearer ${key}`)).toBe(true);
 		const at = (n: string) => `${amp.baseUrl}/user-content/attachments/${n}`;
+		// Scripted before the thread finishes: the wake can reach the chat as soon as it does.
+		chatModel.setResponses([fauxAssistantMessage("The docs thread is done.")]);
 		amp.say(handle, "assistant", `Done. ![shot](${at("shot.png")}) ![fake](${at("fake.png")})`);
 		amp.threads.get(handle)!.state = "idle";
 		await threadIs(id, "idle");
@@ -290,7 +297,6 @@ real("Forge's worker role with the Gate and Maintenance", () => {
 		const wakes = (await d.stack.admin.query("select dedupe_key from pim_forge.forge_outbox where topic = 'wake' and thread_id = $1", [id])).rows;
 		expect(wakes).toHaveLength(1);
 		expect(wakes[0].dedupe_key).toMatch(new RegExp(`^coding:${id}:role-amp$`));
-		chatModel.setResponses([fauxAssistantMessage("The docs thread is done.")]);
 		await waitFor("the chat to hear it", async () => ((await chatHeard()).some((t) => t.includes(`Coding thread ${id} completed`)) ? true : undefined), 60_000);
 		void readTranscript;
 	}, 120_000);

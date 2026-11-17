@@ -1,0 +1,11 @@
+# A trial of the whole stack on one machine over plain HTTP, without certificates: Caddy listens on 127.0.0.1:8088 only.
+#
+#   deploy/compose/init-env.sh http://localhost:8088 --image pim:v2
+#   docker build -f deploy/Dockerfile.v2 -t pim:v2 .
+#   docker compose -f deploy/compose/compose.yaml -f deploy/compose/compose.local.yaml up -d
+#
+# Open http://localhost:8088 on the same machine (a browser treats localhost as secure, so passkeys work). For a real hostname use
+# compose.yaml alone with an https PIM_PUBLIC_URL.
+services:
+  caddy:
+    ports: !override ["127.0.0.1:8088:8088"]

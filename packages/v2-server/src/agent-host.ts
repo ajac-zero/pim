@@ -27,6 +27,7 @@ import { openString, type KeyringCrypto } from "@pim/v2-app/crypto";
 import type { Db as RuntimeDb } from "@pim/v2-runtime/db";
 import type { PartitionContext, RunnerOptions } from "@pim/v2-runtime/runner";
 import { pimExtension, type ToolDeps } from "./agent-tools.ts";
+import { BUILTIN_SKILLS } from "./builtin-skills.ts";
 import { chatgptCredentialStore, chatgptProvider, type ChatGPTRunnerOptions } from "./chatgpt-auth.ts";
 import type { ForgeParts } from "./forge-assembly.ts";
 import { createFailover } from "./provider-failover.ts";
@@ -62,6 +63,8 @@ export type AgentHostOptions = {
 	chatgpt?: ChatGPTRunnerOptions | undefined;
 	/** How long a failed model is skipped. */
 	cooldowns?: { transientMs?: number; authMs?: number } | undefined;
+	/** How long a model stream may stay silent before it is cut off, and how long a tool may run before its call ends with an error. */
+	stallMs?: { stream?: number; tool?: number } | undefined;
 	fetch?: typeof fetch | undefined;
 	now?: (() => number) | undefined;
 };
@@ -152,7 +155,18 @@ export function createAgentHost(options: AgentHostOptions) {
 		catalogs.set(ownerId, holder);
 		return holder.through;
 	}
-	const failover = createFailover({ now, cooldowns: options.cooldowns });
+	const failover = createFailover({
+		now,
+		cooldowns: options.cooldowns,
+		stallMs: options.stallMs?.stream,
+		// Every Runner reads and writes the same cooldowns, so a model one of them found down is skipped by all.
+		store: {
+			load: async (ownerId) => new Map((await db.read<{ ref: string; ms: string }>(ownerId, "SELECT ref, (extract(epoch FROM until) * 1000)::bigint AS ms FROM pim_runtime.provider_cooldowns WHERE owner_id = $1 AND until > now()", [ownerId])).rows.map((r) => [r.ref, Number(r.ms)])),
+			save: async (ownerId, provider, id, untilMs, reason) => {
+				await db.read(ownerId, "INSERT INTO pim_runtime.provider_cooldowns (owner_id, ref, until, reason) VALUES ($1, $2, to_timestamp($3 / 1000.0), $4) ON CONFLICT (owner_id, ref) DO UPDATE SET until = greatest(pim_runtime.provider_cooldowns.until, excluded.until), reason = excluded.reason", [ownerId, `${provider}/${id}`, untilMs, reason.slice(0, 300)]);
+			},
+		},
+	});
 	const chatgptOptions: ChatGPTRunnerOptions = options.chatgpt ?? {};
 	/** The reads of one request's sections share one query; the next request reads again, so what an agent just saved is in its next prompt. */
 	const contexts = new Map<string, Promise<RunnerContext>>();
@@ -241,7 +255,7 @@ export function createAgentHost(options: AgentHostOptions) {
 				.catch(() => {});
 		});
 		const registry = createRegistry();
-		const deps: ToolDeps = { ownerId, partitionId: partition.partitionId, runtime: db, app: options.app, forge: options.forge, relay: options.relay, fetch: options.fetch ?? fetch, now, crypto: options.crypto, allowPrivateConnectors: env.PIM_CONNECTOR_ALLOW_PRIVATE === "1", chatOf: (conversationId) => publicChatId(ownerId, conversationId) };
+		const deps: ToolDeps = { ownerId, partitionId: partition.partitionId, runtime: db, app: options.app, forge: options.forge, relay: options.relay, fetch: options.fetch ?? fetch, now, toolTimeoutMs: options.stallMs?.tool, crypto: options.crypto, allowPrivateConnectors: env.PIM_CONNECTOR_ALLOW_PRIVATE === "1", chatOf: (conversationId) => publicChatId(ownerId, conversationId) };
 		const ctx = (conversationId: number | string) => publicChatId(ownerId, conversationId).then((chat) => readContext(ownerId, chat));
 		registry.install(pimExtension(deps, [
 			section("agent", async (input) => {
@@ -251,7 +265,9 @@ export function createAgentHost(options: AgentHostOptions) {
 			}),
 			section("your_skills", async (input) => {
 				const c = await ctx(input.conversationId);
-				return c.skills.length === 0 ? undefined : `Skills you can load with read_skill:\n${c.skills.map((s) => `- ${s.name}: ${s.description}`).join("\n")}`;
+				// The person's own skills first; a built-in one is listed unless they have written one of the same name.
+				const skills = [...c.skills, ...BUILTIN_SKILLS.filter((b) => !c.skills.some((s) => s.name === b.name)).map(({ name, description }) => ({ name, description }))];
+				return `Skills you can load with read_skill:\n${skills.map((s) => `- ${s.name}: ${s.description}`).join("\n")}`;
 			}),
 			section("active_goals", async (input) => {
 				const c = await ctx(input.conversationId);
@@ -283,5 +299,17 @@ export function createAgentHost(options: AgentHostOptions) {
 		return { model: await choose(ownerId, [...(c?.agent ? [] : [asModelRef(c?.chat_model)]), ...own, await chosenModel(ownerId), ...(c?.fallbacks ?? []).map(asModelRef)]) };
 	};
 
-	return { harnessOptions, homeRoot, chatAgent };
+	/** One model call as an owner's own models, for what is not a chat turn (an approval review): the same catalog, failover and ledger, no tools. */
+	async function ask(ownerId: string, chat: string | null, system: string, question: string, signal: AbortSignal): Promise<string> {
+		const models = await refreshCatalog(ownerId);
+		const c = await readContext(ownerId, chat).catch(() => undefined);
+		const pick = await choose(ownerId, [await chosenModel(ownerId), ...(c?.fallbacks ?? []).map(asModelRef)]);
+		const model = models.getModel(pick.provider, pick.modelId);
+		if (!model) throw new Error(`The model ${pick.provider}/${pick.modelId} is not available`);
+		const message: any = await failover.wrap(models, ownerId).completeSimple(model, { systemPrompt: system, messages: [{ role: "user", content: question, timestamp: now() }] } as never, { signal } as never);
+		if (message.stopReason === "error" || message.stopReason === "aborted") throw new Error(message.errorMessage ?? "The model did not answer");
+		return (message.content as { type: string; text?: string }[]).filter((p) => p.type === "text").map((p) => p.text ?? "").join("");
+	}
+
+	return { harnessOptions, homeRoot, chatAgent, ask, context: (ownerId: string, chat: string | null) => readContext(ownerId, chat) };
 }

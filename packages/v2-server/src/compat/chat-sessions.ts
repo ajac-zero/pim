@@ -6,6 +6,7 @@
  * The utility model's side jobs (a title, a summary, an improved prompt, suggestions) are in ./utility.ts and are off until one is chosen. Not here:
  * changing the queue behind a running turn, which lives in the runtime's inbox, not in the application's tables.
  */
+import { randomUUID } from "node:crypto";
 import type { App } from "@pim/v2-app/app";
 import { BadRequestError, CapabilityUnavailableError, ConflictError, NotFoundError } from "@pim/v2-app/errors";
 import { ok, type Route, route } from "@pim/v2-app/http";
@@ -189,6 +190,20 @@ export function sessionRoutes(env: Record<string, string | undefined> = process.
 			if (!row) throw new NotFoundError("No such task");
 			const messages = row.task_chat ? (await transcriptPage(app.db.pool, p.ownerId, row.task_chat as string)).messages : [];
 			return ok({ ...taskView(row), messages });
+		}),
+		// Asks the model again in a chat whose last request failed: the person's last message is sent once more, as it was written. A chat that is not waiting like that says so.
+		route("POST", "/api/sessions/:id/retry", async ({ app, principal, params, json }) => {
+			const p = await principal();
+			const id = chatId(params[0]!);
+			await sessionView(app, p, id);
+			const messages = (await transcriptPage(app.db.pool, p.ownerId, id)).messages.filter((m) => !m.partial);
+			const last = messages.at(-1);
+			const asked = messages.findLast((m) => m.role === "user");
+			const text = asked?.parts.map((part) => (part.type === "text" ? part.text : "")).join("");
+			if (last?.role !== "assistant" || last.stopReason !== "error" || !text) throw new ConflictError("This chat isn't waiting to try again", "not_held");
+			const commandId = String(((await json().catch(() => ({}))) as Record<string, unknown>).commandId ?? `retry-${randomUUID()}`);
+			await app.conversations.admit(p, { commandId, kind: "user_message", chatId: id, payload: { text } });
+			return ok({ session: id });
 		}),
 		route("POST", "/api/sessions/:id/tasks/:task/cancel", async ({ app, principal, params }) => {
 			const p = await principal();

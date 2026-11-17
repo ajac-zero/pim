@@ -337,7 +337,7 @@ export function connectorToolset(deps: ConnectorToolsDeps): { tools: ToolRegistr
 						const waiting = { content: [{ type: "text", text: "Waiting for a person's approval." }], control: { suspend: true } } as never;
 						const filed = await app.db.owner(ownerId, async (tx) => (await tx.query("SELECT id FROM pim_app.approvals WHERE tool = 'connector:call' AND args->>'taskId' = $1 LIMIT 1", [taskId])).rows[0]?.id as string | undefined);
 						if (filed) return waiting;
-						const gate = await app.approvals.gate(p, { action: "connector:call", resource: { connector: c.id, tool: tool.name }, ...(chat ? { chatId: chat } : {}), args: { taskId, callId: api.callId, connector: c.id, service: c.name, tool: tool.name, readOnly, arguments: redact(args.arguments) }, timeoutMs: 24 * 3600_000, onTimeout: "deny" });
+						const gate = await app.approvals.gate(p, { action: "connector:call", resource: { connector: c.id, tool: tool.name }, ...(chat ? { chatId: chat } : {}), args: { taskId, callId: api.callId, connector: c.id, service: c.name, tool: tool.name, readOnly, arguments: redact(args.arguments) }, timeoutMs: 24 * 3600_000, onTimeout: "deny", explicit: tool.annotations?.destructiveHint === true });
 						if (gate.outcome === "waiting") return waiting;
 					}
 				}

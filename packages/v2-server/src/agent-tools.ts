@@ -20,6 +20,8 @@ import type { EnvelopeCrypto } from "@pim/v2-contracts/platform";
 import { loadWidgets, MAX_WIDGETS, type ShownWidget, uiDiagnostics, widgetRefs } from "./agent-widgets.ts";
 import { connectorToolset, type Transport } from "./connector-tools.ts";
 import { watchTools } from "./watch-tools.ts";
+import { builtinSkill } from "./builtin-skills.ts";
+import { readSkillFolder } from "./skill-sources.ts";
 
 export type ToolDeps = {
 	ownerId: string;
@@ -34,6 +36,8 @@ export type ToolDeps = {
 	/** The deployment's keys, which open a connector's sealed credential; and whether a connector may live at a private address. */
 	crypto?: EnvelopeCrypto | undefined;
 	allowPrivateConnectors?: boolean | undefined;
+	/** The longest a tool may run before its call ends with an error instead of holding the chat; default 10 minutes. */
+	toolTimeoutMs?: number | undefined;
 	/** The public id of the chat that a pi conversation is. */
 	chatOf(conversationId: number | string): Promise<string | null>;
 };
@@ -100,6 +104,29 @@ const HOW_APPS_RUN =
 	"pim.tools.call(name, input) runs one of the user's connector tools that runs without asking, by its tool name, and answers with its result as text. " +
 	"The user is asked once per version before ask or a tool first runs; tools that ask before they run can't be used. Show a message when a call fails. " +
 	"A jsx app is a React app, App.jsx: `export default function App() { ... }`, with hooks from \"react\"; it may import \"react\", \"recharts\", \"lucide-react\" and its own files, is styled with Tailwind classes, and is compiled when you save it: a compile error comes back to you to fix. ";
+
+/**
+ * Makes a tool stoppable: its call ends when the chat is stopped (the abort signal) even if the tool's own work ignores it, and with an error after `timeoutMs` instead of
+ * never, so a hung connection or process cannot leave a chat busy for ever. The work itself is not cancelled, only abandoned; a tool that can cancel it still should.
+ */
+export function stoppable(tool: ToolRegistration, timeoutMs = 600_000): ToolRegistration {
+	const execute = (tool as any).execute as (args: any, api: any, context: any) => Promise<Result>;
+	return {
+		...(tool as object),
+		execute: (args: any, api: any, context: any) =>
+			new Promise<Result>((resolve, reject) => {
+				const signal: AbortSignal | undefined = context?.abortSignal;
+				const stop = () => reject(signal?.reason ?? new Error("The call was stopped"));
+				if (signal?.aborted) return stop();
+				const timer = setTimeout(() => resolve(text(`${(tool as any).name} did not finish within ${Math.round(timeoutMs / 60_000)} minutes and was stopped.`, true)), timeoutMs);
+				signal?.addEventListener("abort", stop, { once: true });
+				execute(args, api, context).then(resolve, reject).finally(() => {
+					clearTimeout(timer);
+					signal?.removeEventListener("abort", stop);
+				});
+			}),
+	} as ToolRegistration;
+}
 
 export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 	const { ownerId, partitionId, runtime } = deps;
@@ -204,8 +231,12 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 		write("move_memory", "Move a memory to another scope, such as everyone or another agent's.", Type.Object({ id: S(), scope: S() }), async (app, call, a) => (await app.memories.move(call.p, a.id, a.scope), text(`Moved to ${a.scope}.`))),
 
 		// Skills and goals.
-		read("read_skill", "Read a skill's instructions and the names of its files.", Type.Object({ name: S() }), async (app, call, a) => {
-			const s = await app.agents.getSkill(call.p, a.name);
+		read("read_skill", "Read a skill's instructions and the names of its files: one of the person's own, or one that comes with Pim.", Type.Object({ name: S() }), async (app, call, a) => {
+			const s = await app.agents.getSkill(call.p, a.name).catch((error) => {
+				if (builtinSkill(a.name)) return undefined;
+				throw error;
+			});
+			if (!s) return text(`${builtinSkill(a.name)!.instructions}\n\nFiles: none`);
 			return text(`${s.body}\n\nFiles: ${Object.keys(s.files ?? {}).join(", ") || "none"}`);
 		}),
 		read("read_skill_file", "Read one of a skill's supporting files.", Type.Object({ name: S(), path: S() }), async (app, call, a) => {
@@ -217,6 +248,37 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 			await (exists ? app.agents.updateSkill(call.p, a.name, { description: a.description, body: a.body, files: a.files }) : app.agents.createSkill(call.p, { name: a.name, description: a.description, body: a.body, files: a.files }));
 			return text(exists ? `Saved a new version of ${a.name}.` : `Created ${a.name}.`);
 		}),
+		tool("install_skill", "Install a skill from a GitHub folder (https://github.com/owner/repo/tree/ref/path, holding a SKILL.md and any files it uses). A person approves it first, with the files it holds listed; what is installed is exactly what they approved, at the commit the folder is at now.", Type.Object({ source: S({ minLength: 1 }), name: O(S()) }),
+			async (args, api) => {
+				const app = deps.app;
+				if (!app) return noApp();
+				const taskId = String(api.taskId);
+				try {
+					const folder = await readSkillFolder(deps.fetch, args.source);
+					const chat = await deps.chatOf(api.conversationId);
+					const p = await principalOf(app, chat);
+					const name = args.name ?? folder.name;
+					const signal = (await runtime.read<{ payload: { approved?: boolean } }>(ownerId, "SELECT payload FROM pim_runtime.durable_signals WHERE owner_id = $1 AND task_id = $2 AND kind = 'approval' ORDER BY signal_id DESC LIMIT 1", [ownerId, taskId])).rows[0];
+					if (signal && signal.payload.approved !== true) return text("A person did not approve this skill, so it was not installed.", true);
+					const filed = (await app.db.owner(ownerId, async (tx) => (await tx.query("SELECT id, args FROM pim_app.approvals WHERE tool = 'skill:install' AND args->>'taskId' = $1 LIMIT 1", [taskId])).rows[0])) as { id: string; args: { commit?: string; hashes?: Record<string, string> } } | undefined;
+					if (!signal && !filed) {
+						const names = Object.keys(folder.hashes);
+						const summary = `Install the skill ${name} from ${folder.source}: ${names.length} file${names.length === 1 ? "" : "s"} (${names.slice(0, 12).join(", ")}${names.length > 12 ? ", …" : ""})`;
+						const gate = await app.approvals.gate(p, { action: "skill:install", resource: { source: folder.source.replace(/\/tree\/.*$/, "") }, ...(chat ? { chatId: chat } : {}), args: { taskId, callId: api.callId, source: folder.source, commit: folder.commit, name, hashes: folder.hashes, summary }, timeoutMs: 24 * 3600_000, onTimeout: "deny", explicit: true });
+						if (gate.outcome === "waiting") return { content: [{ type: "text", text: "Waiting for a person's approval." }], control: { suspend: true } } as never;
+					} else if (!signal) {
+						return { content: [{ type: "text", text: "Waiting for a person's approval." }], control: { suspend: true } } as never;
+					}
+					// What was approved is what is installed: the folder read again must be the one the person was shown.
+					if (filed?.args.hashes && JSON.stringify(Object.entries(filed.args.hashes).sort()) !== JSON.stringify(Object.entries(folder.hashes).sort())) return text("The skill's files are not the ones that were approved, so it was not installed. Ask again to see them.", true);
+					const files = { ...folder.files, ".source": JSON.stringify({ source: folder.source, commit: folder.commit }) };
+					const exists = await app.agents.getSkill(p, name).then(() => true, () => false);
+					await (exists ? app.agents.updateSkill(p, name, { description: folder.description, body: folder.body, files }) : app.agents.createSkill(p, { name, description: folder.description, body: folder.body, files }));
+					return text(`${exists ? "Saved a new version of" : "Installed"} the skill ${name} from ${folder.source}.`);
+				} catch (error) {
+					return text(error instanceof Error ? error.message : String(error), true);
+				}
+			}, "safe"),
 		write("create_goal", "Start a goal, with the steps to reach it.", Type.Object({ title: S({ minLength: 1 }), steps: O(strings) }), async (app, call, a) => text(`Created goal ${await app.memories.createGoal(call.p, a.title, a.steps ?? [])}.`)),
 		write("update_goal", "Change a goal: its title, its status (active, done, dropped) or its steps; or tick a step off with complete_step (its position, from 0).", Type.Object({ id: S(), title: O(S()), status: O(Type.Union([Type.Literal("active"), Type.Literal("done"), Type.Literal("dropped")])), steps: O(strings), complete_step: O(Type.Integer({ minimum: 0 })) }), async (app, call, a) => {
 			if (a.title !== undefined || a.status !== undefined || a.steps !== undefined) await app.memories.updateGoal(call.p, a.id, { title: a.title, status: a.status, steps: a.steps });
@@ -380,5 +442,5 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 	// Watches: events of a connected server, delivered to the chat that asked.
 	tools.push(...watchTools({ ownerId, watch: () => (deps.app && deps.crypto ? { app: deps.app, crypto: deps.crypto, transport, publicUrl: process.env.PIM_PUBLIC_URL, now: deps.now } : undefined), chatOf: deps.chatOf, principalOf: (chat) => (deps.app ? principalOf(deps.app, chat) : Promise.resolve(undefined)) }));
 
-	return defineExtension({ name: "pim", tools, sections: [...sections, ...connectors.sections] });
+	return defineExtension({ name: "pim", tools: tools.map((t) => stoppable(t, deps.toolTimeoutMs)), sections: [...sections, ...connectors.sections] });
 }

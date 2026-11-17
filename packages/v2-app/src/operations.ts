@@ -92,15 +92,31 @@ export class Approvals {
 	constructor(private readonly db: Db, private readonly authz = new Authorizer(db)) {}
 
 	/** Authorizes `action`. Returns "allowed" (with the standing approval that covered it, if any), or the id of a waiting approval a person must decide. */
-	async gate(p: Principal, input: { action: string; resource?: Record<string, string>; chatId?: string; args?: object; timeoutMs?: number; onTimeout?: "deny" | "approve"; now?: Date }): Promise<{ outcome: "allowed"; viaStandingApproval?: string } | { outcome: "waiting"; approvalId: string }> {
+	async gate(p: Principal, input: { action: string; resource?: Record<string, string>; chatId?: string; args?: object; timeoutMs?: number; onTimeout?: "deny" | "approve"; explicit?: boolean; now?: Date }): Promise<{ outcome: "allowed"; viaStandingApproval?: string } | { outcome: "waiting"; approvalId: string }> {
 		const decision = await this.authz.authorize({ principal: p, ownerId: p.ownerId, action: input.action, ...(input.resource ? { resource: input.resource } : {}) });
 		if (decision.outcome === "allow") return { outcome: "allowed", ...(decision.viaStandingApproval ? { viaStandingApproval: decision.viaStandingApproval } : {}) };
 		const id = newId("ap");
 		const now = input.now ?? new Date();
+		// The person's approval policy. `auto` approves what is not answered within the timeout (30 seconds unless they set another); `majordomo` has the majordomo review it
+		// (`reviewApprovals`, in the Runner). An explicit action, one a person must always answer for (a tool its connector marks destructive), ignores both.
+		const settings = new Map((await this.db.owner(p.ownerId, async (tx) => (await tx.query("SELECT key, value FROM pim_app.owner_settings WHERE key IN ('settings.approvalPolicy', 'settings.approvalTimeoutSeconds')")).rows)).map((r) => [r.key as string, r.value as unknown]));
+		const policy = (settings.get("settings.approvalPolicy") as string | undefined) ?? process.env.PIM_APPROVAL_POLICY ?? "explicit";
+		const auto = policy === "auto" && !input.explicit;
+		const seconds = settings.get("settings.approvalTimeoutSeconds");
+		const timeoutMs = auto ? (typeof seconds === "number" && seconds > 0 ? seconds : 30) * 1000 : input.timeoutMs;
 		await this.db.owner(p.ownerId, (tx) =>
-			tx.query("INSERT INTO pim_app.approvals (id, owner_id, public_chat_id, tool, args, timeout_policy, expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7)", [id, p.ownerId, input.chatId ?? null, input.action, JSON.stringify({ ...input.args, resource: input.resource ?? {} }), input.onTimeout ?? "deny", input.timeoutMs ? new Date(now.getTime() + input.timeoutMs) : null]),
+			tx.query("INSERT INTO pim_app.approvals (id, owner_id, public_chat_id, tool, args, timeout_policy, expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7)", [id, p.ownerId, input.chatId ?? null, input.action, JSON.stringify({ ...input.args, resource: input.resource ?? {}, ...(input.explicit ? { explicit: true } : {}) }), auto ? "approve" : (input.onTimeout ?? "deny"), timeoutMs ? new Date(now.getTime() + timeoutMs) : null]),
 		);
 		return { outcome: "waiting", approvalId: id };
+	}
+
+	/** The majordomo's answer to an approval it reviewed: approved or denied, recorded as its own decision, or handed back to the person (`escalate`), who then answers as usual. */
+	async review(ownerId: string, approvalId: string, outcome: "approve" | "deny" | "escalate", note: string): Promise<boolean> {
+		return this.db.owner(ownerId, async (tx) => {
+			const review = JSON.stringify({ review: { status: outcome === "escalate" ? "escalated" : "decided", note: note.slice(0, 1000), at: new Date().toISOString() } });
+			if (outcome === "escalate") return ((await tx.query("UPDATE pim_app.approvals SET args = args || $2::jsonb WHERE id = $1 AND state = 'waiting'", [approvalId, review])).rowCount ?? 0) > 0;
+			return ((await tx.query("UPDATE pim_app.approvals SET state = $2, decided_by = 'majordomo', decided_at = now(), args = args || $3::jsonb WHERE id = $1 AND state = 'waiting'", [approvalId, outcome === "approve" ? "approved" : "denied", review])).rowCount ?? 0) > 0;
+		});
 	}
 
 	/** A person decides. An agent cannot approve its own request. A late decision after a timeout is a conflict. */

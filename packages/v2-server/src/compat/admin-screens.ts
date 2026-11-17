@@ -41,55 +41,12 @@ const PLAIN_VARIABLES = ["PIM_PUBLIC_URL", "PIM_APPS_ORIGIN", "PIM_CONTENT_ORIGI
 const slug = (text: string) => text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40);
 const PROVIDER_KINDS = ["anthropic", "openai", "openai_compatible", "google", "workers_ai", "bedrock", "custom"];
 
-export function screenRoutes(env: Env, coding: ForgeHandler): Route[] {
+export function screenRoutes(env: Env): Route[] {
 	const member = (r: Record<string, unknown>) => ({ ownerId: r.owner_id, username: r.username, role: r.role, status: r.status, createdAt: ms(r.created_at as Date), activatedAt: ms(r.activated_at as Date | null), statusReason: r.status_reason ?? null });
 	const status = (to: "active" | "suspended") => async ({ app, principal, params }: { app: App; principal: () => Promise<Principal>; params: string[] }) => {
 		const p = await principal();
 		await app.identity.setStatus(p, await ownerOfUsername(app, params[0]!), to, to === "suspended" ? "suspended by an admin" : "");
 		return ok({});
-	};
-
-	/** Forge's own answer to a pools request, made as the caller (it checks for an admin's browser session itself). */
-	const forge = async (req: IncomingMessage, origin: string, method: string, path: string, body?: unknown): Promise<Response> => {
-		const headers = new Headers();
-		for (const [k, v] of Object.entries(req.headers)) if (v !== undefined && !["content-length", "content-type", "transfer-encoding"].includes(k)) headers.set(k, Array.isArray(v) ? v.join(", ") : v);
-		if (body !== undefined) headers.set("content-type", "application/json");
-		const response = await coding(new Request(new URL(path, origin), { method, headers, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) }));
-		return response ?? new Response(JSON.stringify({ error: "not_found" }), { status: 404 });
-	};
-	const poolsOf = async (req: IncomingMessage, origin: string) => {
-		const response = await forge(req, origin, "GET", "/api/admin/coding/pools");
-		if (!response.ok) throw Object.assign(new Error("pools"), { response });
-		const rows = ((await response.json()) as { pools: Record<string, any>[] }).pools;
-		return rows.map((r) => ({ id: r.id, provider: r.provider, size: r.size, priority: r.priority, enabled: r.enabled, config: {}, providerAvailable: true, slots: { held: r.held, free: Math.max(r.size - r.held, 0) }, queued: r.waiting, breaker: { state: r.retryAt ? "open" : "healthy", retryAt: ms(r.retryAt) } }));
-	};
-	const passThrough = async (response: Response): Promise<Reply> => ({ status: response.status, body: await response.json().catch(() => ({})) });
-	const upsertPool = async (req: IncomingMessage, origin: string, id: string, input: Record<string, any>): Promise<Reply> => {
-		const response = await forge(req, origin, "PUT", `/api/admin/coding/pools/${encodeURIComponent(id)}`, { provider: input.provider, size: input.size, priority: input.priority, enabled: input.enabled });
-		if (!response.ok) return passThrough(response);
-		return ok({ pool: (await poolsOf(req, origin)).find((p) => p.id === id) });
-	};
-	const poolRoutes = async (method: string, req: IncomingMessage, origin: string, p: Principal, app: App, id: string | undefined, body: Record<string, any>): Promise<Reply> => {
-		await admin(app, p, "admin:pools");
-		try {
-			if (method === "GET") return ok({ pools: await poolsOf(req, origin) });
-			if (method === "DELETE") {
-				const response = await forge(req, origin, "DELETE", `/api/admin/coding/pools/${encodeURIComponent(id!)}`);
-				return response.ok ? deleted() : passThrough(response);
-			}
-			if (method === "POST") {
-				const provider = String(body.provider ?? "");
-				if (!provider) throw new BadRequestError("A pool needs a provider");
-				return upsertPool(req, origin, String(body.id ?? (slug(provider) || "pool")), { size: 10, ...body });
-			}
-			const current = (await poolsOf(req, origin)).find((x) => x.id === id);
-			if (!current) throw new NotFoundError("No such pool");
-			return upsertPool(req, origin, id!, { ...current, ...body });
-		} catch (error) {
-			const response = (error as { response?: Response }).response;
-			if (response) return passThrough(response);
-			throw error;
-		}
 	};
 
 	const hostStatus = { paired: false, pairedAt: null, seenAt: null, connected: false, image: null, kind: null, version: null, machines: 0, running: 0, pending: 0 };
@@ -215,12 +172,6 @@ export function screenRoutes(env: Env, coding: ForgeHandler): Route[] {
 			throw new NotFoundError("No such built-in app");
 		}),
 
-		// ---- coding pools: Forge's, in the web app's shape ----
-		route("GET", "/api/admin/coding/pools", async ({ app, principal, req, origin }) => poolRoutes("GET", req, origin, await principal(), app, undefined, {})),
-		route("POST", "/api/admin/coding/pools", async ({ app, principal, req, origin, json }) => poolRoutes("POST", req, origin, await principal(), app, undefined, await json())),
-		route("PATCH", "/api/admin/coding/pools/:id", async ({ app, principal, req, origin, json, params }) => poolRoutes("PATCH", req, origin, await principal(), app, params[0], await json())),
-		route("DELETE", "/api/admin/coding/pools/:id", async ({ app, principal, req, origin, params }) => poolRoutes("DELETE", req, origin, await principal(), app, params[0], {})),
-
 		// ---- managed compute and the computer host: not part of this deployment yet ----
 		route("GET", "/api/admin/compute", async ({ app, principal }) => {
 			await admin(app, await principal(), "admin:compute");
@@ -240,4 +191,59 @@ export function screenRoutes(env: Env, coding: ForgeHandler): Route[] {
 function saved(p: { id: string; name: string; hasKey: boolean; config: Record<string, unknown> }) {
 	const c = p.config as { url?: string; chosen?: string[] | null; structuredOutput?: boolean; api?: string; builtin?: string; overrides?: Record<string, unknown> };
 	return { id: p.id, ...(c.builtin ? { builtin: c.builtin } : {}), name: p.name, url: c.url ?? "", hasKey: p.hasKey, chosen: c.chosen ?? null, models: [], ...(c.structuredOutput ? { structuredOutput: true } : {}), ...(c.api ? { api: c.api } : {}), ...(c.overrides ? { overrides: c.overrides } : {}) };
+}
+
+/** The coding pools Forge keeps, in the web app's shape. They go before Forge's own `/api/admin/coding` routes, which answer in Forge's. */
+export function poolRoutes(coding: ForgeHandler): Route[] {
+	/** Forge's own answer to a pools request, made as the caller (it checks for an admin's browser session itself). */
+	const forge = async (req: IncomingMessage, origin: string, method: string, path: string, body?: unknown): Promise<Response> => {
+		const headers = new Headers();
+		for (const [k, v] of Object.entries(req.headers)) if (v !== undefined && !["content-length", "content-type", "transfer-encoding"].includes(k)) headers.set(k, Array.isArray(v) ? v.join(", ") : v);
+		if (body !== undefined) headers.set("content-type", "application/json");
+		const response = await coding(new Request(new URL(path, origin), { method, headers, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) }));
+		return response ?? new Response(JSON.stringify({ error: "not_found" }), { status: 404 });
+	};
+	const poolsOf = async (req: IncomingMessage, origin: string) => {
+		const response = await forge(req, origin, "GET", "/api/admin/coding/pools");
+		if (!response.ok) throw Object.assign(new Error("pools"), { response });
+		const rows = ((await response.json()) as { pools: Record<string, any>[] }).pools;
+		return rows.map((r) => ({ id: r.id, provider: r.provider, size: r.size, priority: r.priority, enabled: r.enabled, config: {}, providerAvailable: true, slots: { held: r.held, free: Math.max(r.size - r.held, 0) }, queued: r.waiting, breaker: { state: r.retryAt ? "open" : "healthy", retryAt: ms(r.retryAt) } }));
+	};
+	const passThrough = async (response: Response): Promise<Reply> => ({ status: response.status, body: await response.json().catch(() => ({})) });
+	const upsertPool = async (req: IncomingMessage, origin: string, id: string, input: Record<string, any>): Promise<Reply> => {
+		const response = await forge(req, origin, "PUT", `/api/admin/coding/pools/${encodeURIComponent(id)}`, { provider: input.provider, size: input.size, priority: input.priority, enabled: input.enabled });
+		if (!response.ok) return passThrough(response);
+		return ok({ pool: (await poolsOf(req, origin)).find((p) => p.id === id) });
+	};
+	const runPools = async (method: string, req: IncomingMessage, origin: string, p: Principal, app: App, id: string | undefined, body: Record<string, any>): Promise<Reply> => {
+		await admin(app, p, "admin:pools");
+		try {
+			if (method === "GET") return ok({ pools: await poolsOf(req, origin) });
+			if (method === "DELETE") {
+				const response = await forge(req, origin, "DELETE", `/api/admin/coding/pools/${encodeURIComponent(id!)}`);
+				return response.ok ? deleted() : passThrough(response);
+			}
+			if (method === "POST") {
+				const provider = String(body.provider ?? "");
+				if (!provider) throw new BadRequestError("A pool needs a provider");
+				return upsertPool(req, origin, String(body.id ?? (slug(provider) || "pool")), { size: 10, ...body });
+			}
+			const current = (await poolsOf(req, origin)).find((x) => x.id === id);
+			if (!current) throw new NotFoundError("No such pool");
+			return upsertPool(req, origin, id!, { ...current, ...body });
+		} catch (error) {
+			const response = (error as { response?: Response }).response;
+			if (response) return passThrough(response);
+			throw error;
+		}
+	};
+
+	return [
+		// ---- coding pools: Forge's, in the web app's shape ----
+		route("GET", "/api/admin/coding/pools", async ({ app, principal, req, origin }) => runPools("GET", req, origin, await principal(), app, undefined, {})),
+		route("POST", "/api/admin/coding/pools", async ({ app, principal, req, origin, json }) => runPools("POST", req, origin, await principal(), app, undefined, await json())),
+		route("PATCH", "/api/admin/coding/pools/:id", async ({ app, principal, req, origin, json, params }) => runPools("PATCH", req, origin, await principal(), app, params[0], await json())),
+		route("DELETE", "/api/admin/coding/pools/:id", async ({ app, principal, req, origin, params }) => runPools("DELETE", req, origin, await principal(), app, params[0], {})),
+
+	];
 }

@@ -4,8 +4,10 @@
  * configured, so the app shows it as off rather than failing.
  */
 import type { Route } from "@pim/v2-app/http";
+import { adminCompatRoutes } from "./admin.ts";
 import { bootRoutes } from "./boot.ts";
 
 export const webCompatRoutes: Route[] = [
 	...bootRoutes,
+	...adminCompatRoutes,
 ];

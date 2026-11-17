@@ -5,7 +5,14 @@ const textOf = (m) => (typeof m?.content === "string" ? m.content : (m?.content 
 createServer(async (req, res) => {
 	let body = ""; for await (const c of req) body += c;
 	if (req.url.endsWith("/models")) return res.end(JSON.stringify({ data: [{ id: "fake-1", object: "model" }] }));
-	const msgs = (JSON.parse(body || "{}").messages) ?? [];
+	const request = JSON.parse(body || "{}");
+	const msgs = request.messages ?? [];
+	// A request with no tools, as an app's window.pim.ask makes, is answered with plain text.
+	if (!request.tools?.length) {
+		const asked = textOf([...msgs].reverse().find((m) => m.role === "user")).trim();
+		res.writeHead(200, { "content-type": "application/json" });
+		return res.end(JSON.stringify({ id: "c1", object: "chat.completion", created: 0, model: "fake-1", choices: [{ index: 0, message: { role: "assistant", content: `Echo: ${asked}` }, finish_reason: "stop" }] }));
+	}
 	const last = msgs[msgs.length - 1] ?? {};
 	const lastUser = [...msgs].reverse().find((m) => m.role === "user");
 	const text = textOf(lastUser).trim();

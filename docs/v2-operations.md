@@ -155,6 +155,35 @@ What this says, within those limits:
 - Memory: PostgreSQL's summed RSS is 0.3-7 GB and counts shared buffers once per backend, so it overstates real use; Node processes 0.7-1.5 GB together.
 - Not measured: the real Runner, real models, a separate PostgreSQL host, replication, PgBouncer in the path, Kubernetes. 1,000 runs are 1,000 streaming conversations, not 1,000 stored agents.
 
+## Integrated qualification on the real v2 stack
+
+The reference-writer numbers above say what PostgreSQL, Node and NATS do under a streaming write pattern. These are measured on the real thing: `packages/v2-server/test/integrated-bench.test.ts` starts the real Gate, Live, Runners and Projector (the `@pim/v2-server` roles), real PostgreSQL 17 with the non-superuser role logins and row-level security, `nats-server`, an S3 server, and a scripted streaming model (25 tokens/s, a 100-character answer, so each turn commits several partial messages). `node scripts/v2-bench/integrated.mjs --profile 5 --profile 50 --profile 500 --profile 1000` runs it on a PostgreSQL it starts itself with durability on (the test suite's default cluster has `fsync` off) and `max_connections` 1000; the bounded CI run is the same test at profiles 5 and 50. Raw results: `packages/v2-server/bench-results/2026-11-17-integrated-<n>.json`.
+
+**What a profile does.** N people (N tenants) each have one chat that streams and three idle stored chats that do not (active runs and idle chats are counted apart; the idle chats are listed, never run). One person's foreground reads, `GET /api/snapshot/sidebar` and `GET /api/sessions` through the Gate, are measured by four closed-loop clients, first warm and idle for 6 s (after a 2 s warm-up) as the baseline, then through the whole load, so both budgets come from one run: warm p95 under 250 ms, and at most 20% worse than that baseline. During the load a Live client that never reads its socket, a Live client whose socket is cut 4 s in (it must reconnect and resume), and a flood of coding-thread projection writes (40 rows every 100 ms) run beside the turns. For 5 and 50 people each person sends 8 turns in sequence in the qualification run (2 in the bounded CI run), so the load lasts long enough to measure; for 500 and 1,000 every person sends one turn at once, all started together.
+
+**Machine and versions.** 4 vCPU (Intel Xeon 2.6 GHz), 7.8 GB, Node 26.13.1, PostgreSQL 17.11 with `fsync`, `full_page_writes` and `synchronous_commit` on and `shared_buffers` 256 MB, nats-server 2.10.22. Gate, Live, the two Runners and the Projector share **one Node process**, because the scripted model is wired in through in-process hooks; PostgreSQL and NATS are separate processes. That is the main limit of these numbers: the whole product shares one event loop.
+
+Latencies in ms as p50/p95/p99, baseline → under load; "answer readable" is seconds from a person's send until the answer is readable in the projection (p50 / p99).
+
+| Active runs | Turns each | Idle chats | Answer readable (s) | Runtime commits/s | Sidebar | Session list | p95 regression sidebar / sessions | Node process CPU (of one core) | Machine CPU | Max projection lag (commits) | RSS MB: stack process / PostgreSQL (sum of backends) |
+|---:|---:|---:|---|---:|---|---|---|---:|---:|---:|---|
+| 5 | 8 | 15 | 1.3 / 1.6 | 45.5 | 9/16/20 → 8/19/32 | 9/16/20 → 7/18/26 | +18.8% / +12.5% | 72% | 40% | 16 | 261 / 1,012 |
+| 50 | 8 | 150 | 4.5 / 7.1 | 95.1 | 8/12/14 → 23/54/90 | 8/12/14 → 22/54/98 | +350% / +350% | 88% | 59% | 523 | 274 / 2,902 |
+| 500 | 1 | 1,500 | 54.7 / 67.0 | 94.7 | 8/12/14 → 20/78/112 | 8/12/15 → 18/77/104 | +550% / +542% | 86% | 58% | 1,254 | 382 / 2,829 |
+| 1,000 | 1 | 3,000 | 88.7 / 115.3 | 108.9 | 7/10/13 → 10/78/109 | 7/10/15 → 9/74/107 | +680% / +640% | 84% | 59% | 1,270 | 402 / 3,619 |
+
+**Results against the two budgets.**
+
+- **Warm p95 under 250 ms: met at every size**, on both reads (worst 78 ms, at 500 and 1,000 runs). The single worst read was 653 ms (500 runs): the budget is about p95, and tails exist.
+- **At most 20% worse than baseline: met only at 5 runs** (+18.8% and +12.5%; the baseline p95 is 16 ms, so the limit is 3 ms and this is close to run-to-run noise). It is **missed from 50 runs up**, by a wide margin: the p95 goes from 11-12 ms to 54-78 ms. On the real stack the reads cost more than the reference writer's (a Gate request with authentication and a tenant transaction) and share the process with every Runner.
+- **Throughput is capped by the one Node process, and that is the bottleneck.** From 50 runs up the stack process uses 84-88% of one core (`stack_node_process_cpu_pct_of_one_core`), the machine is only 58-59% busy, the event loop never stalls long (p99 delay under 20 ms, max 54 ms, against a 10 ms sampling floor), and the runtime sustains about 95-109 commits per second (about 8-9 completed turns per second) whatever N is. So 500 simultaneous turns take 55-67 s to become readable and 1,000 take 89-115 s, against about 4 s for one turn alone. Doubling the Runner pool (`PIM_BENCH_RUNTIME_POOL=80`, 4 Runners, a bigger Gate pool) changed nothing (500 runs: p50 61 s, 82 commits/s), which rules out the connection pools and the Runner count as the limit when they share one event loop. Admission itself is not the limit: the Gate admitted 1,000 messages in 2.5 s, p95 803 ms.
+- **Projection lag** (commits the Projector had not yet projected, summed over partitions) peaked at 523 at 50 runs and about 1,250-1,270 at 500 and 1,000: it falls behind during the burst and drains; no turn was lost, every answer landed and was readable.
+- **Live:** the slow client stayed connected and received nothing it could not hold (at these event sizes its buffer never reached the coalescing threshold, so no update was coalesced and no client was disconnected: that path is covered by Live's own tests, not by this load); the cut client reconnected and was live again in 0.3-0.5 s at every size and kept receiving updates.
+- **Memory:** the stack process peaked at 261-402 MB (about 0.4 MB per concurrent run); PostgreSQL's summed RSS (0.9-3.6 GB) counts shared buffers once per backend and overstates real use.
+- **PostgreSQL** did 1,800-3,800 transactions per second (reads included); fsync was not the limit (mean WAL flush about 0.25-0.3 ms).
+
+**What to do about it.** 1,000 simultaneous streaming conversations are not reachable on this stack in one process on this machine: they complete, but at about 100 commits per second the queue drains in two minutes. The next measurement needs Runners (and Gate and Live) in separate processes, which needs the model hooks to be configurable outside the process (the harness injects a scripted provider in-process), and a machine with more cores. It was not done here, and no number for it is claimed. Per-turn cost in the Node process is the thing to profile first.
+
 ## Verification status
 
 | Claim | Evidence | Status |
@@ -164,7 +193,7 @@ What this says, within those limits:
 | Backup, mutate, restore (base only and point in time), safety pass, zero duplicate effects with a negative control | `test/backup.test.ts`, real PostgreSQL with WAL archiving | Run, passing |
 | Redaction, metrics, event-loop and pool signals | `test/observability.test.ts` | Run, passing |
 | Compose and Kubernetes configuration | `test/deploy.test.ts`; `kustomize build` and `kubeconform` against Kubernetes 1.30 and the CloudNativePG, External Secrets and Prometheus Operator schemas | Run, passing. **Not applied to a cluster; the Compose stack was never started**: this sandbox has no Docker daemon. |
-| Benchmarks | `bench-results/` | Run, numbers above |
+| Benchmarks | `bench-results/` (reference writer), `packages/v2-server/bench-results/` (integrated stack) | Run, numbers above |
 | `pg_dump` script, S3 and SeaweedFS paths, OpenBao, CloudNativePG failover and restore, gVisor isolation | — | **Not run.** The importer and backup tools use a directory-backed object store here; an S3 client is not written. |
 
 ## Open items

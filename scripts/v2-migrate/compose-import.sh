@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Imports a v1 export (`run.mjs export` through the fence Worker) into a fresh Compose stack and promotes it into the live schemas, inside the stack's own
 # image and with its own keys, so nothing about the import depends on the machine it runs from. The stack must be new: up once (so the migrations ran)
-# and never claimed. Gate, Live, Runners, Forge and maintenance stay stopped until the import and promotion have finished, then start again.
+# and never claimed. A large space's history is held in memory whole, so the import and promotion get an 8 GB heap. Gate, Live, Runners, Forge and maintenance stay stopped until the import and promotion have finished, then start again.
 # Usage: scripts/v2-migrate/compose-import.sh <work-dir> [legacy-rp-id] [default-model]
 #   <work-dir>      holds snapshot/ from the export; objects/ and report/ are written next to it
 #   legacy-rp-id    the old deployment's passkey RP id (its hostname); passkeys only carry over when it equals the new one
@@ -19,8 +19,8 @@ chmod -R a+rwX "$WORK"
 "$COMPOSE" up -d --wait postgres pgbouncer nats seaweedfs
 "$COMPOSE" stop caddy gate live runner forge maintenance
 "$COMPOSE" run --rm migrator migrate
-"$COMPOSE" run --rm --no-deps -v "$WORK:/work" -e LEGACY_RP_ID="$LEGACY_RP_ID" -e NEW_RP_ID="$NEW_RP_ID" --entrypoint sh migrator -c \
+"$COMPOSE" run --rm --no-deps -v "$WORK:/work" -e NODE_OPTIONS=--max-old-space-size=8192 -e LEGACY_RP_ID="$LEGACY_RP_ID" -e NEW_RP_ID="$NEW_RP_ID" --entrypoint sh migrator -c \
 	'node --import tsx ../v2-ops/src/cli/migrate.ts import --snapshot /work/snapshot --database-url "$PIM_DATABASE_URL" --objects-dir /work/objects --cutover-id "cut-$(date -u +%Y%m%dT%H%M%SZ)" --report /work/report --legacy-rp-id "$LEGACY_RP_ID" --new-rp-id "$NEW_RP_ID"'
-"$COMPOSE" run --rm --no-deps -v "$WORK:/work" -e PIM_RP_ID="$NEW_RP_ID" -e PIM_LEGACY_RP_ID="$LEGACY_RP_ID" -e PIM_CUTOVER_AT="$CUTOVER_AT" -e PIM_LEGACY_OBJECTS_DIR=/work/objects ${MODEL:+-e PIM_DEFAULT_MODEL="$MODEL"} migrator promote | tee "$WORK/report/promote.log"
+"$COMPOSE" run --rm --no-deps -v "$WORK:/work" -e NODE_OPTIONS=--max-old-space-size=8192 -e PIM_RP_ID="$NEW_RP_ID" -e PIM_LEGACY_RP_ID="$LEGACY_RP_ID" -e PIM_CUTOVER_AT="$CUTOVER_AT" -e PIM_LEGACY_OBJECTS_DIR=/work/objects ${MODEL:+-e PIM_DEFAULT_MODEL="$MODEL"} migrator promote | tee "$WORK/report/promote.log"
 "$COMPOSE" up -d --wait
 echo "Imported $WORK/snapshot; the audit and promotion reports are in $WORK/report"

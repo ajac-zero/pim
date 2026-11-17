@@ -37,7 +37,10 @@ export const blobBytes = (cell: { $b64: string }) => Buffer.from(cell.$b64, "bas
 
 const safe = (name: string) => encodeURIComponent(name).replace(/%/g, "_");
 const dumpPath = (cls: string, name: string) => `dos/${cls}/${safe(name)}.json`;
+const chunkPath = (cls: string, name: string, table: string, i: number) => `dos-rows/${cls}/${safe(name)}/${safe(table)}.${i}.jsonl`;
 const objectPath = (bucket: string, key: string) => `objects/data/${bucket}/${sha256(key)}`;
+/** A table whose rows come to more than this many characters of JSON is written in chunk files of about this size, one row per line: one JSON string of a large space's whole history is more than a JavaScript string can hold. */
+const CHUNK_CHARS = 64 * 1024 * 1024;
 
 /** Writes a snapshot directory: DO dumps, the object index with object bytes, OAuth KV entries, and a manifest of checksums. */
 export class SnapshotWriter {
@@ -55,8 +58,24 @@ export class SnapshotWriter {
 		this.#files[path] = sha256(data);
 	}
 
-	dump(dump: DoDump) {
-		return this.#write(dumpPath(dump.class, dump.name), JSON.stringify(dump));
+	async dump(dump: DoDump) {
+		const tables: Record<string, TableDump & { chunks?: number }> = {};
+		for (const [table, { columns, rows }] of Object.entries(dump.tables)) {
+			const lines = rows.map((row) => JSON.stringify(row));
+			if (lines.reduce((n, line) => n + line.length + 1, 0) <= CHUNK_CHARS) {
+				tables[table] = { columns, rows };
+				continue;
+			}
+			let chunks = 0;
+			for (let start = 0; start < lines.length; ) {
+				let end = start;
+				for (let size = 0; end < lines.length && (end === start || size + lines[end]!.length < CHUNK_CHARS); end++) size += lines[end]!.length + 1;
+				await this.#write(chunkPath(dump.class, dump.name, table, chunks++), lines.slice(start, end).join("\n"));
+				start = end;
+			}
+			tables[table] = { columns, rows: [], chunks };
+		}
+		return this.#write(dumpPath(dump.class, dump.name), JSON.stringify({ ...dump, tables }));
 	}
 
 	async object(bucket: string, key: string, bytes: Uint8Array, contentType: string | null) {
@@ -97,7 +116,13 @@ export class SnapshotReader {
 	}
 
 	async dump(cls: string, name: string): Promise<DoDump> {
-		return JSON.parse(await readFile(join(this.dir, dumpPath(cls, name)), "utf8")) as DoDump;
+		const dump = JSON.parse(await readFile(join(this.dir, dumpPath(cls, name)), "utf8")) as DoDump & { tables: Record<string, TableDump & { rows: Row[]; chunks?: number }> };
+		for (const [table, value] of Object.entries(dump.tables)) {
+			if (!value.chunks) continue;
+			for (let i = 0; i < value.chunks; i++) for (const line of (await readFile(join(this.dir, chunkPath(cls, name, table, i)), "utf8")).split("\n")) value.rows.push(JSON.parse(line) as Row);
+			delete value.chunks;
+		}
+		return dump;
 	}
 
 	async objects(): Promise<ObjectEntry[]> {

@@ -41,8 +41,19 @@ export class FenceExporter {
 		const out: Record<string, { columns: string[]; rows: DoDump["tables"][string]["rows"][number][] }> = {};
 		for (const table of tables) {
 			const rows: DoDump["tables"][string]["rows"][number][] = [];
-			for (let after = 0, done = false; !done; ) {
-				const page = await this.#get<{ rows: typeof rows; next: number; done: boolean }>(`${base}/rows?table=${encodeURIComponent(table.name)}&after=${after}&limit=1000`);
+			// A page is built in the fence Worker's memory: one of large rows (a long transcript's entries) can exceed it, and the Worker is cut off.
+			// A failed page is asked for again, smaller, down to a single row; a page that succeeds lets the next one grow back.
+			for (let after = 0, done = false, limit = 1000, failures = 0; !done; ) {
+				let page: { rows: typeof rows; next: number; done: boolean };
+				try {
+					page = await this.#get(`${base}/rows?table=${encodeURIComponent(table.name)}&after=${after}&limit=${limit}`);
+				} catch (error) {
+					if (++failures > 12) throw error;
+					limit = Math.max(1, Math.floor(limit / 2));
+					continue;
+				}
+				failures = 0;
+				limit = Math.min(1000, limit * 2);
 				rows.push(...page.rows);
 				after = page.next;
 				done = page.done;

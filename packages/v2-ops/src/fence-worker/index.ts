@@ -30,19 +30,20 @@ class Inert extends DurableObject<Env> {
 	fenceAlarm(): Promise<number | null> {
 		return this.ctx.storage.getAlarm();
 	}
-	fenceTables() {
+	/** Every table with its columns and key; `counted` adds each table's row count, which a page of rows does not need (it would count every table on every page). */
+	fenceTables(counted = true) {
 		const sql = this.ctx.storage.sql;
 		const tables = sql.exec("SELECT name, sql FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' AND name NOT LIKE '\\_cf\\_%' ESCAPE '\\' ORDER BY name").toArray();
 		return tables.map((t) => {
 			const name = String(t.name);
 			const info = sql.exec(`PRAGMA table_info("${name.replace(/"/g, '""')}")`).toArray();
-			const rows = Number(sql.exec(`SELECT count(*) AS n FROM "${name.replace(/"/g, '""')}"`).one().n);
+			const rows = counted ? Number(sql.exec(`SELECT count(*) AS n FROM "${name.replace(/"/g, '""')}"`).one().n) : -1;
 			return { name, columns: info.map((c) => String(c.name)), pk: info.filter((c) => Number(c.pk) > 0).sort((a, b) => Number(a.pk) - Number(b.pk)).map((c) => String(c.name)), withoutRowid: /WITHOUT\s+ROWID/i.test(String(t.sql)), rows };
 		});
 	}
 	fenceRows(table: string, after: number, limit: number) {
 		const sql = this.ctx.storage.sql;
-		const known = this.fenceTables().find((t) => t.name === table);
+		const known = this.fenceTables(false).find((t) => t.name === table);
 		if (!known) throw new Error(`No such table: ${table}`);
 		const quoted = `"${table.replace(/"/g, '""')}"`;
 		const bounded = Math.max(1, Math.min(limit, 2000));

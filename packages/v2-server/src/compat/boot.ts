@@ -168,7 +168,7 @@ const webApproval = (r: any) => {
 		callId: typeof callId === "string" ? callId : null,
 		expiresAt: ms(r.expires_at),
 		onTimeout: r.timeout_policy,
-		decidedBy: r.decided_by === null ? null : r.decided_by === "majordomo" ? "majordomo" : r.state.startsWith("timed_out") ? "timeout" : r.via_standing_grant ? "always" : "user",
+		decidedBy: r.state.startsWith("timed_out") ? "timeout" : r.decided_by === null ? null : r.decided_by === "majordomo" ? "majordomo" : r.via_standing_grant ? "always" : "user",
 		requestedBy: null,
 		// While the majordomo has it the person is not asked; once it hands it back, they see what it said.
 		review: r.state === "waiting" && (reviewed?.status === "reviewing" || reviewed?.status === "escalated") ? { status: reviewed.status, note: reviewed.note ?? null } : null,

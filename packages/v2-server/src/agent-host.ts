@@ -126,7 +126,27 @@ function meter(models: Models, record: (message: any, model: any) => void): Mode
 export function createAgentHost(options: AgentHostOptions) {
 	const { db, env } = options;
 	const now = options.now ?? Date.now;
-	const modelsByOwner = new Map<string, Models>();
+	/**
+	 * Each owner's catalog, in a holder. A Runner keeps a partition resident while chats in it are active, and the catalog it was opened with holds each provider's address and
+	 * key as they were then: a provider changed afterwards (or imported, then pointed elsewhere) would keep failing with "Connection error" until the partition was released.
+	 * So the holder is rebuilt whenever a message sets the chat's model (`choose`), and the models the harness holds read through it.
+	 */
+	const catalogs = new Map<string, { current: Models; through: Models }>();
+	async function refreshCatalog(ownerId: string): Promise<Models> {
+		const current = await buildModels(ownerId);
+		const held = catalogs.get(ownerId);
+		if (held) {
+			held.current = current;
+			return held.through;
+		}
+		const holder = { current, through: undefined as unknown as Models };
+		holder.through = new Proxy({} as Models, { get: (_target, property) => {
+			const value = Reflect.get(holder.current, property, holder.current) as unknown;
+			return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(holder.current) : value;
+		} });
+		catalogs.set(ownerId, holder);
+		return holder.through;
+	}
 	const failover = createFailover({ now, cooldowns: options.cooldowns });
 	const chatgptOptions: ChatGPTRunnerOptions = options.chatgpt ?? {};
 	/** The reads of one request's sections share one query; the next request reads again, so what an agent just saved is in its next prompt. */
@@ -196,7 +216,7 @@ export function createAgentHost(options: AgentHostOptions) {
 	/** The first of these models the catalog can run (its provider is configured); when none can, the first one, which then fails with what is missing. */
 	async function choose(ownerId: string, candidates: (ModelRef | null)[]): Promise<{ provider: string; modelId: string }> {
 		const wanted = [...candidates, asModelRef(env.PIM_DEFAULT_MODEL)].filter((m): m is ModelRef => m !== null);
-		const models = modelsByOwner.get(ownerId);
+		const models = catalogs.has(ownerId) ? await refreshCatalog(ownerId).catch(() => catalogs.get(ownerId)!.through) : undefined;
 		const available = models ? await models.getAvailable().catch(() => []) : [];
 		const found = wanted.find((w) => available.some((a) => a.provider === w.provider && a.id === w.id)) ?? (wanted.length === 0 ? available[0] : undefined);
 		const chain = wanted.filter((w, i) => wanted.findIndex((x) => x.provider === w.provider && x.id === w.id) === i);
@@ -207,8 +227,7 @@ export function createAgentHost(options: AgentHostOptions) {
 
 	const harnessOptions = async (partition: PartitionContext): Promise<HarnessOptions> => {
 		const ownerId = partition.ownerId;
-		const models = await buildModels(ownerId);
-		modelsByOwner.set(ownerId, models);
+		const models = await refreshCatalog(ownerId);
 		const metered = meter(failover.wrap(models, ownerId), (message, model) => {
 			const usage = message?.usage;
 			if (!usage || !(usage.input > 0 || usage.output > 0)) return;

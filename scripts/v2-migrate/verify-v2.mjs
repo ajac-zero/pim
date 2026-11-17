@@ -61,7 +61,31 @@ const ada = new Session(expect.tokens.ada);
 const bob = new Session(expect.tokens.bob);
 
 // ---- sign-in ----
-{
+// When the new stack's hostname is not the one the passkey was made for, the old passkey cannot sign in (a browser offers a passkey only to the host it was made for, and a
+// server given an assertion for the old host refuses it); what a person does is use a recovery code, which adds a passkey for the new host. Both are checked.
+const rpChanged = new URL(BASE).hostname !== expect.passkey.rpId;
+if (rpChanged) {
+	const anon = new Session(null);
+	const key = Passkey.from(expect.passkey);
+	const options = await anon.post("/auth/sign-in/options");
+	check("the new stack asks for its own host's passkeys, which the old passkey is not (a browser would not offer it)", options.json?.rpId === new URL(BASE).hostname && options.json.rpId !== expect.passkey.rpId, JSON.stringify(options.json));
+	const stale = await anon.post("/auth/sign-in", key.get({ challenge: options.json.challenge, rpId: expect.passkey.rpId }, BASE, Buffer.from(expect.accounts.ada.ownerId).toString("base64url")));
+	check("an assertion the old passkey makes for the old host is refused", stale.status >= 400 && !anon.cookie.includes("session"), `${stale.status} ${stale.raw.toString().slice(0, 120)}`);
+	const code = expect.recoveryCodes.codes[0];
+	const recover = new Session(null);
+	const asked = await recover.post("/auth/passkeys/options", { recovery: code, username: expect.recoveryCodes.username });
+	const fresh = Passkey.make();
+	const made = asked.status === 200 ? await recover.post("/auth/passkeys", fresh.create(asked.json, BASE, "New host")) : asked;
+	check("a recovery code and the username add a passkey for the new host and sign the person in", made.status === 200 && accountOf(await recover.get("/api/account"))?.ownerId === expect.accounts.ada.ownerId, `${asked.status} ${made.status} ${made.raw.toString().slice(0, 150)}`);
+	const again = await new Session(null).post("/auth/passkeys/options", { recovery: code, username: expect.recoveryCodes.username });
+	check("the recovery code works once", again.status >= 400, again.status);
+	const opts2 = await new Session(null).post("/auth/sign-in/options");
+	const session2 = new Session(null);
+	session2.cookie = "";
+	const o = await session2.post("/auth/sign-in/options");
+	const back = await session2.post("/auth/sign-in", fresh.get(o.json, BASE, Buffer.from(expect.accounts.ada.ownerId).toString("base64url")));
+	check("the new passkey signs in on later visits", back.status === 200 && opts2.status === 200, back.status);
+} else {
 	const anon = new Session(null);
 	const key = Passkey.from(expect.passkey);
 	const options = await anon.post("/auth/sign-in/options");

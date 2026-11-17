@@ -1,6 +1,7 @@
 // A cutover rehearsal on the real stack: a legacy export (the ops package's synthetic snapshot) is imported into the landing schema, audited, promoted into the
 // live schemas, and then real gate, live and runner processes serve it: an imported passkey signs in, imported forked chats read over the snapshot API,
 // a new message in an imported chat runs on a Runner, and Forge adopts an imported Amp thread without starting it again.
+import type { Pool } from "pg";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,6 +10,7 @@ import { createModels } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 import { createRegistry, type HarnessOptions } from "@earendil-works/pi-durable";
 import { FakeOrbClient } from "@pim/coding/orb/fake";
+import { KeyringCrypto, openString } from "@pim/v2-app/crypto";
 import { userHandle } from "@pim/v2-app/signin";
 import { EnvelopeCrypto } from "@pim/v2-ops/crypto/envelope";
 import { auditImport } from "@pim/v2-ops/migration/audit";
@@ -30,6 +32,27 @@ import { type Deployment, base, start, startS3 } from "./support/processes.ts";
 import { createStack, describeWith, freePort, hasNats, startNats } from "./support/stack.ts";
 
 const real = describeWith(hasNats());
+
+/** What the synthetic snapshot lacks of Ada's space: an agent, a skill with a file, memories, a goal, a circle and a chat link, as the legacy tables hold them. */
+async function legacyDomain(admin: Pool, objects: FsObjectStore, conversation: string | number) {
+	const sha = "ab".repeat(32);
+	const legacy = (await admin.query("SELECT legacy_id FROM pim_ops.owner_map WHERE owner_id = $1", [ADA])).rows[0].legacy_id as string;
+	await objects.put("BLOBS", `${legacy}/skills/${sha}`, Buffer.from("# reference\n"));
+	const at = FIXTURE_CUTOVER_AT - 86_400_000;
+	const rows: [string, string, unknown][] = [
+		["pim_agents", "ag_poet", { id: "ag_poet", name: "Poet", instructions: "Answer in verse.", model: "faux/m", fallbacks: "[]", skills: "[\"Haiku\"]", apps: "[]", contacts: "[]", role: null, description: "", is_default: 0, symbol: "P", color: "blue", created_at: at }],
+		["pim_skills", "Haiku", { name: "Haiku", created_at: at }],
+		["pim_skill_versions", "Haiku:1", { name: "Haiku", version: 1, description: "Write haiku", instructions: "Five, seven, five.", created_at: at }],
+		["pim_skill_files", "Haiku:1:ref.md", { name: "Haiku", version: 1, path: "ref.md", sha256: sha }],
+		["optmem_log", "1", { id: 1, scope: "everyone", text: "Ada likes tea\nblack, no sugar", date: new Date(at).toISOString() }],
+		["pim_goals", "g_5k", { id: "g_5k", title: "Run a 5k", status: "active", steps: "[\"Run 2k\",{\"title\":\"Run 4k\",\"done\":true}]", created_at: at }],
+		["pim_circles", "c_friends", { id: "c_friends", name: "Friends" }],
+		["pim_circle_members", "c_friends:grace", { circle_id: "c_friends", owner_id: "own_grace" }],
+	];
+	const session = String(conversation);
+	rows.push(["pim_agent_sessions", session, { session, agent: "ag_poet" }], ["pim_chat_links", "lnk1", { id: "lnk1", session, shared_at: at }]);
+	for (const [table, pk, row] of rows) await admin.query("INSERT INTO pim_ops.legacy_rows (owner_id, source, table_name, pk, row) VALUES ($1,'Pim',$2,$3,$4)", [ADA, table, pk, JSON.stringify(row)]);
+}
 const ADA = "o_own_ada";
 
 real("a cutover rehearsal", () => {
@@ -40,7 +63,13 @@ real("a cutover rehearsal", () => {
 	const faux = fauxProvider({ provider: "faux", models: [{ id: "m" }] });
 	const key = new Authenticator("ES256");
 	const asked: string[] = [];
+	let legacyObjects: FsObjectStore;
+	const copied = new Map<string, Uint8Array>();
+	const appKeys = new KeyringCrypto("a1", { a1: Buffer.alloc(32, 5) });
+	const opsKeys = new EnvelopeCrypto({ k1: Buffer.alloc(32, 1) }, "k1");
 
+	const ACTIVATED_AT = FIXTURE_CUTOVER_AT + 3_600_000;
+	const promoteOptions = () => ({ rpId: "127.0.0.1", cutoverAt: FIXTURE_CUTOVER_AT, activatedAt: ACTIVATED_AT, defaultAgent: { provider: "faux", modelId: "m" }, crypto: { ops: opsKeys, app: appKeys }, objects: { get: (bucket: string, key: string) => legacyObjects.get(bucket, key), put: async (key: string, bytes: Uint8Array) => void copied.set(key, bytes) } });
 	const hooks = () => {
 		const models = createModels();
 		models.setProvider(faux.provider);
@@ -55,7 +84,8 @@ real("a cutover rehearsal", () => {
 		info = await buildLegacySnapshot(join(dir, "snapshot"));
 		const reader = new SnapshotReader(join(dir, "snapshot"));
 		const objects = new FsObjectStore(join(dir, "s3"));
-		const crypto = new EnvelopeCrypto({ k1: Buffer.alloc(32, 1) }, "k1");
+		legacyObjects = objects;
+		const crypto = opsKeys;
 		await importSnapshot(stack.admin, reader, { cutoverId: "cut-1", crypto, objects, appCredentialsKey: info.keys.appCredentialsKey.toString("base64") });
 		const audit = await auditImport(stack.admin, reader, objects, { cutoverId: "cut-1" });
 		expect(audit.checks.filter((c) => !c.ok)).toEqual([]);
@@ -63,6 +93,16 @@ real("a cutover rehearsal", () => {
 		await stack.admin.query(`
 			UPDATE pim_ops.pi_entries SET record = jsonb_set(record, '{model,0}', (record->'model'->0) || jsonb_build_object('usage', jsonb_build_object('input', 0, 'output', 0, 'cacheRead', 0, 'cacheWrite', 0, 'totalTokens', 0, 'cost', jsonb_build_object('input', 0, 'output', 0, 'cacheRead', 0, 'cacheWrite', 0, 'total', 0)), 'stopReason', 'stop', 'api', 'faux', 'provider', 'faux', 'model', 'm', 'timestamp', 1))
 			WHERE record->'model'->0->>'role' = 'assistant'`);
+		// The synthetic snapshot has no live document; a real one keeps the run of a chat cut off mid-tool (here the plain chat's http_request) in it.
+		const cut = (await stack.admin.query("SELECT id, conversation_id, partition_id FROM pim_ops.pi_tasks WHERE owner_id = $1 AND record::text LIKE '%call_http_1%' ORDER BY id LIMIT 1", [ADA])).rows[0];
+		const live = { run: { taskId: Number(cut.id), inputs: [] }, tools: [{ callId: "call_http_1", name: "http_request", taskId: Number(cut.id), status: "running" }], generation: { attempt: 1 } };
+		const docRecord = { id: 9_000_000, kind: "pi.live", scope: { kind: "conversation", conversationId: Number(cut.conversation_id) }, history: "latest", fork: "initial", createdAt: 1 };
+		await stack.admin.query("INSERT INTO pim_ops.pi_documents (owner_id, id, partition_id, kind, family, key_value, scope_kind, scope_owner_id, created_at, record) VALUES ($1,9000000,$2,'pi.live',0,'','conversation',$3,1,$4)", [ADA, cut.partition_id, cut.conversation_id, JSON.stringify(docRecord)]);
+		await stack.admin.query("INSERT INTO pim_ops.pi_document_revisions (owner_id, document_id, seq, kind, version, content) VALUES ($1,9000000,1,'base',1,$2)", [ADA, JSON.stringify(live)]);
+		// The fixture's own pi.agent document of that chat is a stub without pi's document semantics; the promotion's default agent stands in for it.
+		await stack.admin.query("DELETE FROM pim_ops.pi_document_revisions WHERE owner_id = $1 AND document_id IN (SELECT id FROM pim_ops.pi_documents WHERE owner_id = $1 AND kind = 'pi.agent' AND scope_owner_id = $2)", [ADA, cut.conversation_id]);
+		await stack.admin.query("DELETE FROM pim_ops.pi_documents WHERE owner_id = $1 AND kind = 'pi.agent' AND scope_owner_id = $2", [ADA, cut.conversation_id]);
+		await legacyDomain(stack.admin, objects, cut.conversation_id);
 		// The synthetic passkeys' keys are random bytes; Ada's is replaced by a real one so the test can sign in with it.
 		await stack.admin.query("UPDATE pim_ops.passkeys SET id = $1, spki = $2, algorithm = -7 WHERE owner_id = $3 AND id = (SELECT min(id) FROM pim_ops.passkeys WHERE owner_id = $3)", [key.id, key.spki, ADA]);
 	}, 180_000);
@@ -74,16 +114,32 @@ real("a cutover rehearsal", () => {
 	}, 60_000);
 
 	it("promotes the landing into the live schemas, idempotently", async () => {
-		const report = await promoteToLive(d.stack.admin, { rpId: "127.0.0.1", cutoverAt: FIXTURE_CUTOVER_AT, defaultAgent: { provider: "faux", modelId: "m" } });
+		const report = await promoteToLive(d.stack.admin, promoteOptions());
 		expect(report.owners).toEqual(expect.arrayContaining([ADA]));
 		expect(report.chats).toBeGreaterThanOrEqual(6);
 		expect(report.messages).toBeGreaterThan(0);
 		expect(report.orphanedTasks).toBeGreaterThan(0);
+		expect(report.clearedRuns).toBe(1);
 		const count = async (sql: string) => Number((await d.stack.admin.query(sql)).rows[0].n);
 		const before = [await count("SELECT count(*) n FROM pim_app.accounts"), await count("SELECT count(*) n FROM pim_app.conversations"), await count("SELECT count(*) n FROM pim_runtime.entries"), await count("SELECT count(*) n FROM pim_projection.chat_transcript_projection"), await count("SELECT count(*) n FROM pim_forge.forge_threads")];
 		expect(before.every((n) => n > 0)).toBe(true);
-		await promoteToLive(d.stack.admin, { rpId: "127.0.0.1", cutoverAt: FIXTURE_CUTOVER_AT, defaultAgent: { provider: "faux", modelId: "m" } });
+		await promoteToLive(d.stack.admin, promoteOptions());
 		expect([await count("SELECT count(*) n FROM pim_app.accounts"), await count("SELECT count(*) n FROM pim_app.conversations"), await count("SELECT count(*) n FROM pim_runtime.entries"), await count("SELECT count(*) n FROM pim_projection.chat_transcript_projection"), await count("SELECT count(*) n FROM pim_forge.forge_threads")]).toEqual(before);
+		// Ada's space came across: agents, skills with their files, memories, goals, circles, shares, apps, notes, and the secrets under the new keys.
+		const as = async <T>(sql: string, args: unknown[] = []) => (await d.stack.admin.query(sql, args)).rows as T[];
+		expect((await as("SELECT instructions, config FROM pim_app.agents WHERE owner_id = $1 AND id = 'ag_poet'", [ADA]))[0]).toMatchObject({ instructions: "Answer in verse.", config: { model: { provider: "faux", id: "m" }, skills: ["Haiku"] } });
+		expect(await count(`SELECT count(*) n FROM pim_app.conversations WHERE owner_id = '${ADA}' AND agent_id = 'ag_poet'`)).toBeGreaterThan(0);
+		expect((await as("SELECT body, files, version FROM pim_app.skills WHERE owner_id = $1 AND name = 'Haiku'", [ADA]))[0]).toMatchObject({ body: "Five, seven, five.", files: { "ref.md": "# reference\n" }, version: 1 });
+		expect((await as("SELECT title, body FROM pim_app.memories WHERE owner_id = $1", [ADA]))[0]).toMatchObject({ title: "Ada likes tea", body: "Ada likes tea\nblack, no sugar" });
+		expect((await as("SELECT title, done FROM pim_app.goal_steps WHERE owner_id = $1 AND goal_id = 'g_5k' ORDER BY position", [ADA])).map((r: any) => [r.title, r.done])).toEqual([["Run 2k", false], ["Run 4k", true]]);
+		expect((await as("SELECT name, members FROM pim_app.circles WHERE owner_id = $1", [ADA]))[0]).toMatchObject({ name: "Friends" });
+		expect(await count(`SELECT count(*) n FROM pim_app.shares WHERE owner_id = '${ADA}' AND link = 'lnk1'`)).toBe(1);
+		expect(await count(`SELECT count(*) n FROM pim_app.artifact_versions WHERE owner_id = '${ADA}'`)).toBeGreaterThan(0);
+		expect(await count(`SELECT count(*) n FROM pim_app.note_updates WHERE owner_id = '${ADA}'`)).toBeGreaterThan(0);
+		for (const p of await as<{ id: string; secret: string | null }>("SELECT id, secret FROM pim_app.providers WHERE owner_id = $1 AND secret IS NOT NULL", [ADA])) expect((await openString(appKeys, p.secret!, `provider:${ADA}/${p.id}`)).length).toBeGreaterThan(0);
+		// Nothing that was due while the fence stood comes back: a time trigger counts from the activation.
+		const stale = await count(`SELECT count(*) n FROM pim_app.triggers WHERE owner_id = '${ADA}' AND source = 'time' AND watermark < ${ACTIVATED_AT}`);
+		expect(stale).toBe(0);
 		// The numeric ids are the legacy ones, and the app's chat ids are the runtime's.
 		const same = await count("SELECT count(*) n FROM pim_app.conversations c JOIN pim_runtime.conversation_partitions p ON p.public_chat_id = c.public_chat_id AND p.conversation_id = c.conversation_id AND p.partition_id = c.partition_id");
 		expect(same).toBe(await count("SELECT count(*) n FROM pim_app.conversations"));
@@ -117,8 +173,6 @@ real("a cutover rehearsal", () => {
 		expect(sidebar.sessions.map((s) => s.chatId)).toEqual(expect.arrayContaining([info.chats.plain, info.chats.branched, info.chats.fork]));
 	}, 60_000);
 
-	// A chat cut off mid-tool (info.chats.plain, info.chats.branched) keeps its in-flight run in its live document and queues new input behind it until someone reconciles it:
-	// the runtime does not clear a run whose task it orphaned. That is documented, not hidden, so the new message here goes to an idle imported fork.
 	it("runs a new message in an imported chat on a Runner, after the imported history, with projections continuing", async () => {
 		// Any call the imported work makes gets a plain answer; the one this test sends gets its own.
 		const answer = (ctx: { messages: { role: string; content: unknown }[] }) => {
@@ -144,6 +198,15 @@ real("a cutover rehearsal", () => {
 		expect(tail.map((m) => m.role)).toEqual(["user", "assistant"]);
 		expect(Math.min(...tail.map((m) => Number(m.id)))).toBeGreaterThan(Math.max(...before.messages.map((m) => Number(m.id))));
 		expect(tail[0]!.parts[0]!.text).toBe("what did we say before?");
+
+		// The plain chat was cut off mid-tool: its live document held the run of the orphaned http_request. The cutover cleared that run, so a new message runs at once.
+		const readPlain = async () => (await web.call("GET", `/api/snapshot/chat/${info.chats.plain}?limit=200`)).json as { messages: { role: string; parts: { text?: string }[] }[] };
+		expect((await web.call("POST", `/api/sessions/${info.chats.plain}/messages`, { commandId: "after-cutover-plain", text: "anyone there after the cut?" })).status).toBe(202);
+		const plain = await waitFor("the answer in the chat that was cut off mid-tool", async () => {
+			const s = await readPlain();
+			return s.messages.some((m) => m.role === "assistant" && m.parts.some((p) => p.text === "Noted.")) && s.messages.some((m) => m.parts.some((p) => p.text === "anyone there after the cut?")) ? s : undefined;
+		}, 60_000);
+		expect(plain.messages.at(-1)!.role).toBe("assistant");
 	}, 120_000);
 
 	it("adopts an imported Amp thread in Forge without starting it again, and leaves a cut-off CLI thread idle", async () => {

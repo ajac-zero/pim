@@ -10,20 +10,27 @@
  *   partition's next commit.
  * - `pim_forge`: coding threads (a remote Amp thread keeps its handle and is adopted, never started again).
  *
+ * - the space's domain (`promoteDomain`): agents, skills and their versions, memories, goals, triggers (with the post-cutover skip so nothing catches up),
+ *   providers and connectors (secrets re-sealed from the ops envelopes under the application's keys), circles, chat links, profiles, apps with their versions, notes
+ *   (the Yjs document as the first update), objects' metadata and ACLs, and the settings a person explicitly set.
+ *
  * It is idempotent per tenant and runs as the schema owner. **Not promoted** (they remain in `pim_ops.legacy_rows` and the ops ledger, listed in
- * docs/architecture/v2-implementation-status.md): agents, skills, memories, goals, schedules, triggers, providers, connectors, circles, shares, apps, notes,
- * objects' ACLs, settings, standing approvals and grants.
+ * docs/architecture/v2-implementation-status.md): legacy schedules (they are triggers, promoted as such), deployment-level providers, templates and bots,
+ * standing approvals and grants (an admin records those again, deliberately).
  */
 import { createHash } from "node:crypto";
 import type { ConversationRecord, DocumentRecord, EntryRecord, SubmissionRecord, TaskRecord } from "@earendil-works/pi-durable";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { projectEntries } from "@pim/shared/transcript";
+import { KeyringCrypto, sealString } from "@pim/v2-app/crypto";
 import { userHandle } from "@pim/v2-app/signin";
+import type { EnvelopeCrypto as OpsCrypto } from "@pim/v2-ops/crypto/envelope";
+import { applyImmutable, decoder } from "@earendil-works/chord/delta";
 import { Db as RuntimeDb } from "@pim/v2-runtime/db";
 import { importLegacySpace, type LegacySpace } from "@pim/v2-runtime/splitter";
 import { PgPiStorage } from "@pim/v2-runtime/storage";
 import type { Pool, PoolClient } from "pg";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 
 export type PromoteOptions = {
 	/** The relying party id of the new deployment: a passkey works only under the hostname it was made for. */
@@ -36,9 +43,16 @@ export type PromoteOptions = {
 	 * per owner from `pim_app.agents` and `pim_app.providers`).
 	 */
 	defaultAgent?: { provider: string; modelId: string };
+	/** When the new deployment goes live: a time trigger counts firings from here, never from before it, so nothing the cutover missed fires. Default: now. */
+	activatedAt?: number;
+	/** What re-seals the secrets the landing holds: the ops envelopes are opened with `ops`, and sealed again under the application's own keys with `app`. Without it connectors and providers are promoted without credentials, to be connected again. */
+	crypto?: { ops: OpsCrypto; app: KeyringCrypto };
+	/** Where the legacy objects' bytes are: skills' files, apps' files and media. Without it those rows are reported as skipped, not promoted empty. */
+	objects?: { get(bucket: string, key: string): Promise<Uint8Array | null>; put?(key: string, bytes: Uint8Array, contentType: string | null): Promise<void> };
 };
 
-export type PromoteReport = { owners: string[]; chats: number; messages: number; forgeThreads: number; orphanedTasks: number };
+/** `domain` counts what was promoted per kind; `skipped` says what was left in the landing and why. */
+export type PromoteReport = { owners: string[]; chats: number; messages: number; forgeThreads: number; orphanedTasks: number; clearedRuns: number; domain: Record<string, number>; skipped: string[] };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 /** A chat's public id as a UUID: the legacy id when it is one, else one derived from it, the same every time. */
@@ -101,13 +115,16 @@ async function promoteIdentity(pool: Pool, owner: string, rpId: string): Promise
 }
 
 /** The landing's pi tables as the runtime's `LegacySpace`. A task that was running a tool at the cutover (held for reconciliation) ends as orphaned: it is never replayed. */
-async function legacySpace(pool: Pool, owner: string, cutoverAt: number, defaultAgent?: PromoteOptions["defaultAgent"]): Promise<{ space: LegacySpace; orphaned: number }> {
+async function legacySpace(pool: Pool, owner: string, cutoverAt: number, defaultAgent?: PromoteOptions["defaultAgent"]): Promise<{ space: LegacySpace; orphaned: number; clearedRuns: number }> {
 	const q = async (sql: string) => (await pool.query(sql, [owner])).rows;
 	const conversations = (await q("SELECT record FROM pim_ops.pi_conversations WHERE owner_id = $1 ORDER BY id")).map((r) => r.record as ConversationRecord);
 	const entries = (await q("SELECT record, commit_seq FROM pim_ops.pi_entries WHERE owner_id = $1 ORDER BY id")).map((r) => ({ record: r.record as EntryRecord, commitSeq: Number(r.commit_seq) }));
 	let orphaned = 0;
+	/** The tasks orphaned, by conversation: the run that waited on one must not outlive it. */
+	const orphanedIn = new Map<number, Set<number>>();
 	const orphan = (t: Record<string, unknown>, reason: string) => {
 		orphaned++;
+		(orphanedIn.get(Number(t.conversationId)) ?? orphanedIn.set(Number(t.conversationId), new Set()).get(Number(t.conversationId))!).add(Number(t.id));
 		return { ...t, state: { status: "terminal", outcome: { status: "orphaned", reason } }, endedAt: cutoverAt };
 	};
 	const tasks = (await q("SELECT id, conversation_id, kind, status, abort_requested, background, hold, record FROM pim_ops.pi_tasks WHERE owner_id = $1 ORDER BY id")).map((r) => {
@@ -146,7 +163,40 @@ async function legacySpace(pool: Pool, owner: string, cutoverAt: number, default
 			documents.push({ record: { id: ++id, kind: b.kind, scope: { kind: "conversation", conversationId: c.id }, history: b.history, fork: b.fork, createdAt: seq } as unknown as DocumentRecord, revisions: [{ seq, kind: "base", version: 1, content: b.content() }] });
 		}
 	}
-	return { space: { conversations, entries, tasks: tasks as never, submissions, documents, metadata: { nextId: Math.max(next, ...documents.map((x) => x.record.id + 1)), nextSeq: Math.max(nextSeq, ...documents.map((x) => x.record.createdAt + 1)) } }, orphaned };
+	const clearedRuns = clearOrphanedRuns(documents, orphanedIn);
+	return { clearedRuns, space: { conversations, entries, tasks: tasks as never, submissions, documents, metadata: { nextId: Math.max(next, ...documents.map((x) => x.record.id + 1)), nextSeq: Math.max(nextSeq, ...documents.map((x) => x.record.createdAt + 1)) } }, orphaned };
+}
+
+/**
+ * A conversation cut off mid-tool keeps `run` in its live document: the task that settles the run's inputs, and `tools`, the round's calls. The tasks are orphaned (never
+ * replayed), but nothing would ever end that run, so a message sent after the cutover would queue behind it forever. A live document whose run, or any of whose tool slots,
+ * names an orphaned task of its conversation is rewritten without `run`, `generation` and `tools`, as pi's own `endRun` leaves it. Its history is `latest`, so one base
+ * revision holding that value replaces the revisions. A document whose value cannot be rebuilt is left as it is. Returns how many runs were cleared.
+ */
+function clearOrphanedRuns(documents: { record: DocumentRecord; revisions: { seq: number; kind: "base" | "delta"; version: number; content: unknown }[] }[], orphanedIn: Map<number, Set<number>>): number {
+	let cleared = 0;
+	for (const doc of documents) {
+		if (doc.record.kind !== "pi.live" || doc.record.scope.kind !== "conversation") continue;
+		const orphans = orphanedIn.get(doc.record.scope.conversationId);
+		if (!orphans || orphans.size === 0) continue;
+		const revisions = [...doc.revisions].sort((a, b) => a.seq - b.seq);
+		const base = revisions.findLast((r) => r.kind === "base");
+		if (!base) continue;
+		let value: Record<string, any>;
+		try {
+			const dec = decoder();
+			value = revisions.filter((r) => r.seq >= base.seq).slice(1).reduce((v, r) => applyImmutable(v, dec.decode(r.content as never) as never), base.content as Record<string, any>);
+		} catch {
+			continue;
+		}
+		const slots: { taskId?: number }[] = Array.isArray(value.tools) ? value.tools : [];
+		const waiting = (value.run && orphans.has(Number(value.run.taskId))) || slots.some((slot) => slot.taskId !== undefined && orphans.has(Number(slot.taskId)));
+		if (!waiting) continue;
+		const { run: _run, generation: _generation, tools: _tools, ...rest } = value;
+		doc.revisions = [{ seq: revisions[0]!.seq, kind: "base", version: base.version, content: rest }];
+		cleared++;
+	}
+	return cleared;
 }
 
 /** The application's chat directory and a baseline projection of what the runtime now holds. */
@@ -243,24 +293,281 @@ async function promoteForge(pool: Pool, owner: string): Promise<number> {
 	return n;
 }
 
+
+// ---- the space's domain ----
+
+const parseJson = (value: unknown, fallback: unknown = null): any => {
+	if (value === null || value === undefined) return fallback;
+	if (typeof value !== "string") return value;
+	try {
+		return JSON.parse(value);
+	} catch {
+		return fallback;
+	}
+};
+const slug = (text: string) => text.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 63) || "item";
+
+type Domain = { counts: Record<string, number>; skipped: string[] };
+const bump = (d: Domain, kind: string, n = 1) => void (d.counts[kind] = (d.counts[kind] ?? 0) + n);
+
+/** The legacy rows of one table of one tenant, as the landing kept them. */
+async function legacyRows(pool: Pool, owner: string, table: string): Promise<Record<string, any>[]> {
+	return (await pool.query("SELECT row FROM pim_ops.legacy_rows WHERE owner_id = $1 AND table_name = $2 ORDER BY pk", [owner, table])).rows.map((r) => r.row as Record<string, any>);
+}
+
+/**
+ * Agents, skills, memories, goals, triggers, providers, connectors, circles, chat links, profiles, apps, notes, objects and explicit settings of one tenant, from the landing into
+ * `pim_app`. Every insert is `ON CONFLICT DO NOTHING`, so it can be run again. A row that refers to something that is not in the new deployment (a member who never joined, an
+ * app without its files) is skipped and said so, never promoted half.
+ */
+async function promoteDomain(pool: Pool, owner: string, options: PromoteOptions, d: Domain): Promise<void> {
+	const legacyId = (await pool.query("SELECT legacy_id FROM pim_ops.owner_map WHERE owner_id = $1", [owner])).rows[0]?.legacy_id as string | undefined;
+	const owners = new Map((await pool.query("SELECT legacy_id, owner_id FROM pim_ops.owner_map")).rows.map((r) => [r.legacy_id as string, r.owner_id as string]));
+	const rows = (table: string) => legacyRows(pool, owner, table);
+	const secret = async (cell: unknown, purpose: string): Promise<string | null> => {
+		if (!cell || typeof cell !== "object" || !("$secret" in cell) || !options.crypto) return null;
+		const name = String((cell as { $secret: string }).$secret);
+		const found = (await pool.query("SELECT envelope, purpose FROM pim_ops.secret_envelopes WHERE owner_id = $1 AND name = $2", [owner, name])).rows[0];
+		if (!found) return null;
+		const plaintext = options.crypto.ops.open(found.envelope, [owner, name, found.purpose]).toString();
+		void purpose;
+		return plaintext === "" ? null : plaintext;
+	};
+	const sealed = async (plaintext: string, context: string) => sealString(options.crypto!.app, plaintext, context);
+	const chatOf = new Map<string, string>();
+	// A legacy session is named by its conversation id; the landing keeps that link as `chats` (its `pim_session_ids` is a pi table, not a legacy row).
+	for (const r of (await pool.query("SELECT conversation_id, public_id FROM pim_ops.chats WHERE owner_id = $1", [owner])).rows) chatOf.set(String(r.conversation_id), chatUuid(String(r.public_id)));
+	const ms = (v: unknown) => (v === null || v === undefined ? new Date() : new Date(Number(v)));
+
+	const agents = await rows("pim_agents");
+	const skills = await rows("pim_skills");
+	const skillVersions = await rows("pim_skill_versions");
+	const skillFiles = await rows("pim_skill_files");
+	const memories = await rows("optmem_log");
+	const goals = await rows("pim_goals");
+	const connections = await rows("pim_app_connections");
+	const credentials = await rows("pim_credentials");
+	const triggers = await rows("pim_triggers");
+	const revisions = await rows("pim_trigger_revisions");
+	const circles = await rows("pim_circles");
+	const members = await rows("pim_circle_members");
+	const links = await rows("pim_chat_links");
+	const artifacts = await rows("pim_artifacts");
+	const notes = await rows("pim_notes");
+	const agentSessions = await rows("pim_agent_sessions");
+	const meta = await rows("pim_meta");
+	const profile = (await pool.query("SELECT row FROM pim_ops.legacy_rows WHERE table_name = 'profiles' AND row->>'owner_id' = ANY($1)", [[legacyId ?? "", owner]])).rows[0]?.row as Record<string, any> | undefined;
+	const dueWork = new Map((await pool.query("SELECT key, state, skip_before_ms FROM pim_ops.due_work WHERE owner_id = $1 AND kind LIKE 'trigger:%'", [owner])).rows.map((r) => [r.key as string, r]));
+	const objectRows = (await pool.query("SELECT bucket, key, size_bytes, sha256, content_type FROM pim_ops.objects WHERE owner_id = $1", [owner])).rows;
+
+	// Sealed values are made first: they need no transaction.
+	const providerSecrets = new Map<string, string>();
+	for (const c of credentials) {
+		const plain = await secret(c.credential, "provider-credential");
+		const key = plain ? (parseJson(plain, {}) as { apiKey?: string }).apiKey : undefined;
+		if (key) providerSecrets.set(String(c.provider), await sealed(key, `provider:${owner}/pv_legacy_${slug(String(c.provider))}`));
+	}
+	const connectorSecrets = new Map<string, string>();
+	for (const c of connections) {
+		const plain = await secret(c.credential, "connector-credential");
+		if (plain) connectorSecrets.set(String(c.id), await sealed(plain, `connector:${owner}/${c.id}`));
+	}
+
+	// Files that live in the object store: skills' and apps'.
+	const skillContent = new Map<string, string>();
+	for (const f of skillFiles) {
+		if (!options.objects || !legacyId) continue;
+		const bytes = await options.objects.get("BLOBS", `${legacyId}/skills/${f.sha256}`);
+		if (bytes) skillContent.set(`${f.name}\n${f.version}\n${f.path}`, Buffer.from(bytes).toString("utf8"));
+	}
+	const appFiles = new Map<string, Record<string, string>>();
+	for (const a of artifacts) {
+		for (const v of parseJson(a.versions, []) as { v: number; files: Record<string, string> }[]) {
+			const files: Record<string, string> = {};
+			for (const [path, key] of Object.entries(v.files ?? {})) {
+				const bytes = options.objects ? await options.objects.get("ARTIFACTS", String(key)) : null;
+				if (bytes) files[path] = Buffer.from(bytes).toString("utf8");
+			}
+			appFiles.set(`${a.id}\n${v.v}`, files);
+		}
+	}
+
+	await asOwner(pool, owner, async (c) => {
+		// Agents, and which chat each one answers.
+		for (const a of agents) {
+			const model = parseJson(a.model, typeof a.model === "string" ? a.model : null);
+			const ref = typeof model === "string" ? (model.includes("/") ? { provider: model.split("/")[0], id: model.split("/").slice(1).join("/") } : null) : model;
+			const config = { ...(ref ? { model: ref } : {}), fallbacks: parseJson(a.fallbacks, []), skills: parseJson(a.skills, []), apps: parseJson(a.apps, []), contacts: parseJson(a.contacts, []), delegates: [], legacy: { role: a.role ?? null, description: a.description ?? "", isDefault: a.is_default === 1 } };
+			const r = await c.query("INSERT INTO pim_app.agents (id, owner_id, name, instructions, config, emoji, color, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT DO NOTHING", [a.id, owner, a.name, a.instructions ?? "", JSON.stringify(config), a.symbol ?? null, a.color ?? null, ms(a.created_at)]);
+			bump(d, "agents", r.rowCount ?? 0);
+		}
+		for (const s of agentSessions) {
+			const chat = chatOf.get(String(s.session));
+			if (chat) await c.query("UPDATE pim_app.conversations SET agent_id = $2 WHERE public_chat_id = $1 AND agent_id IS NULL", [chat, s.agent]);
+		}
+		// Skills with every version; the latest is the skill.
+		for (const sk of skills) {
+			const versions = skillVersions.filter((v) => v.name === sk.name).sort((a, b) => Number(a.version) - Number(b.version));
+			const latest = versions.at(-1);
+			if (!latest) continue;
+			const filesOf = (v: Record<string, any>) => {
+				const out: Record<string, string> = {};
+				for (const f of skillFiles.filter((x) => x.name === sk.name && Number(x.version) === Number(v.version))) {
+					const text = skillContent.get(`${sk.name}\n${v.version}\n${f.path}`);
+					if (text !== undefined) out[f.path] = text;
+				}
+				return out;
+			};
+			const lost = skillFiles.filter((x) => x.name === sk.name && Number(x.version) === Number(latest.version)).length - Object.keys(filesOf(latest)).length;
+			if (lost > 0) d.skipped.push(`skill ${sk.name}: ${lost} supporting file(s) whose bytes were not given`);
+			const id = `sk_legacy_${slug(String(sk.name))}`;
+			const inserted = await c.query("INSERT INTO pim_app.skills (id, owner_id, name, description, body, files, version, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT DO NOTHING", [id, owner, sk.name, latest.description ?? "", latest.instructions ?? "", JSON.stringify(filesOf(latest)), Number(latest.version), ms(sk.created_at)]);
+			if (!inserted.rowCount) continue;
+			bump(d, "skills");
+			for (const v of versions) await c.query("INSERT INTO pim_app.skill_versions (owner_id, skill_id, version, body, files, created_at) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING", [owner, id, Number(v.version), v.instructions ?? "", JSON.stringify(filesOf(v)), ms(v.created_at)]);
+		}
+		for (const m of memories) {
+			const text = String(m.text ?? "");
+			const r = await c.query("INSERT INTO pim_app.memories (id, owner_id, scope, title, body, created_at, updated_at, deleted_at) VALUES ($1,$2,$3,$4,$5,$6,$6,$7) ON CONFLICT DO NOTHING", [`m_legacy_${m.id}`, owner, m.scope ?? "everyone", text.split("\n")[0]!.slice(0, 80), text, new Date(String(m.date)).toString() === "Invalid Date" ? new Date() : new Date(String(m.date)), m.forgotten === 1 ? new Date() : null]);
+			bump(d, "memories", r.rowCount ?? 0);
+		}
+		for (const g of goals) {
+			const status = /done|complete/i.test(String(g.status)) ? "done" : /drop|abandon|cancel/i.test(String(g.status)) ? "dropped" : "active";
+			const r = await c.query("INSERT INTO pim_app.goals (id, owner_id, title, status, created_at) VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING", [g.id, owner, g.title, status, ms(g.created_at)]);
+			if (!r.rowCount) continue;
+			bump(d, "goals");
+			for (const [i, step] of (parseJson(g.steps, []) as unknown[]).entries()) {
+				const st = typeof step === "string" ? { title: step, done: false } : (step as { title?: string; text?: string; done?: boolean; status?: string });
+				await c.query("INSERT INTO pim_app.goal_steps (goal_id, owner_id, position, title, done) VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING", [g.id, owner, i, st.title ?? st.text ?? "", st.done === true || st.status === "done"]);
+			}
+		}
+		// Providers and connectors, with their secrets under the application's keys. Without keys they come without credentials, to be connected again.
+		for (const p of credentials) {
+			const kind = ["anthropic", "openai", "google"].includes(String(p.provider)) ? String(p.provider) : "custom";
+			const r = await c.query("INSERT INTO pim_app.providers (id, owner_id, kind, config, secret) VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING", [`pv_legacy_${slug(String(p.provider))}`, owner, kind, JSON.stringify({ name: p.provider }), providerSecrets.get(String(p.provider)) ?? null]);
+			bump(d, "providers", r.rowCount ?? 0);
+			if (!providerSecrets.has(String(p.provider))) d.skipped.push(`provider ${p.provider}: no credential promoted (${options.crypto ? "its secret could not be opened" : "no keys were given"})`);
+		}
+		for (const k of connections) {
+			const native = ["gmail", "google", "google-drive", "spotify"].includes(String(k.app));
+			const credential = connectorSecrets.get(String(k.id)) ?? null;
+			const eventSecret = options.crypto ? await sealed(randomBytes(32).toString("base64url"), `connector-events:${owner}/${k.id}`) : null;
+			const r = await c.query(
+				"INSERT INTO pim_app.connectors (id, owner_id, kind, name, credential, event_key, event_secret, status, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT DO NOTHING",
+				[k.id, owner, native ? "native" : "builtin", k.name ?? k.app, credential, randomBytes(12).toString("base64url"), eventSecret, credential && k.state === "connected" ? "connected" : "auth_required", ms(k.created_at)],
+			);
+			bump(d, "connectors", r.rowCount ?? 0);
+			if (!credential) d.skipped.push(`connector ${k.id} (${k.app}): connected again by its owner`);
+		}
+		// Triggers. A time trigger is counted from the later of the cutover's skip guard and the activation, so what the cutover missed never fires.
+		const activated = options.activatedAt ?? Date.now();
+		for (const t of triggers) {
+			const rev = revisions.filter((r) => r.trigger_id === t.id).sort((a, b) => Number(b.revision) - Number(a.revision))[0];
+			const spec = parseJson(rev?.spec, null);
+			if (!spec?.source) continue;
+			const due = dueWork.get(String(t.id));
+			const computer = ["poll", "stream", "process", "file"].includes(spec.source.kind);
+			const ended = due && (due.state === "done" || due.state === "dropped");
+			const lifecycle = t.lifecycle === "deleted" ? "deleted" : ended ? "ended" : t.lifecycle === "active" || t.lifecycle === "enabled" ? (computer ? "paused" : "enabled") : ["draft", "paused", "ended"].includes(String(t.lifecycle)) ? String(t.lifecycle) : "paused";
+			const watermark = spec.source.kind === "time" ? Math.max(Number(due?.skip_before_ms ?? options.cutoverAt), options.cutoverAt, activated) : null;
+			const r = await c.query(
+				"INSERT INTO pim_app.triggers (id, owner_id, agent_id, source, spec, enabled, lifecycle, title, origin_chat, watermark, enabled_at, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'legacy',$9,$10,$11) ON CONFLICT DO NOTHING",
+				[t.id, owner, spec.owningAgentId ?? null, spec.source.kind, JSON.stringify(spec), lifecycle === "enabled", lifecycle, String(spec.label ?? t.id).slice(0, 120), watermark, lifecycle === "enabled" ? new Date(activated) : null, ms(t.created_at)],
+			);
+			bump(d, "triggers", r.rowCount ?? 0);
+			if (computer) d.skipped.push(`trigger ${t.id}: runs on a computer, so it is paused until it is granted one`);
+		}
+		// Circles and their members; a member who has not joined the new deployment is left out.
+		for (const ci of circles) {
+			const mine = members.filter((m) => m.circle_id === ci.id).map((m) => owners.get(String(m.owner_id)) ?? String(m.owner_id));
+			const known = new Set((await c.query("SELECT owner_id FROM pim_app.accounts WHERE owner_id = ANY($1)", [mine])).rows.map((r) => r.owner_id));
+			for (const m of mine) if (!known.has(m)) d.skipped.push(`circle ${ci.id}: member ${m} has no account here`);
+			const r = await c.query("INSERT INTO pim_app.circles (id, owner_id, name, members) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING", [ci.id, owner, ci.name, mine.filter((m) => known.has(m))]);
+			bump(d, "circles", r.rowCount ?? 0);
+		}
+		for (const l of links) {
+			const chat = chatOf.get(String(l.session));
+			if (!chat) continue;
+			const r = await c.query("INSERT INTO pim_app.shares (id, owner_id, kind, resource_id, audience, link, created_at) VALUES ($1,$2,'chat',$3,'link',$4,$5) ON CONFLICT DO NOTHING", [`sh_legacy_${l.id}`, owner, chat, l.id, ms(l.shared_at)]);
+			bump(d, "shares", r.rowCount ?? 0);
+		}
+		if (profile) {
+			const r = await c.query("INSERT INTO pim_app.profiles (owner_id, display_name, bio, published) VALUES ($1,$2,$3,true) ON CONFLICT DO NOTHING", [owner, profile.display_name ?? "", profile.bio ?? ""]);
+			bump(d, "profiles", r.rowCount ?? 0);
+		}
+		// Apps: every version, with its files read from the object store.
+		for (const a of artifacts) {
+			const kind = a.kind === "jsx" ? "jsx" : a.kind === "hosted" ? "backend" : a.kind === "html" || a.kind === "app" ? "html" : null;
+			const versions = (parseJson(a.versions, []) as { v: number }[]).sort((x, y) => x.v - y.v);
+			if (!kind || versions.length === 0) {
+				d.skipped.push(`app ${a.id}: a ${a.kind} is not promoted as an app`);
+				continue;
+			}
+			const filesOf = (v: number) => appFiles.get(`${a.id}\n${v}`) ?? {};
+			const main = kind === "html" ? "index.html" : kind === "jsx" ? "App.jsx" : "pim.app.json";
+			if (!(main in filesOf(versions.at(-1)!.v)) && !(kind === "jsx" && "App.tsx" in filesOf(versions.at(-1)!.v))) {
+				d.skipped.push(`app ${a.id}: its files were not given, so it was not promoted empty`);
+				continue;
+			}
+			const r = await c.query("INSERT INTO pim_app.artifacts (id, owner_id, title, kind, latest_version, access, created_at) VALUES ($1,$2,$3,$4,$5,'private',$6) ON CONFLICT DO NOTHING", [a.id, owner, a.name, kind, versions.at(-1)!.v, ms(a.created_at)]);
+			if (!r.rowCount) continue;
+			bump(d, "apps");
+			for (const v of versions) await c.query("INSERT INTO pim_app.artifact_versions (artifact_id, owner_id, version, files, message) VALUES ($1,$2,$3,$4,'Imported') ON CONFLICT DO NOTHING", [a.id, owner, v.v, JSON.stringify(filesOf(v.v))]);
+		}
+		// Notes: the Yjs document is the first update of the log, as legacy wrote it.
+		for (const n of notes) {
+			const r = await c.query("INSERT INTO pim_app.notes (note_id, owner_id, title, version, created_at) VALUES ($1,$2,$3,1,$4) ON CONFLICT DO NOTHING", [n.id, owner, n.title ?? "", ms(n.updated_at)]);
+			if (!r.rowCount) continue;
+			bump(d, "notes");
+			await c.query("INSERT INTO pim_app.note_updates (owner_id, note_id, seq, data, origin, fence) VALUES ($1,$2,1,$3,'import',0) ON CONFLICT DO NOTHING", [owner, n.id, Buffer.from(String(n.ydoc), "base64")]);
+		}
+		// Objects: metadata and ACL, under the new owner's key; bytes are copied when the caller can. Vault blobs and skills' content-addressed files are not objects here.
+		for (const o of objectRows) {
+			if (/\/(vault|skills)\//.test(o.key)) continue;
+			const rest = String(o.key).split("/").slice(1).join("/");
+			const key = `${owner}/${rest}`;
+			const type = String(o.content_type ?? "application/octet-stream");
+			const purpose = type.startsWith("image/") ? "image" : /^(video|audio)\//.test(type) ? "media" : o.bucket === "ARTIFACTS" ? "artifact_file" : "file";
+			if (options.objects?.put) {
+				const bytes = await options.objects.get(o.bucket, o.key);
+				if (bytes) await options.objects.put(key, bytes, type);
+			}
+			const r = await c.query("INSERT INTO pim_app.objects (key, owner_id, purpose, content_type, size, sha256, acl) VALUES ($1,$2,$3,$4,$5,$6,'private') ON CONFLICT DO NOTHING", [key, owner, purpose, type, Number(o.size_bytes), o.sha256]);
+			bump(d, "objects", r.rowCount ?? 0);
+		}
+		// Settings: only what the person set. A key they never changed stays absent, so the deployment's default still applies to it.
+		for (const m of meta.filter((x) => x.key === "settings")) {
+			const settings = parseJson(m.value, {}) as Record<string, unknown>;
+			for (const [key, value] of Object.entries(settings)) {
+				if (value === null || value === undefined) continue;
+				const r = await c.query("INSERT INTO pim_app.owner_settings (owner_id, key, value) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING", [owner, `settings.${key}`, JSON.stringify(value)]);
+				bump(d, "settings", r.rowCount ?? 0);
+			}
+		}
+	});
+}
+
 /** Promotes every tenant of the landing; the owners done. Safe to run again: what is already in place is left as it is. */
 export async function promoteToLive(pool: Pool, options: PromoteOptions): Promise<PromoteReport> {
 	const runtime = new RuntimeDb(pool);
 	const owners = (await pool.query("SELECT owner_id FROM pim_ops.tenants WHERE owner_id <> '_deployment' ORDER BY owner_id")).rows.map((r) => r.owner_id as string);
-	const report: PromoteReport = { owners: [], chats: 0, messages: 0, forgeThreads: 0, orphanedTasks: 0 };
+	const report: PromoteReport = { owners: [], chats: 0, messages: 0, forgeThreads: 0, orphanedTasks: 0, clearedRuns: 0, domain: {}, skipped: [] };
 	for (const owner of owners) {
 		await promoteIdentity(pool, owner, options.rpId);
 		const has = (await runtime.read(owner, "SELECT 1 FROM pim_runtime.partitions WHERE owner_id = $1 LIMIT 1", [owner])).rowCount;
 		const hasPi = (await pool.query("SELECT 1 FROM pim_ops.pi_conversations WHERE owner_id = $1 LIMIT 1", [owner])).rowCount;
 		if (!has && hasPi) {
-			const { space, orphaned } = await legacySpace(pool, owner, options.cutoverAt, options.defaultAgent);
+			const { space, orphaned, clearedRuns } = await legacySpace(pool, owner, options.cutoverAt, options.defaultAgent);
 			const publicChatIds = new Map((await pool.query("SELECT conversation_id, public_id FROM pim_ops.chats WHERE owner_id = $1", [owner])).rows.map((r) => [Number(r.conversation_id), chatUuid(r.public_id)]));
 			await importLegacySpace(runtime, owner, space, { publicChatIds });
 			report.orphanedTasks += orphaned;
+			report.clearedRuns += clearedRuns;
 			const c = await promoteChats(pool, runtime, owner);
 			report.chats += c.chats;
 			report.messages += c.messages;
 		}
+		const domain: Domain = { counts: report.domain, skipped: report.skipped };
+		await promoteDomain(pool, owner, options, domain);
 		report.forgeThreads += await promoteForge(pool, owner);
 		report.owners.push(owner);
 	}

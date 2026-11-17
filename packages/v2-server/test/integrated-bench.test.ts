@@ -105,6 +105,15 @@ real("the integrated Gate, Runner, Projector and Live under concurrent streaming
 		);
 		return { samples, async stop() { running = false; await Promise.all(loops); return samples; } };
 	}
+	/** WAL flush counts: pg_stat_wal has them through PostgreSQL 17 and not after, so a newer server reports none. */
+	const walStats = async (): Promise<{ sync: number; time: number } | null> => {
+		try {
+			const r = (await d.stack.admin.query("SELECT wal_sync, wal_sync_time FROM pg_stat_wal")).rows[0];
+			return { sync: Number(r.wal_sync), time: Number(r.wal_sync_time) };
+		} catch {
+			return null;
+		}
+	};
 	const cpuTimes = () => {
 		const f = readFileSync("/proc/stat", "utf8").split("\n")[0]!.split(/\s+/).slice(1).map(Number);
 		return { idle: (f[3] ?? 0) + (f[4] ?? 0), total: f.reduce((a, b) => a + b, 0) };
@@ -188,7 +197,7 @@ real("the integrated Gate, Runner, Projector and Live under concurrent streaming
 			const rss: { node: number; pg: number; nats: number }[] = [];
 			const memTimer = setInterval(() => rss.push({ node: process.memoryUsage().rss / 1048576, pg: rssMb("postgres"), nats: rssMb("nats-server") }), 1_000);
 			const db0 = (await d.stack.admin.query("SELECT xact_commit AS x FROM pg_stat_database WHERE datname = current_database()")).rows[0].x as string;
-			const wal0 = (await d.stack.admin.query("SELECT wal_sync, wal_sync_time FROM pg_stat_wal")).rows[0];
+			const wal0 = await walStats();
 			const receipts0 = Number((await d.stack.admin.query("SELECT count(*) n FROM pim_runtime.commit_receipts")).rows[0].n);
 			const cpu0 = cpuTimes();
 			const proc0 = process.cpuUsage();
@@ -248,7 +257,7 @@ real("the integrated Gate, Runner, Projector and Live under concurrent streaming
 			const floodRows = await flood;
 			const loaded = await loadedProbe.stop();
 			const db1 = (await d.stack.admin.query("SELECT xact_commit AS x FROM pg_stat_database WHERE datname = current_database()")).rows[0].x as string;
-			const wal1 = (await d.stack.admin.query("SELECT wal_sync, wal_sync_time FROM pg_stat_wal")).rows[0];
+			const wal1 = await walStats();
 			const receipts1 = Number((await d.stack.admin.query("SELECT count(*) n FROM pim_runtime.commit_receipts")).rows[0].n);
 			const settings = Object.fromEntries((await d.stack.admin.query("SELECT name, setting FROM pg_settings WHERE name IN ('fsync','synchronous_commit','full_page_writes','shared_buffers','max_connections')")).rows.map((r) => [r.name, r.setting]));
 			const version = (await d.stack.admin.query("SHOW server_version")).rows[0].server_version as string;
@@ -284,8 +293,8 @@ real("the integrated Gate, Runner, Projector and Live under concurrent streaming
 				runtime_commits_total: receipts1,
 				runtime_commits_per_second: Math.round(((receipts1 - receipts0) / seconds) * 10) / 10,
 				pg_transactions_per_second: Math.round((Number(db1) - Number(db0)) / seconds),
-				pg_wal_flushes_per_second: Math.round((Number(wal1.wal_sync) - Number(wal0.wal_sync)) / seconds),
-				pg_wal_flush_mean_ms: Number(wal1.wal_sync) > Number(wal0.wal_sync) ? Math.round(((Number(wal1.wal_sync_time) - Number(wal0.wal_sync_time)) / (Number(wal1.wal_sync) - Number(wal0.wal_sync))) * 1000) / 1000 : null,
+				pg_wal_flushes_per_second: wal0 && wal1 ? Math.round((wal1.sync - wal0.sync) / seconds) : null,
+				pg_wal_flush_mean_ms: wal0 && wal1 && wal1.sync > wal0.sync ? Math.round(((wal1.time - wal0.time) / (wal1.sync - wal0.sync)) * 1000) / 1000 : null,
 				machine_cpu_busy_pct: Math.round((1 - (cpu1.idle - cpu0.idle) / (cpu1.total - cpu0.total)) * 1000) / 10,
 				// The stack's Node process: CPU seconds used per wall second, as a percent of ONE core (100 means its one event loop is saturated).
 				stack_node_process_cpu_pct_of_one_core: Math.round(((procCpu.user + procCpu.system) / 1000 / wallMs) * 1000) / 10,

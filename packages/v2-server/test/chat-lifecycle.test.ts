@@ -58,7 +58,7 @@ real("a chat over its life", () => {
 		expect(registered.status).toBe(201);
 		ownerId = registered.json.account.ownerId;
 		live = await start(d, "live", { pollMs: 40 });
-		runner = await start(d, "runner", { pollMs: 40, providers: () => [faux.provider] }, { PIM_DEFAULT_MODEL: "faux/m", PIM_APP_DATABASE_URL: stack.url("gate") });
+		runner = await start(d, "runner", { pollMs: 40, providers: () => [faux.provider] }, { PIM_DEFAULT_MODEL: "faux/m", PIM_APP_DATABASE_URL: stack.url("gate"), PIM_MEMORY_NAP: "off" });
 	}, 180_000);
 	afterAll(async () => {
 		await Promise.allSettled([runner?.close(), live?.close(), gate?.close()]);

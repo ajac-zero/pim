@@ -275,5 +275,25 @@ export function createAgentHost(options: AgentHostOptions) {
 		return { model: await choose(ownerId, [...own, await chosenModel(ownerId), ...(c?.fallbacks ?? []).map(asModelRef)]) };
 	};
 
-	return { harnessOptions, homeRoot, chatAgent };
+	/**
+	 * One answer from a model for work no chat asked for, such as the memory nap: the deployment's `PIM_MEMORY_MODEL` (`provider/model`), else the utility model the person chose
+	 * in Settings, else the model they chose for agents, else the deployment's default. It is metered into the owner's ledger as background work. Undefined when no model can answer.
+	 */
+	async function complete(ownerId: string, system: string, prompt: string, maxTokens = 1024): Promise<string | undefined> {
+		const models = await buildModels(ownerId);
+		const available = await models.getAvailable().catch(() => []);
+		const utility = asModelRef((await db.read<{ m: unknown }>(ownerId, "SELECT pim_app.runner_utility_model($1) AS m", [ownerId]).catch(() => ({ rows: [] as { m: unknown }[] }))).rows[0]?.m);
+		const wanted = [asModelRef(env.PIM_MEMORY_MODEL), utility, await chosenModel(ownerId), asModelRef(env.PIM_DEFAULT_MODEL)].filter((m): m is ModelRef => m !== null);
+		const model = wanted.map((w) => available.find((a) => a.provider === w.provider && a.id === w.id)).find((m) => m !== undefined);
+		if (!model) return undefined;
+		const answer = await models.completeSimple(model as never, { systemPrompt: system, messages: [{ role: "user", content: prompt, timestamp: now() }] } as never, { maxTokens } as never);
+		const usage = (answer as any)?.usage;
+		if (usage && (usage.input > 0 || usage.output > 0)) {
+			await db.read(ownerId, "SELECT pim_app.record_model_call($1, $2, 'background', NULL, $3, $4, $5, $6, $7)", [ownerId, `mc_${randomUUID()}`, model.provider, model.id, Math.round(usage.input ?? 0), Math.round(usage.output ?? 0), Math.round((usage.cost?.total ?? 0) * 1_000_000)]).catch(() => {});
+		}
+		if ((answer as any)?.stopReason === "error") throw new Error(String((answer as any).errorMessage ?? "The model failed"));
+		return ((answer as any).content as { type: string; text?: string }[]).flatMap((c) => (c.type === "text" ? [c.text ?? ""] : [])).join("").trim();
+	}
+
+	return { harnessOptions, homeRoot, chatAgent, complete };
 }

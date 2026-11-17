@@ -45,7 +45,7 @@ export class App {
 	readonly apps: Apps;
 	readonly sharing: Sharing;
 	readonly crypto: EnvelopeCrypto;
-	constructor(readonly db: Db, store: ObjectStore, opts: { hideSuspended?: boolean; providers?: Partial<Record<ProviderId, ProviderSettings>>; crypto?: EnvelopeCrypto; appKey?: string; fetchTools?: ToolFetcher; exchange?: CodeExchanger; transcripts?: TranscriptSource; chatgpt?: ChatGPTOptions; mcpReplyWaitMs?: number } = {}) {
+	constructor(readonly db: Db, store: ObjectStore, opts: { hideSuspended?: boolean; providers?: Partial<Record<ProviderId, ProviderSettings>>; crypto?: EnvelopeCrypto; appKey?: string; fetchTools?: ToolFetcher; exchange?: CodeExchanger; transcripts?: TranscriptSource; chatgpt?: ChatGPTOptions; mcpReplyWaitMs?: number; allowHttpConnectors?: boolean } = {}) {
 		this.identity = new Identity(db);
 		this.conversations = new Conversations(db);
 		this.memories = new Memories(db);
@@ -65,7 +65,7 @@ export class App {
 		this.chatgpt = new ChatGPT(db, this.crypto, opts.chatgpt);
 		this.usage = new Usage(db);
 		this.triggers = new Triggers(db, this.conversations);
-		this.connectors = new Connectors(db, this.crypto, this.triggers, this.signin, { ...(opts.fetchTools ? { fetchTools: opts.fetchTools } : {}), ...(opts.exchange ? { exchange: opts.exchange } : {}) });
+		this.connectors = new Connectors(db, this.crypto, this.triggers, this.signin, { ...(opts.fetchTools ? { fetchTools: opts.fetchTools } : {}), ...(opts.exchange ? { exchange: opts.exchange } : {}), ...(opts.allowHttpConnectors ? { allowHttp: true } : {}) });
 		this.apps = new Apps(db, this.signin, { hideSuspended: opts.hideSuspended ?? false });
 		this.sharing = new Sharing(db, this.conversations, this.agents, opts.transcripts);
 	}

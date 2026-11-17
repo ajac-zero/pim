@@ -143,7 +143,7 @@ export function screenRoutes(env: Env): Route[] {
 			await admin(app, await principal(), "admin:apps");
 			const b = await json();
 			if (typeof b.name !== "string" || !b.name.trim()) throw new BadRequestError("A connector needs a name");
-			if (!/^https:\/\//.test(String(b.url ?? "")) && !/^http:\/\/(localhost|127\.0\.0\.1)/.test(String(b.url ?? ""))) throw new BadRequestError("A connector's url is https");
+			if (!/^https:\/\//.test(String(b.url ?? "")) && !/^http:\/\/(localhost|127\.0\.0\.1)/.test(String(b.url ?? "")) && !(process.env.PIM_CONNECTOR_ALLOW_PRIVATE === "1" && /^http:\/\//.test(String(b.url ?? "")))) throw new BadRequestError("A connector's url is https");
 			const entry: CustomApp = { id: `${slug(b.name) || "connector"}-${randomBytes(3).toString("hex")}`, name: b.name.trim(), description: String(b.description ?? ""), url: b.url, icon: b.icon ? String(b.icon) : null, category: b.category ? String(b.category) : null };
 			await setSetting(app, CUSTOM_APPS_KEY, [...(await customApps(app)), entry]);
 			return ok({ app: { id: `custom/${entry.id}` } }, 201);

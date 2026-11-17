@@ -20,6 +20,7 @@
     "@earendil-works/pi-durable": "1.1.0",
     "@pim/coding": "workspace:*",
     "@pim/shared": "workspace:*",
+    "@pim/ui-lang": "workspace:*",
     "@pim/v2-app": "workspace:*",
     "@pim/v2-contracts": "workspace:*",
     "@pim/v2-forge": "workspace:*",

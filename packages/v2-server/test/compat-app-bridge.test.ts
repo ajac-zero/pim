@@ -21,6 +21,7 @@ describe("an app's bridge and its page", () => {
 	let mcp: Server;
 	let base: string;
 	const asked: string[] = [];
+	let connectorId = "";
 	const people: Record<string, { token: string; ownerId: string }> = {};
 	const call = async (who: string, method: string, path: string, body?: unknown) => {
 		const res = await fetch(base + path, { method, headers: { authorization: `Bearer ${people[who]!.token}`, ...(body === undefined ? {} : { "content-type": "application/json" }) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
@@ -61,7 +62,7 @@ describe("an app's bridge and its page", () => {
 		const { connector } = await app.connectors.create(principal, { kind: "custom_mcp", name: "Notes", url: mcpUrl });
 		await app.connectors.recordDiscovery(ada.ownerId, connector.id, [{ name: "read", annotations: { readOnlyHint: true } }, { name: "write" }]);
 		await app.connectors.setEnabledTools(principal, connector.id, ["read", "write"]);
-		people.ada!.connector = connector.id as never;
+		connectorId = connector.id;
 		gate = createGate(app, { first: [...bridgeRoutes({ PIM_AI_GATEWAY_URL: modelUrl, PIM_AI_GATEWAY_MODELS: "m", PIM_DEFAULT_MODEL: "gateway/m", PIM_CONNECTOR_ALLOW_PRIVATE: "1" }), ...adminCompatRoutes] });
 		base = await listen(gate);
 	}, 120_000);
@@ -135,7 +136,7 @@ describe("an app's bridge and its page", () => {
 
 	it("calls only a connector tool the person switched on, after a grant, and never one that asks first", async () => {
 		const id = (await call("ada", "POST", "/api/apps", { title: "Tool", kind: "html", files: html("t") })).json.id;
-		const c = (people.ada as any).connector as string;
+		const c = connectorId;
 		expect((await bridge("ada", id, 1, "tools.call", { name: `${c}/read`, input: { q: 1 } })).json).toEqual({ needs: { capability: `tool:${c}/read`, label: "Notes: read" } });
 		// `write` is not read-only, so it asks first by default and a page can't use it, nor be granted it.
 		expect((await bridge("ada", id, 1, "tools.call", { name: "write" })).json).toMatchObject({ error: "tool_not_on" });

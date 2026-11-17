@@ -17,6 +17,7 @@ import type { RelayBus } from "@pim/v2-app/relay";
 import { computerTools } from "./computer-tools.ts";
 import type { ForgeParts } from "./forge-assembly.ts";
 import type { EnvelopeCrypto } from "@pim/v2-contracts/platform";
+import { loadWidgets, MAX_WIDGETS, type ShownWidget, uiDiagnostics, widgetRefs } from "./agent-widgets.ts";
 import { connectorToolset, type Transport } from "./connector-tools.ts";
 
 export type ToolDeps = {
@@ -143,23 +144,31 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 	const tools: ToolRegistration[] = [
 		tool(
 			"send_to_user",
-			"Send the person a message. It is the only way they see anything you write: the rest of your text is private working notes. Set complete when you are finishing a delegated task.",
-			Type.Object({ message: S({ minLength: 1 }), complete: O(Type.Boolean()), widgets: O(strings) }),
+			`Send the person a message. It is the only way they see anything you write: the rest of your text is private working notes. Set complete when you are finishing a delegated task. To draw a small interactive piece, such as a quiz, a checklist or a form, put a \`\`\`ui block of ui source in the message, alone on its lines; a block that can't be drawn refuses the message with what to fix. widgets shows data under the message, by name, up to ${MAX_WIDGETS}: ${widgetRefs().join(", ")}.`,
+			Type.Object({ message: S({ minLength: 1 }), complete: O(Type.Boolean()), widgets: O(Type.Array(Type.String(), { maxItems: MAX_WIDGETS })) }),
 			async (args, api) => {
 				const app = deps.app;
+				const wanted = [...new Set<string>(args.widgets ?? [])];
+				const unknown = wanted.filter((ref) => !widgetRefs().includes(ref));
+				if (unknown.length > 0) return text(`Not sent: ${unknown.join(", ")} ${unknown.length === 1 ? "isn't a widget" : "aren't widgets"} you can show. The widgets you can show here: ${widgetRefs().join(", ")}.`, true);
+				// A block it wrote wrong is a mistake the model can fix: say what the compiler found and send nothing.
+				const ui = uiDiagnostics(String(args.message));
+				if (ui.error !== undefined) return text(`Not sent: ${ui.error}.`, true);
 				const chat = await deps.chatOf(api.conversationId);
+				let shown: ShownWidget[] = [];
 				if (app && chat) {
 					try {
 						await app.conversations.markResponse(ownerId, chat);
-						if (args.complete) {
-							const p = await principalOf(app, chat);
-							if (p.kind === "delegated") await app.conversations.updateTask(p, p.delegateId, "completed", String(args.message).slice(0, 2000));
-						}
+						const p = await principalOf(app, chat);
+						if (args.complete && p.kind === "delegated") await app.conversations.updateTask(p, p.delegateId, "completed", String(args.message).slice(0, 2000));
+						// Loaded once, as sent: the message and what it shows stay together, and the model is told what the person saw.
+						if (wanted.length > 0) shown = await loadWidgets(app, p, p.kind === "agent" && p.agentId !== "pim" ? p.agentId : null, wanted);
 					} catch (error) {
 						return text(`Not sent: ${error instanceof Error ? error.message : String(error)}`, true);
 					}
 				}
-				return text(args.widgets?.length ? `Sent. The widgets (${args.widgets.join(", ")}) are shown with it where this deployment has them.` : "Sent.");
+				const result = { sent: "Sent.", ...(shown.length > 0 ? { widgets: shown } : {}), ...(ui.notes ? { uiNotes: ui.notes } : {}) };
+				return text(Object.keys(result).length === 1 ? "Sent." : JSON.stringify(result));
 			},
 			"safe",
 		),

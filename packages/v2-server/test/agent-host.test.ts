@@ -116,6 +116,22 @@ real("the default agent host", () => {
 		expect(Number(calls[0].input_tokens)).toBeGreaterThan(0);
 	}, 120_000);
 
+	it("refuses a message whose ui block cannot be drawn or that names a widget it cannot show, and loads the widgets it can", async () => {
+		const before = (await results("send_to_user")).length;
+		await say(
+			"show me",
+			toolUse(fauxToolCall("send_to_user", { message: "Try:\n```ui\n<box><gauge/></box>\n```" })),
+			toolUse(fauxToolCall("send_to_user", { message: "Here.", widgets: ["pim.nothing/here"] })),
+			toolUse(fauxToolCall("send_to_user", { message: "Here are your goals.", widgets: ["pim.goals/active"] })),
+		);
+		const answered = (await results("send_to_user")).slice(before);
+		expect(answered[0]).toMatch(/^Not sent: a ```ui block .*gauge/);
+		expect(answered[1]).toContain("pim.nothing/here isn't a widget you can show");
+		expect(answered[1]).toContain("pim.goals/active");
+		// What the person was shown goes back to the model as the web app reads it: loaded once, as sent.
+		expect(JSON.parse(answered[2]!).widgets).toMatchObject([{ id: "pim.goals/active", kind: "progress", items: [{ title: "Run a 5k", value: 0, max: 2, detail: "Run 2k" }] }]);
+	}, 120_000);
+
 	it("sends an approved HTTP request once, and a request whose outcome is unknown is never sent again", async () => {
 		const request = { method: "POST", url: API, headers: { authorization: "Bearer secret-token" }, body: '{"sku":1}' };
 		faux.setResponses([toolUse(fauxToolCall("http_request", request)), toolUse(fauxToolCall("send_to_user", { message: "Ordered." })), fauxAssistantMessage(`done ${++n}`)] as never);

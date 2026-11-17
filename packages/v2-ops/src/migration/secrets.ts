@@ -18,6 +18,8 @@ export const SECRET_COLUMNS: Readonly<Record<string, readonly SecretColumn[]>> =
 		{ table: "pim_credentials", column: "credential", purpose: "provider-credential", format: "plain" },
 		{ table: "pim_app_connections", column: "credential", purpose: "connector-credential", format: "native-app-sealed" },
 		{ table: "pim_push_subscriptions", column: "auth", purpose: "push-auth", format: "plain" },
+		// The secret a connector signs its event deliveries with, for a trigger that watches it.
+		{ table: "pim_trigger_subscriptions", column: "secret", purpose: "trigger-subscription-secret", format: "plain" },
 	],
 	Directory: [{ table: "computer_requests", column: "token", purpose: "computer-token", format: "plain" }],
 };

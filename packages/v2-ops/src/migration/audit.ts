@@ -126,7 +126,9 @@ export async function auditImport(pool: Pool, reader: SnapshotReader, objects: O
 		equal(`${owner} every conversation's visible transcript is identical (fork closure, asOf ancestry)`, 0, mismatched);
 
 		// Chats: public ids, numeric conversation ids, explicit settings.
-		const links = rowsOf(dump, "pim_session_ids");
+		// A link whose chat row is gone (v1 lists chats from pim_sessions, so it showed none of these) is not carried over as a chat; its conversation is.
+		const sessionIds = new Set(rowsOf(dump, "pim_sessions").map((x) => String(x.id)));
+		const links = rowsOf(dump, "pim_session_ids").filter((l) => sessionIds.has(String(l.session)));
 		equal(`${owner} chat public ids map to the same conversation ids`, sorted(links.map((l) => `${l.id}|${l.session}`), (x) => x), (await pool.query("SELECT public_id||'|'||conversation_id AS k FROM pim_ops.chats WHERE owner_id = $1", [owner])).rows.map((r) => r.k as string).sort());
 		const settings = rowsOf(dump, "pim_meta").find((m) => m.key === "settings");
 		const target = (await pool.query("SELECT row->>'value' AS value FROM pim_ops.legacy_rows WHERE owner_id = $1 AND source = $2 AND table_name = 'pim_meta' AND pk = 'settings'", [owner, `Pim:${legacy}`])).rows[0];
@@ -161,12 +163,14 @@ export async function auditImport(pool: Pool, reader: SnapshotReader, objects: O
 	}
 	countCheck("OAUTH_KV entries", (await reader.oauthKv()).length, await count("SELECT count(*) n FROM pim_ops.legacy_rows WHERE source = 'OAUTH_KV'"));
 
-	// No secret survives in clear.
-	const clear = await count(`SELECT count(*) n FROM pim_ops.legacy_rows WHERE row::text ~ '(sk-example|sk-ant-example|mgr-token-example|mcp-oauth-|mcp-client-secret|push-auth-secret|ya29\\.|1//example)'`);
+	// No secret survives in clear. Transcript-like rows are kept as written, as chat transcripts are: an approval's tool arguments and a coding thread's events,
+	// diffs and test runs hold whatever the person and the agent wrote, which may look like a credential; none of them is a credential Pim keeps.
+	const content = `split_part(source, ':', 1) <> 'CodingThread' AND table_name NOT IN ('pim_approvals')`;
+	const clear = await count(`SELECT count(*) n FROM pim_ops.legacy_rows WHERE ${content} AND row::text ~ '(sk-example|sk-ant-example|mgr-token-example|mcp-oauth-|mcp-client-secret|push-auth-secret|ya29\\.|1//example)'`);
 	equal("no plaintext secret remains in legacy_rows", 0, clear);
 	// The pattern above names the fixture's secrets. A real deployment's are in shapes nobody listed (a provider key inside a JSON array in `pim_meta`, which the first rehearsal on a real export found
 	// in clear), so also refuse any credential-shaped property that holds a value: inside a JSON string (`\"key\":\"...`) or as a property of the row itself, other than the row's own `key` column.
-	const shaped = await count(`SELECT count(*) n FROM pim_ops.legacy_rows WHERE row::text ~ '\\\\"(apiKey|api_key|key|token|secret|password|access_token|refresh_token|client_secret)\\\\"\\s*:\\s*\\\\"[^"\\\\]{8,}' OR (row - 'key')::text ~ '"(apiKey|api_key|token|secret|password|access_token|refresh_token|client_secret)"\\s*:\\s*"[^"]{8,}'`);
+	const shaped = await count(`SELECT count(*) n FROM pim_ops.legacy_rows WHERE ${content} AND (row::text ~ '\\\\"(apiKey|api_key|key|token|secret|password|access_token|refresh_token|client_secret)\\\\"\\s*:\\s*\\\\"[^"\\\\]{8,}' OR (row - 'key')::text ~ '"(apiKey|api_key|token|secret|password|access_token|refresh_token|client_secret)"\\s*:\\s*"[^"]{8,}')`);
 	equal("no credential-shaped property is left in clear in legacy_rows", 0, shaped);
 
 	// Objects.

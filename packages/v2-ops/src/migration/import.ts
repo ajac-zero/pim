@@ -132,8 +132,10 @@ export async function importSnapshot(pool: Pool, reader: SnapshotReader, options
 				}
 			}
 			for (const entry of dump.kv) {
-				const secret = SECRET_KV.test(entry.key);
-				const name = `${cls}.kv.${entry.key}`;
+				// A coding workspace's record holds the tokens its container was started with; there is one per container, so its name carries the container's.
+				const workspace = cls === "WorkspaceContainer" && entry.key === "workspace";
+				const secret = workspace || SECRET_KV.test(entry.key);
+				const name = workspace ? `${cls}.${dump.name}.kv.${entry.key}` : `${cls}.kv.${entry.key}`;
 				if (secret) addSecrets(tenant, [{ name, purpose: "kv", plaintext: JSON.stringify(entry.value), format: "plain", legacy: null }]);
 				legacyRows.push({ owner_id: tenant, source: `${dump.class}:${dump.name}`, table_name: "$kv", pk: entry.key, row: { key: entry.key, value: secret ? { $secret: name } : entry.value } });
 			}

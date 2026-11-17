@@ -28,9 +28,9 @@ export function snapshotRoutes(pool: Pool): Route[] {
 				const p = await principal();
 				await app.identity.authz.enforce(p, "api:read");
 				const page = await sidebarPage(pool, p.ownerId, { after: url.searchParams.get("after"), ...(limit(url) === undefined ? {} : { limit: limit(url)! }) });
-				// What the person renamed or deleted is kept on the chat itself; the projection learns of it only from the runtime.
-				const kept = new Map((await app.db.owner(p.ownerId, async (tx) => (await tx.query("SELECT public_chat_id::text AS id, title, deleted_at FROM pim_app.conversations WHERE public_chat_id::text = ANY($1)", [page.sessions.map((s) => s.chatId)])).rows)).map((r) => [r.id as string, r]));
-				return ok({ ...page, sessions: page.sessions.filter((s) => !kept.get(s.chatId)?.deleted_at).map((s) => ({ ...s, title: kept.get(s.chatId)?.title ?? s.title })) });
+				// What the person renamed, deleted or has read is kept on the chat itself; the projection learns of it only from the runtime.
+				const kept = new Map((await app.db.owner(p.ownerId, async (tx) => (await tx.query("SELECT public_chat_id::text AS id, title, deleted_at, (response_at IS NOT NULL AND (read_at IS NULL OR read_at < response_at)) AS unread FROM pim_app.conversations WHERE public_chat_id::text = ANY($1)", [page.sessions.map((s) => s.chatId)])).rows)).map((r) => [r.id as string, r]));
+				return ok({ ...page, sessions: page.sessions.filter((s) => !kept.get(s.chatId)?.deleted_at).map((s) => ({ ...s, title: kept.get(s.chatId)?.title ?? s.title, unread: kept.get(s.chatId)?.unread ?? s.unread })) });
 			},
 		},
 		{

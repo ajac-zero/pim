@@ -373,7 +373,8 @@ const abortCommand: CommandHandler = async (resident, command, context) => {
 };
 
 const handoffCommand: CommandHandler = async (resident, command, context) => {
-	const handoff = command.payload.handoff;
+	// The application names the summary it carries `summary` (`Conversations.handoff`); `handoff` is the runtime's own word for it.
+	const handoff = command.payload.handoff ?? command.payload.summary;
 	await (await conversationOf(resident, command, context)).reset(typeof handoff === "string" ? handoff : undefined, context);
 };
 

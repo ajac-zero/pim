@@ -33,7 +33,7 @@ import { createFailover } from "./provider-failover.ts";
 
 type Env = Record<string, string | undefined>;
 type ModelRef = { provider: string; id: string };
-type ProviderRow = { id: string; kind: string; config: Record<string, any>; secret: string | null };
+type ProviderRow = { id: string; kind: string; config: Record<string, any>; secret: string | null; /** The deployment's own (shared with everyone), named `shared:<id>`, its key sealed for the deployment rather than for the owner. */ shared?: boolean };
 export type RunnerContext = {
 	username: string | null;
 	agent: { id: string; name: string; instructions: string; config: Record<string, any> } | null;
@@ -63,6 +63,9 @@ export type AgentHostOptions = {
 	fetch?: typeof fetch | undefined;
 	now?: (() => number) | undefined;
 };
+
+/** What the catalog calls a provider the deployment shares with everyone. */
+const SHARED = "shared:";
 
 const asModelRef = (v: unknown): ModelRef | null => {
 	if (typeof v === "string") return v.includes("/") ? { provider: v.split("/")[0]!.replace(/^own:/, ""), id: v.split("/").slice(1).join("/") } : null;
@@ -172,7 +175,7 @@ export function createAgentHost(options: AgentHostOptions) {
 		for (const row of rows) {
 			if (!row.secret || !options.crypto) continue;
 			try {
-				keys.set(row.id, await openString(options.crypto, row.secret, `provider:${ownerId}/${row.id}`));
+				keys.set(row.id, await openString(options.crypto, row.secret, row.shared ? `provider:_instance/${row.id.slice(SHARED.length)}` : `provider:${ownerId}/${row.id}`));
 			} catch {
 				// A key sealed under a key this process does not hold stays unavailable, and the provider with it.
 			}

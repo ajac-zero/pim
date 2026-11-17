@@ -156,6 +156,22 @@ real("a cutover rehearsal", () => {
 		expect(plan).toMatchObject({ email: "ada@example.test", host_id: "urn:uuid:11111111-1111-4111-8111-111111111111" });
 		expect(JSON.parse(await openString(appKeys, plan.secret, `chatgpt:${ADA}`))).toMatchObject({ type: "oauth", access: "chatgpt-access-example", refresh: "chatgpt-refresh-example", clientId: "client-example" });
 		expect(await as("SELECT 1 FROM pim_app.providers WHERE owner_id = $1 AND kind = 'openai'", [ADA])).toHaveLength(0);
+		// A connected MCP server comes across with its address and its tokens, sealed under the application's keys for the Runner's connector tools; a native connector's sign-in
+		// stays in the landing, with no copy in the application and the connector asking to be connected again.
+		const mcp = (await as<{ kind: string; url: string; status: string; credential: string; approval: string }>("SELECT kind, url, status, credential, approval FROM pim_app.connectors WHERE owner_id = $1 AND id = 'mcp_notes'", [ADA]))[0]!;
+		expect(mcp).toMatchObject({ kind: "custom_mcp", url: "https://mcp.example.test/mcp", status: "connected", approval: "none" });
+		expect(JSON.parse(await openString(appKeys, mcp.credential, `connector:${ADA}/mcp_notes`))).toEqual({ access_token: "mcp-oauth-notes-access-example", refresh_token: "mcp-oauth-notes-refresh-example", client_id: "client_9", client_secret: "mcp-client-secret-notes-example" });
+		expect(await as("SELECT status, credential FROM pim_app.connectors WHERE owner_id = $1 AND id = 'conn_gmail'", [ADA])).toEqual([{ status: "auth_required", credential: null }]);
+		expect(report.skipped.join("\n")).toMatch(/connector conn_gmail \(gmail\): .*stays sealed in the landing/);
+		// What the admin shared with everyone: a provider the Runner can call is the deployment's own, its key sealed for the deployment and not for any person; a built-in service stays in the landing.
+		const shared = await as<{ id: string; config: { url: string }; secret: string }>("SELECT id, config, secret FROM pim_app.instance_providers");
+		expect(shared.map((p) => p.id)).toEqual(["prov_1"]);
+		expect(await openString(appKeys, shared[0]!.secret, "provider:_instance/prov_1")).toBe("sk-example-not-a-real-key-123");
+		expect(report.skipped.join("\n")).toMatch(/shared provider prov_2: kept sealed in the landing; the built-in anthropic service/);
+		expect(await as<{ p: { id: string; shared?: boolean }[] }>("SELECT pim_app.runner_providers($1) AS p", [ADA]).then((r) => r[0]!.p.filter((p) => p.shared).map((p) => p.id))).toEqual(["shared:prov_1"]);
+		// Templates, the bot the admin shared (its own model named without the old catalog's prefix) and the agent everyone starts with.
+		expect(await as("SELECT id, owner_id, agent_id, title, bundle, uses, default_for_everyone FROM pim_app.templates")).toEqual([{ id: "tpl_1", owner_id: ADA, agent_id: "agent_ada_1", title: "Researcher", bundle: { agent: { name: "Researcher", instructions: "Be brief.", emoji: "R", color: "blue" }, description: "Reads things", apps: [] }, uses: 3, default_for_everyone: true }]);
+		expect(await as("SELECT id, owner_id, agent_id, name, settings FROM pim_app.bots")).toEqual([{ id: "b_ada1", owner_id: ADA, agent_id: "agent_ada_1", name: "Ask Ada", settings: { dailyMessages: 25, dailyToolCalls: 5, model: { provider: "prov_own", id: "m" }, tools: ["search", "create_ticket"], ask: ["create_ticket"] } }]);
 		for (const p of await as<{ id: string; secret: string | null }>("SELECT id, secret FROM pim_app.providers WHERE owner_id = $1 AND secret IS NOT NULL", [ADA])) expect((await openString(appKeys, p.secret!, `provider:${ADA}/${p.id}`)).length).toBeGreaterThan(0);
 		// A file from before files moved to computers: its bytes are an object under the new owner, and its path is kept in an index, since an object key has no room for it.
 		expect(Buffer.from(copied.get(`${ADA}/files/f1`)!).toString()).toBe("%PDF");

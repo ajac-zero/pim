@@ -45,6 +45,8 @@ export function modelRoutes(env: Env): Route[] {
 			if (row.hasKey && row.config.builtin && kind !== "openai") for (const m of CATALOGS[kind]?.models() ?? []) if (!row.config.chosen || row.config.chosen.includes(m.id)) add(describe(m));
 			if (row.kind === "openai_compatible" && Array.isArray(row.config.models)) for (const m of row.config.models) add({ provider: `${OWN}${row.id}`, id: m.id, name: m.name ?? m.id, images: m.images === true } as never);
 		}
+		// The providers the admin shared with everyone: their models, by the name the Runner's catalog gives them.
+		for (const shared of ((await app.db.anonymous(async (tx: any) => (await tx.query("SELECT pim_app.instance_provider_models() AS p")).rows[0]?.p)) ?? []) as { id: string; models: { id: string; name?: string; images?: boolean }[] }[]) for (const m of shared.models) add({ provider: shared.id, id: m.id, name: m.name ?? m.id, images: m.images === true } as never);
 		if (env.PIM_AI_GATEWAY_URL) for (const id of (env.PIM_AI_GATEWAY_MODELS ?? "").split(",").map((s) => s.trim()).filter(Boolean)) add({ provider: "gateway", id, name: id, images: false } as never);
 		const info = (r: ModelRef | null) => (r ? (choices.find((c) => same(c, r)) ?? null) : null);
 		const chosen = await setting(app, p.ownerId, "model");

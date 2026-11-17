@@ -160,8 +160,14 @@ export async function buildLegacySnapshot(dir: string, options: { cutoverAt?: nu
 	await writer.dump(
 		dump("Gallery", "gallery", {
 			profiles: table(["owner_id", "username", "display_name", "bio", "updated_at"], [{ owner_id: owners.ada, username: "ada", display_name: "Ada", bio: null, updated_at: cutoverAt - 86_400_000 }]),
-			templates: table(["id", "owner_id", "username", "agent_id", "name", "description", "instructions", "apps"], [{ id: "tpl_1", owner_id: owners.ada, username: "ada", agent_id: "agent_ada_1", name: "Researcher", description: "Reads things", instructions: "Be brief.", apps: "[]" }]),
-			providers: table(["id", "provider", "created_at"], [{ id: "prov_1", provider: json({ id: "prov_1", kind: "openai-compatible", baseUrl: "https://models.example.test/v1", apiKey: "sk-example-not-a-real-key-123" }), created_at: cutoverAt - 300 * 86_400_000 }]),
+			templates: table(["id", "owner_id", "username", "agent_id", "name", "description", "instructions", "apps", "published_at", "uses", "symbol", "color"], [{ id: "tpl_1", owner_id: owners.ada, username: "ada", agent_id: "agent_ada_1", name: "Researcher", description: "Reads things", instructions: "Be brief.", apps: "[]", published_at: cutoverAt - 40 * 86_400_000, uses: 3, symbol: "R", color: "blue" }]),
+			// The admin's shared providers as the Gallery keeps them: a custom endpoint with its key, and a built-in service, which a deployment configures itself.
+			providers: table(["id", "provider", "created_at"], [
+				{ id: "prov_1", provider: json({ id: "prov_1", name: "Shared models", url: "https://models.example.test/v1", key: "sk-example-not-a-real-key-123", chosen: null, models: [{ id: "shared-m1" }] }), created_at: cutoverAt - 300 * 86_400_000 },
+				{ id: "prov_2", provider: json({ id: "prov_2", builtin: "anthropic", name: "Anthropic", url: "https://api.anthropic.com/v1", key: "sk-ant-example-shared-999", chosen: null, models: [] }), created_at: cutoverAt - 200 * 86_400_000 },
+			]),
+			bots: table(["id", "owner_id", "username", "agent_id", "name", "shared_at", "daily_messages", "daily_tool_calls", "model", "tools", "icon_data"], [{ id: "b_ada1", owner_id: owners.ada, username: "ada", agent_id: "agent_ada_1", name: "Ask Ada", shared_at: cutoverAt - 20 * 86_400_000, daily_messages: 25, daily_tool_calls: 5, model: json({ provider: "own:prov_own", id: "m" }), tools: json([{ name: "search", ask: false }, { name: "create_ticket", ask: true }]), icon_data: null }]),
+			default_agent: table(["id", "owner_id", "username", "agent_id", "name", "description", "instructions", "apps", "updated_at", "symbol", "color"], [{ id: 1, owner_id: owners.ada, username: "ada", agent_id: "agent_ada_1", name: "Researcher", description: "Reads things", instructions: "Be brief.", apps: "[]", updated_at: cutoverAt - 10 * 86_400_000, symbol: "R", color: "blue" }]),
 			compute_providers: table(["id", "provider", "created_at"], [{ id: "cp_1", provider: json({ id: "cp_1", kind: "sandbox-manager", url: "https://manager.example.test", token: "mgr-token-example-456" }), created_at: cutoverAt - 100 * 86_400_000 }]),
 			apps: table(["id", "name", "description", "url", "icon", "category", "created_at"], []),
 			published_artifacts: table(["id", "owner_id", "username", "artifact_id", "version", "title", "kind", "files"], [{ id: "pa_1", owner_id: owners.ada, username: "ada", artifact_id: "art_1", version: 1, title: "Habit tracker", kind: "app", files: json(["index.html"]) }]),
@@ -272,7 +278,9 @@ export async function buildLegacySnapshot(dir: string, options: { cutoverAt?: nu
 					{ audience: "agent:ag_1", app: "conn_gmail", tool: "send_email", permission: "ask", definition: null, updated_at: cutoverAt - 86_400_000 },
 					{ audience: "circle_1", app: "conn_gmail", tool: "send_email", permission: "on", definition: null, updated_at: cutoverAt - 86_400_000 },
 				]),
-				pim_mcp_servers: table(["id", "approval"], [{ id: "conn_gmail", approval: "all" }]),
+				pim_mcp_servers: table(["id", "approval"], [{ id: "conn_gmail", approval: "all" }, { id: "mcp_notes", approval: "none" }]),
+				// A connected MCP server, as the `agents` library keeps it: its row here, its OAuth tokens in the key-value store below.
+				cf_agents_mcp_servers: table(["id", "name", "server_url", "callback_url", "client_id", "auth_url", "server_options"], [{ id: "mcp_notes", name: "Notes server", server_url: "https://mcp.example.test/mcp", callback_url: "https://pim.example.test/mcp/callback/ada", client_id: "client_9", auth_url: null, server_options: null }]),
 				pim_push_subscriptions: table(["endpoint", "p256dh", "auth", "created_at"], [{ endpoint: "https://push.example.test/abc", p256dh: "p256", auth: "push-auth-secret", created_at: cutoverAt - 40 * 86_400_000 }]),
 				pim_tasks: table(["id", "title", "status", "conversation", "operation_id"], [{ id: "t1", title: "Research hostels", status: "done", conversation: String(delegated), operation_id: "task:t1" }]),
 				// A real space keeps apps in three tables, their files content-addressed in the ARTIFACTS bucket at `<owner>/<sha256>`; a note is an app of kind markdown with one README.md.
@@ -298,6 +306,8 @@ export async function buildLegacySnapshot(dir: string, options: { cutoverAt?: nu
 				kv: [
 					{ key: "/own_ada/conn_gmail/client_1/token", value: { access_token: "mcp-oauth-access-example", refresh_token: "mcp-oauth-refresh-example" } },
 					{ key: "/own_ada/conn_gmail/client_1/client_info", value: { client_id: "client_1", client_secret: "mcp-client-secret-example" } },
+					{ key: "/own_ada/mcp_notes/client_9/token", value: { access_token: "mcp-oauth-notes-access-example", refresh_token: "mcp-oauth-notes-refresh-example", token_type: "Bearer", expires_in: 3600 } },
+					{ key: "/own_ada/mcp_notes/client_9/client_info/", value: { client_id: "client_9", client_secret: "mcp-client-secret-notes-example" } },
 					{ key: "pim:last-open", value: cutoverAt - 3_600_000 },
 				],
 				alarm: cutoverAt - 7 * MIN,

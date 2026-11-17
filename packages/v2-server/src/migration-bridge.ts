@@ -175,6 +175,8 @@ async function legacySpace(pool: Pool, owner: string, cutoverAt: number, default
 			doc.revisions = doc.revisions.map((rev) => {
 				const model = (rev.content as { model?: { provider?: string } } | null)?.model;
 				if (!model?.provider || usable.has(model.provider)) return rev;
+				// A person's own provider keeps its id here, without the old catalog's `own:` prefix.
+				if (model.provider.startsWith("own:") && usable.has(model.provider.slice(4))) return { ...rev, content: { ...(rev.content as object), model: { ...model, provider: model.provider.slice(4) } } };
 				remappedModels++;
 				return { ...rev, content: { ...(rev.content as object), model: defaultAgent } };
 			});
@@ -377,6 +379,8 @@ async function promoteDomain(pool: Pool, owner: string, options: PromoteOptions,
 	const connections = await rows("pim_app_connections");
 	const toolPermissions = await rows("pim_tool_permissions");
 	const mcpServers = await rows("pim_mcp_servers");
+	const mcpConnections = await rows("cf_agents_mcp_servers");
+	const kv = await rows("$kv");
 	const credentials = await rows("pim_credentials");
 	const triggers = await rows("pim_triggers");
 	const revisions = await rows("pim_trigger_revisions");
@@ -408,10 +412,19 @@ async function promoteDomain(pool: Pool, owner: string, options: PromoteOptions,
 		const key = plain ? (parseJson(plain, {}) as { apiKey?: string }).apiKey : undefined;
 		if (key) providerSecrets.set(String(c.provider), await sealed(key, `provider:${owner}/pv_legacy_${slug(String(c.provider))}`));
 	}
-	const connectorSecrets = new Map<string, string>();
-	for (const c of connections) {
-		const plain = await secret(c.credential, "connector-credential");
-		if (plain) connectorSecrets.set(String(c.id), await sealed(plain, `connector:${owner}/${c.id}`));
+	// A native connector's sign-in (Gmail, Drive, Spotify) has no consumer in this deployment yet: its credential stays where the import sealed it (`pim_ops.secret_envelopes`),
+	// never in clear and not copied into the application's tables, so connecting it again, or a later native connector, can start from it.
+	// A connected MCP server (the `agents` library's `cf_agents_mcp_servers`, with its OAuth tokens in the space's key-value store) has one: the Runner's connector tools.
+	// The tokens' key is `/<client name>/<server id>/<client id>/token`, the registered client's `.../client_info/`; the sign-in's discovery state is dropped once tokens are saved, so
+	// the token endpoint a refresh needs is found again from the server's address when the Runner first has to refresh.
+	const mcpSecrets = new Map<string, string>();
+	const mcpKv = (server: string, leaf: string) => kv.find((e) => typeof e.key === "string" && e.key.startsWith("/") && e.key.split("/")[2] === server && new RegExp(`^/[^/]+/[^/]+/[^/]+/${leaf}/?$`).test(e.key));
+	for (const m of mcpConnections) {
+		const token = parseJson(await secret(mcpKv(String(m.id), "token")?.value, "kv"), null) as { access_token?: string; refresh_token?: string } | null;
+		const info = parseJson(await secret(mcpKv(String(m.id), "client_info")?.value, "kv"), null) as { client_id?: string; client_secret?: string } | null;
+		if (!token?.access_token) continue;
+		const bundle = { access_token: token.access_token, ...(token.refresh_token ? { refresh_token: token.refresh_token } : {}), ...(info?.client_id ?? m.client_id ? { client_id: info?.client_id ?? m.client_id } : {}), ...(info?.client_secret ? { client_secret: info.client_secret } : {}) };
+		mcpSecrets.set(String(m.id), await sealed(JSON.stringify(bundle), `connector:${owner}/${m.id}`));
 	}
 
 	// Files that live in the object store: skills' and apps'.
@@ -534,14 +547,26 @@ async function promoteDomain(pool: Pool, owner: string, options: PromoteOptions,
 		}
 		for (const k of connections) {
 			const native = ["gmail", "google", "google-drive", "spotify"].includes(String(k.app));
-			const credential = connectorSecrets.get(String(k.id)) ?? null;
 			const eventSecret = options.crypto ? await sealed(randomBytes(32).toString("base64url"), `connector-events:${owner}/${k.id}`) : null;
 			const r = await c.query(
-				"INSERT INTO pim_app.connectors (id, owner_id, kind, name, credential, event_key, event_secret, status, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT DO NOTHING",
-				[k.id, owner, native ? "native" : "builtin", k.name ?? k.app, credential, randomBytes(12).toString("base64url"), eventSecret, credential && k.state === "connected" ? "connected" : "auth_required", ms(k.created_at)],
+				"INSERT INTO pim_app.connectors (id, owner_id, kind, name, credential, event_key, event_secret, status, created_at) VALUES ($1,$2,$3,$4,NULL,$5,$6,'auth_required',$7) ON CONFLICT DO NOTHING",
+				[k.id, owner, native ? "native" : "builtin", k.name ?? k.app, randomBytes(12).toString("base64url"), eventSecret, ms(k.created_at)],
 			);
 			bump(d, "connectors", r.rowCount ?? 0);
-			if (!credential) d.skipped.push(`connector ${k.id} (${k.app}): connected again by its owner`);
+			d.skipped.push(`connector ${k.id} (${k.app}): connected again by its owner; its sign-in stays sealed in the landing, since this deployment has no ${native ? "native" : "built-in"} connector that could use it`);
+		}
+		// Connected MCP servers: the server's address and, when the person had signed in, its tokens sealed under the application's keys. The server's tools are discovered again and
+		// switched on by the person (the old Pim did not keep the list), except the choices carried below.
+		for (const m of mcpConnections) {
+			const credential = mcpSecrets.get(String(m.id)) ?? null;
+			const eventSecret = options.crypto ? await sealed(randomBytes(32).toString("base64url"), `connector-events:${owner}/${m.id}`) : null;
+			const r = await c.query(
+				"INSERT INTO pim_app.connectors (id, owner_id, kind, name, url, credential, event_key, event_secret, status) VALUES ($1,$2,'custom_mcp',$3,$4,$5,$6,$7,$8) ON CONFLICT DO NOTHING",
+				[m.id, owner, m.name ?? m.id, m.server_url, credential, randomBytes(12).toString("base64url"), eventSecret, credential ? "connected" : "auth_required"],
+			);
+			bump(d, "mcp connections", r.rowCount ?? 0);
+			if (!credential) d.skipped.push(`MCP server ${m.id}: signed in again by its owner (${options.crypto ? "it held no tokens" : "no keys were given"})`);
+			else d.skipped.push(`MCP server ${m.id}: its tools are not switched on until its owner enables them (the old Pim did not keep the list)`);
 		}
 		// What the person chose for each connector tool (Off, Ask, On), and each connector's approval policy. A choice for Pim's own tools or a circle has no home here yet.
 		for (const m of mcpServers) {
@@ -649,10 +674,100 @@ async function promoteDomain(pool: Pool, owner: string, options: PromoteOptions,
 	});
 }
 
+
+type SharedProvider = { id: string; row: Record<string, any>; provider: { name?: string; url?: string; key?: string | null; models?: unknown[]; builtin?: string; api?: string; structuredOutput?: boolean } | null; runnable: boolean };
+
+/** The providers the admin shared with everyone, opened: `runnable` ones are what this deployment's Runner can call (an OpenAI-compatible endpoint with an address). */
+async function sharedProviders(pool: Pool, options: PromoteOptions): Promise<SharedProvider[]> {
+	const out: SharedProvider[] = [];
+	for (const row of await legacyRows(pool, "_deployment", "providers")) {
+		const cell = row.provider as { $secret?: string } | undefined;
+		const found = cell?.$secret && options.crypto ? (await pool.query("SELECT envelope FROM pim_ops.secret_envelopes WHERE owner_id = '_deployment' AND name = $1", [cell.$secret])).rows[0] : undefined;
+		const provider = found ? (parseJson(options.crypto!.ops.open(found.envelope, ["_deployment", cell!.$secret!, "model-provider"]).toString(), null) as SharedProvider["provider"]) : null;
+		out.push({ id: String(row.id), row, provider, runnable: provider !== null && !provider.builtin && !provider.api && typeof provider.url === "string" });
+	}
+	return out;
+}
+
+/**
+ * What the old Pim's Gallery kept for the deployment: the providers its admin shared with everyone (the deployment's own here, with their keys sealed for the deployment, not
+ * for any person), the templates people published, the bots the admin shared, and the agent everyone starts with. A template, bot or default agent whose author has no account here is
+ * left in the landing and said so; so is a shared provider this deployment cannot run (a built-in service, or one that speaks another API than chat completions).
+ */
+async function promoteDeployment(pool: Pool, options: PromoteOptions, d: Domain): Promise<void> {
+	const owners = new Map((await pool.query("SELECT legacy_id, owner_id FROM pim_ops.owner_map")).rows.map((r) => [r.legacy_id as string, r.owner_id as string]));
+	const accounts = new Set((await pool.query("SELECT owner_id FROM pim_app.accounts")).rows.map((r) => r.owner_id as string));
+	const rows = (table: string) => legacyRows(pool, "_deployment", table);
+	const ms = (v: unknown) => (v === null || v === undefined ? new Date() : new Date(Number(v)));
+	const author = (row: Record<string, any>) => {
+		const owner = owners.get(String(row.owner_id)) ?? String(row.owner_id);
+		return accounts.has(owner) ? owner : null;
+	};
+	// A model named `own:<id>` is the author's own provider, whose id this deployment keeps; `shared:<id>` stays as the catalog names it.
+	const modelRef = (value: unknown): { provider: string; id: string } | null => {
+		const m = parseJson(value, null) as { provider?: unknown; id?: unknown } | null;
+		return m && typeof m.provider === "string" && typeof m.id === "string" ? { provider: m.provider.replace(/^own:/, ""), id: m.id } : null;
+	};
+
+	for (const { id, row, provider, runnable } of await sharedProviders(pool, options)) {
+		if (!provider) {
+			d.skipped.push(`shared provider ${id}: not promoted, ${options.crypto ? "its record could not be opened" : "no keys were given to open it"}`);
+			continue;
+		}
+		if (!runnable) {
+			d.skipped.push(`shared provider ${id}: kept sealed in the landing; ${provider.builtin ? `the built-in ${provider.builtin} service` : provider.api ? `an endpoint that speaks ${provider.api}` : "a provider without an address"} needs the deployment's own configuration (PIM_AI_GATEWAY_*, or a provider key in the environment)`);
+			continue;
+		}
+		const secret = provider.key ? await sealString(options.crypto!.app, provider.key, `provider:_instance/${id}`) : null;
+		const r = await pool.query("INSERT INTO pim_app.instance_providers (id, kind, config, secret, created_at) VALUES ($1,'openai_compatible',$2,$3,$4) ON CONFLICT DO NOTHING", [id, JSON.stringify({ name: provider.name ?? id, url: provider.url, models: provider.models ?? [], structuredOutput: provider.structuredOutput === true }), secret, ms(row.created_at)]);
+		bump(d, "shared providers", r.rowCount ?? 0);
+	}
+
+	for (const t of await rows("templates")) {
+		const owner = author(t);
+		if (!owner) {
+			d.skipped.push(`template ${t.id}: its author ${t.username} has no account here`);
+			continue;
+		}
+		const bundle = { agent: { name: t.name, instructions: t.instructions, emoji: t.symbol ?? null, color: t.color ?? null }, description: t.description ?? "", apps: parseJson(t.apps, []) };
+		const r = await pool.query("INSERT INTO pim_app.templates (id, owner_id, agent_id, title, bundle, published_at, uses) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING", [t.id, owner, t.agent_id, t.name, JSON.stringify(bundle), ms(t.published_at), Number(t.uses ?? 0)]);
+		bump(d, "templates", r.rowCount ?? 0);
+		if (parseJson(t.bundle, []).length > 0 || parseJson(t.team, []).length > 0 || t.icon_data) d.skipped.push(`template ${t.id}: its bundled agents and icon are not carried`);
+	}
+
+	for (const b of await rows("bots")) {
+		const owner = author(b);
+		if (!owner) {
+			d.skipped.push(`bot ${b.id}: its host ${b.username} has no account here`);
+			continue;
+		}
+		const tools = parseJson(b.tools, []) as { name?: string; ask?: boolean }[];
+		const settings = { dailyMessages: b.daily_messages ?? null, dailyToolCalls: b.daily_tool_calls ?? null, model: modelRef(b.model), tools: tools.map((x) => x.name).filter(Boolean), ask: tools.filter((x) => x.ask).map((x) => x.name).filter(Boolean) };
+		const r = await pool.query("INSERT INTO pim_app.bots (id, owner_id, name, agent_id, settings, created_at) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING", [b.id, owner, b.name, b.agent_id, JSON.stringify(settings), ms(b.shared_at)]);
+		bump(d, "bots", r.rowCount ?? 0);
+		if (b.icon_data) d.skipped.push(`bot ${b.id}: its icon is not carried`);
+	}
+
+	// The agent everyone starts with is a template an admin marks as the default; one that was never published as a template becomes one.
+	for (const a of await rows("default_agent")) {
+		const owner = author(a);
+		if (!owner) {
+			d.skipped.push(`default agent ${a.agent_id}: its author ${a.username} has no account here`);
+			continue;
+		}
+		const bundle = { agent: { name: a.name, instructions: a.instructions, emoji: a.symbol ?? null, color: a.color ?? null }, description: a.description ?? "", apps: parseJson(a.apps, []) };
+		const marked = await pool.query("UPDATE pim_app.templates SET default_for_everyone = true WHERE owner_id = $1 AND agent_id = $2 AND NOT EXISTS (SELECT 1 FROM pim_app.templates WHERE default_for_everyone)", [owner, a.agent_id]);
+		if (marked.rowCount) continue;
+		const r = await pool.query("INSERT INTO pim_app.templates (id, owner_id, agent_id, title, bundle, published_at, default_for_everyone) SELECT $1,$2,$3,$4,$5,$6,true WHERE NOT EXISTS (SELECT 1 FROM pim_app.templates WHERE default_for_everyone) ON CONFLICT DO NOTHING", [`tpl_legacy_default`, owner, a.agent_id, a.name, JSON.stringify(bundle), ms(a.updated_at)]);
+		bump(d, "default agent", r.rowCount ?? 0);
+	}
+}
+
 /** Promotes every tenant of the landing; the owners done. Safe to run again: what is already in place is left as it is. */
 export async function promoteToLive(pool: Pool, options: PromoteOptions): Promise<PromoteReport> {
 	const runtime = new RuntimeDb(pool);
 	const owners = (await pool.query("SELECT owner_id FROM pim_ops.tenants WHERE owner_id <> '_deployment' ORDER BY owner_id")).rows.map((r) => r.owner_id as string);
+	const shared = (await sharedProviders(pool, options)).flatMap((p) => (p.runnable ? [p.id] : []));
 	const report: PromoteReport = { owners: [], chats: 0, messages: 0, forgeThreads: 0, orphanedTasks: 0, clearedRuns: 0, remappedModels: 0, domain: {}, skipped: [] };
 	// Every account exists before any space is promoted: a circle names members who may sort after its owner.
 	for (const owner of owners) await promoteIdentity(pool, owner, options.rpId);
@@ -661,7 +776,7 @@ export async function promoteToLive(pool: Pool, options: PromoteOptions): Promis
 		const hasPi = (await pool.query("SELECT 1 FROM pim_ops.pi_conversations WHERE owner_id = $1 LIMIT 1", [owner])).rowCount;
 		if (!has && hasPi) {
 			const own = await ownProviderIds(pool, owner, options);
-			const { space, orphaned, clearedRuns, remappedModels } = await legacySpace(pool, owner, options.cutoverAt, options.defaultAgent, new Set(["anthropic", "openai", "google", "gateway", ...own]));
+			const { space, orphaned, clearedRuns, remappedModels } = await legacySpace(pool, owner, options.cutoverAt, options.defaultAgent, new Set(["anthropic", "openai", "google", "gateway", ...own, ...shared.map((id) => `shared:${id}`)]));
 			report.remappedModels += remappedModels;
 			const publicChatIds = new Map((await pool.query("SELECT conversation_id, public_id FROM pim_ops.chats WHERE owner_id = $1", [owner])).rows.map((r) => [Number(r.conversation_id), chatUuid(r.public_id)]));
 			await importLegacySpace(runtime, owner, space, { publicChatIds });
@@ -676,5 +791,6 @@ export async function promoteToLive(pool: Pool, options: PromoteOptions): Promis
 		report.forgeThreads += await promoteForge(pool, owner);
 		report.owners.push(owner);
 	}
+	await promoteDeployment(pool, options, { counts: report.domain, skipped: report.skipped });
 	return report;
 }

@@ -2,7 +2,7 @@
 // process role, reaching it only over the Relay's NATS bus) runs `shell` after a person approves it, and reads, writes, edits and refuses files. Without a computer, the tools say so at once.
 import { type ChildProcess, spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -136,6 +136,27 @@ real("an agent on a paired computer", () => {
 		const content = await fetch(`${base(gate)}/api/files/content?path=/workspace/hello.txt`, { headers: { cookie: web.cookie ?? "" } });
 		expect(content.status === 200 ? await content.text() : "").toBe("line one\nline 2\n");
 	}, 180_000);
+
+	it("answers at once when the computer's answer is bigger than the bus carries, and tells the model where /workspace is in the shell", async () => {
+		// A 1.5 MB attachment, as a PDF: a read of it asked for 1 MiB, which as base64 is more than NATS's default 1 MB limit, and the Gate waited out its timeout.
+		writeFileSync(join(root, "big.pdf"), Buffer.concat([Buffer.from("%PDF-1.7\n"), Buffer.alloc(1_500_000, 0)]));
+		writeFileSync(join(root, "big.txt"), "x".repeat(1_500_000));
+		const started = Date.now();
+		const end = await ask(
+			"read the pdf",
+			toolUse(fauxToolCall("file_read", { path: "/workspace/big.pdf" }), fauxToolCall("file_edit", { path: "/workspace/big.txt", edits: [{ oldText: "x", newText: "y" }] })),
+			toolUse(fauxToolCall("send_to_user", { message: "Done." })),
+		);
+		await end();
+		expect(Date.now() - started).toBeLessThan(25_000);
+		// The read takes less than the bus carries, finds the binary file, and says where the shell sees it.
+		const read = (await results("file_read")).at(-1)!;
+		expect(read).toContain("binary file (1500009 bytes)");
+		expect(read).toContain(`${realpathSync(root)}/big.pdf`);
+		expect(read).toContain("$PIM_WORKSPACE/big.pdf");
+		// A call that needs a bigger answer fails at once, naming its size.
+		expect((await results("file_edit")).at(-1)).toMatch(/answer is \d+ bytes, more than the 1048576 bytes/);
+	}, 120_000);
 
 	it("does nothing when the person declines, and goes unavailable when the computer leaves", async () => {
 		const end = await ask("remove it", toolUse(fauxToolCall("shell", { command: "touch declined.txt" })), toolUse(fauxToolCall("send_to_user", { message: "Ok." })));

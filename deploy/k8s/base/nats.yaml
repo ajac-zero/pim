@@ -7,7 +7,7 @@ data:
     port: 4222
     http: 8222
     server_name: $POD_NAME
-    max_payload: 1048576
+    max_payload: 8388608
     write_deadline: "5s"
     cluster {
       name: pim

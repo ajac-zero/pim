@@ -241,6 +241,9 @@ describe("diagnostics", () => {
 		expect((await call(ada, "GET", "/api/admin/diagnostics?since=soon")).status).toBe(400);
 		expect((await call(bob, "GET", "/api/admin/diagnostics")).status).toBe(403);
 		expect((await call(ada, "GET", "/api/admin/health")).body.deployment).toMatchObject({ publicUrlSet: true, approvalPolicy: "explicit" });
+	});
+});
+
 describe("a new chat", () => {
 	it("is listed in the sidebar before the projection has heard of it", async () => {
 		const chat = (await call(ada, "POST", "/api/sessions", { agentId: agent, title: "Welcome" })).body.id as string;

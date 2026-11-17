@@ -27,6 +27,7 @@ import { openString, type KeyringCrypto } from "@pim/v2-app/crypto";
 import type { Db as RuntimeDb } from "@pim/v2-runtime/db";
 import type { PartitionContext, RunnerOptions } from "@pim/v2-runtime/runner";
 import { pimExtension, type ToolDeps } from "./agent-tools.ts";
+import { BUILTIN_SKILLS } from "./builtin-skills.ts";
 import { chatgptCredentialStore, chatgptProvider, type ChatGPTRunnerOptions } from "./chatgpt-auth.ts";
 import type { ForgeParts } from "./forge-assembly.ts";
 import { createFailover } from "./provider-failover.ts";
@@ -240,7 +241,9 @@ export function createAgentHost(options: AgentHostOptions) {
 			}),
 			section("your_skills", async (input) => {
 				const c = await ctx(input.conversationId);
-				return c.skills.length === 0 ? undefined : `Skills you can load with read_skill:\n${c.skills.map((s) => `- ${s.name}: ${s.description}`).join("\n")}`;
+				// The person's own skills first; a built-in one is listed unless they have written one of the same name.
+				const skills = [...c.skills, ...BUILTIN_SKILLS.filter((b) => !c.skills.some((s) => s.name === b.name)).map(({ name, description }) => ({ name, description }))];
+				return `Skills you can load with read_skill:\n${skills.map((s) => `- ${s.name}: ${s.description}`).join("\n")}`;
 			}),
 			section("active_goals", async (input) => {
 				const c = await ctx(input.conversationId);

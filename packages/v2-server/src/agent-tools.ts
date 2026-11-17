@@ -18,6 +18,7 @@ import { computerTools } from "./computer-tools.ts";
 import type { ForgeParts } from "./forge-assembly.ts";
 import type { EnvelopeCrypto } from "@pim/v2-contracts/platform";
 import { connectorToolset, type Transport } from "./connector-tools.ts";
+import { builtinSkill } from "./builtin-skills.ts";
 import { readSkillFolder } from "./skill-sources.ts";
 
 export type ToolDeps = {
@@ -207,8 +208,12 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 		write("move_memory", "Move a memory to another scope, such as everyone or another agent's.", Type.Object({ id: S(), scope: S() }), async (app, call, a) => (await app.memories.move(call.p, a.id, a.scope), text(`Moved to ${a.scope}.`))),
 
 		// Skills and goals.
-		read("read_skill", "Read a skill's instructions and the names of its files.", Type.Object({ name: S() }), async (app, call, a) => {
-			const s = await app.agents.getSkill(call.p, a.name);
+		read("read_skill", "Read a skill's instructions and the names of its files: one of the person's own, or one that comes with Pim.", Type.Object({ name: S() }), async (app, call, a) => {
+			const s = await app.agents.getSkill(call.p, a.name).catch((error) => {
+				if (builtinSkill(a.name)) return undefined;
+				throw error;
+			});
+			if (!s) return text(`${builtinSkill(a.name)!.instructions}\n\nFiles: none`);
 			return text(`${s.body}\n\nFiles: ${Object.keys(s.files ?? {}).join(", ") || "none"}`);
 		}),
 		read("read_skill_file", "Read one of a skill's supporting files.", Type.Object({ name: S(), path: S() }), async (app, call, a) => {

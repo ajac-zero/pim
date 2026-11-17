@@ -267,6 +267,11 @@ real("the default agent host", () => {
 		expect((await results("install_skill")).at(-1)).toMatch(/not the ones that were approved/);
 		expect((await d.stack.admin.query("SELECT 1 FROM pim_app.skills WHERE name = 'coffee'")).rowCount).toBe(0);
 
+		// A skill that comes with Pim is read like the person's own, and is listed in the prompt without anyone writing it.
+		await say("how do notes work", toolUse(fauxToolCall("read_skill", { name: "notes" })));
+		expect((await results("read_skill")).at(-1)).toMatch(/^# Notes[\s\S]*note_edit/);
+		expect(await transcript()).toContain("- notes: How to write in the person's notes");
+
 		// A folder without a SKILL.md, or a source that is not GitHub, is refused before anyone is asked.
 		await say("install a bad one", toolUse(fauxToolCall("install_skill", { source: "https://example.com/skills" })));
 		expect((await results("install_skill")).at(-1)).toMatch(/GitHub folder/);

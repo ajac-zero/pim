@@ -6,6 +6,7 @@ import { createModels } from "@earendil-works/pi-ai";
 import { createRegistry, type HarnessOptions } from "@earendil-works/pi-durable";
 import type { ProcessConfig } from "@pim/v2-contracts/platform";
 import { App } from "@pim/v2-app/app";
+import { OPENAI_ENDPOINTS } from "@pim/v2-app/chatgpt";
 import { KeyringCrypto } from "@pim/v2-app/crypto";
 import { connect as connectApp } from "@pim/v2-app/db";
 import { createGate } from "@pim/v2-app/gate";
@@ -62,6 +63,9 @@ export function keyringFromProcessEnv(env: Env): KeyringCrypto | undefined {
 	return new KeyringCrypto((env.PIM_KEK_CURRENT ?? Object.keys(keys).at(-1)!).toLowerCase(), keys);
 }
 
+/** Where Sign in with ChatGPT goes when not to OpenAI's own servers (`PIM_CHATGPT_ISSUER`: a proxy or a test double); unset, OpenAI's. */
+const chatgptFromEnv = (env: Env) => (env.PIM_CHATGPT_ISSUER ? { endpoints: { ...OPENAI_ENDPOINTS, issuer: env.PIM_CHATGPT_ISSUER.replace(/\/+$/, "") } } : undefined);
+
 /** One set of metrics per process, whatever roles it runs: the registry refuses a name twice. */
 const metricsByHost = new WeakMap<Host, ReturnType<typeof createPimMetrics>>();
 const metricsOf = (host: Host) => {
@@ -86,7 +90,7 @@ export async function startGate(config: ProcessConfig, env: Env, host: Host, nat
 	instrumentPool(db.pool, metrics, "gate");
 	const objects = s3Of(config, env);
 	const crypto = keyringFromProcessEnv(env);
-	const app = new App(db, objects, { ...(crypto ? { crypto } : {}), ...(env.PIM_APP_SECRET_KEY ? { appKey: env.PIM_APP_SECRET_KEY } : {}), transcripts: projectedTranscripts(db.pool) });
+	const app = new App(db, objects, { ...(crypto ? { crypto } : {}), ...(env.PIM_APP_SECRET_KEY ? { appKey: env.PIM_APP_SECRET_KEY } : {}), transcripts: projectedTranscripts(db.pool), ...(chatgptFromEnv(env) ? { chatgpt: chatgptFromEnv(env)! } : {}) });
 	if (nats) publishRevocations(app, nats);
 	// A computer paired to another process (the `relay` container, another Gate) is reached over NATS.
 	if (nats) app.relay.useBus(natsRelayBus(nats));
@@ -205,7 +209,7 @@ export async function startRunner(config: ProcessConfig, env: Env, host: Host, h
 	const objects = appDb || forgePool ? s3Of(config, env) : undefined;
 	const app = appDb && objects ? new App(appDb, objects, { ...(crypto ? { crypto } : {}), ...(env.PIM_APP_SECRET_KEY ? { appKey: env.PIM_APP_SECRET_KEY } : {}) }) : undefined;
 	const forge = forgePool && objects ? assembleForge(forgePool as never, objects, env) : undefined;
-	const host_ = hooks.harnessOptions ? undefined : createAgentHost({ db, env, crypto, app, forge, providers: hooks.providers, fetch: hooks.fetch });
+	const host_ = hooks.harnessOptions ? undefined : createAgentHost({ db, env, crypto, app, forge, providers: hooks.providers, fetch: hooks.fetch, ...(chatgptFromEnv(env) ? { chatgpt: { ...chatgptFromEnv(env), ...(env.PIM_CHATGPT_BASE_URL ? { baseUrl: env.PIM_CHATGPT_BASE_URL } : {}) } } : {}), ...(env.PIM_PROVIDER_COOLDOWN_MS ? { cooldowns: { transientMs: Number(env.PIM_PROVIDER_COOLDOWN_MS) } } : {}) });
 	const runner = new Runner({
 		db,
 		harnessOptions: hooks.harnessOptions ?? host_!.harnessOptions,

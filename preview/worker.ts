@@ -4,6 +4,7 @@ import { createFauxCore, fauxAssistantMessage, fauxToolCall, type FauxResponseFa
 import type { ModelRef } from "@earendil-works/pi-durable";
 import type { PiModel } from "agents/harness/pi";
 import { ownedCode } from "../src/auth";
+import { chatgptCredentials } from "../src/chatgpt";
 import { deploymentSettings } from "../src/deployment";
 import type { ImageModel } from "../src/extensions/image-generation";
 import { serve } from "../src/gateway";
@@ -29,6 +30,9 @@ export { Auth, CodingSchedulerDO, CodingThreadDO, Directory, Gallery, HostOps } 
  * - `GET /__dev/sign-in/<username>?returnTo=/path` signs the browser in as
  *   that person, making the account if it's new, with a passkey made here.
  *   `&bot=<id>` makes a new account a guest of that shared bot.
+ * - `GET /__dev/seed-connections/<username>?mcp=<url>` leaves in that person's space what a ChatGPT sign-in and a connected MCP
+ *   server leave there, which a local Worker cannot make itself (OpenAI is out of reach, and a connector's address must be https):
+ *   the cutover rehearsal (scripts/v2-migrate) uses it to have credentials of both kinds to carry across.
  */
 
 const PREVIEW_MODEL = "preview-model";
@@ -189,6 +193,20 @@ export class Pim extends RealPim {
 		return preview.getModel(UTILITY_MODEL)!;
 	}
 
+	/** For the cutover rehearsal: the rows and keys a ChatGPT sign-in and a connected MCP server leave, written as the product writes them. */
+	async seedConnections(mcpUrl: string): Promise<{ chatgptEmail: string; mcpServer: string; accessToken: string; refreshToken: string }> {
+		const email = "ada@chatgpt.rehearsal.test";
+		this.chatgpt.hostId();
+		await chatgptCredentials(this.credentials).write({ type: "oauth", access: "rehearsal-chatgpt-access-0001", refresh: "rehearsal-chatgpt-refresh-0001", expires: Date.now() + 365 * 86_400_000, clientId: "rehearsal-client", scopes: ["chatgpt.tokens.use.direct"], idToken: "rehearsal-id-token", subject: "rehearsal-subject", email } as never);
+		const server = "rehearsal-mcp";
+		const clientId = "rehearsal-mcp-client";
+		const tokens = { access_token: "rehearsal-mcp-access-0001", refresh_token: "rehearsal-mcp-refresh-0001", token_type: "Bearer", expires_in: 3600 };
+		this.ctx.storage.sql.exec("INSERT OR REPLACE INTO cf_agents_mcp_servers (id, name, server_url, callback_url, client_id, auth_url, server_options) VALUES (?, ?, ?, ?, ?, NULL, NULL)", server, "Rehearsal notes server", mcpUrl, "http://localhost/mcp/callback/ada", clientId);
+		await this.ctx.storage.put(`/own_ada/${server}/${clientId}/token`, tokens);
+		await this.ctx.storage.put(`/own_ada/${server}/${clientId}/client_info/`, { client_id: clientId, redirect_uris: [] });
+		return { chatgptEmail: email, mcpServer: server, accessToken: tokens.access_token, refreshToken: tokens.refresh_token };
+	}
+
 	/** A stand-in image model, which draws Pim's icon whatever it's asked for. */
 	protected override imageModel(): ImageModel {
 		return {
@@ -199,6 +217,7 @@ export class Pim extends RealPim {
 }
 
 const DEV_SIGN_IN = /^\/__dev\/sign-in\/([^/]+)$/;
+const DEV_SEED = /^\/__dev\/seed-connections\/([^/]+)$/;
 
 /** Signs the browser in as `username`, with a new software passkey, and sends it to `returnTo`. */
 async function devSignIn(request: Request, env: Env, ctx: ExecutionContext, username: string): Promise<Response> {
@@ -256,6 +275,14 @@ export default {
 			if (sameSite) request.headers.set("origin", home);
 		}
 		const signIn = request.method === "GET" ? DEV_SIGN_IN.exec(new URL(request.url).pathname) : null;
+		const seed = request.method === "GET" ? DEV_SEED.exec(new URL(request.url).pathname) : null;
+		if (seed) {
+			return env.Directory.getByName("directory").resolve(decodeURIComponent(seed[1]!).toLowerCase()).then(async (account) => {
+				if (!account) return new Response("No such account", { status: 404 });
+				const stub = env.Pim.getByName(account.ownerId) as unknown as { seedConnections(url: string): Promise<unknown> };
+				return Response.json(await stub.seedConnections(new URL(request.url).searchParams.get("mcp") ?? "https://mcp.rehearsal.invalid/mcp"));
+			});
+		}
 		if (signIn) return devSignIn(request, env, ctx, decodeURIComponent(signIn[1]!).toLowerCase());
 		return serve(request, env, ctx);
 	},

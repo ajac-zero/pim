@@ -47,6 +47,8 @@ export async function promoteCommand(env: Env) {
 	try {
 		return await promoteToLive(pool, {
 			rpId: env.PIM_RP_ID!,
+			env,
+			...(env.PIM_LEGACY_RP_ID ? { legacyRpId: env.PIM_LEGACY_RP_ID } : {}),
 			cutoverAt: Number(env.PIM_CUTOVER_AT),
 			...(provider && model.length ? { defaultAgent: { provider, modelId: model.join("/") } } : {}),
 			...(env.PIM_ACTIVATED_AT ? { activatedAt: Number(env.PIM_ACTIVATED_AT) } : {}),

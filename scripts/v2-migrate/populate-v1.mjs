@@ -2,14 +2,19 @@
 // Fills a running v1 preview (`amp orb services ensure`, http://localhost:8787) with a realistic space through the real API paths, so the cutover can be rehearsed on data
 // a real Worker wrote instead of a synthetic fixture. Two accounts (ada the admin, bob), chats with a fork and a chat cut off mid-tool, agents, skills with files and
 // versions, memories, goals, scheduled tasks, notes, apps with versions, an uploaded image, a custom model provider with an API key, settings and a profile.
-// Writes the expectations (what v2 must show afterwards) to --expect. Usage: node scripts/v2-migrate/populate-v1.mjs [--base URL] [--expect FILE]
+// Also what the admin shares and what credentials a space holds: a template, a bot, the agent everyone starts with, a provider shared with everyone, and (through the preview's
+// `/__dev/seed-connections`, since a local Worker can reach neither OpenAI nor an https MCP server) a ChatGPT sign-in and a connected MCP server with its OAuth tokens.
+// Writes the expectations (what v2 must show afterwards) to --expect.
+// Usage: node scripts/v2-migrate/populate-v1.mjs [--base URL] [--expect FILE] [--provider-host HOST]
+//   --provider-host  the host the stand-in providers are addressed by (default 127.0.0.1). Use the Docker gateway (172.18.0.1) when the destination's Runner is a container, so the
+//                    imported providers and the MCP server are reachable from it without anyone editing a row.
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import { writeFileSync } from "node:fs";
 import { parseArgs } from "node:util";
 import { Passkey } from "./passkey.mjs";
 
-const { values } = parseArgs({ options: { base: { type: "string", default: "http://localhost:8787" }, expect: { type: "string", default: "v1-expectations.json" }, "probe-seconds": { type: "string", default: "0" } } });
+const { values } = parseArgs({ options: { base: { type: "string", default: "http://localhost:8787" }, expect: { type: "string", default: "v1-expectations.json" }, "probe-seconds": { type: "string", default: "0" }, "provider-host": { type: "string", default: "127.0.0.1" } } });
 const BASE = values.base;
 const log = (...a) => console.log("[populate]", ...a);
 
@@ -79,12 +84,21 @@ const provider = createServer((_req, res) => {
 	res.setHeader("content-type", "application/json");
 	res.end(JSON.stringify({ data: [{ id: "rehearsal-model" }] }));
 });
-await new Promise((r) => provider.listen(0, "127.0.0.1", r));
-const providerUrl = `http://127.0.0.1:${provider.address().port}/v1`;
+const HOST = values["provider-host"];
+await new Promise((r) => provider.listen(0, HOST === "127.0.0.1" ? "127.0.0.1" : "0.0.0.0", r));
+const providerUrl = `http://${HOST}:${provider.address().port}/v1`;
+// A port for the MCP server the space is connected to: the server itself is only a stand-in the verification starts, so the port is held just long enough to be named.
+const mcpPort = await new Promise((resolve) => {
+	const probe = createServer();
+	probe.listen(0, "127.0.0.1", () => {
+		const { port } = probe.address();
+		probe.close(() => resolve(port));
+	});
+});
 
 const ada = await new Client("ada").signIn();
 const bob = await new Client("bob").signIn();
-const expect = { base: BASE, accounts: {}, chats: [], agents: [], skills: [], memories: [], goals: [], triggers: [], notes: [], apps: [], providers: [], settings: {}, files: [] };
+const expect = { base: BASE, accounts: {}, chats: [], agents: [], skills: [], memories: [], goals: [], triggers: [], notes: [], apps: [], providers: [], sharedProviders: [], templates: [], bots: [], settings: {}, files: [] };
 
 const adaAccount = await ada.get("/account");
 const bobAccount = await bob.get("/account");
@@ -157,6 +171,25 @@ expect.files.push({ owner: "ada", kind: "chat-image", sha256: createHash("sha256
 const added = await ada.post("/providers", { name: "Rehearsal provider", url: providerUrl, key: "rehearsal-provider-key-0001", models: ["rehearsal-model"] });
 expect.providers.push({ owner: "ada", name: "Rehearsal provider", key: "rehearsal-provider-key-0001", id: (added.provider ?? added).id, url: providerUrl });
 
+// What the admin shares: a provider for everyone, a template and a bot made of an agent, and the agent everyone starts with.
+const shared = await ada.call("POST", "/admin/providers", { name: "Shared rehearsal models", url: providerUrl, key: "rehearsal-shared-key-0002", models: ["rehearsal-model"] });
+expect.sharedProviders.push({ id: (shared.provider ?? shared).id, name: "Shared rehearsal models", key: "rehearsal-shared-key-0002", url: providerUrl });
+for (const [who, c, agent, name, instructions] of [["ada", ada, agentId, "Researcher", "You research carefully. Cite sources."], ["bob", bob, (chef.agent ?? chef).id, "Chef", "You suggest dinner."]]) {
+	const published = await c.call("POST", `/agents/${agent}/publish`, {});
+	expect.templates.push({ owner: who, id: published.id, agent, name, instructions });
+}
+await ada.call("PUT", `/agents/${agentId}/bot`, { dailyMessages: 12, dailyToolCalls: 3 });
+const botShared = await ada.call("GET", `/agents/${agentId}/bot`);
+expect.bots.push({ owner: "ada", id: botShared.id, agent: agentId, dailyMessages: 12, dailyToolCalls: 3 });
+await ada.call("PUT", "/admin/default-agent", { agent: agentId });
+expect.defaultAgent = { owner: "ada", agent: agentId };
+
+// What credentials a space holds besides model keys: the ChatGPT sign-in and a connected MCP server with its OAuth tokens (seeded: the preview cannot make either itself).
+const mcpUrl = `http://${HOST}:${mcpPort}/mcp`;
+const seeded = await (await fetch(`${BASE}/__dev/seed-connections/ada?mcp=${encodeURIComponent(mcpUrl)}`)).json();
+expect.chatgpt = { owner: "ada", email: seeded.chatgptEmail, access: "rehearsal-chatgpt-access-0001", refresh: "rehearsal-chatgpt-refresh-0001" };
+expect.mcp = { owner: "ada", id: seeded.mcpServer, url: mcpUrl, port: mcpPort, accessToken: seeded.accessToken, refreshToken: seeded.refreshToken };
+
 await ada.put("/profile", { displayName: "Ada L.", bio: "Rehearsal admin" });
 const circle = await ada.post("/circles", { name: "Family" });
 await ada.post(`/circles/${(circle.circle ?? circle).id}/members`, { username: "bob" });
@@ -181,6 +214,8 @@ const key = Passkey.make();
 const registered = await fetch(`${BASE}/auth/passkeys`, { method: "POST", headers: { cookie: `${ada.cookie}; ${challengeCookie}`, origin: BASE, "content-type": "application/json" }, body: JSON.stringify(key.create(options.json, BASE)) });
 if (!registered.ok) throw new Error(`registering the rehearsal passkey: ${registered.status} ${await registered.text()}`);
 expect.passkey = { owner: "ada", ...key.save(), rpId: new URL(BASE).hostname };
+// Recovery codes: the way back in when the passkey's host changes.
+expect.recoveryCodes = { owner: "ada", username: "ada", codes: (await ada.auth("/recovery-codes")).json.codes };
 const token = (await ada.auth("/tokens", { name: "rehearsal" })).json;
 expect.token = { owner: "ada", name: "rehearsal", token: token.token ?? token.secret };
 const bobToken = (await bob.auth("/tokens", { name: "rehearsal" })).json;

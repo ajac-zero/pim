@@ -1,3 +1,4 @@
+import { QuotaError, type Quota } from "./quota.ts";
 import { createHash } from "node:crypto";
 import { Authorizer } from "./authz.ts";
 import type { Db, Tx } from "./db.ts";
@@ -36,6 +37,8 @@ export type ScheduleInput = { kind: "cron" | "at" | "delay"; spec: string; promp
 export const FIRE_GRACE_MS = 5 * 60_000;
 
 export class Schedules {
+	/** Per-space limits, when the deployment's application has them. */
+	quota: Quota | undefined;
 	constructor(private readonly db: Db, private readonly conversations = new Conversations(db), private readonly authz = new Authorizer(db)) {}
 
 	async create(p: Principal, input: ScheduleInput): Promise<string> {
@@ -45,6 +48,7 @@ export class Schedules {
 		if (!next || Number.isNaN(next.getTime())) throw new BadRequestError("That schedule never fires");
 		const id = newId("sc");
 		await this.db.owner(p.ownerId, async (tx) => {
+			await this.quota?.admitNew(tx, p.ownerId, "schedules");
 			await tx.query("INSERT INTO pim_app.schedules (id, owner_id, agent_id, kind, spec, target, chat_id, prompt, next_run_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)", [id, p.ownerId, input.agentId ?? null, input.kind, input.spec, input.target ?? "new_chat", input.chatId ?? null, input.prompt, next]);
 			await wake(tx, p.ownerId);
 		});
@@ -76,7 +80,7 @@ export class Schedules {
 				at = s.kind === "cron" ? nextCron(s.spec, at) : null;
 			}
 			const latest = occurrences.at(-1)!;
-			const fire = now.getTime() - latest.getTime() <= FIRE_GRACE_MS;
+			let fire = now.getTime() - latest.getTime() <= FIRE_GRACE_MS;
 			// The command is admitted before the schedule moves on. Its id and its new chat's id come from the occurrence, so a second tick, or one
 			// repeating after a crash between the two steps, admits nothing new.
 			if (fire) {
@@ -88,8 +92,13 @@ export class Schedules {
 						if ((error as { code?: string }).code !== "23505") throw error;
 					});
 				}
-				const admission = await this.conversations.admit(principal, { commandId, kind: "trigger_fire", chatId, payload: { text: s.prompt, schedule: s.id } });
-				if (!admission.duplicate) fired++;
+				// A space that has used its day's allowance does not run: the occurrence is recorded as missed, and the schedule moves on.
+				const admission = await this.conversations.admit(principal, { commandId, kind: "trigger_fire", chatId, payload: { text: s.prompt, schedule: s.id } }).catch((error) => {
+					if (error instanceof QuotaError) return null;
+					throw error;
+				});
+				if (!admission) fire = false;
+				else if (!admission.duplicate) fired++;
 			}
 			const won = await this.db.owner(ownerId, async (tx) => {
 				const locked = await tx.query("SELECT 1 FROM pim_app.schedules WHERE id = $1 AND next_run_at = $2 FOR UPDATE SKIP LOCKED", [s.id, s.next_run_at]);

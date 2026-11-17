@@ -1,6 +1,7 @@
 /** The recurring passes of the `maintenance` role that no single service owns. */
 import type { App } from "@pim/v2-app/app";
 import { forgePartitionId } from "./forge-source.ts";
+import type { ObjectStore } from "@pim/v2-contracts/platform";
 import type { Pool } from "pg";
 
 /**
@@ -60,4 +61,97 @@ export async function trimForgeOutbox(pool: Pool, retainMs = 7 * 86_400_000): Pr
 		}
 	}
 	return removed;
+}
+
+/** The schemas besides the application's that hold a person's rows, each sealed to its owner by row-level security. */
+const ERASED_SCHEMAS = ["pim_runtime", "pim_projection", "pim_forge"];
+
+/**
+ * Erases the accounts their owners (or an admin) deleted. A deleting account is already gone to every surface (410); this removes what it held, in
+ * the order that lets a failure be tried again: its objects (images, app files, uploads), its rows in the runtime, the projections and Forge, and last
+ * the application's own (`purgeOwner`), which also marks the account `deleted`, so an account that is still `deleting` is one not yet fully erased.
+ * Returns the owners finished. Gitea repositories and workspaces Forge made are not reached from here.
+ */
+export async function sweepErasures(app: App, pool: Pool, objects: ObjectStore, limit = 5): Promise<string[]> {
+	const owners = (await app.db.anonymous(async (tx) => (await tx.query("SELECT owner_id FROM pim_app.accounts WHERE status = 'deleting' ORDER BY status_changed_at LIMIT $1", [limit])).rows)).map((r) => r.owner_id as string);
+	const done: string[] = [];
+	for (const owner of owners) {
+		const keys = (await app.db.owner(owner, async (tx) => (await tx.query("SELECT key FROM pim_app.objects")).rows)).map((r) => r.key as string);
+		for (const key of keys) await objects.delete(key);
+		const client = await pool.connect();
+		try {
+			await client.query("BEGIN");
+			await client.query("SELECT set_config('pim.owner_id', $1, true)", [owner]);
+			const tables = (await client.query("SELECT table_schema, table_name FROM information_schema.columns WHERE column_name = 'owner_id' AND table_schema = ANY($1)", [ERASED_SCHEMAS])).rows.map((r) => `${r.table_schema}.${r.table_name}`);
+			// Rows refer to one another: a table that a foreign key still holds is tried again after the others.
+			for (let pending = tables, pass = 0; pending.length && pass < 6; pass++) {
+				const next: string[] = [];
+				for (const table of pending) {
+					await client.query("SAVEPOINT erase");
+					try {
+						await client.query(`DELETE FROM ${table} WHERE owner_id = $1`, [owner]);
+						await client.query("RELEASE SAVEPOINT erase");
+					} catch (error) {
+						if ((error as { code?: string }).code !== "23503") throw error;
+						await client.query("ROLLBACK TO SAVEPOINT erase");
+						next.push(table);
+					}
+				}
+				pending = next;
+				if (pass === 5 && next.length) throw new Error(`Could not erase ${next.join(", ")}`);
+			}
+			await client.query("COMMIT");
+		} catch (error) {
+			await client.query("ROLLBACK").catch(() => undefined);
+			console.error("erasure", owner, error);
+			continue;
+		} finally {
+			client.release();
+		}
+		await app.identity.purgeOwner(owner);
+		done.push(owner);
+	}
+	return done;
+}
+
+/**
+ * Fires the schedules that are due, owner by owner. `schedule_wakeups` holds each owner's next moment, so an owner with nothing due costs nothing.
+ * A failing owner does not hold up the others. Returns how many schedules fired.
+ */
+export async function tickSchedules(app: App, now = new Date()): Promise<number> {
+	let fired = 0;
+	for (const owner of await app.schedules.dueOwners(now)) {
+		try {
+			fired += (await app.schedules.tick(owner, now)).fired;
+		} catch (error) {
+			console.error("schedule tick", owner, error);
+		}
+	}
+	return fired;
+}
+
+/**
+ * Fires the time triggers that are due, for each owner who has one switched on. Which owners those are is read across owners (`pim.scope = 'all'`,
+ * migration 0623); what fires, and when, is the owner's own. Returns how many triggers fired.
+ */
+export async function tickTriggers(app: App, pool: Pool, now = new Date()): Promise<number> {
+	const client = await pool.connect();
+	let owners: string[];
+	try {
+		await client.query("BEGIN");
+		await client.query("SELECT set_config('pim.scope', 'all', true)");
+		owners = (await client.query("SELECT DISTINCT owner_id FROM pim_app.triggers WHERE lifecycle = 'enabled' AND source = 'time'")).rows.map((r) => r.owner_id as string);
+		await client.query("COMMIT");
+	} finally {
+		client.release();
+	}
+	let fired = 0;
+	for (const owner of owners) {
+		try {
+			fired += (await app.triggers.tickTime(owner, now)).fired;
+		} catch (error) {
+			console.error("trigger tick", owner, error);
+		}
+	}
+	return fired;
 }

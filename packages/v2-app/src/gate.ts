@@ -26,12 +26,19 @@ export type GateOptions = {
 	before?: (ctx: Ctx, route: Route) => Promise<Reply | undefined>;
 };
 
+const CORS = { "access-control-allow-origin": "*", "access-control-allow-methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS", "access-control-allow-headers": "Authorization, Content-Type, If-Match, Idempotency-Key", "access-control-expose-headers": "ETag", "access-control-max-age": "86400" };
+
 export const builtInRoutes: Route[] = [...hostedRoutes, ...chatgptRoutes, ...domainRoutes, ...coreRoutes, ...authRoutes];
 
 export function createGate(app: App, options: GateOptions = {}): Server {
 	const routes = [...(options.first ?? []), ...builtInRoutes, ...(options.routes ?? [])];
 	return createServer(async (req, res) => {
 		try {
+			// API clients in a browser on another site: tokens work there, cookies do not (SameSite=Strict, and the Origin check of the routes that change something).
+			if (/^\/api(\/|\?|$)/.test(req.url ?? "")) {
+				for (const [name, value] of Object.entries(CORS)) res.setHeader(name, value);
+				if (req.method === "OPTIONS") return void res.writeHead(204).end();
+			}
 			await handle(app, routes, options, req, res);
 		} catch (error) {
 			const known = httpStatus(error);

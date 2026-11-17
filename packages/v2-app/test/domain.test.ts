@@ -180,6 +180,27 @@ describe("durable tool operations and approvals", () => {
 		await expect(f.app.operations.cancel(owner(), b.operationId, "requested")).rejects.toMatchObject({ code: "bad_operation_state" });
 	});
 
+	it("approves after 30 seconds what a person on the auto policy never answers, and leaves explicit ones waiting", async () => {
+		const agent: Principal = { kind: "agent", ownerId: OwnerId.parse(owner()), agentId: "dev" };
+		await f.app.identity.authz.grantCoding(f.admin.principal, { ownerId: owner(), permissions: ["coding:push"], repositories: ["github.com/acme/*"] });
+		const resource = { repository: "github.com/acme/app" };
+		const now = new Date("2026-11-17T00:00:00Z");
+		const setPolicy = (value: string) => f.db.owner(owner(), (tx) => tx.query("INSERT INTO pim_app.owner_settings (owner_id, key, value) VALUES ($1, 'settings.approvalPolicy', $2) ON CONFLICT (owner_id, key) DO UPDATE SET value = $2", [owner(), JSON.stringify(value)]));
+		await setPolicy("explicit");
+		const waits = await f.app.approvals.gate(agent, { action: "coding:push", resource, now });
+		await setPolicy("auto");
+		const auto = await f.app.approvals.gate(agent, { action: "coding:push", resource, now });
+		// Under auto, even a caller that would have waited ten minutes, and would have denied, gets the policy: approved after 30 seconds.
+		const own = await f.app.approvals.gate(agent, { action: "coding:push", resource, timeoutMs: 600_000, onTimeout: "deny", now });
+		if (waits.outcome !== "waiting" || auto.outcome !== "waiting" || own.outcome !== "waiting") throw new Error("expected waiting approvals");
+		expect(await f.app.approvals.sweep(owner(), new Date(now.getTime() + 29_000))).toEqual({ denied: 0, approved: 0 });
+		expect(await f.app.approvals.sweep(owner(), new Date(now.getTime() + 31_000))).toEqual({ denied: 0, approved: 2 });
+		expect(await f.app.approvals.state(owner(), auto.approvalId)).toBe("timed_out_approved");
+		expect(await f.app.approvals.state(owner(), own.approvalId)).toBe("timed_out_approved");
+		expect(await f.app.approvals.state(owner(), waits.approvalId)).toBe("waiting"); // filed before the person chose auto
+		await setPolicy("explicit");
+	});
+
 	it("applies approval timeouts: deny by default, approve only a call still waiting", async () => {
 		const agent: Principal = { kind: "agent", ownerId: OwnerId.parse(owner()), agentId: "dev" };
 		await f.app.identity.authz.grantCoding(f.admin.principal, { ownerId: owner(), permissions: ["coding:push"], repositories: ["github.com/acme/*"] });

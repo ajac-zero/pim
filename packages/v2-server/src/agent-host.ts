@@ -26,7 +26,7 @@ import type { RelayBus } from "@pim/v2-app/relay";
 import { openString, type KeyringCrypto } from "@pim/v2-app/crypto";
 import type { Db as RuntimeDb } from "@pim/v2-runtime/db";
 import type { PartitionContext, RunnerOptions } from "@pim/v2-runtime/runner";
-import { pimExtension, type ToolDeps } from "./agent-tools.ts";
+import { pimExtension, timeZoneOf, type ToolDeps } from "./agent-tools.ts";
 import { BUILTIN_SKILLS } from "./builtin-skills.ts";
 import { CodexImagesClient } from "./codex-images.ts";
 import { imageEndpoints } from "./image-tools.ts";
@@ -272,6 +272,7 @@ export function createAgentHost(options: AgentHostOptions) {
 		const deps: ToolDeps = { ownerId, partitionId: partition.partitionId, runtime: db, app: options.app, forge: options.forge, relay: options.relay, fetch: options.fetch ?? fetch, now, toolTimeoutMs: options.stallMs?.tool, crypto: options.crypto, allowPrivateConnectors: env.PIM_CONNECTOR_ALLOW_PRIVATE === "1", images: imageSources(ownerId), chatOf: (conversationId) => publicChatId(ownerId, conversationId) };
 		const ctx = (conversationId: number | string) => publicChatId(ownerId, conversationId).then((chat) => readContext(ownerId, chat));
 		registry.install(pimExtension(deps, [
+			section("user_time_zone", () => timeZoneOf(db, ownerId)),
 			section("agent", async (input) => {
 				const c = await ctx(input.conversationId);
 				const who = c.agent ? `You are ${c.agent.name}, an agent of ${c.username ?? "this person"} in Pim.` : `You are Pim, ${c.username ? `${c.username}'s` : "a person's"} assistant.`;

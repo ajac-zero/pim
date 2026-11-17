@@ -254,9 +254,10 @@ real("the vertical slice", () => {
 		// Its spend is in the cost ledger as a coding thread's, and the sidebar knows the thread.
 		const costs = await waitFor("the spend in the ledger", async () => {
 			const c = (await web.call("GET", "/api/usage/costs?days=1")).json;
-			return c.byRunKind?.some((r: { key: string }) => r.key === "coding_thread") ? c : undefined;
+			return c.byDay?.some((d: { byRunKind: { key: string }[] }) => d.byRunKind.some((r) => r.key === "coding_thread")) ? c : undefined;
 		}, 30_000);
-		expect(costs.byRunKind.find((r: { key: string }) => r.key === "coding_thread")).toMatchObject({ calls: 1, costMicroUsd: 750_000, inputTokens: 1200, outputTokens: 300 });
+		// The usage screen's report: dollars per day by kind of run.
+		expect(costs.byDay.flatMap((d: { byRunKind: { key: string; costUsd: number }[] }) => d.byRunKind).find((r: { key: string }) => r.key === "coding_thread")).toMatchObject({ costUsd: 0.75 });
 		const sidebar = (await web.call("GET", "/api/snapshot/sidebar")).json as { coding: { threadId: string; state: string }[] };
 		expect(sidebar.coding.map((t) => t.threadId)).toContain(threadId);
 	}, 120_000);

@@ -2,7 +2,7 @@ import type { Principal } from "@pim/v2-contracts/identity";
 import { type ExternalOperationRecord, type ExternalOperationState, operationSettled } from "@pim/v2-contracts/runtime-seam";
 import { ConflictError, NotFoundError } from "./errors.ts";
 import { Authorizer } from "./authz.ts";
-import type { Db } from "./db.ts";
+import type { Db, Tx } from "./db.ts";
 import { newId } from "./ids.ts";
 
 /**

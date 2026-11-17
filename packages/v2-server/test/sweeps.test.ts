@@ -3,7 +3,7 @@ import pg from "pg";
 import { App } from "@pim/v2-app/app";
 import { connect as connectApp } from "@pim/v2-app/db";
 import { MemoryObjectStore } from "@pim/v2-app/objects";
-import { sweepApprovals, trimForgeOutbox } from "../src/sweeps.ts";
+import { sweepApprovals, sweepErasures, tickSchedules, tickTriggers, trimForgeOutbox } from "../src/sweeps.ts";
 import { createStack, type Stack } from "./support/stack.ts";
 
 describe("maintenance sweeps", () => {
@@ -64,5 +64,55 @@ describe("maintenance sweeps", () => {
 		await q("INSERT INTO pim_projection.projection_watermarks (owner_id, partition_id, projection_version, projected_seq) VALUES ($1, $2, 1, 2)", [owner, forgePartitionId(owner)]);
 		expect(await trimForgeOutbox(maintPool)).toBe(3);
 		expect((await q("SELECT dedupe_key FROM pim_forge.forge_outbox ORDER BY owner_seq")).rows.map((r) => r.dedupe_key)).toEqual(["c", "x"]);
+	});
+
+	it("erases a deleted account's objects and rows in every schema, and nothing of anyone else's", async () => {
+		const store = new MemoryObjectStore();
+		const objects = new App(connectApp(stack.url("gate"), 2), store);
+		await objects.identity.setRegistrationOpen({ kind: "user", ownerId: owner, role: "admin", sessionId: "s" } as never, true);
+		const bob = await objects.identity.register({ username: "bob" });
+		const bobPrincipal = { kind: "user", ownerId: bob.ownerId, role: "member", sessionId: "s2" } as never;
+		const bobChat = await objects.conversations.create(bobPrincipal, { title: "mine" });
+		const put = await objects.objects.put(bobPrincipal, { bytes: new Uint8Array([1, 2, 3]), contentType: "text/plain", purpose: "file" });
+		const rows = async (who: string) => Number((await stack.admin.query("SELECT (SELECT count(*) FROM pim_app.conversations WHERE owner_id = $1) + (SELECT count(*) FROM pim_runtime.partitions WHERE owner_id = $1) + (SELECT count(*) FROM pim_runtime.conversation_partitions WHERE owner_id = $1) AS n", [who])).rows[0].n);
+		expect(bobChat).toBeTruthy();
+		// What the Runner would have written for the chat, in the runtime's schema, where the conversation map is immutable.
+		const partition = (await stack.admin.query("SELECT partition_id FROM pim_app.conversations WHERE public_chat_id = $1", [bobChat])).rows[0].partition_id;
+		await stack.admin.query("INSERT INTO pim_runtime.partitions (owner_id, partition_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", [bob.ownerId, partition]);
+		await stack.admin.query("INSERT INTO pim_runtime.conversation_partitions (owner_id, conversation_id, partition_id, public_chat_id) VALUES ($1, 77, $2, $3)", [bob.ownerId, partition, bobChat]);
+		expect(await rows(bob.ownerId)).toBeGreaterThan(1);
+		const adaRows = await rows(owner);
+		// Until the account is deleted, nothing is erased.
+		expect(await sweepErasures(maintenance, maintPool, store)).toEqual([]);
+		await objects.identity.deleteSelf(bobPrincipal);
+		expect(await sweepErasures(maintenance, maintPool, store)).toEqual([bob.ownerId]);
+		expect(await store.head(put.key)).toBeNull();
+		expect(await rows(bob.ownerId)).toBe(0);
+		expect((await stack.admin.query("SELECT status FROM pim_app.accounts WHERE owner_id = $1", [bob.ownerId])).rows[0].status).toBe("deleted");
+		expect(await rows(owner)).toBe(adaRows);
+		expect(await sweepErasures(maintenance, maintPool, store)).toEqual([]);
+		await objects.db.end();
+	});
+
+	it("fires a due schedule and a due time trigger once each, from the owners that have them, into chats of their own", async () => {
+		const ada = { kind: "user", ownerId: owner, role: "admin", sessionId: "s" } as never;
+		const agent = await gate.agents.create(ada, { name: "Clock" });
+		await gate.schedules.create(ada, { kind: "delay", spec: "1000", prompt: "stretch", target: "new_chat", agentId: agent.id });
+		const at = Date.now() + 2_000;
+		const trigger = await gate.triggers.create(ada, { spec: { version: 1, owningAgentId: agent.id, originChatId: "api", label: "Once", instruction: "say hi", source: { kind: "time", schedule: "once", at }, condition: null, destination: { type: "new_chat" }, delivery: {}, authorizationRef: null } });
+		await gate.triggers.setLifecycle(ada, trigger.id, "enabled");
+		// Before either is due nothing fires; the owner is found from the schedule's wakeup and from the trigger's own row.
+		expect(await tickSchedules(maintenance)).toBe(0);
+		expect(await tickTriggers(maintenance, maintPool)).toBe(0);
+		const later = new Date(Date.now() + 10_000);
+		expect(await tickSchedules(maintenance, later)).toBe(1);
+		expect(await tickTriggers(maintenance, maintPool, later)).toBe(1);
+		// A second pass fires nothing more, and each made a chat of kind trigger that waits in the command inbox for a Runner.
+		expect(await tickSchedules(maintenance, later)).toBe(0);
+		expect(await tickTriggers(maintenance, maintPool, later)).toBe(0);
+		const made = (await stack.admin.query("SELECT c.kind, a.kind AS command FROM pim_app.conversations c JOIN pim_app.accepted_commands a ON a.public_chat_id = c.public_chat_id WHERE c.owner_id = $1 AND c.kind = 'trigger' ORDER BY a.accepted_at", [owner])).rows;
+		expect(made).toEqual([{ kind: "trigger", command: "trigger_fire" }, { kind: "trigger", command: "trigger_fire" }]);
+		expect((await gate.triggers.runs(ada, trigger.id)).map((r) => r.phase)).toEqual(["fired"]);
+		expect((await gate.triggers.get(ada, trigger.id)).lifecycle).toBe("ended");
 	});
 });

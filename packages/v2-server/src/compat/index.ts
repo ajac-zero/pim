@@ -13,6 +13,9 @@ import { modelRoutes } from "./model.ts";
 import { computerRoutes } from "./computer.ts";
 import { connectorRoutes } from "../connector-routes.ts";
 import { chatRoutes } from "./chat.ts";
+import { apiClientRoutes } from "./api-clients.ts";
+import { diagnosticsRoutes } from "./diagnostics.ts";
+import { usageRoutes } from "./usage.ts";
 import { bridgeRoutes } from "./app-bridge.ts";
 import { notificationRoutes } from "./notifications.ts";
 import { connectorScreens } from "./connectors.ts";
@@ -65,4 +68,7 @@ export const webCompatRoutes: Route[] = [
 	...bridgeRoutes(process.env),
 	...adminCompatRoutes,
 	...chatRoutes,
+	...usageRoutes(),
+	...apiClientRoutes(),
+	...diagnosticsRoutes(process.env),
 ];

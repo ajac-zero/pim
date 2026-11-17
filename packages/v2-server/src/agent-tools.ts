@@ -8,6 +8,7 @@ import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import { Type } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool, type PromptSection, type ToolRegistration } from "@earendil-works/pi-durable";
+import { QUOTA_MESSAGE } from "@pim/v2-app/quota";
 import type { App } from "@pim/v2-app/app";
 import { OwnerId, PartitionId, type Principal } from "@pim/v2-contracts/identity";
 import { ExternalOperations } from "@pim/v2-runtime/external";
@@ -98,6 +99,12 @@ async function readBody(response: Response): Promise<string> {
 
 const REDACT = /^(authorization|cookie|x-api-key|proxy-authorization)$/i;
 const redactHeaders = (headers: Record<string, string> | undefined) => Object.fromEntries(Object.entries(headers ?? {}).map(([k, v]) => [k, REDACT.test(k) ? "[redacted]" : v]));
+
+/** The person's time zone (Settings), else the deployment's `PIM_TIME_ZONE`, else UTC. */
+export async function timeZoneOf(runtime: RuntimeDb, ownerId: string): Promise<string> {
+	const chosen = await runtime.read<{ z: string | null }>(ownerId, "SELECT pim_app.runner_time_zone($1) AS z", [ownerId]).then((r) => r.rows[0]?.z ?? null, () => null);
+	return chosen ?? process.env.PIM_TIME_ZONE ?? "UTC";
+}
 
 /** What the web app reads from an app tool's answer to show the app as a card in the chat that opens in the canvas: `{ artifact }`, an app with a backend being `hosted` there. */
 const appCard = (ref: { id: string; title: string; kind: string; version: number; sha256: string; size: number }, note: string): Result =>
@@ -242,7 +249,11 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 			},
 			"safe",
 		),
-		tool("current_time", "The current date and time, in UTC.", Type.Object({}), async () => text(new Date(deps.now()).toISOString()), "safe"),
+		tool("current_time", "The current date and time, in UTC and in the user's time zone.", Type.Object({}), async () => {
+			const now = new Date(deps.now());
+			const zone = await timeZoneOf(runtime, ownerId);
+			return json({ utc: now.toISOString(), timeZone: zone, local: now.toLocaleString("en-US", { timeZone: zone, dateStyle: "full", timeStyle: "long" }) });
+		}, "safe"),
 
 		// Memory.
 		write("note", "Save something to remember: a title and the text. It goes to your own memory unless you give a scope such as everyone.", Type.Object({ title: S({ minLength: 1 }), body: S({ minLength: 1 }), scope: O(S()) }), async (app, call, a) =>
@@ -334,7 +345,18 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 		write("pause_trigger", "Pause a trigger.", Type.Object({ id: S() }), async (app, call, a) => text(`Now ${(await app.triggers.setLifecycle(call.p, a.id, "paused")).lifecycle}.`)),
 		write("resume_trigger", "Enable a trigger, or start one that is paused. A time trigger counts from now.", Type.Object({ id: S() }), async (app, call, a) => text(`Now ${(await app.triggers.setLifecycle(call.p, a.id, "enabled")).lifecycle}.`)),
 		write("delete_trigger", "Delete a trigger.", Type.Object({ id: S() }), async (app, call, a) => (await app.triggers.setLifecycle(call.p, a.id, "deleted"), text("Deleted."))),
-		read("test_trigger", "See what a time trigger would do next, without running it.", Type.Object({ id: S(), count: O(Type.Integer({ minimum: 1, maximum: 20 })) }), async (app, call, a) => json(await app.triggers.test(call.p, a.id, { count: a.count }))),
+		read("test_trigger", "A dry run, changing nothing and running nothing: whether a trigger (by id, or as you would make it with trigger) is valid, what would stop it being enabled, a time source's next firings, or what its condition says of each sample.", Type.Object({ id: O(S()), trigger: O(anyObject), samples: O(Type.Array(anyObject, { maxItems: 10 })), count: O(Type.Integer({ minimum: 1, maximum: 20 })) }), async (app, call, a) => json(await app.triggers.test(call.p, a.id ?? null, { ...(a.count ? { count: a.count } : {}), ...(a.trigger ? { spec: { ...(call.chat ? { originChatId: call.chat } : {}), ...(call.agentId ? { owningAgentId: call.agentId } : {}), ...a.trigger } } : {}), ...(a.samples ? { samples: a.samples } : {}) }))),
+		read("list_trigger_runs", "A trigger's runs, newest first, with what is known of each.", Type.Object({ id: S(), limit: O(Type.Integer({ minimum: 1, maximum: 50 })) }), async (app, call, a) => json(await app.triggers.runs(call.p, a.id, a.limit))),
+		read("list_trigger_sources", "What a trigger can watch here: each kind of source, and whether it can run now.", Type.Object({}), async (app, call) => {
+			const paired = !!(await app.db.owner(call.p.ownerId, (tx) => tx.query("SELECT 1 FROM pim_app.computers WHERE revoked_at IS NULL LIMIT 1"))).rowCount;
+			const draft = (reason: string) => ({ status: "draft_only", delivers: false, reason });
+			return json({ sources: [
+				{ kind: "time", status: "available", delivers: true, reason: null },
+				{ kind: "connector_event", status: "available", delivers: true, reason: null },
+				{ kind: "file", status: "unavailable", delivers: false, reason: "not_wired" },
+				...["poll", "stream", "process"].map((kind) => ({ kind, ...draft(paired ? "not_wired" : "computer_not_paired") })),
+			] });
+		}),
 
 		// Notes and apps.
 		write("note_create", "Create a note a person can open and edit alongside you.", Type.Object({ title: S({ minLength: 1 }), text: O(S()) }), async (app, call, a) => text(`Created note ${await app.canvas.create(call.p, a.title, a.text ?? "")}.`)),
@@ -478,6 +500,9 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 	tools.push(...adminTools({ ownerId, app: deps.app, env: process.env, principalOf, chatOf: deps.chatOf, runtime: runtime as never }));
 	// A guest's agent, and a chat that is someone's visit to a bot, work with a short list of tools: nothing of the owner's computer, files, coding or other connectors.
 	tools.push(...guestToolset({ ownerId, partitionId, runtime, app: deps.app, crypto: deps.crypto, transport, ops, owner, now: deps.now, chatOf: deps.chatOf }));
+	// Every tool call that gets this far counts against the owner's day (migration 0621); once the day's allowance is used the call is refused with the space's usual message.
+	const defaultToolCalls = /^\d+$/.test(process.env.PIM_LIMIT_DAILY_TOOL_CALLS?.trim() ?? "") ? Number(process.env.PIM_LIMIT_DAILY_TOOL_CALLS) : null;
+	const withinToolCalls = () => runtime.read<{ ok: boolean }>(ownerId, "SELECT pim_app.runner_count_tool_call($1, $2) AS ok", [ownerId, defaultToolCalls]).then((r) => r.rows[0]?.ok !== false, () => true);
 	const guarded = tools.map((t) => {
 		const name = (t as unknown as { name: string }).name;
 		const run = (t as unknown as { execute: (...a: any[]) => Promise<Result> }).execute;
@@ -486,6 +511,7 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 			const allowed = app ? await toolsAllowed(app, ownerId, await deps.chatOf(api.conversationId)) : null;
 			if (app && name.startsWith("note_") && (await disabledBuiltins(app)).includes("notes")) return text("Notes are turned off for everyone by this Pim's admin.", true);
 			if (allowed && !allowed.has(name)) return text(`${name} isn't available here: this chat only has ${[...allowed].join(", ")}.`, true);
+			if (!(await withinToolCalls())) return text(`${QUOTA_MESSAGE} too many tool calls today. It resets at midnight UTC.`, true);
 			return run(args, api, context);
 		} };
 	}) as unknown as ToolRegistration[];

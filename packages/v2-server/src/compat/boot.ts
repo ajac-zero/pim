@@ -10,8 +10,10 @@ import type { Principal } from "@pim/v2-contracts/identity";
 import type { App } from "@pim/v2-app/app";
 import type { Agent as V2Agent } from "@pim/v2-app/agents";
 import { BadRequestError, ForbiddenError, NotFoundError } from "@pim/v2-app/errors";
+import { usageReport, computeReport } from "./usage.ts";
 import { fromAnotherSite, ok, route, sessionCookieName, setCookie, type Route } from "@pim/v2-app/http";
 import { newId } from "@pim/v2-app/ids";
+import { LOCALES } from "@pim/shared/locales";
 import { clientAddress } from "../limits.ts";
 import { PimThemes } from "@pim/shared/themes";
 import { pimThemes } from "@pim/shared/theme-data/index";
@@ -136,7 +138,7 @@ const SETTINGS: Record<string, (v: unknown) => boolean> = {
 	deviceAlerts: (v) => ["important", "all"].includes(v as string),
 	colorMode: (v) => ["light", "dark", "system"].includes(v as string),
 	colorTheme: (v) => themeIds.includes(v as string),
-	locale: (v) => ["en", "es"].includes(v as string),
+	locale: (v) => (LOCALES as readonly string[]).includes(v as string),
 	approvalTimeoutSeconds: (v) => v === null || (typeof v === "number" && v >= 0),
 };
 async function readSettings(app: App, ownerId: string) {
@@ -204,24 +206,17 @@ export const bootRoutes: Route[] = [
 		const p = await principal();
 		await app.identity.authz.enforce(p, "api:read");
 		const account = (await app.db.owner(p.ownerId, async (tx) => (await tx.query("SELECT owner_id, username, role, status, created_at FROM pim_app.accounts WHERE owner_id = $1", [p.ownerId])).rows[0])) as any;
-		const days = await app.db.owner(p.ownerId, async (tx) =>
-			(await tx.query("SELECT to_char(at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day, sum(input_tokens + output_tokens)::bigint AS tokens, count(*)::int AS requests FROM pim_app.model_calls WHERE at >= now() - interval '30 days' GROUP BY 1 ORDER BY 1")).rows,
-		);
-		const dayOf = (r: any) => ({ day: r.day, tokens: Number(r.tokens), planTokens: 0, modelRequests: r.requests, runs: 0, toolCalls: 0 });
-		const today = new Date().toISOString().slice(0, 10);
-		const storageBytes = Number(await app.db.owner(p.ownerId, async (tx) => (await tx.query("SELECT coalesce(sum(size), 0)::bigint AS n FROM pim_app.objects")).rows[0].n).catch(() => 0));
+		const usage = await usageReport(app, p.ownerId);
 		const codesLeft = await app.db.owner(p.ownerId, async (tx) => (await tx.query("SELECT count(*)::int AS n FROM pim_app.recovery_codes WHERE owner_id = $1 AND used_at IS NULL", [p.ownerId])).rows[0].n as number).catch(() => 10);
 		const others = await app.db.anonymous(async (tx) => (await tx.query("SELECT count(*)::int AS n FROM pim_app.accounts WHERE status = 'active' AND NOT bot AND owner_id <> $1", [p.ownerId])).rows[0].n as number).catch(() => 1);
-		const none = { dailyTokens: null, dailyModelRequests: null, dailyRuns: null, dailyToolCalls: null, sessions: null, schedules: null, storageBytes: null, artifacts: null, artifactVersions: null, artifactBytes: null, artifactStorageBytes: null };
-		const month = today.slice(0, 7);
 		return ok({
 			username: account.username,
 			ownerId: account.owner_id,
 			role: account.role,
 			status: account.status,
 			createdAt: ms(account.created_at),
-			usage: { limits: none, today: days.map(dayOf).find((d) => d.day === today) ?? dayOf({ day: today, tokens: 0, requests: 0 }), history: days.map(dayOf), storageBytes },
-			compute: { quota: { maxConcurrentWorkspaces: null, monthlySandboxMinutes: null, maxSessionMinutes: null }, own: null, usage: { month, minutes: 0, running: 0, byProvider: [], history: [] } },
+			usage,
+			compute: await computeReport(app, p.ownerId),
 			recoveryCodesLeft: codesLeft,
 			alone: others === 0,
 		});

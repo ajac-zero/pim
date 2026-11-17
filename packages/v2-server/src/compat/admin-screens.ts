@@ -6,6 +6,7 @@
 import type { App } from "@pim/v2-app/app";
 import { BadRequestError, NotFoundError, RefusedError } from "@pim/v2-app/errors";
 import { route, type Reply, type Route } from "@pim/v2-app/http";
+import { deploymentLimits } from "@pim/v2-app/quota";
 import { toServiceInput } from "@pim/v2-app/web-providers";
 import { configuredProviders, PROVIDER_IDS, providerName, providerSecrets } from "@pim/v2-app/oauth";
 import type { Principal } from "@pim/v2-contracts/identity";
@@ -92,8 +93,8 @@ export function screenRoutes(env: Env): Route[] {
 		route("GET", "/api/admin/deployment", async ({ app, principal, origin, appsOrigin }) => {
 			await admin(app, await principal(), "admin:settings");
 			const open = (await app.db.anonymous(async (tx) => (await tx.query("SELECT value FROM pim_app.instance_settings WHERE key = 'registration_open'")).rows[0]))?.value === true;
-			const limits = { dailyTokens: null, dailyModelRequests: null, dailyRuns: null, dailyToolCalls: null, sessions: null, schedules: null, storageBytes: null, artifacts: null, artifactVersions: null, artifactBytes: null, artifactStorageBytes: null };
-			const settings = { registration: open ? "open" : "invite", maxAccounts: null, registrationsPerAddress: 5, approvalPolicy: "explicit", timeZone: env.TZ ?? "UTC", model: env.PIM_DEFAULT_MODEL ?? "", models: gatewayModels(env), utilityModel: null, memoryModel: null, memoryLines: 0, imageModel: null, limits, publicUrl: env.PIM_PUBLIC_URL ?? origin, contentOrigin: appsOrigin ?? env.PIM_CONTENT_ORIGIN ?? null, emailFrom: null };
+			const limits = deploymentLimits(env);
+			const settings = { registration: open ? "open" : "invite", maxAccounts: null, registrationsPerAddress: 5, approvalPolicy: env.PIM_APPROVAL_POLICY === "auto" || env.PIM_APPROVAL_POLICY === "majordomo" ? env.PIM_APPROVAL_POLICY : "explicit", timeZone: env.PIM_TIME_ZONE ?? env.TZ ?? "UTC", model: env.PIM_DEFAULT_MODEL ?? "", models: gatewayModels(env), utilityModel: null, memoryModel: null, memoryLines: 0, imageModel: null, limits, publicUrl: env.PIM_PUBLIC_URL ?? origin, contentOrigin: appsOrigin ?? env.PIM_CONTENT_ORIGIN ?? null, emailFrom: null };
 			const secrets = PROVIDER_IDS.flatMap((id) => providerSecrets(id));
 			const variables = [...PLAIN_VARIABLES.map((name) => ({ name, value: env[name]?.trim() || null, problem: null })), ...secrets.map((name) => ({ name, value: env[name]?.trim() ? "(set)" : null, problem: null }))];
 			return ok({ settings, variables });
@@ -158,9 +159,11 @@ export function screenRoutes(env: Env): Route[] {
 		// ---- managed compute and the computer host: not part of this deployment yet ----
 		route("GET", "/api/admin/compute", async ({ app, principal }) => {
 			await admin(app, await principal(), "admin:compute");
-			return ok({ providers: [], kinds: [], quota: { maxConcurrentWorkspaces: null, monthlySandboxMinutes: null, maxSessionMinutes: null }, usage: { month: new Date().toISOString().slice(0, 7), minutes: 0, running: 0, byProvider: [], top: [] } });
+			const quota = await app.db.anonymous(async (tx) => (await tx.query("SELECT max_concurrent, compute_minutes FROM pim_forge.forge_quotas WHERE subject_type = 'deployment' AND subject_id = '*'")).rows[0]);
+			// Everyone's sandbox minutes are in rows each owner alone can read, so the deployment's own usage is shown as nothing here.
+			return ok({ providers: [], kinds: [], quota: { maxConcurrentWorkspaces: quota?.max_concurrent === null || quota === undefined ? null : Number(quota.max_concurrent), monthlySandboxMinutes: quota?.compute_minutes === null || quota === undefined ? null : Number(quota.compute_minutes), maxSessionMinutes: null }, usage: { month: new Date().toISOString().slice(0, 7), minutes: 0, running: 0, byProvider: [], top: [] } });
 		}),
-		...(["POST /api/admin/compute/providers", "PUT /api/admin/compute/providers/:id", "DELETE /api/admin/compute/providers/:id", "POST /api/admin/compute/providers/:id/validate", "PUT /api/admin/compute/quota"] as const).map((spec) => {
+		...(["POST /api/admin/compute/providers", "PUT /api/admin/compute/providers/:id", "DELETE /api/admin/compute/providers/:id", "POST /api/admin/compute/providers/:id/validate"] as const).map((spec) => {
 			const [method, path] = spec.split(" ") as [string, string];
 			return route(method, path, async ({ app, principal }) => (await admin(app, await principal(), "admin:compute"), unsupported("Managed compute")));
 		}),

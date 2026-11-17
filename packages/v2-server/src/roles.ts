@@ -42,7 +42,7 @@ import { natsRelayBus } from "./relay-bus.ts";
 import { notifyPass } from "./notifier.ts";
 import { vapidFromEnv } from "./push.ts";
 import { startApprovalReviews } from "./approval-review.ts";
-import { sweepApprovals, trimForgeOutbox } from "./sweeps.ts";
+import { sweepApprovals, sweepErasures, tickSchedules, tickTriggers, trimForgeOutbox } from "./sweeps.ts";
 import { webAssets } from "./web-assets.ts";
 import { poolRoutes } from "./compat/admin.ts";
 import { webCompatRoutes } from "./compat/index.ts";
@@ -101,7 +101,7 @@ export async function startGate(config: ProcessConfig, env: Env, host: Host, nat
 	instrumentPool(db.pool, metrics, "gate");
 	const objects = s3Of(config, env);
 	const crypto = keyringFromProcessEnv(env);
-	const app = new App(db, objects, { fetchTools: mcpFetchTools({ fetch, allowPrivate: env.PIM_CONNECTOR_ALLOW_PRIVATE === "1", check: publicUrl }), ...(crypto ? { crypto } : {}), ...(env.PIM_APP_SECRET_KEY ? { appKey: env.PIM_APP_SECRET_KEY } : {}), transcripts: projectedTranscripts(db.pool), ...(chatgptFromEnv(env) ? { chatgpt: chatgptFromEnv(env)! } : {}), allowHttpConnectors: env.PIM_CONNECTOR_ALLOW_PRIVATE === "1" });
+	const app = new App(db, objects, { fetchTools: mcpFetchTools({ fetch, allowPrivate: env.PIM_CONNECTOR_ALLOW_PRIVATE === "1", check: publicUrl }), ...(crypto ? { crypto } : {}), ...(env.PIM_APP_SECRET_KEY ? { appKey: env.PIM_APP_SECRET_KEY } : {}), transcripts: projectedTranscripts(db.pool), ...(chatgptFromEnv(env) ? { chatgpt: chatgptFromEnv(env)! } : {}), allowHttpConnectors: env.PIM_CONNECTOR_ALLOW_PRIVATE === "1", env }).limitSpaces();
 	installRooms(app);
 	if (nats) publishRevocations(app, nats);
 	// A computer paired to another process (the `relay` container, another Gate) is reached over NATS.
@@ -316,8 +316,9 @@ export async function startMaintenance(config: ProcessConfig, env: Env, host: Ho
 	const { Usage } = await import("@pim/v2-app/usage");
 	const usage = new Usage(app);
 	let lastTrim = 0;
+	let lastTriggers = 0;
 	const { App } = await import("@pim/v2-app/app");
-	const sweeper = new App(app, objects);
+	const sweeper = new App(app, objects, { env }).limitSpaces();
 	const notifier = { vapid: vapidFromEnv(env), subject: env.PIM_VAPID_SUBJECT || config.publicUrl, allowPrivate: env.PIM_PUSH_ALLOW_PRIVATE === "1" };
 	const keys = keyringFromProcessEnv(env);
 	let lastRenewal = 0;
@@ -328,8 +329,15 @@ export async function startMaintenance(config: ProcessConfig, env: Env, host: Ho
 			await renewDue({ app: new App(app, objects, { crypto: keys }), crypto: keys, transport: { fetch, allowPrivate: env.PIM_CONNECTOR_ALLOW_PRIVATE === "1", check: publicUrl }, publicUrl: env.PIM_PUBLIC_URL, now: Date.now }, maint).catch((e) => console.error("watch renewal", e));
 		}
 		await sweepApprovals(sweeper, maint).catch((e) => console.error("approval sweep", e));
+		// Schedules and time triggers fire from here: a schedule's due time is looked up every pass, the triggers' every few seconds.
+		await tickSchedules(sweeper).catch((e) => console.error("schedule sweep", e));
+		if (Date.now() - lastTriggers > 5_000) {
+			lastTriggers = Date.now();
+			await tickTriggers(sweeper, maint).catch((e) => console.error("trigger sweep", e));
+		}
 		if (Date.now() - lastTrim > 60_000) {
 			lastTrim = Date.now();
+			await sweepErasures(sweeper, maint, objects).catch((e) => console.error("erasure sweep", e));
 			await trimForgeOutbox(maint).catch((e) => console.error("outbox trim", e));
 		}
 		await deliverForgeWakes({ forge: parts.forge, forgeDb: maint as never, runtime, inbox, onUnroutable: (id, why) => console.warn("wake dropped", id, why) });

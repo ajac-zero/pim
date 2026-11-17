@@ -33,6 +33,10 @@ export type QuiescencePlan = {
 };
 
 const TERMINAL_THREAD = new Set(["archived", "failed", "done", "completed", "cancelled", "stopped"]);
+const entryRecord = (pi: ReturnType<typeof readPi>, id: number): any => {
+	const row = pi.entries.find((entry) => Number(entry.id) === id);
+	return row ? json(row.record) : null;
+};
 const json = (value: unknown): any => (typeof value === "string" && value !== "" ? JSON.parse(value) : null);
 
 /**
@@ -57,7 +61,12 @@ export async function planQuiescence(reader: SnapshotReader, cutoverAt: number):
 			if (row.status === "terminal") continue;
 			const task = json(row.record) ?? {};
 			if (row.kind === "pi.tool") {
-				const approval = approvalByCall.get(String(task.callId ?? ""));
+				// A real pi tool task keeps its call id in `input` and its arguments in the checkpoint of its state; its name is in the assistant entry that made the call. A hand-written one has them flat.
+				const callId = task.callId ?? task.input?.callId ?? null;
+				const args = task.args ?? task.state?.checkpoint?.arguments ?? null;
+				const call = (entryRecord(pi, Number(task.input?.assistant))?.model?.[0]?.content ?? []).find((part: any) => part?.type === "toolCall" && part.id === callId);
+				const toolName = task.tool ?? call?.name ?? approvalByCall.get(String(callId ?? ""))?.tool ?? "unknown";
+				const approval = approvalByCall.get(String(callId ?? ""));
 				const reason =
 					approval?.status === "pending"
 						? "An approval was pending at the cutover; a person decides again, and a timeout never approves."
@@ -66,11 +75,11 @@ export async function planQuiescence(reader: SnapshotReader, cutoverAt: number):
 							: "The tool call was running at the cutover and its effect is unknown.";
 				operations.push({
 					tenantId: owner,
-					kind: `tool:${String(task.tool ?? "unknown")}`,
+					kind: `tool:${String(toolName)}`,
 					idempotencyKey: `tool:${owner}:${row.id}`,
 					status: "needs_reconciliation",
 					// The arguments can hold bodies and secrets: only their digest is kept.
-					payload: { taskId: Number(row.id), conversationId: Number(row.conversation_id), callId: task.callId ?? null, taskStatus: row.status, approval: approval?.id ?? null, argsSha256: sha256(canonical(task.args ?? null)) },
+					payload: { taskId: Number(row.id), conversationId: Number(row.conversation_id), callId, taskStatus: row.status, approval: approval?.id ?? null, argsSha256: sha256(canonical(args)) },
 					reason,
 				});
 				taskHolds.push({ tenantId: owner, taskId: Number(row.id), reason });
@@ -94,7 +103,7 @@ export async function planQuiescence(reader: SnapshotReader, cutoverAt: number):
 		const revisions = new Map<string, any>();
 		for (const row of rowsOf(dump, "pim_trigger_revisions")) revisions.set(`${row.trigger_id}:${row.revision}`, json(row.spec));
 		for (const trigger of rowsOf(dump, "pim_triggers")) {
-			if (trigger.lifecycle !== "active") continue;
+			if (trigger.lifecycle !== "active" && trigger.lifecycle !== "enabled") continue;
 			const source = rowsOf(dump, "pim_trigger_sources").find((s) => s.trigger_id === trigger.id);
 			const spec = revisions.get(`${trigger.id}:${trigger.revision}`)?.source;
 			if (!spec || spec.kind !== "time") continue;
@@ -128,7 +137,8 @@ export async function planQuiescence(reader: SnapshotReader, cutoverAt: number):
 			operations.push({ tenantId: owner, kind: "trigger_fire", idempotencyKey: `outbox:${owner}:${outbox.id}`, status: "needs_reconciliation", payload: { outbox: String(outbox.id), trigger: String(outbox.trigger_id), operationId: String(outbox.operation_id), availableAt: Number(outbox.available_at) }, reason: "A firing queued before the cutover is never delivered after it." });
 		}
 		for (const job of rowsOf(dump, "cf_agents_jobs")) {
-			const dueAt = Number(job.time) * 1000;
+			// agents writes `time` in milliseconds (a real export has 1794888000000), where an older fixture wrote seconds: a value below 1e11 is seconds.
+			const dueAt = Number(job.time) < 1e11 ? Number(job.time) * 1000 : Number(job.time);
 			dueWork.push({ tenantId: owner, kind: "agents_job", key: String(job.id), state: dueAt <= cutoverAt ? "dropped" : "armed", nextDueAtMs: dueAt <= cutoverAt ? null : dueAt, missed: dueAt <= cutoverAt ? [dueAt] : [], spec: { fn: job.fn, payload: json(job.payload) } });
 		}
 	}

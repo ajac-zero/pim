@@ -135,7 +135,8 @@ export class Sharing {
 		await this.authz.enforce(p, "api:read");
 		return this.db.owner(p.ownerId, async (tx) => {
 			const r = (await tx.query("SELECT display_name, bio, published FROM pim_app.profiles WHERE owner_id = $1", [p.ownerId])).rows[0];
-			return { displayName: (r?.display_name ?? "") as string, bio: (r?.bio ?? "") as string, published: (r?.published ?? false) as boolean };
+			// An unset name or bio is null, as in v1: the web app then shows the username's initial instead of an empty avatar.
+			return { displayName: (r?.display_name || null) as string | null, bio: (r?.bio || null) as string | null, published: (r?.published ?? false) as boolean };
 		});
 	}
 

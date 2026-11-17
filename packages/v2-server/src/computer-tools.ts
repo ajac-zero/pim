@@ -368,11 +368,25 @@ export function computerTools(deps: ComputerToolDeps, kit: ComputerToolKit): Too
 	let root = "";
 	// References count up across pages; a process that restarts begins above anything an earlier one gave, so an approval that waited across a restart reaches the element it named or none.
 	const meta = new Map<string, string>([["browser_next_ref", String(Math.floor(Date.now() / 1000))]]);
+	// Each chat's browser is on a display of its own where the computer runs displayd. A computer without it (a laptop, a plain server) has one browser, the primary, which the chats
+	// share, each in a window of its own; that is remembered once the computer has said so.
+	let sharedBrowser = false;
+	const NO_DISPLAYD = /no display allocated|displayd is not reachable/;
+	const perThread = async <T>(thread: string | undefined, run: (thread: string | undefined) => Promise<T>): Promise<T> => {
+		if (!thread || sharedBrowser) return run(undefined);
+		try {
+			return await run(thread);
+		} catch (error) {
+			if (!NO_DISPLAYD.test(error instanceof Error ? error.message : String(error))) throw error;
+			sharedBrowser = true;
+			return run(undefined);
+		}
+	};
 	const asBrowser: BrowserComputer = {
 		paired: () => current !== null,
 		status: () => ({ state: current ? "online" : "offline" }),
-		browserStatus: (thread) => (current ? current.call("browser_status", thread ? { thread } : {}) : Promise.resolve({ available: false, running: false })),
-		stopBrowser: async (thread) => void (await current?.call("browser_stop", thread ? { thread } : {})),
+		browserStatus: (thread) => (current ? perThread(thread, (t) => current!.call("browser_status", t ? { thread: t } : {})) : Promise.resolve({ available: false, running: false })),
+		stopBrowser: async (thread) => void (await current?.call("browser_stop", thread ? { thread } : {}).catch(() => undefined)),
 		fs: { mkdir: async (path, options) => void (await current!.call("mkdir", { path, recursive: options.recursive })) },
 		localPath: async (path) => {
 			await current!.call("stat", { path });
@@ -384,7 +398,7 @@ export function computerTools(deps: ComputerToolDeps, kit: ComputerToolKit): Too
 		connectBrowser: async (thread) => {
 			const computer = current!;
 			const transport: BrowserTransport = { send: () => {}, close: () => {} };
-			const link = await computer.openBrowser((data) => (data === null ? transport.onclose?.() : transport.onmessage?.(data)), thread);
+			const link = await perThread(thread, (t) => computer.openBrowser((data) => (data === null ? transport.onclose?.() : transport.onmessage?.(data)), t));
 			transport.send = (message) => link.send(message);
 			transport.close = () => link.close();
 			return transport;

@@ -3,13 +3,16 @@
 // a trigger chat, a pending approval, an external tool call that was running at the fence, schedules that were due while
 // the fence stood, a Yjs note, a hosted app with its files, media, and coding threads (one in Amp's cloud, one a CLI run).
 // Nothing here is real data. Ids and times are fixed so that two runs build the same snapshot.
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { LEGACY_PREFIX, legacyBinding, sealLegacyCredential, sealLegacyVaultBlob, vaultKeyFromCookieKey } from "../crypto/legacy.ts";
 import { keyFingerprint } from "../crypto/envelope.ts";
 import { type DoDump, type Row, type TableDump, SnapshotWriter, b64 } from "./snapshot.ts";
 
 export const FIXTURE_CUTOVER_AT = Date.UTC(2026, 10, 20, 3, 0, 0);
 const MIN = 60_000;
+const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
+const HABIT_HTML = "<!doctype html><title>Habit tracker</title>";
+const NOTE_MD = "# Packing list\n\n- passport\n";
 
 export type FixtureKeys = { readonly appCredentialsKey: Buffer; readonly cookieKey: Buffer };
 
@@ -228,7 +231,6 @@ export async function buildLegacySnapshot(dir: string, options: { cutoverAt?: nu
 	const all = [cron, interval, once, future];
 	const mediaPng = pseudoBytes("image", 64 * 1024);
 	const mediaMp4 = pseudoBytes("video", 3 * 1024 * 1024);
-	const noteDoc = Buffer.from([1, 1, 168, 238, 217, 224, 5, 0, 4, 1, 4, 116, 101, 120, 116, 5, 72, 101, 108, 108, 111, 0]);
 
 	await writer.dump(
 		dump(
@@ -273,8 +275,10 @@ export async function buildLegacySnapshot(dir: string, options: { cutoverAt?: nu
 				pim_mcp_servers: table(["id", "approval"], [{ id: "conn_gmail", approval: "all" }]),
 				pim_push_subscriptions: table(["endpoint", "p256dh", "auth", "created_at"], [{ endpoint: "https://push.example.test/abc", p256dh: "p256", auth: "push-auth-secret", created_at: cutoverAt - 40 * 86_400_000 }]),
 				pim_tasks: table(["id", "title", "status", "conversation", "operation_id"], [{ id: "t1", title: "Research hostels", status: "done", conversation: String(delegated), operation_id: "task:t1" }]),
-				pim_notes: table(["id", "title", "ydoc", "updated_at"], [{ id: "note_1", title: "Packing list", ydoc: b64(noteDoc), updated_at: cutoverAt - 3_600_000 }]),
-				pim_artifacts: table(["id", "name", "kind", "versions", "created_at"], [{ id: "art_1", name: "Habit tracker", kind: "app", versions: json([{ v: 1, files: { "index.html": "own_ada/art_1/v1/index.html" } }]), created_at: cutoverAt - 30 * 86_400_000 }]),
+				// A real space keeps apps in three tables, their files content-addressed in the ARTIFACTS bucket at `<owner>/<sha256>`; a note is an app of kind markdown with one README.md.
+				pim_artifacts: table(["id", "title", "kind", "session", "head", "created_at", "updated_at"], [{ id: "art_1", title: "Habit tracker", kind: "html", session: "1", head: 1, created_at: cutoverAt - 30 * 86_400_000, updated_at: cutoverAt - 30 * 86_400_000 }, { id: "note_1", title: "Packing list", kind: "markdown", session: "1", head: 1, created_at: cutoverAt - 3_600_000, updated_at: cutoverAt - 3_600_000 }]),
+				pim_artifact_versions: table(["artifact", "version", "content", "sha256", "size", "source", "restored_from", "call_id", "created_at"], [{ artifact: "art_1", version: 1, content: "", sha256: sha256(HABIT_HTML), size: HABIT_HTML.length, source: "agent", restored_from: null, call_id: null, created_at: cutoverAt - 30 * 86_400_000 }, { artifact: "note_1", version: 1, content: "", sha256: sha256(NOTE_MD), size: NOTE_MD.length, source: "agent", restored_from: null, call_id: null, created_at: cutoverAt - 3_600_000 }]),
+				pim_artifact_files: table(["artifact", "version", "path", "sha256", "size", "type"], [{ artifact: "art_1", version: 1, path: "index.html", sha256: sha256(HABIT_HTML), size: HABIT_HTML.length, type: "text/html" }, { artifact: "note_1", version: 1, path: "README.md", sha256: sha256(NOTE_MD), size: NOTE_MD.length, type: "text/markdown" }]),
 				pim_triggers: table(Object.keys(cron.triggers), all.map((t) => t.triggers)),
 				pim_trigger_revisions: table(Object.keys(cron.revision), all.map((t) => t.revision)),
 				pim_trigger_sources: table(Object.keys(cron.source), all.map((t) => t.source)),
@@ -348,8 +352,8 @@ export async function buildLegacySnapshot(dir: string, options: { cutoverAt?: nu
 	await writer.dump(dump("WorkspaceCatalog", "workspaces", {}, { kv: [] }));
 
 	// Object storage: a hosted app's files, an image and a video, and a sealed coding-vault blob.
-	await writer.object("ARTIFACTS", "own_ada/art_1/v1/index.html", Buffer.from("<!doctype html><title>Habit tracker</title>"), "text/html");
-	await writer.object("ARTIFACTS", "own_ada/art_1/v1/app.js", Buffer.from("console.log('habits')"), "text/javascript");
+	await writer.object("ARTIFACTS", `own_ada/${sha256(HABIT_HTML)}`, Buffer.from(HABIT_HTML), "text/html");
+	await writer.object("ARTIFACTS", `own_ada/${sha256(NOTE_MD)}`, Buffer.from(NOTE_MD), "text/markdown");
 	await writer.object("BLOBS", "own_ada/img_1.png", mediaPng, "image/png");
 	await writer.object("BLOBS", "own_ada/vid_1.mp4", mediaMp4, "video/mp4");
 	await writer.object("BLOBS", "own_ada/vault/claude-code", sealLegacyVaultBlob(Buffer.from("login-archive-bytes"), vaultKeyFromCookieKey(keys.cookieKey), owners.ada, "claude-code"), "application/octet-stream");

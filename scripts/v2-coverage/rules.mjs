@@ -122,7 +122,7 @@ export const RULES = [
 	["B4", /^Sharing to circles/, "Preserved", "Sharing", app("surfaces"), V, ""],
 	["B4", /^Personal files/, "Changed", "Relay calls to the computer; /api/files (list, content, conditional write, delete) and the file_* agent tools", [app("relay"), srv("computer-agent")].join(", "), V, "Ranges, chunked streaming of large downloads and file-change notices (B4.10) are not carried."],
 	["B4", /^File-change notices/, "Not carried", "—", "—", G, ""],
-	["B4", /^Legacy stored files/, "Not carried", "kept in pim_ops.legacy_rows", ops("migration"), G, ""],
+	["B4", /^Legacy stored files/, "Preserved", "pim_app.objects (purpose `file`, bytes under the owner's key) and the owner setting `legacy_files` (their paths)", cut, P, "Promoted from the landing by `promoteToLive`, tested on a landing row; not exercised on a real v1 export (a v1 space cannot make such files any more). Workspace text files kept in the space's SQLite are in the landing verbatim, not promoted. Nothing shows the index yet: it waits for the computer move."],
 	["B4", /^Code editor tabs/, "Changed", "web app only", "web/src tests", P, ""],
 	["B4", /^Hosted app/, "Preserved", "Relay hosted proxy, token path and app origin", app("relay"), V, ""],
 	["B4", /^Chat images/, "Preserved", "Objects (magic bytes, ACLs, ranges)", app("files"), V, ""],

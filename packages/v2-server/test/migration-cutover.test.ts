@@ -1,6 +1,7 @@
 // A cutover rehearsal on the real stack: a legacy export (the ops package's synthetic snapshot) is imported into the landing schema, audited, promoted into the
 // live schemas, and then real gate, live and runner processes serve it: an imported passkey signs in, imported forked chats read over the snapshot API,
 // a new message in an imported chat runs on a Runner, and Forge adopts an imported Amp thread without starting it again.
+import { createHash } from "node:crypto";
 import type { Pool } from "pg";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -23,7 +24,7 @@ import { MemoryObjects } from "@pim/v2-forge/ports";
 import { ForgeScheduler } from "@pim/v2-forge/scheduler";
 import { ForgeStore } from "@pim/v2-forge/store";
 import { ForgeWorker } from "@pim/v2-forge/worker";
-import { promoteToLive } from "../src/migration-bridge.ts";
+import { chatUuid, promoteToLive } from "../src/migration-bridge.ts";
 import type { Process } from "../src/main.ts";
 import { waitFor } from "../../v2-runtime/test/support/rig.ts";
 import { Authenticator } from "./support/authenticator.ts";
@@ -39,7 +40,12 @@ async function legacyDomain(admin: Pool, objects: FsObjectStore, conversation: s
 	const legacy = (await admin.query("SELECT legacy_id FROM pim_ops.owner_map WHERE owner_id = $1", [ADA])).rows[0].legacy_id as string;
 	await objects.put("BLOBS", `${legacy}/skills/${sha}`, Buffer.from("# reference\n"));
 	const at = FIXTURE_CUTOVER_AT - 86_400_000;
+	// A file kept in the space before files moved to computers: a row of `pim_stored_files`, its bytes in the BLOBS bucket at `<owner>/files/<id>` (B4.11).
+	const bytes = Buffer.from("%PDF");
+	await objects.put("BLOBS", `${legacy}/files/f1`, bytes);
+	await admin.query("INSERT INTO pim_ops.objects (bucket, key, owner_id, size_bytes, sha256, content_type) VALUES ('BLOBS', $1, $2, 4, $3, 'application/pdf')", [`${legacy}/files/f1`, ADA, createHash("sha256").update(bytes).digest("hex")]);
 	const rows: [string, string, unknown][] = [
+		["pim_stored_files", "notes/old.pdf", { path: "notes/old.pdf", id: "f1", type: "application/pdf", bytes: 4, updated_at: at }],
 		["pim_agents", "ag_poet", { id: "ag_poet", name: "Poet", instructions: "Answer in verse.", model: "faux/m", fallbacks: "[]", skills: "[\"Haiku\"]", apps: "[]", contacts: "[]", role: null, description: "", is_default: 0, symbol: "P", color: "blue", created_at: at }],
 		["pim_skills", "Haiku", { name: "Haiku", created_at: at }],
 		["pim_skill_versions", "Haiku:1", { name: "Haiku", version: 1, description: "Write haiku", instructions: "Five, seven, five.", created_at: at }],
@@ -99,10 +105,14 @@ real("a cutover rehearsal", () => {
 		const docRecord = { id: 9_000_000, kind: "pi.live", scope: { kind: "conversation", conversationId: Number(cut.conversation_id) }, history: "latest", fork: "initial", createdAt: 1 };
 		await stack.admin.query("INSERT INTO pim_ops.pi_documents (owner_id, id, partition_id, kind, family, key_value, scope_kind, scope_owner_id, created_at, record) VALUES ($1,9000000,$2,'pi.live',0,'','conversation',$3,1,$4)", [ADA, cut.partition_id, cut.conversation_id, JSON.stringify(docRecord)]);
 		await stack.admin.query("INSERT INTO pim_ops.pi_document_revisions (owner_id, document_id, seq, kind, version, content) VALUES ($1,9000000,1,'base',1,$2)", [ADA, JSON.stringify(live)]);
-		// The fixture's own pi.agent document of that chat is a stub without pi's document semantics; the promotion's default agent stands in for it.
-		await stack.admin.query("DELETE FROM pim_ops.pi_document_revisions WHERE owner_id = $1 AND document_id IN (SELECT id FROM pim_ops.pi_documents WHERE owner_id = $1 AND kind = 'pi.agent' AND scope_owner_id = $2)", [ADA, cut.conversation_id]);
-		await stack.admin.query("DELETE FROM pim_ops.pi_documents WHERE owner_id = $1 AND kind = 'pi.agent' AND scope_owner_id = $2", [ADA, cut.conversation_id]);
+		// The fixture's own pi.agent documents of that chat and of the home chat are stubs without pi's document semantics; the promotion's default agent stands in for them.
+		await stack.admin.query("DELETE FROM pim_ops.pi_document_revisions WHERE owner_id = $1 AND document_id IN (SELECT id FROM pim_ops.pi_documents WHERE owner_id = $1 AND kind = 'pi.agent' AND scope_owner_id IN ($2, 1))", [ADA, cut.conversation_id]);
+		await stack.admin.query("DELETE FROM pim_ops.pi_documents WHERE owner_id = $1 AND kind = 'pi.agent' AND scope_owner_id IN ($2, 1)", [ADA, cut.conversation_id]);
+		// A conversation last run on the old deployment's model (Workers AI), a provider the new one does not have: pi would answer every new message with "Model ... is not available".
+		await stack.admin.query("UPDATE pim_ops.pi_document_revisions SET content = '{\"model\":{\"provider\":\"workers-ai\",\"modelId\":\"@cf/llama\"}}'::jsonb WHERE owner_id = $1 AND document_id = (SELECT max(id) FROM pim_ops.pi_documents WHERE owner_id = $1 AND kind = 'pi.agent' AND scope_owner_id NOT IN (1, $2))", [ADA, cut.conversation_id]);
 		await legacyDomain(stack.admin, objects, cut.conversation_id);
+		// The first conversation (the home partition's) is a chat of its own in a real space; the synthetic snapshot links it to none.
+		await stack.admin.query("INSERT INTO pim_ops.chats (owner_id, public_id, conversation_id, title, created_at_ms, updated_at_ms) VALUES ($1, 'home-chat', 1, 'Home', 1, 1) ON CONFLICT DO NOTHING", [ADA]);
 		// The synthetic passkeys' keys are random bytes; Ada's is replaced by a real one so the test can sign in with it.
 		await stack.admin.query("UPDATE pim_ops.passkeys SET id = $1, spki = $2, algorithm = -7 WHERE owner_id = $3 AND id = (SELECT min(id) FROM pim_ops.passkeys WHERE owner_id = $3)", [key.id, key.spki, ADA]);
 	}, 180_000);
@@ -120,6 +130,8 @@ real("a cutover rehearsal", () => {
 		expect(report.messages).toBeGreaterThan(0);
 		expect(report.orphanedTasks).toBeGreaterThan(0);
 		expect(report.clearedRuns).toBe(1);
+		expect(report.remappedModels).toBeGreaterThan(0);
+		expect(await Number((await d.stack.admin.query("SELECT count(*) n FROM pim_runtime.document_revisions WHERE content::text LIKE '%workers-ai%'")).rows[0].n)).toBe(0);
 		const count = async (sql: string) => Number((await d.stack.admin.query(sql)).rows[0].n);
 		const before = [await count("SELECT count(*) n FROM pim_app.accounts"), await count("SELECT count(*) n FROM pim_app.conversations"), await count("SELECT count(*) n FROM pim_runtime.entries"), await count("SELECT count(*) n FROM pim_projection.chat_transcript_projection"), await count("SELECT count(*) n FROM pim_forge.forge_threads")];
 		expect(before.every((n) => n > 0)).toBe(true);
@@ -145,6 +157,10 @@ real("a cutover rehearsal", () => {
 		expect(JSON.parse(await openString(appKeys, plan.secret, `chatgpt:${ADA}`))).toMatchObject({ type: "oauth", access: "chatgpt-access-example", refresh: "chatgpt-refresh-example", clientId: "client-example" });
 		expect(await as("SELECT 1 FROM pim_app.providers WHERE owner_id = $1 AND kind = 'openai'", [ADA])).toHaveLength(0);
 		for (const p of await as<{ id: string; secret: string | null }>("SELECT id, secret FROM pim_app.providers WHERE owner_id = $1 AND secret IS NOT NULL", [ADA])) expect((await openString(appKeys, p.secret!, `provider:${ADA}/${p.id}`)).length).toBeGreaterThan(0);
+		// A file from before files moved to computers: its bytes are an object under the new owner, and its path is kept in an index, since an object key has no room for it.
+		expect(Buffer.from(copied.get(`${ADA}/files/f1`)!).toString()).toBe("%PDF");
+		expect((await as("SELECT value FROM pim_app.owner_settings WHERE owner_id = $1 AND key = 'legacy_files'", [ADA]))[0]).toMatchObject({ value: [{ path: "notes/old.pdf", key: `${ADA}/files/f1`, type: "application/pdf", bytes: 4 }] });
+		expect(await count(`SELECT count(*) n FROM pim_app.objects WHERE key = '${ADA}/files/f1' AND purpose = 'file'`)).toBe(1);
 		// Nothing that was due while the fence stood comes back: a time trigger counts from the activation.
 		const stale = await count(`SELECT count(*) n FROM pim_app.triggers WHERE owner_id = '${ADA}' AND source = 'time' AND watermark < ${ACTIVATED_AT}`);
 		expect(stale).toBe(0);
@@ -215,6 +231,17 @@ real("a cutover rehearsal", () => {
 			return s.messages.some((m) => m.role === "assistant" && m.parts.some((p) => p.text === "Noted.")) && s.messages.some((m) => m.parts.some((p) => p.text === "anyone there after the cut?")) ? s : undefined;
 		}, 60_000);
 		expect(plain.messages.at(-1)!.role).toBe("assistant");
+
+		// A chat in the home partition, which a real space's first chat and its forks share: the relay must not try to make that partition again as a family (a real rehearsal found it did).
+		const home = (await d.stack.admin.query("SELECT c.public_id FROM pim_ops.chats c JOIN pim_ops.conversation_directory x ON x.owner_id = c.owner_id AND x.conversation_id = c.conversation_id JOIN pim_ops.partitions p ON p.owner_id = x.owner_id AND p.partition_id = x.partition_id WHERE c.owner_id = $1 AND p.home AND c.deleted_at_ms IS NULL LIMIT 1", [ADA])).rows[0]?.public_id as string | undefined;
+		if (home) {
+			const chat = chatUuid(home);
+			expect((await web.call("POST", `/api/sessions/${chat}/messages`, { commandId: "after-cutover-home", text: "anyone home?" })).status).toBe(202);
+			await waitFor("the answer in a chat of the home partition", async () => {
+				const s = (await web.call("GET", `/api/snapshot/chat/${chat}?limit=200`)).json as { messages: { role: string; parts: { text?: string }[] }[] };
+				return s.messages.some((m) => m.parts.some((p) => p.text === "anyone home?")) && s.messages.at(-1)!.role === "assistant" ? s : undefined;
+			}, 60_000);
+		}
 	}, 120_000);
 
 	it("adopts an imported Amp thread in Forge without starting it again, and leaves a cut-off CLI thread idle", async () => {

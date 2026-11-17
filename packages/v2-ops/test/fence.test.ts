@@ -80,7 +80,7 @@ describe("the inert fence worker", () => {
 		await seed(stub, [
 			...JOBS,
 			"CREATE TABLE pi_entries (id INTEGER PRIMARY KEY, conversation_id INTEGER NOT NULL, record TEXT NOT NULL) STRICT",
-			...Array.from({ length: 1205 }, (_, i) => `INSERT INTO pi_entries (id, conversation_id, record) VALUES (${i + 2}, 1, '{"n":${i}}')`),
+			...Array.from({ length: 1205 }, (_, i) => `INSERT INTO pi_entries (id, conversation_id, record) VALUES (${i}, 1, '{"n":${i}}')`),
 			"CREATE TABLE pim_notes (id TEXT PRIMARY KEY, ydoc BLOB)",
 			"INSERT INTO pim_notes VALUES ('n1', x'0001ff80')",
 		]);
@@ -102,7 +102,8 @@ describe("the inert fence worker", () => {
 			after = page.next;
 			done = page.done;
 		}
-		expect(ids).toEqual(Array.from({ length: 1205 }, (_, i) => i + 2));
+		// optmem_log's first memory has id (and rowid) 0: a page cursor that skipped it lost that row, which the first real export found.
+		expect(ids).toEqual(Array.from({ length: 1205 }, (_, i) => i));
 		const jobs = [];
 		for (let after = 0, done = false; !done; ) {
 			const page = await get(`/fence/v1/do/Pim/own_export/rows?table=cf_agents_jobs&after=${after}&limit=2`);

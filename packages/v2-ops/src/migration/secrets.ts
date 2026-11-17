@@ -25,7 +25,8 @@ export const SECRET_COLUMNS: Readonly<Record<string, readonly SecretColumn[]>> =
 /** `directory_meta`, `pim_meta` and `auth_meta` keys whose values are secrets. */
 export const SECRET_META_KEYS: Readonly<Record<string, readonly string[]>> = {
 	Directory: ["cookie_key", "salt", "claim_code"],
-	Pim: ["hosted_key", "vapid_keys"],
+	// `own_providers` is the person's custom model providers as one JSON array with each API key in it; the others are keys the Worker made for the space.
+	Pim: ["hosted_key", "vapid_keys", "own_providers", "computer_token", "images_signing_key", "email_pending"],
 	Auth: ["setup_code"],
 };
 export const META_TABLE: Readonly<Record<string, string>> = { Directory: "directory_meta", Pim: "pim_meta", Auth: "auth_meta" };

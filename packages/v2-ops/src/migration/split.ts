@@ -22,14 +22,29 @@ export type Split = {
 	readonly maxSeq: ReadonlyMap<string, number>;
 };
 
+/**
+ * pi-durable stores the scalar columns it indexes by (a task's and a document's `kind`, a document's `key_value`, a submission's `request_id`) as JSON text, so a real
+ * export holds `"pi.tool"` with its quotes where a hand-written fixture holds `pi.tool`. Everything downstream (the quiescence plan, the audit's tool-hold check, the
+ * landing's columns, the promotion) compares the bare value, so it is read bare here. A value that is not JSON text is kept as it is.
+ */
+const bare = (cell: unknown) => {
+	if (typeof cell !== "string" || !cell.startsWith('"')) return cell;
+	try {
+		return JSON.parse(cell) as string;
+	} catch {
+		return cell;
+	}
+};
+const unquoted = (rows: readonly Row[], columns: readonly string[]): readonly Row[] => rows.map((row) => ({ ...row, ...Object.fromEntries(columns.filter((c) => c in row).map((c) => [c, bare(row[c]) as Row[string]])) }));
+
 export function readPi(dump: DoDump): PiRows {
 	const meta = rowsOf(dump, "pi_durable_metadata")[0];
 	return {
 		conversations: rowsOf(dump, "pi_conversations"),
 		entries: rowsOf(dump, "pi_entries"),
-		tasks: rowsOf(dump, "pi_tasks"),
-		submissions: rowsOf(dump, "pi_submissions"),
-		documents: rowsOf(dump, "pi_documents"),
+		tasks: unquoted(rowsOf(dump, "pi_tasks"), ["kind"]),
+		submissions: unquoted(rowsOf(dump, "pi_submissions"), ["request_id"]),
+		documents: unquoted(rowsOf(dump, "pi_documents"), ["kind", "key_value"]),
 		revisions: rowsOf(dump, "pi_document_revisions"),
 		nextId: BigInt(String(meta?.next_id ?? "2")),
 	};

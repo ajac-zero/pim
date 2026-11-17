@@ -24,6 +24,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { projectEntries } from "@pim/shared/transcript";
 import { chatgptContext } from "@pim/v2-app/chatgpt";
 import { KeyringCrypto, sealString } from "@pim/v2-app/crypto";
+import { mergeNoteUpdates, noteUpdateFromText } from "@pim/v2-app/note-import";
 import { userHandle } from "@pim/v2-app/signin";
 import type { EnvelopeCrypto as OpsCrypto } from "@pim/v2-ops/crypto/envelope";
 import { applyImmutable, decoder } from "@earendil-works/chord/delta";
@@ -53,7 +54,7 @@ export type PromoteOptions = {
 };
 
 /** `domain` counts what was promoted per kind; `skipped` says what was left in the landing and why. */
-export type PromoteReport = { owners: string[]; chats: number; messages: number; forgeThreads: number; orphanedTasks: number; clearedRuns: number; domain: Record<string, number>; skipped: string[] };
+export type PromoteReport = { owners: string[]; chats: number; messages: number; forgeThreads: number; orphanedTasks: number; clearedRuns: number; remappedModels: number; domain: Record<string, number>; skipped: string[] };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 /** A chat's public id as a UUID: the legacy id when it is one, else one derived from it, the same every time. */
@@ -116,7 +117,7 @@ async function promoteIdentity(pool: Pool, owner: string, rpId: string): Promise
 }
 
 /** The landing's pi tables as the runtime's `LegacySpace`. A task that was running a tool at the cutover (held for reconciliation) ends as orphaned: it is never replayed. */
-async function legacySpace(pool: Pool, owner: string, cutoverAt: number, defaultAgent?: PromoteOptions["defaultAgent"]): Promise<{ space: LegacySpace; orphaned: number; clearedRuns: number }> {
+async function legacySpace(pool: Pool, owner: string, cutoverAt: number, defaultAgent?: PromoteOptions["defaultAgent"], usable: ReadonlySet<string> = new Set()): Promise<{ space: LegacySpace; orphaned: number; clearedRuns: number; remappedModels: number }> {
 	const q = async (sql: string) => (await pool.query(sql, [owner])).rows;
 	const conversations = (await q("SELECT record FROM pim_ops.pi_conversations WHERE owner_id = $1 ORDER BY id")).map((r) => r.record as ConversationRecord);
 	const entries = (await q("SELECT record, commit_seq FROM pim_ops.pi_entries WHERE owner_id = $1 ORDER BY id")).map((r) => ({ record: r.record as EntryRecord, commitSeq: Number(r.commit_seq) }));
@@ -165,7 +166,21 @@ async function legacySpace(pool: Pool, owner: string, cutoverAt: number, default
 		}
 	}
 	const clearedRuns = clearOrphanedRuns(documents, orphanedIn);
-	return { clearedRuns, space: { conversations, entries, tasks: tasks as never, submissions, documents, metadata: { nextId: Math.max(next, ...documents.map((x) => x.record.id + 1)), nextSeq: Math.max(nextSeq, ...documents.map((x) => x.record.createdAt + 1)) } }, orphaned };
+	// A conversation's `pi.agent` document names the model it was last run on, and a legacy one names the old deployment's (Workers AI, the preview stand-in): a provider this deployment does not have. pi would
+	// fail every new message with "Model ... is not available", so each such revision names the deployment's default model instead. A model of a provider the deployment has stays.
+	let remappedModels = 0;
+	if (defaultAgent) {
+		for (const doc of documents) {
+			if (doc.record.kind !== "pi.agent") continue;
+			doc.revisions = doc.revisions.map((rev) => {
+				const model = (rev.content as { model?: { provider?: string } } | null)?.model;
+				if (!model?.provider || usable.has(model.provider)) return rev;
+				remappedModels++;
+				return { ...rev, content: { ...(rev.content as object), model: defaultAgent } };
+			});
+		}
+	}
+	return { clearedRuns, remappedModels, space: { conversations, entries, tasks: tasks as never, submissions, documents, metadata: { nextId: Math.max(next, ...documents.map((x) => x.record.id + 1)), nextSeq: Math.max(nextSeq, ...documents.map((x) => x.record.createdAt + 1)) } }, orphaned };
 }
 
 /**
@@ -198,6 +213,19 @@ function clearOrphanedRuns(documents: { record: DocumentRecord; revisions: { seq
 		cleared++;
 	}
 	return cleared;
+}
+
+/** The ids of the custom model providers a space had (its models are still named by them, and the promotion keeps those ids). */
+async function ownProviderIds(pool: Pool, owner: string, options: PromoteOptions): Promise<string[]> {
+	const meta = (await pool.query("SELECT row FROM pim_ops.legacy_rows WHERE owner_id = $1 AND table_name = 'pim_meta' AND pk = 'own_providers'", [owner])).rows[0]?.row as { value?: { $secret?: string } } | undefined;
+	const name = meta?.value?.$secret;
+	const found = name ? (await pool.query("SELECT envelope FROM pim_ops.secret_envelopes WHERE owner_id = $1 AND name = $2", [owner, name])).rows[0] : undefined;
+	if (!found || !options.crypto) return [];
+	try {
+		return (parseJson(options.crypto.ops.open(found.envelope, [owner, name!, "meta"]).toString(), []) as { id: string }[]).map((p) => p.id);
+	} catch {
+		return [];
+	}
 }
 
 /** The application's chat directory and a baseline projection of what the runtime now holds. */
@@ -356,7 +384,10 @@ async function promoteDomain(pool: Pool, owner: string, options: PromoteOptions,
 	const members = await rows("pim_circle_members");
 	const links = await rows("pim_chat_links");
 	const artifacts = await rows("pim_artifacts");
-	const notes = await rows("pim_notes");
+	const artifactVersions = await rows("pim_artifact_versions");
+	const artifactFiles = await rows("pim_artifact_files");
+	const noteUpdates = await rows("pim_note_updates");
+	const storedFiles = await rows("pim_stored_files");
 	const agentSessions = await rows("pim_agent_sessions");
 	const meta = await rows("pim_meta");
 	const profile = (await pool.query("SELECT row FROM pim_ops.legacy_rows WHERE table_name = 'profiles' AND row->>'owner_id' = ANY($1)", [[legacyId ?? "", owner]])).rows[0]?.row as Record<string, any> | undefined;
@@ -390,17 +421,55 @@ async function promoteDomain(pool: Pool, owner: string, options: PromoteOptions,
 		const bytes = await options.objects.get("BLOBS", `${legacyId}/skills/${f.sha256}`);
 		if (bytes) skillContent.set(`${f.name}\n${f.version}\n${f.path}`, Buffer.from(bytes).toString("utf8"));
 	}
-	const appFiles = new Map<string, Record<string, string>>();
+	// Apps and notes. A legacy app is a row of `pim_artifacts` whose versions are rows of `pim_artifact_versions`, each with its files in `pim_artifact_files`, whose bytes are in the
+	// ARTIFACTS bucket at `<owner>/<sha256>`. A note is such an app of kind `markdown` with one README.md.
+	const decoder = new TextDecoder("utf-8", { fatal: true });
+	const MAIN = { html: "index.html", jsx: "App.jsx", markdown: "README.md" } as const;
+	type PlannedApp = { a: Record<string, any>; kind: "html" | "jsx" | "backend" | "note"; versions: { v: number; files: Record<string, string>; at: unknown }[] };
+	const plannedApps: PlannedApp[] = [];
 	for (const a of artifacts) {
-		for (const v of parseJson(a.versions, []) as { v: number; files: Record<string, string> }[]) {
-			const files: Record<string, string> = {};
-			for (const [path, key] of Object.entries(v.files ?? {})) {
-				const bytes = options.objects ? await options.objects.get("ARTIFACTS", String(key)) : null;
-				if (bytes) files[path] = Buffer.from(bytes).toString("utf8");
-			}
-			appFiles.set(`${a.id}\n${v.v}`, files);
+		const kind = a.kind === "jsx" ? "jsx" : a.kind === "hosted" ? "backend" : a.kind === "html" || a.kind === "app" ? "html" : a.kind === "markdown" ? "note" : null;
+		if (!kind) {
+			d.skipped.push(`app ${a.id}: a ${a.kind} is not promoted as an app (kept in the landing)`);
+			continue;
 		}
+		const versions: PlannedApp["versions"] = [];
+		for (const v of artifactVersions.filter((x) => x.artifact === a.id).sort((x, y) => Number(x.version) - Number(y.version))) {
+			const files: Record<string, string> = {};
+			for (const f of artifactFiles.filter((x) => x.artifact === a.id && Number(x.version) === Number(v.version))) {
+				const bytes = options.objects && legacyId ? await options.objects.get("ARTIFACTS", `${legacyId}/${f.sha256}`) : null;
+				if (!bytes) {
+					d.skipped.push(`app ${a.id} v${v.version}: ${f.path} has no bytes to promote`);
+					continue;
+				}
+				try {
+					files[String(f.path)] = decoder.decode(bytes);
+				} catch {
+					d.skipped.push(`app ${a.id} v${v.version}: ${f.path} is binary; its bytes are copied as an object, not inlined in the version`);
+				}
+			}
+			// A version from before files were kept apart holds its main file in the row.
+			if (Object.keys(files).length === 0 && typeof v.content === "string" && v.content !== "") files[MAIN[kind === "note" ? "markdown" : kind === "backend" ? "html" : kind]] = v.content;
+			versions.push({ v: Number(v.version), files, at: v.created_at });
+		}
+		if (versions.length === 0 || Object.keys(versions.at(-1)!.files).length === 0) {
+			d.skipped.push(`app ${a.id}: its files were not given, so it was not promoted empty`);
+			continue;
+		}
+		plannedApps.push({ a, kind, versions });
 	}
+	// A note's words: the Yjs updates it was edited with when it has them (a live edit not yet saved as a version is only there), else its latest version as the first update.
+	const noteBody = (p: PlannedApp): Uint8Array => {
+		const updates = noteUpdates.filter((u) => u.artifact === p.a.id && u.data && typeof u.data === "object" && "$b64" in u.data).map((u) => new Uint8Array(Buffer.from(String(u.data.$b64), "base64")));
+		return updates.length > 0 ? mergeNoteUpdates(updates).update : noteUpdateFromText(p.versions.at(-1)!.files["README.md"] ?? Object.values(p.versions.at(-1)!.files)[0] ?? "");
+	};
+
+	// Custom model providers: one JSON array in `pim_meta`, sealed whole on landing, each with its API key. The id stays the legacy one, so an agent's model reference still names it.
+	const ownMeta = meta.find((m) => m.key === "own_providers");
+	const ownProviders: { id: string; name?: string; url?: string; key?: string; models?: unknown[]; structuredOutput?: boolean }[] = ownMeta ? parseJson(await secret(ownMeta.value, "own-providers"), []) : [];
+	if (ownMeta && ownProviders.length === 0 && !options.crypto) d.skipped.push("custom model providers: not promoted, no keys were given to open them");
+	const ownSecrets = new Map<string, string>();
+	for (const p of ownProviders) if (p.key) ownSecrets.set(p.id, await sealed(p.key, `provider:${owner}/${p.id}`));
 
 	await asOwner(pool, owner, async (c) => {
 		// Agents, and which chat each one answers.
@@ -495,6 +564,9 @@ async function promoteDomain(pool: Pool, owner: string, options: PromoteOptions,
 			const rev = revisions.filter((r) => r.trigger_id === t.id).sort((a, b) => Number(b.revision) - Number(a.revision))[0];
 			const spec = parseJson(rev?.spec, null);
 			if (!spec?.source) continue;
+			// A legacy trigger names its chat by the numeric session id; the chat is a UUID here, and a firing addressed to "1" would reach nothing.
+			if (spec.originChatId !== undefined) spec.originChatId = chatOf.get(String(spec.originChatId)) ?? spec.originChatId;
+			if (spec.destination?.chatId !== undefined) spec.destination = { ...spec.destination, chatId: chatOf.get(String(spec.destination.chatId)) ?? spec.destination.chatId };
 			const due = dueWork.get(String(t.id));
 			const computer = ["poll", "stream", "process", "file"].includes(spec.source.kind);
 			const ended = due && (due.state === "done" || due.state === "dropped");
@@ -525,31 +597,25 @@ async function promoteDomain(pool: Pool, owner: string, options: PromoteOptions,
 			const r = await c.query("INSERT INTO pim_app.profiles (owner_id, display_name, bio, published) VALUES ($1,$2,$3,true) ON CONFLICT DO NOTHING", [owner, profile.display_name ?? "", profile.bio ?? ""]);
 			bump(d, "profiles", r.rowCount ?? 0);
 		}
-		// Apps: every version, with its files read from the object store.
-		for (const a of artifacts) {
-			const kind = a.kind === "jsx" ? "jsx" : a.kind === "hosted" ? "backend" : a.kind === "html" || a.kind === "app" ? "html" : null;
-			const versions = (parseJson(a.versions, []) as { v: number }[]).sort((x, y) => x.v - y.v);
-			if (!kind || versions.length === 0) {
-				d.skipped.push(`app ${a.id}: a ${a.kind} is not promoted as an app`);
+		// Custom providers, with their keys sealed under the application's own keys.
+		for (const p of ownProviders) {
+			const r = await c.query("INSERT INTO pim_app.providers (id, owner_id, kind, config, secret) VALUES ($1,$2,'openai_compatible',$3,$4) ON CONFLICT DO NOTHING", [p.id, owner, JSON.stringify({ name: p.name ?? p.id, url: p.url, models: p.models ?? [], structuredOutput: p.structuredOutput === true }), ownSecrets.get(p.id) ?? null]);
+			bump(d, "providers", r.rowCount ?? 0);
+		}
+		// Apps: every version with its files; notes: the Yjs document as the first update of the log.
+		for (const p of plannedApps) {
+			const { a, kind, versions } = p;
+			if (kind === "note") {
+				const r = await c.query("INSERT INTO pim_app.notes (note_id, owner_id, title, version, created_at) VALUES ($1,$2,$3,1,$4) ON CONFLICT DO NOTHING", [a.id, owner, a.title ?? "", ms(a.created_at)]);
+				if (!r.rowCount) continue;
+				bump(d, "notes");
+				await c.query("INSERT INTO pim_app.note_updates (owner_id, note_id, seq, data, origin, fence) VALUES ($1,$2,1,$3,'import',0) ON CONFLICT DO NOTHING", [owner, a.id, Buffer.from(noteBody(p))]);
 				continue;
 			}
-			const filesOf = (v: number) => appFiles.get(`${a.id}\n${v}`) ?? {};
-			const main = kind === "html" ? "index.html" : kind === "jsx" ? "App.jsx" : "pim.app.json";
-			if (!(main in filesOf(versions.at(-1)!.v)) && !(kind === "jsx" && "App.tsx" in filesOf(versions.at(-1)!.v))) {
-				d.skipped.push(`app ${a.id}: its files were not given, so it was not promoted empty`);
-				continue;
-			}
-			const r = await c.query("INSERT INTO pim_app.artifacts (id, owner_id, title, kind, latest_version, access, created_at) VALUES ($1,$2,$3,$4,$5,'private',$6) ON CONFLICT DO NOTHING", [a.id, owner, a.name, kind, versions.at(-1)!.v, ms(a.created_at)]);
+			const r = await c.query("INSERT INTO pim_app.artifacts (id, owner_id, title, kind, latest_version, access, created_at) VALUES ($1,$2,$3,$4,$5,'private',$6) ON CONFLICT DO NOTHING", [a.id, owner, a.title, kind, versions.at(-1)!.v, ms(a.created_at)]);
 			if (!r.rowCount) continue;
 			bump(d, "apps");
-			for (const v of versions) await c.query("INSERT INTO pim_app.artifact_versions (artifact_id, owner_id, version, files, message) VALUES ($1,$2,$3,$4,'Imported') ON CONFLICT DO NOTHING", [a.id, owner, v.v, JSON.stringify(filesOf(v.v))]);
-		}
-		// Notes: the Yjs document is the first update of the log, as legacy wrote it.
-		for (const n of notes) {
-			const r = await c.query("INSERT INTO pim_app.notes (note_id, owner_id, title, version, created_at) VALUES ($1,$2,$3,1,$4) ON CONFLICT DO NOTHING", [n.id, owner, n.title ?? "", ms(n.updated_at)]);
-			if (!r.rowCount) continue;
-			bump(d, "notes");
-			await c.query("INSERT INTO pim_app.note_updates (owner_id, note_id, seq, data, origin, fence) VALUES ($1,$2,1,$3,'import',0) ON CONFLICT DO NOTHING", [owner, n.id, Buffer.from(String(n.ydoc), "base64")]);
+			for (const v of versions) await c.query("INSERT INTO pim_app.artifact_versions (artifact_id, owner_id, version, files, message, created_at) VALUES ($1,$2,$3,$4,'Imported',$5) ON CONFLICT DO NOTHING", [a.id, owner, v.v, JSON.stringify(v.files), ms(v.at)]);
 		}
 		// Objects: metadata and ACL, under the new owner's key; bytes are copied when the caller can. Vault blobs and skills' content-addressed files are not objects here.
 		for (const o of objectRows) {
@@ -564,6 +630,12 @@ async function promoteDomain(pool: Pool, owner: string, options: PromoteOptions,
 			}
 			const r = await c.query("INSERT INTO pim_app.objects (key, owner_id, purpose, content_type, size, sha256, acl) VALUES ($1,$2,$3,$4,$5,$6,'private') ON CONFLICT DO NOTHING", [key, owner, purpose, type, Number(o.size_bytes), o.sha256]);
 			bump(d, "objects", r.rowCount ?? 0);
+		}
+		// Files kept in the space before files moved to computers (`pim_stored_files`, bytes at `<owner>/files/<id>`): the bytes are objects above; this index keeps their paths, which an object key has no room for.
+		if (storedFiles.length > 0) {
+			const index = storedFiles.map((f) => ({ path: f.path, key: `${owner}/files/${f.id}`, type: f.type, bytes: Number(f.bytes), updatedAt: Number(f.updated_at) }));
+			const r = await c.query("INSERT INTO pim_app.owner_settings (owner_id, key, value) VALUES ($1,'legacy_files',$2) ON CONFLICT DO NOTHING", [owner, JSON.stringify(index)]);
+			bump(d, "legacyFiles", r.rowCount ? index.length : 0);
 		}
 		// Settings: only what the person set. A key they never changed stays absent, so the deployment's default still applies to it.
 		for (const m of meta.filter((x) => x.key === "settings")) {
@@ -581,13 +653,16 @@ async function promoteDomain(pool: Pool, owner: string, options: PromoteOptions,
 export async function promoteToLive(pool: Pool, options: PromoteOptions): Promise<PromoteReport> {
 	const runtime = new RuntimeDb(pool);
 	const owners = (await pool.query("SELECT owner_id FROM pim_ops.tenants WHERE owner_id <> '_deployment' ORDER BY owner_id")).rows.map((r) => r.owner_id as string);
-	const report: PromoteReport = { owners: [], chats: 0, messages: 0, forgeThreads: 0, orphanedTasks: 0, clearedRuns: 0, domain: {}, skipped: [] };
+	const report: PromoteReport = { owners: [], chats: 0, messages: 0, forgeThreads: 0, orphanedTasks: 0, clearedRuns: 0, remappedModels: 0, domain: {}, skipped: [] };
+	// Every account exists before any space is promoted: a circle names members who may sort after its owner.
+	for (const owner of owners) await promoteIdentity(pool, owner, options.rpId);
 	for (const owner of owners) {
-		await promoteIdentity(pool, owner, options.rpId);
 		const has = (await runtime.read(owner, "SELECT 1 FROM pim_runtime.partitions WHERE owner_id = $1 LIMIT 1", [owner])).rowCount;
 		const hasPi = (await pool.query("SELECT 1 FROM pim_ops.pi_conversations WHERE owner_id = $1 LIMIT 1", [owner])).rowCount;
 		if (!has && hasPi) {
-			const { space, orphaned, clearedRuns } = await legacySpace(pool, owner, options.cutoverAt, options.defaultAgent);
+			const own = await ownProviderIds(pool, owner, options);
+			const { space, orphaned, clearedRuns, remappedModels } = await legacySpace(pool, owner, options.cutoverAt, options.defaultAgent, new Set(["anthropic", "openai", "google", "gateway", ...own]));
+			report.remappedModels += remappedModels;
 			const publicChatIds = new Map((await pool.query("SELECT conversation_id, public_id FROM pim_ops.chats WHERE owner_id = $1", [owner])).rows.map((r) => [Number(r.conversation_id), chatUuid(r.public_id)]));
 			await importLegacySpace(runtime, owner, space, { publicChatIds });
 			report.orphanedTasks += orphaned;

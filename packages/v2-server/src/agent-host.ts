@@ -129,7 +129,18 @@ export function createAgentHost(options: AgentHostOptions) {
 	const { db, env } = options;
 	const now = options.now ?? Date.now;
 	const modelsByOwner = new Map<string, Models>();
-	const failover = createFailover({ now, cooldowns: options.cooldowns, stallMs: options.stallMs?.stream });
+	const failover = createFailover({
+		now,
+		cooldowns: options.cooldowns,
+		stallMs: options.stallMs?.stream,
+		// Every Runner reads and writes the same cooldowns, so a model one of them found down is skipped by all.
+		store: {
+			load: async (ownerId) => new Map((await db.read<{ ref: string; ms: string }>(ownerId, "SELECT ref, (extract(epoch FROM until) * 1000)::bigint AS ms FROM pim_runtime.provider_cooldowns WHERE owner_id = $1 AND until > now()", [ownerId])).rows.map((r) => [r.ref, Number(r.ms)])),
+			save: async (ownerId, provider, id, untilMs, reason) => {
+				await db.read(ownerId, "INSERT INTO pim_runtime.provider_cooldowns (owner_id, ref, until, reason) VALUES ($1, $2, to_timestamp($3 / 1000.0), $4) ON CONFLICT (owner_id, ref) DO UPDATE SET until = greatest(pim_runtime.provider_cooldowns.until, excluded.until), reason = excluded.reason", [ownerId, `${provider}/${id}`, untilMs, reason.slice(0, 300)]);
+			},
+		},
+	});
 	const chatgptOptions: ChatGPTRunnerOptions = options.chatgpt ?? {};
 	/** The reads of one request's sections share one query; the next request reads again, so what an agent just saved is in its next prompt. */
 	const contexts = new Map<string, Promise<RunnerContext>>();

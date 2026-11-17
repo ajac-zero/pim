@@ -5,7 +5,7 @@ import { createModels, Type } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 import { defineTool } from "@earendil-works/pi-durable";
 import { stoppable } from "../src/agent-tools.ts";
-import { createFailover } from "../src/provider-failover.ts";
+import { type CooldownStore, createFailover } from "../src/provider-failover.ts";
 
 const never = () => new Promise<never>(() => {});
 
@@ -61,5 +61,61 @@ describe("a tool that never returns", () => {
 		expect(result.content[0].text).toMatch(/did not finish/);
 		const quick = stoppable(defineTool({ name: "q", description: "x", parameters: Type.Object({}), execute: async () => ({ content: [{ type: "text", text: "ok" }] }) } as never) as never, 50) as any;
 		expect((await quick.execute({}, {}, { abortSignal: new AbortController().signal })).content[0].text).toBe("ok");
+	});
+});
+
+describe("cooldowns and failover across Runners", () => {
+	const rig = () => {
+		const faux = fauxProvider({ provider: "faux", models: [{ id: "a" }, { id: "b" }] });
+		const models = createModels();
+		models.setProvider(faux.provider);
+		return { faux, models };
+	};
+	const ask = (models: any, id: string) => models.stream(models.getModel("faux", id), { messages: [{ role: "user", content: "hi", timestamp: 0 }] }, {}).result();
+	const limited = (blocks: unknown[] = []) => fauxAssistantMessage(blocks as never, { stopReason: "error", errorMessage: "429 rate limit reached" });
+	const memoryStore = (): CooldownStore => {
+		const rows = new Map<string, number>();
+		return { load: async () => new Map(rows), save: async (_o, provider, id, until) => void rows.set(`${provider}/${id}`, until) };
+	};
+	const chain = (f: ReturnType<typeof createFailover>) => f.setChain("o", { provider: "faux", id: "a" }, [{ provider: "faux", id: "a" }, { provider: "faux", id: "b" }]);
+
+	it("a model one Runner found down is skipped by another, which never calls it", async () => {
+		const store = memoryStore();
+		const first = rig();
+		const one = createFailover({ store });
+		chain(one);
+		first.faux.setResponses([limited(), fauxAssistantMessage("from b")]);
+		expect(JSON.stringify((await ask(one.wrap(first.models, "o"), "a")).content)).toContain("from b");
+
+		// A second Runner, with its own memory and the same store, asks for `a` and is answered by `b` at once: `a` is given no request.
+		const second = rig();
+		const two = createFailover({ store });
+		chain(two);
+		second.faux.setResponses([fauxAssistantMessage("b again")]);
+		expect(JSON.stringify((await ask(two.wrap(second.models, "o"), "a")).content)).toContain("b again");
+		expect(second.faux.state.callCount).toBe(1);
+		expect(two.isCooling("o", { provider: "faux", id: "a" })).toBe(true);
+	});
+
+	it("goes to the next model when a request fails after only thinking, and never after an answer began", async () => {
+		const { faux, models } = rig();
+		const failover = createFailover({});
+		chain(failover);
+		faux.setResponses([limited([{ type: "thinking", thinking: "let me see" }]), fauxAssistantMessage("from b")]);
+		const events: string[] = [];
+		const stream = failover.wrap(models, "o").stream(models.getModel("faux", "a")!, { messages: [{ role: "user", content: "hi", timestamp: 0 }] } as never, {});
+		for await (const e of stream) events.push(e.type);
+		expect(JSON.stringify((await stream.result()).content)).toContain("from b");
+		expect(events).not.toContain("error");
+
+		// Text already shown is final: the failure ends the turn, and `b` is not asked.
+		const cooled = createFailover({});
+		chain(cooled);
+		const again = rig();
+		again.faux.setResponses([limited([{ type: "text", text: "half an answer" }]), fauxAssistantMessage("from b")]);
+		const message = await ask(cooled.wrap(again.models, "o"), "a");
+		expect(message.stopReason).toBe("error");
+		expect(JSON.stringify(message.content)).toContain("half an answer");
+		expect(again.faux.state.callCount).toBe(1);
 	});
 });

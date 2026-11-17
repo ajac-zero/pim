@@ -36,6 +36,10 @@ ENV NODE_ENV=production
 WORKDIR /app/packages/v2-server
 COPY --from=build /app /app
 COPY --from=web /app/web/dist /app/web/dist
+# pim-computer and pim-host, which the Gate serves at /pim-computer.ts and /pim-host.ts and which the Compose profile and a container host run (`node /app/computer/pim-computer.ts`).
+COPY --from=web /app/computer /app/computer
+# The folder a computer's files are mounted on, owned by `node`: a new volume takes the owner this folder has in the image.
+RUN mkdir /workspace && chown node:node /workspace
 ENV PIM_WEB_DIR=/app/web/dist
 # The roles listen on PIM_HTTP_PORT (8080) and PIM_METRICS_PORT (9464); the filesystem is read-only in both deployments, and /tmp is a tmpfs.
 USER node

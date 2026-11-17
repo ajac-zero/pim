@@ -93,10 +93,10 @@ async function cua(options: Options, args: string[], input?: string): Promise<{ 
 }
 
 /** Runs `file` with `args`, and `input` on its standard input; what it said, and how it exited. */
-async function runProgram(file: string, args: string[], input?: string): Promise<{ code: number; stdout: string; stderr: string }> {
+async function runProgram(file: string, args: string[], input?: string, env: Record<string, string> = {}): Promise<{ code: number; stdout: string; stderr: string }> {
 	const { spawn } = await import("node:child_process");
 	return new Promise((resolve) => {
-		const child = spawn(file, args, { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, CUA_TELEMETRY: process.env.CUA_TELEMETRY ?? "0" } });
+		const child = spawn(file, args, { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, CUA_TELEMETRY: process.env.CUA_TELEMETRY ?? "0", ...env } });
 		let stdout = "";
 		let stderr = "";
 		child.stdout.on("data", (chunk: Buffer) => {
@@ -114,9 +114,9 @@ async function runProgram(file: string, args: string[], input?: string): Promise
 }
 
 /** A failure of `cua`, said briefly. */
-function failed(what: string, run: { code: number; stderr: string; stdout: string }): Error {
+function failed(what: string, run: { code: number; stderr: string; stdout: string }, program = "cua"): Error {
 	const said = (run.stderr.trim() || run.stdout.trim()).split("\n").slice(-3).join(" ").slice(0, 400);
-	return new Error(`${what} failed (cua exited ${run.code})${said ? `: ${said}` : ""}`);
+	return new Error(`${what} failed (${program} exited ${run.code})${said ? `: ${said}` : ""}`);
 }
 
 /** The computers this program keeps, and whether each runs. */
@@ -241,12 +241,12 @@ async function remove(options: Options, name: string): Promise<void> {
 
 /** The network the containers join: a bridge of its own, which none of the Pim stack's networks is. */
 const DOCKER_NETWORK = "pim-computers";
-const docker = (options: Options, args: string[], input?: string) => runProgram(options.docker, args, input);
+const docker = (options: Options, args: string[], env?: Record<string, string>) => runProgram(options.docker, args, undefined, env);
 
 /** The containers this program keeps, and whether each runs. */
 async function dockerMachines(options: Options): Promise<Machine[]> {
 	const run = await docker(options, ["ps", "-a", "--filter", "label=pim.computer-host=1", "--format", "{{json .}}"]);
-	if (run.code !== 0) throw failed("Listing the computers", run);
+	if (run.code !== 0) throw failed("Listing the computers", run, "docker");
 	return run.stdout
 		.split("\n")
 		.filter((line) => line.trim())
@@ -260,11 +260,9 @@ async function dockerCreate(options: Options, name: string, token: string): Prom
 	if (!options.image) throw new Error("Give the Pim image the computers run, with --image (PIM_HOST_IMAGE).");
 	await docker(options, ["network", "create", DOCKER_NETWORK]); // fails when it exists, which is fine
 	const gone = await docker(options, ["rm", "-f", name]);
-	if (gone.code !== 0 && !/No such container/i.test(gone.stderr)) throw failed(`Replacing ${name}`, gone);
+	if (gone.code !== 0 && !/No such container/i.test(gone.stderr)) throw failed(`Replacing ${name}`, gone, "docker");
 	log(`Making ${name} from ${options.image}.`);
-	// The token goes in on standard input, so it is on no command line.
-	const env = ["PIM_URL", "PIM_COMPUTER_TOKEN", "PIM_COMPUTER_ROOT", "HOME"];
-	const values = [options.computerUrl, token, "/workspace", "/home/node"];
+	// The token reaches the container through docker's own environment (`-e NAME` with no value copies it), so it is on no command line and in no file.
 	const run = await docker(
 		options,
 		[
@@ -272,12 +270,13 @@ async function dockerCreate(options: Options, name: string, token: string): Prom
 			"--network", DOCKER_NETWORK, "--add-host", "host.docker.internal:host-gateway",
 			"--read-only", "--tmpfs", "/tmp", "--tmpfs", "/home/node:uid=1000,gid=1000", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true", "--user", "node",
 			"--cpus", String(options.cpu), "--memory", options.memory.replace(/GB?$/i, "g").replace(/MB?$/i, "m"), "--pids-limit", "1024",
-			"-v", `${name}-files:/workspace`, "--env-file", "/dev/stdin", "--workdir", "/workspace",
+			"-v", `${name}-files:/workspace`, "--workdir", "/workspace",
+			"-e", `PIM_URL=${options.computerUrl}`, "-e", "PIM_COMPUTER_ROOT=/workspace", "-e", "HOME=/home/node", "-e", "PIM_COMPUTER_TOKEN",
 			"--entrypoint", "node", options.image, "/app/computer/pim-computer.ts",
 		],
-		env.map((key, i) => `${key}=${values[i]}\n`).join(""),
+		{ PIM_COMPUTER_TOKEN: token },
 	);
-	if (run.code !== 0) throw failed(`Making ${name}`, run);
+	if (run.code !== 0) throw failed(`Making ${name}`, run, "docker");
 	log(`${name} is running.`);
 }
 
@@ -285,16 +284,16 @@ async function dockerStart(options: Options, name: string): Promise<boolean> {
 	log(`Starting ${name}, which stopped.`);
 	const run = await docker(options, ["start", name]);
 	if (run.code !== 0 && /No such container/i.test(run.stderr)) return false;
-	if (run.code !== 0) throw failed(`Starting ${name}`, run);
+	if (run.code !== 0) throw failed(`Starting ${name}`, run, "docker");
 	return true;
 }
 
 /** Removes a person's computer with everything on it: the container and its files. One that is gone already is removed. */
 async function dockerRemove(options: Options, name: string): Promise<void> {
 	const gone = await docker(options, ["rm", "-f", name]);
-	if (gone.code !== 0 && !/No such container/i.test(gone.stderr)) throw failed(`Removing ${name}`, gone);
+	if (gone.code !== 0 && !/No such container/i.test(gone.stderr)) throw failed(`Removing ${name}`, gone, "docker");
 	const volume = await docker(options, ["volume", "rm", "-f", `${name}-files`]);
-	if (volume.code !== 0) throw failed(`Removing ${name}'s files`, volume);
+	if (volume.code !== 0) throw failed(`Removing ${name}'s files`, volume, "docker");
 	log(`${name} is removed.`);
 }
 

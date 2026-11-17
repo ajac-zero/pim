@@ -246,6 +246,14 @@ export function createAgentHost(options: AgentHostOptions) {
 				const scopes = c.agent ? `agent-${c.agent.id} and everyone` : "everyone";
 				return `Your memory (scopes ${scopes}). Save with note, find with recall, read in full with zoom.${c.memories.length ? `\n${c.memories.map((m) => `- [${m.id}] (${m.scope}) ${m.title}`).join("\n")}` : "\nNothing is remembered yet."}`;
 			}),
+			section("room", async (input) => {
+				const chat = await publicChatId(ownerId, input.conversationId);
+				const room = chat ? (await db.read<{ r: { role: "host" | "seat"; mode: string; host: { id: string; name: string } | null; members: { id: string; name: string }[] } | null }>(ownerId, "SELECT pim_app.runner_room($1, $2) AS r", [ownerId, chat]).catch(() => ({ rows: [] as never[] }))).rows[0]?.r : undefined;
+				if (!room) return undefined;
+				const names = (room.role === "host" ? room.members : [room.host ?? { id: "", name: "Pim" }, ...room.members]).map((m) => m.name);
+				const turns = room.mode === "open" ? "Everything the person says wakes every agent in the room; each decides whether it has something to add." : "The host answers what the person says to no one in particular; an agent answers when it is mentioned as @Name.";
+				return `This is a group chat${room.role === "seat" ? " and you are one of its agents, not its host" : " and you are its host"}. ${room.role === "host" ? "Also in it" : "Others in it"}: ${names.join(", ") || "no one else yet"}. ${turns} What another agent says reaches you as a message that starts "[From Name]"; what you send with send_to_user is shown in the chat as yours, under your name. Mention an agent by @Name to bring its attention; do not repeat what others have said.`;
+			}),
 			section("delegates", async (input) => {
 				const c = await ctx(input.conversationId);
 				return c.contacts.length === 0 ? undefined : `Agents you can hand work to with delegate:\n${c.contacts.map((a) => `- ${a.id}: ${a.name}${a.about ? ` — ${a.about}` : ""}`).join("\n")}`;

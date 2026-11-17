@@ -349,6 +349,11 @@ const inputCommand: CommandHandler = async (resident, command, context) => {
 	const conversation = await conversationOf(resident, command, context);
 	const content = (command.payload.content ?? command.payload.text) as Input | undefined;
 	if (content === undefined) throw new CommandRejected(`Command ${command.commandId} has no content`);
+	// A message in a room that is not for this conversation's agent is written into it without waking the agent: it is in its context from its next request.
+	if (command.payload.write === true) {
+		await conversation.submit({ type: "write", requestId: command.piRequestId, entry: { kind: "pim.room", model: [{ role: "user", content, timestamp: Date.now() }] } }, context);
+		return;
+	}
 	const whenBusy = command.payload.whenBusy as "steer" | "followUp" | "reject" | undefined;
 	await conversation.submit({ type: "input", content, requestId: command.piRequestId, ...(whenBusy === undefined ? {} : { whenBusy }) }, context);
 };

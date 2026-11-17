@@ -14,6 +14,7 @@ import { ExternalOperations } from "@pim/v2-runtime/external";
 import type { Db as RuntimeDb } from "@pim/v2-runtime/db";
 import type { Actor } from "@pim/v2-forge/authz";
 import type { RelayBus } from "@pim/v2-app/relay";
+import { postToRoom } from "./rooms.ts";
 import { computerTools } from "./computer-tools.ts";
 import { type ImageSources, imageTools } from "./image-tools.ts";
 import type { ForgeParts } from "./forge-assembly.ts";
@@ -153,7 +154,9 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 				const chat = await deps.chatOf(api.conversationId);
 				if (app && chat) {
 					try {
-						await app.conversations.markResponse(ownerId, chat);
+						// An agent in a group chat speaks into the host chat, where the person reads it; its own seat is not a chat they open.
+						const posted = await postToRoom(app, await principalOf(app, chat), chat, `${api.taskId}:${api.callId}`, String(args.message));
+						if (!posted) await app.conversations.markResponse(ownerId, chat);
 						if (args.complete) {
 							const p = await principalOf(app, chat);
 							if (p.kind === "delegated") await app.conversations.updateTask(p, p.delegateId, "completed", String(args.message).slice(0, 2000));

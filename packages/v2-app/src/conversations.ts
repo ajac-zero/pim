@@ -14,7 +14,7 @@ const uuidFrom = (seed: string): string => {
 	const h = createHash("sha256").update(seed).digest("hex");
 	return `${h.slice(0, 8)}-${h.slice(8, 12)}-5${h.slice(13, 16)}-a${h.slice(17, 20)}-${h.slice(20, 32)}`;
 };
-const requestId = (ownerId: string, commandId: string) => `pimreq_${createHash("sha256").update(`${ownerId}\n${commandId}`).digest("hex").slice(0, 32)}`;
+export const requestId = (ownerId: string, commandId: string) => `pimreq_${createHash("sha256").update(`${ownerId}\n${commandId}`).digest("hex").slice(0, 32)}`;
 
 const TASK_NEXT: Record<string, string[]> = {
 	working: ["auth-required", "completed", "failed", "canceled"],
@@ -30,6 +30,11 @@ const TASK_NEXT: Record<string, string[]> = {
  */
 export class Conversations {
 	readonly authz: Authorizer;
+	/**
+	 * Runs inside the transaction that accepts a person's message, for a deployment that gives a chat more than one reader (a group chat's seats, `v2-server/src/rooms.ts`).
+	 * It answers whether the chat's own agent is woken by the message; when not, the message is only written into its conversation.
+	 */
+	onUserMessage: ((tx: Tx, ownerId: string, chatId: string, commandId: string, payload: Record<string, unknown>) => Promise<{ host: boolean }>) | undefined;
 	constructor(private readonly db: Db) {
 		this.authz = new Authorizer(db);
 	}
@@ -83,6 +88,8 @@ export class Conversations {
 			await tx.query("UPDATE pim_app.accepted_commands SET public_chat_id = $2, payload = payload || $3::jsonb WHERE command_id = $1", [input.commandId, chatId, JSON.stringify(result ? { _result: result } : {})]);
 			if (RUNTIME_KINDS.has(input.kind)) {
 				if (!chatId) throw new BadRequestError(`A ${input.kind} command needs a chat`);
+				const heard = input.kind === "user_message" && payload.write !== true && this.onUserMessage ? await this.onUserMessage(tx, p.ownerId, chatId, input.commandId, payload) : { host: true };
+				if (!heard.host) await tx.query("UPDATE pim_app.accepted_commands SET payload = payload || '{\"write\": true}'::jsonb WHERE command_id = $1", [input.commandId]);
 				await tx.query("INSERT INTO pim_app.command_inbox (owner_id, command_id, partition_id) VALUES ($1, $2, (SELECT partition_id FROM pim_app.conversations WHERE public_chat_id = $3))", [p.ownerId, input.commandId, chatId]);
 			}
 			return { commandId: input.commandId, piRequestId, duplicate: false, state: "inbox_accepted", chatId, result };
@@ -248,7 +255,7 @@ export class Conversations {
 	}
 }
 
-async function requireChat(tx: Tx, chatId: string) {
+export async function requireChat(tx: Tx, chatId: string) {
 	const { rows } = await tx.query("SELECT * FROM pim_app.conversations WHERE public_chat_id = $1 AND deleted_at IS NULL", [chatId]);
 	if (!rows[0]) throw new NotFoundError("No such chat");
 	return rows[0];
@@ -263,7 +270,7 @@ async function nextConversationId(tx: Tx, ownerId: string): Promise<number> {
 	return Number(rows[0].id);
 }
 
-async function createChat(tx: Tx, ownerId: string, input: NewChat, partitionId?: string): Promise<string> {
+export async function createChat(tx: Tx, ownerId: string, input: NewChat, partitionId?: string): Promise<string> {
 	const id = input.id ?? randomUUID();
 	let partition = partitionId;
 	if (!partition) {

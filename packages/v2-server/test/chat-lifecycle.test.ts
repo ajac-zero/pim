@@ -1,6 +1,7 @@
 // What happens to a chat over its life, end to end on the real stack with a scripted model: read state (an agent's reply makes it unread, reading it clears that, and the
 // sidebar and the chat agree), compaction (a chat that outgrows the model's context is compacted in place by pi, and the next turn runs on the summary), and reset with a
-// handoff (a summary carried into a new chat that continues the old one, which is archived and detaches again when the person writes in it).
+// handoff (a summary carried into a new chat that continues the old one, which is archived and detaches again when the person writes in it), and a group chat (a room: a
+// seat for each agent, who hears what the person says, answers when mentioned, and speaks into the host chat as "[From Name]").
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { App } from "@pim/v2-app/app";
@@ -131,4 +132,53 @@ real("a chat over its life", () => {
 		await say(old, "one more thing about Lisbon", reply("Go on."));
 		expect((await app.conversations.get(ownerId, old))).toMatchObject({ archived: false, continuedTo: null });
 	}, 180_000);
+
+	it("runs a group chat: agents in seats hear the person, answer when mentioned, and speak into the host chat", async () => {
+		const coach = (await web.call("POST", "/api/agents", { name: "Coach", instructions: "You coach running." })).json;
+		const host = (await web.call("POST", "/api/sessions", { title: "Planning" })).json.id;
+		await say(host, "hello", reply("Hi, I'm the host."));
+		expect((await web.call("POST", `/api/sessions/${host}/room/members`, { agent: coach.id })).json.room).toMatchObject({ mode: "mentions", members: [{ id: coach.id, name: "Coach", busy: false }] });
+		const seat = (await d.stack.admin.query("SELECT seat_chat_id FROM pim_app.room_members WHERE public_chat_id = $1", [host])).rows[0].seat_chat_id as string;
+		// The seat is a conversation of its own that no list shows.
+		expect((await web.call("GET", "/api/sessions")).json.sessions.map((s: { id: string }) => s.id)).not.toContain(seat);
+		await waitFor("the seat to leave the sidebar", async () => (await web.call("GET", "/api/snapshot/sidebar")).json.sessions.some((s: { chatId: string }) => s.chatId === host), 30_000);
+		expect((await web.call("GET", "/api/snapshot/sidebar")).json.sessions.map((s: { chatId: string }) => s.chatId)).not.toContain(seat);
+
+		// Said to no one in particular: the host answers, and the seat only hears it.
+		await say(host, "I want to run a 10k in the spring", reply("A 10k is a fine goal."));
+		await waitFor("the seat to hear it", async () => (JSON.stringify(await transcript(seat)).includes("10k in the spring") ? true : undefined), 30_000);
+		expect(JSON.stringify(await transcript(seat))).not.toContain("send_to_user");
+		expect((await transcript(seat)).some((e) => e.kind === "pim.room")).toBe(true);
+
+		// Mentioned: the agent answers in its seat, and what it sends lands in the host chat as its own, without waking the host.
+		const hostBefore = (await transcript(host)).length;
+		faux.setResponses([reply("Start with three easy runs a week."), fauxAssistantMessage("done coach")] as never);
+		await web.call("POST", `/api/sessions/${host}/messages`, { commandId: "m-mention", text: "@Coach how should I start?" });
+		await waitFor("the coach to answer", async () => (JSON.stringify(await transcript(seat)).includes("done coach") ? true : undefined), 60_000);
+		const hostText = JSON.stringify(await transcript(host));
+		await waitFor("the post in the host chat", async () => (JSON.stringify(await transcript(host)).includes("[From Coach]") ? true : undefined), 30_000);
+		expect(JSON.stringify(await transcript(host))).toContain("Start with three easy runs a week.");
+		// The host did not take a turn for it: nothing the host said came after the mention, and the person has a reply to read.
+		const after = (await transcript(host)).slice(hostBefore);
+		expect(after.filter((e) => e.kind === "pi.assistant")).toHaveLength(0);
+		expect(hostText).toContain("@Coach how should I start?");
+		expect((await listed(host)).unread).toBe(true);
+		// Mentioning an address is not mentioning an agent.
+		await say(host, "mail me at ann@Coach.example", reply("Noted."));
+		expect(JSON.stringify(await transcript(seat)).split("ann@Coach.example").length).toBeGreaterThan(1);
+
+		// In open mode everyone wakes: both answer.
+		await d.stack.admin.query("UPDATE pim_app.conversations SET room_mode = 'open' WHERE public_chat_id = $1", [host]);
+		const turn = (ctx: { messages?: { role: string }[] }) => ((ctx.messages ?? []).at(-1)?.role === "toolResult" ? fauxAssistantMessage("done open") : reply("I have something to add."));
+		// Each agent answers and ends its turn; the post of one into the host chat may wake the next request of the other, so there is a little slack.
+		faux.setResponses([turn, turn, turn, turn, turn, turn] as never);
+		await web.call("POST", `/api/sessions/${host}/messages`, { commandId: "m-open", text: "what else?" });
+		await waitFor("both to answer", async () => ((await transcript(seat)).some((e) => JSON.stringify(e.model ?? "").includes("\"I have something to add.\"")) && (await transcript(host)).some((e) => e.kind === "pi.assistant" && JSON.stringify(e.model ?? "").includes("I have something to add.")) ? true : undefined), 60_000);
+
+		// Taking the agent out: it hears nothing more and its seat is gone.
+		expect((await web.call("DELETE", `/api/sessions/${host}/room/members/${coach.id}`)).json.room).toBeNull();
+		expect((await d.stack.admin.query("SELECT deleted_at FROM pim_app.conversations WHERE public_chat_id = $1", [seat])).rows[0].deleted_at).not.toBeNull();
+		await say(host, "just us now", reply("Just us."));
+		expect(JSON.stringify(await transcript(seat))).not.toContain("just us now");
+	}, 240_000);
 });

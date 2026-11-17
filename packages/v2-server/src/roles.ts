@@ -6,6 +6,7 @@ import { createModels } from "@earendil-works/pi-ai";
 import { createRegistry, type HarnessOptions } from "@earendil-works/pi-durable";
 import type { ProcessConfig } from "@pim/v2-contracts/platform";
 import { App } from "@pim/v2-app/app";
+import { installRooms } from "./rooms.ts";
 import { OPENAI_ENDPOINTS } from "@pim/v2-app/chatgpt";
 import { KeyringCrypto } from "@pim/v2-app/crypto";
 import { connect as connectApp } from "@pim/v2-app/db";
@@ -94,6 +95,7 @@ export async function startGate(config: ProcessConfig, env: Env, host: Host, nat
 	const objects = s3Of(config, env);
 	const crypto = keyringFromProcessEnv(env);
 	const app = new App(db, objects, { fetchTools: mcpFetchTools({ fetch, allowPrivate: env.PIM_CONNECTOR_ALLOW_PRIVATE === "1", check: publicUrl }), ...(crypto ? { crypto } : {}), ...(env.PIM_APP_SECRET_KEY ? { appKey: env.PIM_APP_SECRET_KEY } : {}), transcripts: projectedTranscripts(db.pool), ...(chatgptFromEnv(env) ? { chatgpt: chatgptFromEnv(env)! } : {}) });
+	installRooms(app);
 	if (nats) publishRevocations(app, nats);
 	// A computer paired to another process (the `relay` container, another Gate) is reached over NATS.
 	if (nats) app.relay.useBus(natsRelayBus(nats));

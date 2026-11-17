@@ -181,4 +181,16 @@ real("connector tools", () => {
 		expect(mcp.calls.length).toBe(count + 1);
 		expect((await d.stack.admin.query("SELECT count(*)::int AS n FROM pim_app.approvals")).rows[0].n).toBe(3);
 	}, 240_000);
+
+	it("serves the web app's connected-servers and connections lists, connects a server by its address and removes it", async () => {
+		const listed = (await web.call("GET", "/api/mcp")).json.servers as { id: string; state: string; tools: { name: string }[] }[];
+		expect(listed.find((s) => s.id === connector)).toMatchObject({ state: "ready", tools: [{ name: "search" }, { name: "create_ticket" }, { name: "delete_all" }] });
+		expect((await web.call("POST", "/api/mcp", {})).status).toBe(400);
+		const url = (await d.stack.admin.query("SELECT url FROM pim_app.connectors WHERE id = $1", [connector])).rows[0].url;
+		// Without the server's credential it cannot list tools, and says so instead of pretending.
+		const bare = (await web.call("POST", "/api/mcp", { url })).json;
+		expect(bare).toMatchObject({ state: "failed" });
+		expect((await web.call("DELETE", `/api/mcp/${bare.id}`)).json).toEqual({ deleted: true });
+		expect((await web.call("GET", "/api/connections")).json).toEqual({ connections: [] });
+	});
 });

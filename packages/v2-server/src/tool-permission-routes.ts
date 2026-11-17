@@ -7,7 +7,7 @@ import { ForbiddenError } from "@pim/v2-contracts/authz";
 import type { App } from "@pim/v2-app/app";
 import type { Principal } from "@pim/v2-contracts/identity";
 import { BadRequestError, NotFoundError } from "@pim/v2-app/errors";
-import { ok, type Route } from "@pim/v2-app/http";
+import { ok, route, type Route } from "@pim/v2-app/http";
 import { type Approval, type ConnectorRow, type McpTool, type Permission, type PermissionRow, resolvePermission } from "./connector-tools.ts";
 
 const CHOICES: Permission[] = ["off", "ask", "on"];
@@ -34,22 +34,15 @@ export function permissionRoutes(): Route[] {
 		};
 	};
 	return [
-		{
-			method: "GET",
-			pattern: /^\/api\/permissions$/,
-			run: async ({ app, principal, url }) => {
+		route("GET", "/api/permissions", async ({ app, principal, url }) => {
 				const p = await principal();
 				await person(app, p, false);
 				if (url.searchParams.has("circle")) return ok({ tools: [] });
 				const agent = url.searchParams.get("agent") ?? undefined;
 				const { connectors, permissions } = await rows(app, p.ownerId);
 				return ok({ tools: connectors.flatMap((c) => c.discovered.map((t) => info(c, t, permissions, agent))) });
-			},
-		},
-		{
-			method: "PUT",
-			pattern: /^\/api\/permissions$/,
-			run: async ({ app, principal, json }) => {
+		}),
+		route("PUT", "/api/permissions", async ({ app, principal, json }) => {
 				const p = await principal();
 				await person(app, p, true);
 				const b = await json();
@@ -70,16 +63,12 @@ export function permissionRoutes(): Route[] {
 				const after = (await rows(app, p.ownerId)).permissions;
 				void permissions;
 				return ok(info(c, tool, after, agent));
-			},
-		},
-		{
-			method: "POST",
-			pattern: /^\/api\/approvals\/([^/]+)\/(approve|deny)$/,
-			run: async ({ app, principal, json, params }) => {
+		}),
+		...(["approve", "deny"] as const).map((verb) => route("POST", `/api/approvals/:id/${verb}`, async ({ app, principal, json, params }) => {
 				const p = await principal();
 				await person(app, p, true);
 				const id = params[0]!;
-				const approve = params[1] === "approve";
+				const approve = verb === "approve";
 				const body = await json().catch(() => ({}) as Record<string, any>);
 				const filed = await app.db.owner(p.ownerId, async (tx) => (await tx.query("SELECT tool, args FROM pim_app.approvals WHERE id = $1", [id])).rows[0]);
 				if (!filed) throw new NotFoundError("No such approval");
@@ -89,7 +78,6 @@ export function permissionRoutes(): Route[] {
 					if (typeof connector === "string" && typeof tool === "string") await app.db.owner(p.ownerId, (tx) => tx.query("INSERT INTO pim_app.tool_permissions (owner_id, audience, app, tool, permission) VALUES ($1,'owner',$2,$3,'on') ON CONFLICT (owner_id, audience, app, tool) DO UPDATE SET permission = 'on', updated_at = now()", [p.ownerId, connector, tool]));
 				}
 				return ok({ id, status: approve ? "approved" : "denied", ...(approve && body.always === true ? { always: true } : {}) });
-			},
-		},
+		})),
 	];
 }

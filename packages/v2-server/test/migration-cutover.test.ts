@@ -136,6 +136,11 @@ real("a cutover rehearsal", () => {
 		expect(await count(`SELECT count(*) n FROM pim_app.shares WHERE owner_id = '${ADA}' AND link = 'lnk1'`)).toBe(1);
 		expect(await count(`SELECT count(*) n FROM pim_app.artifact_versions WHERE owner_id = '${ADA}'`)).toBeGreaterThan(0);
 		expect(await count(`SELECT count(*) n FROM pim_app.note_updates WHERE owner_id = '${ADA}'`)).toBeGreaterThan(0);
+		// The ChatGPT sign-in came across as it was, sealed under the application's keys, with the same agent host id: nobody signs in again.
+		const plan = (await as<{ secret: string; email: string; host_id: string }>("SELECT secret, email, host_id FROM pim_app.chatgpt_credentials WHERE owner_id = $1", [ADA]))[0]!;
+		expect(plan).toMatchObject({ email: "ada@example.test", host_id: "urn:uuid:11111111-1111-4111-8111-111111111111" });
+		expect(JSON.parse(await openString(appKeys, plan.secret, `chatgpt:${ADA}`))).toMatchObject({ type: "oauth", access: "chatgpt-access-example", refresh: "chatgpt-refresh-example", clientId: "client-example" });
+		expect(await as("SELECT 1 FROM pim_app.providers WHERE owner_id = $1 AND kind = 'openai'", [ADA])).toHaveLength(0);
 		for (const p of await as<{ id: string; secret: string | null }>("SELECT id, secret FROM pim_app.providers WHERE owner_id = $1 AND secret IS NOT NULL", [ADA])) expect((await openString(appKeys, p.secret!, `provider:${ADA}/${p.id}`)).length).toBeGreaterThan(0);
 		// Nothing that was due while the fence stood comes back: a time trigger counts from the activation.
 		const stale = await count(`SELECT count(*) n FROM pim_app.triggers WHERE owner_id = '${ADA}' AND source = 'time' AND watermark < ${ACTIVATED_AT}`);

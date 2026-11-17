@@ -1,5 +1,6 @@
 import { BadRequestError, NotFoundError } from "../errors.ts";
 import { ok, type Reply, route, type Route } from "../http.ts";
+import { isWebProviderInput, toServiceInput, toWebProvider } from "../web-providers.ts";
 
 const int = (v: string | null, fallback: number) => (v === null ? fallback : Number.isInteger(Number(v)) ? Number(v) : fallback);
 const none = (): Reply => ({ status: 200, body: { ok: true } });
@@ -91,8 +92,21 @@ export const domainRoutes: Route[] = [
 
 	// ---- providers, usage ----
 	route("GET", "/api/providers", async ({ app, principal }) => ok({ providers: await app.providers.list(await principal()) })),
-	route("POST", "/api/providers", async ({ app, principal, json }) => ok(await app.providers.create(await principal(), (await json()) as never), 201)),
-	route("PUT", "/api/providers/:id", async ({ app, principal, params, json }) => ok(await app.providers.update(await principal(), params[0]!, (await json()) as never))),
+	// The web app's own forms (`builtin`, `url`, `key`, `models`) are answered in the shape it shows; the services' own shape (`kind`, `apiKey`, `config`) still works.
+	route("POST", "/api/providers", async ({ app, principal, json }) => {
+		const body = await json();
+		if (!isWebProviderInput(body)) return ok(await app.providers.create(await principal(), body as never), 201);
+		const p = await principal();
+		return ok({ provider: toWebProvider(await app.providers.create(p, (await toServiceInput(body)) as never)) }, 201);
+	}),
+	route("PUT", "/api/providers/:id", async ({ app, principal, params, json }) => {
+		const body = await json();
+		if (!isWebProviderInput(body)) return ok(await app.providers.update(await principal(), params[0]!, body as never));
+		const p = await principal();
+		const existing = (await app.providers.list(p)).find((x) => x.id === params[0]!);
+		const input = await toServiceInput(body, existing);
+		return ok({ provider: toWebProvider(await app.providers.update(p, params[0]!, { ...(input.name ? { name: input.name } : {}), config: input.config, ...(input.apiKey !== undefined ? { apiKey: input.apiKey } : {}) })) });
+	}),
 	route("DELETE", "/api/providers/:id", async ({ app, principal, params }) => (await app.providers.remove(await principal(), params[0]!), none())),
 	route("GET", "/api/model/fallbacks", async ({ app, principal }) => ok({ models: await app.providers.fallbacks(await principal()) })),
 	route("PUT", "/api/model/fallbacks", async ({ app, principal, json }) => ok({ models: await app.providers.setFallbacks(await principal(), (await json()).models) })),

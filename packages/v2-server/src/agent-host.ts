@@ -62,10 +62,10 @@ export type AgentHostOptions = {
 };
 
 const asModelRef = (v: unknown): ModelRef | null => {
-	if (typeof v === "string") return v.includes("/") ? { provider: v.split("/")[0]!, id: v.split("/").slice(1).join("/") } : null;
+	if (typeof v === "string") return v.includes("/") ? { provider: v.split("/")[0]!.replace(/^own:/, ""), id: v.split("/").slice(1).join("/") } : null;
 	const m = v as { provider?: unknown; id?: unknown; modelId?: unknown } | null;
 	const id = m?.id ?? m?.modelId;
-	return m && typeof m.provider === "string" && typeof id === "string" ? { provider: m.provider, id } : null;
+	return m && typeof m.provider === "string" && typeof id === "string" ? { provider: m.provider.replace(/^own:/, ""), id } : null;
 };
 
 /** A pi-ai provider for an OpenAI-compatible endpoint: a gateway, a local server, or an owner's own. A server without a key is sent a placeholder. */
@@ -243,14 +243,17 @@ export function createAgentHost(options: AgentHostOptions) {
 		return { models: metered, registry } as HarnessOptions;
 	};
 
+	/** The model the owner chose in Settings for agents with none of their own (migration 0611). */
+	const chosenModel = async (ownerId: string) => asModelRef((await db.read<{ m: unknown }>(ownerId, "SELECT pim_app.runner_model($1) AS m", [ownerId]).catch(() => ({ rows: [] as { m: unknown }[] }))).rows[0]?.m);
+
 	const homeRoot: NonNullable<RunnerOptions["homeRoot"]> = async (ownerId) => {
 		const c = await readContext(ownerId, null).catch(() => undefined);
-		return { agent: { model: await choose(ownerId, (c?.fallbacks ?? []).map(asModelRef)) } };
+		return { agent: { model: await choose(ownerId, [await chosenModel(ownerId), ...(c?.fallbacks ?? []).map(asModelRef)]) } };
 	};
 	const chatAgent: NonNullable<RunnerOptions["chatAgent"]> = async (ownerId, chat) => {
 		const c = await readContext(ownerId, chat ?? null).catch(() => undefined);
 		const own = c?.agent ? [asModelRef(c.agent.config.model), ...((c.agent.config.fallbacks ?? []) as unknown[]).map(asModelRef)] : [];
-		return { model: await choose(ownerId, [...own, ...(c?.fallbacks ?? []).map(asModelRef)]) };
+		return { model: await choose(ownerId, [...own, await chosenModel(ownerId), ...(c?.fallbacks ?? []).map(asModelRef)]) };
 	};
 
 	return { harnessOptions, homeRoot, chatAgent };

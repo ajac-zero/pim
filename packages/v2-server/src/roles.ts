@@ -9,6 +9,7 @@ import { App } from "@pim/v2-app/app";
 import { OPENAI_ENDPOINTS } from "@pim/v2-app/chatgpt";
 import { KeyringCrypto } from "@pim/v2-app/crypto";
 import { connect as connectApp } from "@pim/v2-app/db";
+import { modelRoutes } from "./model-routes.ts";
 import { createGate } from "@pim/v2-app/gate";
 import { S3ObjectStore } from "@pim/v2-app/objects";
 import { attachSockets, BROWSER_LIVE, COMPUTER_CONNECT, COMPUTER_SCREEN, NOTES_LIVE } from "@pim/v2-app/sockets";
@@ -100,7 +101,7 @@ export async function startGate(config: ProcessConfig, env: Env, host: Host, nat
 	const authenticate = forgeAuthenticator(app, secure);
 	// Forge's whole HTTP surface (the coding API, harness logins, the git broker, Gitea, the model gateway), each request under its owner's row-level security scope.
 	const coding = forgeHttp(forge, { authenticate, crypto: app.crypto });
-	const options = { publicUrl: config.publicUrl, ...(env.PIM_APPS_ORIGIN ? { appsOrigin: env.PIM_APPS_ORIGIN } : {}), routes: [...snapshotRoutes(db.pool), ...codingAdminRoutes(), ...forgeRoutes(coding)] };
+	const options = { publicUrl: config.publicUrl, ...(env.PIM_APPS_ORIGIN ? { appsOrigin: env.PIM_APPS_ORIGIN } : {}), routes: [...modelRoutes(env), ...snapshotRoutes(db.pool), ...codingAdminRoutes(), ...forgeRoutes(coding)] };
 	const gate = createGate(app, options);
 	const listener = gate.listeners("request")[0] as (req: never, res: never) => void;
 	const web = webAssets(env.PIM_WEB_DIR);

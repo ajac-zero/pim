@@ -108,14 +108,14 @@ real("Sign in with ChatGPT and provider failover", () => {
 		const stack = await createStack();
 		d = { stack, nats: await startNats(), s3: await startS3(), gatePort: await freePort(), ingressSecret: "ingress" };
 		app = new App(connectApp(stack.url("gate"), 4), new MemoryObjectStore());
-		const env = { PIM_KEK_k1: key.toString("base64"), PIM_KEK_CURRENT: "k1", PIM_CHATGPT_ISSUER: openai.issuer };
+		const env = { PIM_KEK_k1: key.toString("base64"), PIM_KEK_CURRENT: "k1", PIM_CHATGPT_ISSUER: openai.issuer, PIM_DEFAULT_MODEL: "faux/m" };
 		gate = await start(d, "gate", {}, env);
 		web = new Client(base(gate), d.ingressSecret);
 		const claim = await app.identity.issueClaim("bootstrap", null, 3_600_000);
 		const registered = await web.call("POST", "/auth/register", { username: "anibal", bootstrap: claim });
 		expect(registered.status).toBe(201);
 		ownerId = registered.json.account.ownerId;
-		runner = await start(d, "runner", { pollMs: 40, providers: () => [faux.provider] }, { ...env, PIM_CHATGPT_BASE_URL: openai.issuer, PIM_PROVIDER_COOLDOWN_MS: "600000", PIM_DEFAULT_MODEL: "faux/m" });
+		runner = await start(d, "runner", { pollMs: 40, providers: () => [faux.provider] }, { ...env, PIM_CHATGPT_BASE_URL: openai.issuer, PIM_PROVIDER_COOLDOWN_MS: "600000"});
 	}, 180_000);
 	afterAll(async () => {
 		await Promise.allSettled([runner?.close(), gate?.close()]);
@@ -146,6 +146,28 @@ real("Sign in with ChatGPT and provider failover", () => {
 		const row = await stored();
 		expect(row.secret).not.toContain("access-1");
 		expect(await opened()).toMatchObject({ access: "access-1", refresh: "refresh-1", clientId: "client-1", subject: "acct-1" });
+	}, 60_000);
+
+	it("shows the plan and the person's providers in the model settings, and keeps the model they choose", async () => {
+		const settings = (await web.call("GET", "/api/model")).json;
+		expect(settings.chatgpt).toEqual({ connected: true, email: "anibal@example.com", error: null });
+		expect(settings.default).toMatchObject({ provider: "faux", id: "m" });
+		expect(settings.choices.map((c: { provider: string; id: string }) => `${c.provider}/${c.id}`)).toContain(`openai/${MODEL}`);
+		const added = await web.call("POST", "/api/providers", { name: "Local", url: "http://127.0.0.1:9/v1", models: ["tiny"], key: "sk-local" });
+		expect(added.status).toBe(201);
+		expect(added.json.provider).toMatchObject({ name: "Local", url: "http://127.0.0.1:9/v1", hasKey: true, chosen: ["tiny"], models: [{ id: "tiny" }] });
+		expect(JSON.stringify(added.json)).not.toContain("sk-local");
+		const own = `own:${added.json.provider.id}`;
+		const after = (await web.call("GET", "/api/model")).json;
+		expect(after.providers).toMatchObject([{ provider: own, hasKey: true }]);
+		expect(after.choices).toContainEqual(expect.objectContaining({ provider: own, id: "tiny" }));
+		expect((await web.call("PUT", "/api/model", { provider: "nobody", id: "nothing" })).status).toBe(400);
+		expect((await web.call("PUT", "/api/model", { provider: own, id: "tiny" })).json.model).toMatchObject({ provider: own, id: "tiny" });
+		expect((await web.call("GET", "/api/model")).json.model).toMatchObject({ provider: own, id: "tiny" });
+		// Choosing the default again follows it.
+		expect((await web.call("PUT", "/api/model", { provider: "faux", id: "m" })).status).toBe(200);
+		expect((await d.stack.admin.query("SELECT 1 FROM pim_app.owner_settings WHERE key = 'model'")).rowCount).toBe(0);
+		expect((await web.call("DELETE", `/api/providers/${added.json.provider.id}`)).status).toBe(200);
 	}, 60_000);
 
 	it("runs a chat turn on the plan, refreshing the token first and writing the rotated one back", async () => {

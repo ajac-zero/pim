@@ -256,10 +256,11 @@ export async function buildLegacySnapshot(dir: string, options: { cutoverAt?: nu
 				pim_meta: table(["key", "value"], [
 					// Explicit settings only: every key the person never changed is absent, and must stay absent.
 					{ key: "settings", value: json({ timeZone: "Europe/Madrid", approvalPolicy: "auto" }) },
+					{ key: "chatgpt_host_id", value: "urn:uuid:11111111-1111-4111-8111-111111111111" },
 					{ key: "hosted_key", value: Buffer.alloc(32, 5).toString("base64url") },
 					{ key: "vapid_keys", value: json({ kty: "EC", crv: "P-256", d: "example-private-scalar", x: "x", y: "y" }) },
 				]),
-				pim_credentials: table(["provider", "credential"], [{ provider: "anthropic", credential: json({ apiKey: "sk-ant-example-789" }) }]),
+				pim_credentials: table(["provider", "credential"], [{ provider: "anthropic", credential: json({ apiKey: "sk-ant-example-789" }) }, { provider: "openai", credential: json({ type: "oauth", access: "chatgpt-access-example", refresh: "chatgpt-refresh-example", expires: cutoverAt + 3_600_000, clientId: "client-example", scopes: ["chatgpt.tokens.use.direct"], idToken: "id.example.token", subject: "acct-example", email: "ada@example.test" }) }]),
 				pim_app_connections: table(["id", "app", "name", "state", "credential", "sign_in_state", "pending", "auth_url", "error", "created_at", "generation"], [
 					{ id: "conn_gmail", app: "gmail", name: "Gmail", state: "connected", credential: sealLegacyCredential(gmailCredential, keys.appCredentialsKey, credBinding("conn_gmail", "gmail")), sign_in_state: null, pending: null, auth_url: null, error: null, created_at: cutoverAt - 60 * 86_400_000, generation: "g1" },
 					{ id: "conn_spot", app: "spotify", name: "Spotify", state: "connected", credential: json({ accessToken: "unsealed-example" }), sign_in_state: null, pending: null, auth_url: null, error: null, created_at: cutoverAt - 30 * 86_400_000, generation: "g1" },

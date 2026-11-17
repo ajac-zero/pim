@@ -11,7 +11,10 @@ import pg from "pg";
 import { createHost, type Host } from "./host.ts";
 import { migrateAll } from "./migrate.ts";
 import { promoteToLive } from "./migration-bridge.ts";
-import { type Env, type Hooks, NatsPulse, type Role, startForge, startGate, startLive, startMaintenance, startRunner } from "./roles.ts";
+import { S3ObjectStore } from "@pim/v2-app/objects";
+import { cryptoFromEnv } from "@pim/v2-ops/cli/common";
+import { FsObjectStore } from "@pim/v2-ops/migration/objects";
+import { type Env, type Hooks, keyringFromProcessEnv, NatsPulse, type Role, startForge, startGate, startLive, startMaintenance, startRunner } from "./roles.ts";
 
 export type Process = { host: Host; roles: Role[]; close(): Promise<void>; drain(): Promise<void> };
 
@@ -28,13 +31,27 @@ export async function migrateCommand(env: Env): Promise<number[]> {
 /**
  * `promote`: after `@pim/v2-ops` has imported and audited a legacy snapshot into the landing schema, writes it into the live schemas (see `migration-bridge.ts`).
  * Reads `PIM_DATABASE_URL` (the schema owner), `PIM_RP_ID` (the new deployment's hostname), `PIM_CUTOVER_AT` (epoch ms) and optionally `PIM_DEFAULT_MODEL` (`provider/model`).
+ * With `PIM_KEK_*` (the keys the import sealed the landing's secrets under, which also seal the live ones) it carries provider and connector credentials over; with
+ * `PIM_LEGACY_OBJECTS_DIR` (the importer's `--objects-dir`) and `PIM_S3_*` it copies skills', apps' and chats' files into the application's bucket. Without them those
+ * rows are reported as skipped, never promoted empty.
  */
 export async function promoteCommand(env: Env) {
 	for (const name of ["PIM_DATABASE_URL", "PIM_RP_ID", "PIM_CUTOVER_AT"]) if (!env[name]) throw new Error(`${name} is required to promote`);
 	const [provider, ...model] = (env.PIM_DEFAULT_MODEL ?? "").split("/");
+	const app = keyringFromProcessEnv(env);
+	const crypto = app ? { app, ops: cryptoFromEnv(env as NodeJS.ProcessEnv) } : undefined;
+	const legacy = env.PIM_LEGACY_OBJECTS_DIR ? new FsObjectStore(env.PIM_LEGACY_OBJECTS_DIR) : undefined;
+	const live = env.PIM_S3_ENDPOINT && env.PIM_S3_BUCKET ? new S3ObjectStore(env.PIM_S3_BUCKET, { endpoint: env.PIM_S3_ENDPOINT, region: env.PIM_S3_REGION ?? "us-east-1", ...(env.PIM_S3_ACCESS_KEY && env.PIM_S3_SECRET_KEY ? { credentials: { accessKeyId: env.PIM_S3_ACCESS_KEY, secretAccessKey: env.PIM_S3_SECRET_KEY } } : {}) }) : undefined;
 	const pool = new pg.Pool({ connectionString: env.PIM_DATABASE_URL, max: 4 });
 	try {
-		return await promoteToLive(pool, { rpId: env.PIM_RP_ID!, cutoverAt: Number(env.PIM_CUTOVER_AT), ...(provider && model.length ? { defaultAgent: { provider, modelId: model.join("/") } } : {}) });
+		return await promoteToLive(pool, {
+			rpId: env.PIM_RP_ID!,
+			cutoverAt: Number(env.PIM_CUTOVER_AT),
+			...(provider && model.length ? { defaultAgent: { provider, modelId: model.join("/") } } : {}),
+			...(env.PIM_ACTIVATED_AT ? { activatedAt: Number(env.PIM_ACTIVATED_AT) } : {}),
+			...(crypto ? { crypto } : {}),
+			...(legacy ? { objects: { get: (bucket: string, key: string) => legacy.get(bucket, key), ...(live ? { put: async (key: string, bytes: Uint8Array, contentType: string | null) => void (await live.put(key, bytes, { contentType: contentType ?? "application/octet-stream" })) } : {}) } } : {}),
+		});
 	} finally {
 		await pool.end();
 	}

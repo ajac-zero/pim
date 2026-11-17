@@ -1,5 +1,6 @@
 // `/api/coding/git/:owner/:name.git/*`: git smart HTTP for the sandboxes, in front of the git host (GitHub App or Gitea).
 // A sandbox holds only a `pimgit_` token. Every request is checked against PostgreSQL (the thread's nonce and state, the owner not suspended), a push may only update the thread's own `pim/*` branch (never the default branch, never a delete), and a pushed branch is recorded on the thread.
+import { createHash, randomUUID } from "node:crypto";
 import { type Row } from "../db";
 import { type ForgeStore } from "../store";
 import { ForgeError } from "../errors";
@@ -10,7 +11,7 @@ import { type Handler, errorResponse, json, match } from "./common";
 /** `repoUrl` is the repository as the thread names it (its provider instance is found from it). Where the host's smart HTTP endpoint is, and how to sign in to it for this repository. The broker never gives this to a sandbox. */
 export type GitUpstream = (repoUrl: string, access: "read" | "write") => Promise<{ url: string; authorization: string | null }>;
 
-export type GitBrokerDeps = { credentials: Credentials; store: ForgeStore; git: GitHost; upstream: GitUpstream; fetch?: typeof fetch; maxPushBytes?: number };
+export type GitBrokerDeps = { credentials: Credentials; store: ForgeStore; /** The store as one owner's requests see it (row-level security); the Gate's. */ scope?: (ownerId: string) => ForgeStore; git: GitHost; upstream: GitUpstream; fetch?: typeof fetch; maxPushBytes?: number };
 
 export const MAX_PUSH_BYTES = 64 * 1024 * 1024;
 const ZERO = "0".repeat(40);
@@ -65,7 +66,7 @@ export function gitBroker(d: GitBrokerDeps): Handler {
 			const service = url.searchParams.get("service");
 			let target: string;
 			let op: "read" | "write";
-			let who: { threadId: string };
+			let who: { threadId: string; ownerId: string };
 			if (rest === "info/refs" && req.method === "GET" && (service === "git-upload-pack" || service === "git-receive-pack")) {
 				op = service === "git-receive-pack" ? "write" : "read";
 				who = await d.credentials.verifyGit(token, { repo, op: op === "write" ? "advertise-push" : "fetch" });
@@ -78,7 +79,7 @@ export function gitBroker(d: GitBrokerDeps): Handler {
 				op = "write";
 				return await receive(d, doFetch, req, repo, token);
 			} else return json(404, { error: "No such git route", code: "not_found" });
-			return await proxy(d, doFetch, req, (await d.store.get(who.threadId))!.repo, op, target, req.method === "POST" ? new Uint8Array(await req.arrayBuffer()) : undefined);
+			return await proxy(d, doFetch, req, (await storeOf(d, who.ownerId).get(who.threadId))!.repo, op, target, req.method === "POST" ? new Uint8Array(await req.arrayBuffer()) : undefined);
 		} catch (e) {
 			// A refusal from git's side reads best as a plain status: the sandbox's git prints it.
 			const r = errorResponse(e);
@@ -111,19 +112,92 @@ async function receive(d: GitBrokerDeps, doFetch: typeof fetch, req: Request, re
 	if (cmd.next === ZERO) throw new ForgeError("push_refused", "A branch can't be deleted through a push");
 	const branch = cmd.ref.slice("refs/heads/".length);
 	const first = await d.credentials.verifyGit(token, { repo, op: "advertise-push" });
-	const thread = (await d.store.get(first.threadId))!;
+	const thread = (await storeOf(d, first.ownerId).get(first.threadId))!;
 	const who = await d.credentials.verifyGit(token, { repo, op: "push", branch, defaultBranch: await d.git.defaultBranch(thread.repo) });
 	if (thread.branch && thread.branch !== branch) throw new ForgeError("push_refused", `This thread pushes only its own branch, ${thread.branch}`);
-	const res = await proxy(d, doFetch, req, thread.repo, "write", "git-receive-pack", body);
-	if (res.status !== 200) return res;
-	const answer = new Uint8Array(await res.arrayBuffer());
-	if (new TextDecoder().decode(answer).includes(`ok ${cmd.ref}`)) {
-		await d.store.locked(who.threadId, async (q) => {
-			await d.store.patch(q, who.threadId, { last_pushed_sha: cmd.next });
-			await d.store.appendEvent(q, who.threadId, { kind: "git.push", data: { branch, sha: cmd.next, via: "sandbox" } });
-		});
+	const send = (b: Uint8Array) => proxy(d, doFetch, new Request(req.url, { method: "POST", headers: req.headers }), thread.repo, "write", "git-receive-pack", b);
+	let answer: Uint8Array;
+	let status = 200;
+	let contentType = "application/x-git-receive-pack-result";
+	if (cmd.old === ZERO) {
+		const res = await send(body);
+		status = res.status;
+		contentType = res.headers.get("content-type") ?? contentType;
+		answer = new Uint8Array(await res.arrayBuffer());
+	} else {
+		// An update must be a fast-forward. The pack goes up under a staging ref first so the host has the new commit, the host says whether the old tip leads to it,
+		// and only then does the branch move (by an empty pack, with the old tip as its guard) and the staging ref go.
+		if (!d.git.isAncestor) throw new ForgeError("push_refused", "This git host can't tell whether a push only moves the branch forward, so only its first push is taken");
+		const caps = capabilitiesOf(body);
+		const staging = `refs/heads/pim-staging/${randomUUID()}`;
+		const staged = await send(withCommand(body, ZERO, cmd.next, staging));
+		const stagedText = new TextDecoder("latin1").decode(new Uint8Array(await staged.arrayBuffer()));
+		if (staged.status !== 200 || !stagedText.includes(`ok ${staging}`)) return report(caps, cmd.ref, "ng", "the host refused the push", 200);
+		try {
+			if (!(await d.git.isAncestor(thread.repo, cmd.old, cmd.next))) throw new ForgeError("push_refused", `This isn't a fast-forward of ${branch}: fetch it, rebase onto it and push again; a force push is refused`);
+			const moved = await send(commandPacket(cmd.old, cmd.next, cmd.ref, "report-status", EMPTY_PACK));
+			if (moved.status !== 200 || !new TextDecoder("latin1").decode(new Uint8Array(await moved.arrayBuffer())).includes(`ok ${cmd.ref}`)) return report(caps, cmd.ref, "ng", "the branch moved meanwhile: fetch and try again", 200);
+		} finally {
+			await send(commandPacket(cmd.next, ZERO, staging, "report-status delete-refs")).then((r) => r.arrayBuffer()).catch(() => {});
+		}
+		return await recorded(d, who.ownerId, who.threadId, branch, cmd.next, report(caps, cmd.ref, "ok", ""));
 	}
-	return new Response(answer, { status: 200, headers: { "content-type": res.headers.get("content-type") ?? "application/x-git-receive-pack-result" } });
+	if (status !== 200) return new Response(answer, { status, headers: { "content-type": contentType } });
+	if (new TextDecoder().decode(answer).includes(`ok ${cmd.ref}`)) await record(d, who.ownerId, who.threadId, branch, cmd.next);
+	return new Response(answer, { status: 200, headers: { "content-type": contentType } });
+}
+
+async function record(d: GitBrokerDeps, ownerId: string, threadId: string, branch: string, sha: string) {
+	const store = storeOf(d, ownerId);
+	await store.locked(threadId, async (q) => {
+		await store.patch(q, threadId, { last_pushed_sha: sha });
+		await store.appendEvent(q, threadId, { kind: "git.push", data: { branch, sha, via: "sandbox" } });
+	});
+}
+
+async function recorded(d: GitBrokerDeps, ownerId: string, threadId: string, branch: string, sha: string, res: Response): Promise<Response> {
+	await record(d, ownerId, threadId, branch, sha);
+	return res;
+}
+
+const enc = new TextEncoder();
+const pkt = (text: string | Uint8Array) => {
+	const body = typeof text === "string" ? enc.encode(text) : text;
+	return new Uint8Array([...enc.encode((body.length + 4).toString(16).padStart(4, "0")), ...body]);
+};
+const FLUSH = enc.encode("0000");
+/** An empty pack: the header with no objects, and its checksum. */
+const EMPTY_PACK = (() => {
+	const header = new Uint8Array([0x50, 0x41, 0x43, 0x4b, 0, 0, 0, 2, 0, 0, 0, 0]);
+	return new Uint8Array([...header, ...createHash("sha1").update(header).digest()]);
+})();
+
+/** One command, its capabilities, the flush, and a pack when there is one. */
+function commandPacket(old: string, next: string, ref: string, caps: string, pack?: Uint8Array): Uint8Array {
+	return new Uint8Array([...pkt(`${old} ${next} ${ref}\0 ${caps}\n`), ...FLUSH, ...(pack ?? [])]);
+}
+
+/** The capabilities the client sent on its first command line. */
+const storeOf = (d: GitBrokerDeps, ownerId: string) => d.scope?.(ownerId) ?? d.store;
+
+function capabilitiesOf(body: Uint8Array): string[] {
+	const len = Number.parseInt(new TextDecoder().decode(body.subarray(0, 4)), 16);
+	const line = new TextDecoder().decode(body.subarray(4, len));
+	return (line.split("\0")[1] ?? "").trim().split(" ").filter(Boolean);
+}
+
+/** The request with its one command rewritten to another ref, the capabilities and the pack kept. */
+function withCommand(body: Uint8Array, old: string, next: string, ref: string): Uint8Array {
+	const len = Number.parseInt(new TextDecoder().decode(body.subarray(0, 4)), 16);
+	const caps = new TextDecoder().decode(body.subarray(4, len)).split("\0")[1] ?? "";
+	return new Uint8Array([...pkt(`${old} ${next} ${ref}\0${caps}`), ...body.subarray(len)]);
+}
+
+/** What the client's git is answered, in the framing it asked for: `unpack ok`, and `ok` or `ng` for its branch. */
+function report(caps: string[], ref: string, result: "ok" | "ng", why: string, status = 200): Response {
+	const lines = new Uint8Array([...pkt("unpack ok\n"), ...pkt(result === "ok" ? `ok ${ref}\n` : `ng ${ref} ${why}\n`), ...FLUSH]);
+	const body = caps.some((c) => c.startsWith("side-band")) ? new Uint8Array([...pkt(new Uint8Array([1, ...lines])), ...FLUSH]) : lines;
+	return new Response(body, { status, headers: { "content-type": "application/x-git-receive-pack-result" } });
 }
 
 export type { Row };

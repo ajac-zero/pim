@@ -4,6 +4,14 @@ import { CAPABILITIES, HARNESSES, MAX_RESUMES, MAX_SESSION_RESTARTS } from "../s
 import { SETTLE_MS } from "../src/compute";
 import { ada, ScriptedPort, startReq, stack } from "./stack";
 
+const waitUntil = async (check: () => Promise<boolean>) => {
+	for (let i = 0; i < 400; i++) {
+		if (await check()) return;
+		await new Promise((r) => setTimeout(r, 25));
+	}
+	throw new Error("timed out");
+};
+
 describe("harness capabilities are honest", () => {
 	it("describes five harnesses in three families, none of which share the normal agents' runners", () => {
 		expect(Object.keys(CAPABILITIES).sort()).toEqual([...HARNESSES].sort());
@@ -135,6 +143,51 @@ describe("sandbox harness turns", () => {
 		const { threadId } = await s.forge.start(ada, startReq("login-1", { harness: "codex" }));
 		await s.worker({ turns: { codex: port } }).step(threadId);
 		expect(await s.store.get(threadId)).toMatchObject({ state: "waiting_input", stateReason: "login_required" });
+	});
+
+	it("gives a sandbox back after two idle minutes, keeps the thread, and provisions again for its next input", async () => {
+		const port = new ScriptedPort([{ outcome: "completed", text: "first", sessionId: "s1" }, { outcome: "completed", text: "second" }]);
+		const w = s.worker({ turns: { codex: port } });
+		const { threadId } = await s.forge.start(ada, startReq("reap-1", { harness: "codex" }));
+		await w.step(threadId);
+		const first = (await s.store.get(threadId))!.workspaceRef;
+		expect(await s.scheduler.slots("default")).toContain(threadId);
+		s.advance(60_000);
+		expect(await w.reap()).not.toContain(threadId);
+		s.advance(61_000);
+		expect(await w.reap()).toContain(threadId);
+		const t = (await s.store.get(threadId))!;
+		expect(t).toMatchObject({ state: "idle", workspaceRef: null });
+		expect(await s.scheduler.slots("default")).not.toContain(threadId);
+		expect(s.sandboxes.list().some((tag) => tag === first.tag)).toBe(false);
+		// The vendor session lived in the sandbox: the next turn starts a new one, in a fresh sandbox.
+		await s.forge.steer(ada, threadId, "again", "reap-2");
+		await w.step(threadId);
+		expect(port.calls[1]).toMatchObject({ sessionId: null, resume: false });
+		expect((await s.store.get(threadId))!.workspaceRef).toBeTruthy();
+		// A thread with input waiting is never reaped.
+		s.advance(121_000);
+		await s.store.locked(threadId, (q) => s.store.enqueueInbox(q, threadId, "reap-3", "steer", { prompt: "x" }));
+		expect(await w.reap()).not.toContain(threadId);
+	});
+
+	it("dispatches steps without waiting for them: a slow turn doesn't hold up another thread", async () => {
+		let release!: () => void;
+		const gate = new Promise<void>((r) => (release = r));
+		const slow = new ScriptedPort([async () => (await gate, { outcome: "completed", text: "slow" })]);
+		const fast = new ScriptedPort([{ outcome: "completed", text: "fast" }]);
+		const w = s.worker({ turns: { "claude-code": slow, codex: fast } });
+		const a = (await s.forge.start(ada, startReq("disp-a", { harness: "claude-code" }))).threadId;
+		const b = (await s.forge.start(ada, startReq("disp-b", { harness: "codex" }))).threadId;
+		const started = await w.dispatch();
+		expect(started).toBeGreaterThanOrEqual(2);
+		await waitUntil(async () => (await s.store.get(b))!.state === "idle");
+		expect((await s.store.get(a))!.state).toBe("running");
+		// The same thread is never stepped twice at once.
+		expect(await w.dispatch()).toBe(0);
+		release();
+		await w.drain();
+		expect((await s.store.get(a))!.state).toBe("idle");
 	});
 
 	it("an ambiguous sandbox creation is reconciled by tag, never launched twice", async () => {

@@ -51,6 +51,12 @@ export class ProviderGitHost implements GitHost {
 		return provider.createPullRequest({ repo, head: branch, base, title, body: "" });
 	}
 
+	async isAncestor(repoUrl: string, ancestor: string, descendant: string): Promise<boolean> {
+		const { provider, repo } = this.resolve(repoUrl);
+		if (!provider.isAncestor) throw new ForgeError("push_refused", `${provider.instance.label} can't tell whether a push only moves a branch forward`);
+		return provider.isAncestor(repo, ancestor, descendant);
+	}
+
 	async deleteBranch(repoUrl: string, branch: string): Promise<void> {
 		const { provider, repo } = this.resolve(repoUrl);
 		await deleteBranch(await remoteOf(provider, repo, "write"), branch);

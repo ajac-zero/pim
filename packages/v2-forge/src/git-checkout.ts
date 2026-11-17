@@ -11,7 +11,8 @@ const REPO_DIR = "/workspace/repo";
 export type CheckoutDeps = { compute: ComputeProvider; credentials: Credentials; /** Pim's public origin, such as https://pim.example.test: what the sandbox's `origin` points at. */ publicUrl: string; ttlMs?: number };
 
 /** Writes the credential helper and a push-scoped grant, clones the repository through the broker at the thread's ref, and checks out its own branch. Idempotent: an existing checkout is left alone. */
-export async function prepareCheckout(d: CheckoutDeps, thread: ThreadRow, handle: ComputeHandle): Promise<void> {
+/** `restore` is the thread's last autosave bundle (a sandbox given back when idle): the work the clone doesn't have is brought back from it. */
+export async function prepareCheckout(d: CheckoutDeps, thread: ThreadRow, handle: ComputeHandle, restore?: { bundle: Uint8Array; head: string } | null): Promise<void> {
 	const name = repoName(thread.repo);
 	if (!name || !d.compute.workspace) throw new ForgeError("invalid", `Not a repository: ${thread.repo}`);
 	const ws = await d.compute.workspace(handle);
@@ -30,4 +31,10 @@ export async function prepareCheckout(d: CheckoutDeps, thread: ThreadRow, handle
 	await run(["git", "clone", "--quiet", url, REPO_DIR]);
 	if (thread.ref) await run(["git", "-C", REPO_DIR, "checkout", "--quiet", thread.ref]);
 	if (thread.branch) await run(["git", "-C", REPO_DIR, "checkout", "--quiet", "-B", thread.branch]);
+	if (restore) {
+		await ws.writeFile("/workspace/.pim-restore.bundle", restore.bundle, 0o600);
+		await run(["git", "-C", REPO_DIR, "fetch", "--quiet", "/workspace/.pim-restore.bundle", "HEAD"]);
+		await run(["git", "-C", REPO_DIR, "checkout", "--quiet", "-B", thread.branch ?? "restored", restore.head]);
+		await d.compute.exec(handle, ["rm", "-f", "/workspace/.pim-restore.bundle"], { cwd: "/workspace" }).catch(() => {});
+	}
 }

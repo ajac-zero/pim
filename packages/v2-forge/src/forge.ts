@@ -4,12 +4,12 @@ import { pageTranscript, transcriptOutput } from "@pim/coding/transcript";
 import type { TranscriptMessage } from "@pim/shared/transcript";
 import { type Actor, Authz, assertCapability, assertPushBranch, repoName, type Permission } from "./authz";
 import { type ComputeProvider } from "./compute";
-import { type Db, type Row, tx } from "./db";
+import { type Db, type Row, scopedDb, tx } from "./db";
 import { ForbiddenError, ForgeError } from "./errors";
 import { HARNESSES, capabilitiesOf, type Harness } from "./harnesses";
 import { type GitHost, type Objects, type OrbClients } from "./ports";
-import { type ForgeScheduler } from "./scheduler";
-import { type ForgeStore, type OutboxTopic, type ThreadRow } from "./store";
+import { ForgeScheduler } from "./scheduler";
+import { ForgeStore, type OutboxTopic, type ThreadRow } from "./store";
 import { type Credentials } from "./tokens";
 
 export type ForgeConfig = {
@@ -24,6 +24,8 @@ export type ForgeConfig = {
 	compute: ComputeProvider | null;
 	/** Whether this deployment holds an Amp credential at all. */
 	ampConfigured: boolean;
+	/** Whether freeing a slot also admits the next waiters. False for a Forge scoped to one owner (the Gate's), which can't see theirs; the worker's sweep does it. */
+	promoteOnRelease?: boolean;
 };
 
 export type StartRequest = { operationId: string; harness?: Harness; task: string; repo: string; ref?: string; chatId?: string; budgetUsd?: number | null; pool?: string; profile?: object };
@@ -31,6 +33,15 @@ export type Gated<T> = ({ status: "done" } & T) | { status: "approval_required";
 
 export class Forge {
 	constructor(private readonly c: ForgeConfig) {}
+
+	/** This Forge as one owner's requests see it: every query runs under that owner's row-level security scope (see `scopedDb`). */
+	scopedTo(ownerId: string): Forge {
+		const db = scopedDb(this.c.db, ownerId);
+		const store = new ForgeStore(db, this.c.store.now);
+		const authz = new Authz(db, this.c.authz.policy);
+		return new Forge({ ...this.c, db, store, authz, scheduler: new ForgeScheduler(db, store, this.c.scheduler.clock), promoteOnRelease: false });
+	}
+
 
 	private async own(actor: Actor, ref: string): Promise<ThreadRow> {
 		if (actor.role === "guest") throw new ForbiddenError("coding", "guests can't use coding threads");
@@ -106,7 +117,7 @@ export class Forge {
 			await this.c.store.patch(q, t.threadId, { cancel_state: "cancelled" });
 			await this.c.store.setState(q, t.threadId, "idle", "cancelled");
 		});
-		await this.c.scheduler.release(t.threadId, "cancelled");
+		await this.c.scheduler.release(t.threadId, "cancelled", { promote: this.c.promoteOnRelease !== false });
 	}
 
 	/** A person's setup script for a repository (at most 64 KiB), run in their workspaces for it. Needs the start grant on that repository. */
@@ -334,7 +345,7 @@ export class Forge {
 			await q.query("update pim_forge.forge_threads set state = 'archived', archived_at = now(), updated_at = now() where thread_id = $1", [t.threadId]);
 			await this.c.store.emit(q, "projection", `archived:${t.threadId}`, t.threadId, { type: "coding.archived", threadId: t.threadId });
 		});
-		await this.c.scheduler.release(t.threadId, "archived");
+		await this.c.scheduler.release(t.threadId, "archived", { promote: this.c.promoteOnRelease !== false });
 		await this.teardownCompute(actor, ref);
 	}
 

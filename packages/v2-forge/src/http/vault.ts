@@ -13,14 +13,16 @@ export interface LoginFlows {
 	submitCode(ownerId: string, code: string): Promise<unknown>;
 }
 
-export function codingVault(d: { vault: ForgeVault; authenticate: Authenticate; login?: LoginFlows }): Handler {
+/** `vault` may be a function of the owner, for a process that reads under row-level security (the vault's table is owner-scoped). */
+export function codingVault(d: { vault: ForgeVault | ((ownerId: string) => ForgeVault); authenticate: Authenticate; login?: LoginFlows }): Handler {
 	return async (req) => {
 		const path = new URL(req.url).pathname;
 		if (!path.startsWith("/api/coding/vault")) return null;
 		return guarded(async () => {
 			const { actor } = notGuest(await d.authenticate(req));
+			const vault = typeof d.vault === "function" ? d.vault(actor.ownerId) : d.vault;
 			let m = match("/api/coding/vault", path);
-			if (m && req.method === "GET") return json(200, { harnesses: await d.vault.status(actor.ownerId), supported: HARNESSES });
+			if (m && req.method === "GET") return json(200, { harnesses: await vault.status(actor.ownerId), supported: HARNESSES });
 			m = match("/api/coding/vault/:harness/:what", path) ?? match("/api/coding/vault/:harness/:what/:more", path) ?? match("/api/coding/vault/:harness", path);
 			if (!m) throw new ForgeError("not_found", "No such vault route");
 			const harness = String(m.harness);
@@ -34,7 +36,7 @@ export function codingVault(d: { vault: ForgeVault; authenticate: Authenticate; 
 				case "PUT api-key": {
 					if (!isApiKeyHarness(harness)) throw new ForgeError("not_found", `${harness} signs in with a login, not a key`);
 					try {
-						return json(200, await d.vault.saveApiKey(actor.ownerId, harness, (await readJson(req, 4096)).apiKey));
+						return json(200, await vault.saveApiKey(actor.ownerId, harness, (await readJson(req, 4096)).apiKey));
 					} catch (e) {
 						if (e instanceof ApiKeyError) throw new ForgeError("invalid", e.message);
 						throw e;
@@ -44,7 +46,7 @@ export function codingVault(d: { vault: ForgeVault; authenticate: Authenticate; 
 				case "DELETE ":
 					// A running sign-in goes with it.
 					if (d.login && isLoginHarness(harness)) await d.login.cancel(actor.ownerId, harness).catch(() => {});
-					return json(200, await d.vault.delete(actor.ownerId, harness));
+					return json(200, await vault.delete(actor.ownerId, harness));
 				case "POST login":
 					return json(200, await flows().start(actor.ownerId, harness));
 				case "GET login":

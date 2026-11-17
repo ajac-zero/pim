@@ -54,6 +54,8 @@ export class LocalSandboxProvider implements ComputeProvider {
 				if (timer) clearTimeout(timer);
 				done({ code, stdout, stderr, ...(timedOut ? { timedOut } : {}) });
 			});
+			// A command that exits without reading its input is not an error of ours.
+			child.stdin.on("error", () => {});
 			child.stdin.end(options.stdin ?? "");
 		});
 	}

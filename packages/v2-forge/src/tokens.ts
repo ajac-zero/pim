@@ -2,7 +2,7 @@
 // The HMAC proves who minted a token; whether it still works is read from PostgreSQL on every use, so archiving, aborting or suspending cuts it off at once.
 // Nothing here is a PostgreSQL or runtime credential: a sandbox only ever sees one of these.
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { type Db, type Row } from "./db";
+import { type Db, type Row, scopedDb } from "./db";
 import { ForbiddenError, ForgeError } from "./errors";
 import { type Policy, assertPushBranch, repoName } from "./authz";
 
@@ -38,6 +38,8 @@ export class Credentials {
 		private readonly key: string,
 		private readonly policy: Policy,
 		private readonly clock: () => number = Date.now,
+		/** Reads a token's thread under its owner's row-level security scope: for a process, the Gate's, that is subject to it. */
+		private readonly scoped = false,
 	) {}
 
 	gitToken(thread: { threadId: string; ownerId: string; gatewayNonce: string }, o: { repo: string; scope: "read" | "push"; ttlMs?: number }): string {
@@ -55,7 +57,7 @@ export class Credentials {
 	/** The thread must still be live, with the same nonce, and its owner not suspended. */
 	private async live(c: Claims): Promise<Row> {
 		const row = (
-			await this.db.query<Row>(
+			await (this.scoped ? scopedDb(this.db, c.owner) : this.db).query<Row>(
 				`select t.*, o.suspended_at from pim_forge.forge_threads t left join pim_forge.forge_owners o on o.owner_id = t.owner_id where t.thread_id = $1`,
 				[c.thread],
 			)

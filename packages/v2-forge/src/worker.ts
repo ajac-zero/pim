@@ -25,6 +25,8 @@ export type WorkerDeps = {
 	orbs: OrbClients;
 	objects: Objects;
 	attachments?: AttachmentFetcher;
+	/** How often a remote orb's running thread is looked at (an idle one, ten times less often), in ms. */
+	orbPollMs?: number;
 	/** Amp's origin, which attachment links are recognized by; https://ampcode.com when absent. */
 	ampBaseUrl?: string;
 	/** The pool a thread of a harness is placed on when it names none. */
@@ -72,9 +74,82 @@ export class ForgeWorker {
 		return out;
 	}
 
+	/**
+	 * Gives back the sandboxes of threads that have been idle past the grace: the checkout is bundled to Objects, the sandbox deleted, its slot freed, and the thread keeps its transcript and branch.
+	 * The next turn is provisioned again and restored from that bundle; a CLI's vendor session lived in the sandbox and starts anew.
+	 */
+	async reap(autosave?: (threadId: string) => Promise<void>): Promise<string[]> {
+		const { store, scheduler } = this.d;
+		const reaped: string[] = [];
+		for (const id of await scheduler.idleCandidates()) {
+			const epoch = await store.acquireLease(id, this.holder, this.d.leaseMs ?? 60_000);
+			if (epoch === null) continue;
+			try {
+				const t = await store.get(id);
+				const pending = (await store.db.query<Row>("select 1 from pim_forge.forge_inbox where thread_id = $1 and status in ('pending', 'sending')", [id])).rows.length > 0;
+				if (!t || t.state !== "idle" || pending || !t.workspaceRef) {
+					await scheduler.markBusy(id);
+					continue;
+				}
+				await autosave?.(id).catch(() => {});
+				await this.d.compute?.destroy(t.workspaceRef).catch(() => {});
+				await store.fenced(id, epoch, async (q) => {
+					await store.patch(q, id, { workspace_ref: null, provisioning: null });
+					await q.query("delete from pim_forge.forge_harness_sessions where thread_id = $1", [id]);
+					await store.appendEvent(q, id, { kind: "workspace.released", data: { reason: "idle" } });
+				});
+				await scheduler.release(id, "idle");
+				reaped.push(id);
+			} finally {
+				await store.releaseLease(id, this.holder, epoch);
+			}
+		}
+		return reaped;
+	}
+
+	/** Threads this worker is stepping now: `dispatch` never starts a second step of one. */
+	private readonly stepping = new Map<string, Promise<StepResult>>();
+
+	/**
+	 * Starts a step of every thread that needs one and isn't being stepped, up to `max` at once, and returns without waiting: a turn takes minutes and must not hold up the others.
+	 * Returns how many it started; `drain` waits for those to end.
+	 */
+	async dispatch(max = 8): Promise<number> {
+		const ids = (
+			await this.d.store.db.query<Row>(
+				`select thread_id from pim_forge.forge_threads t where state in ('provisioning', 'running')
+				 or (state in ('idle', 'queued', 'waiting_input') and exists (select 1 from pim_forge.forge_inbox i where i.thread_id = t.thread_id and i.status in ('pending', 'sending', 'uncertain')))
+				 or (harness = 'amp' and orb is not null and state in ('running', 'waiting_input', 'idle') and (last_seen_at is null or last_seen_at < now() - (case when state = 'running' then $1 else $2 end)::interval))
+				 order by updated_at`,
+				[`${this.d.orbPollMs ?? 3000} milliseconds`, `${(this.d.orbPollMs ?? 3000) * 10} milliseconds`],
+			)
+		).rows.map((r) => r.thread_id as string);
+		let started = 0;
+		for (const id of ids) {
+			if (this.stepping.size >= max) break;
+			if (this.stepping.has(id)) continue;
+			const run = this.step(id).catch((error) => {
+				console.error(JSON.stringify({ event: "pim.forge.step_failed", thread: id, error: String(error?.message ?? error).slice(0, 300) }));
+				return "skipped" as StepResult;
+			});
+			this.stepping.set(id, run);
+			void run.finally(() => this.stepping.delete(id));
+			started++;
+		}
+		return started;
+	}
+
+	/** Waits for the steps `dispatch` started. */
+	async drain(): Promise<void> {
+		while (this.stepping.size) await Promise.allSettled([...this.stepping.values()]);
+	}
+
 	async step(threadId: string): Promise<StepResult> {
 		const epoch = await this.d.store.acquireLease(threadId, this.holder, this.d.leaseMs ?? 60_000);
 		if (epoch === null) return "busy";
+		// A turn outlasts a lease: it is renewed while the step goes on, and a worker that fails to renew (it lost the thread) stops being able to write.
+		const ttl = this.d.leaseMs ?? 60_000;
+		const renew = setInterval(() => void this.d.store.acquireLease(threadId, this.holder, ttl).catch(() => {}), Math.max(1000, ttl / 3));
 		try {
 			const thread = await this.d.store.get(threadId);
 			if (!thread || thread.state === "archived" || thread.state === "failed") return "skipped";
@@ -83,6 +158,7 @@ export class ForgeWorker {
 			if (error instanceof LeaseLostError) return "busy";
 			throw error;
 		} finally {
+			clearInterval(renew);
 			await this.d.store.releaseLease(threadId, this.holder, epoch);
 		}
 	}

@@ -141,7 +141,8 @@ services:
       SEAWEED_SECRET_KEY: ${SEAWEED_SECRET_KEY:?}
     networks: [internal]
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:9333/cluster/status >/dev/null"]
+      # Healthy once the master, the filer and the S3 gateway all answer: the bucket is created through the filer.
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:9333/cluster/status >/dev/null && wget -qO- http://127.0.0.1:8888/ >/dev/null && wget -qO- http://127.0.0.1:8333/ 2>&1 | grep -qv 'Connection refused'"]
       interval: 5s
       timeout: 3s
       retries: 30
@@ -150,7 +151,7 @@ services:
     image: chrislusf/seaweedfs:3.80
     restart: "no"
     # Creates the bucket through SeaweedFS's own shell; idempotent (an existing bucket is left alone).
-    entrypoint: ["/bin/sh", "-c", "echo \"s3.bucket.create -name $$BUCKET\" | weed shell -master=seaweedfs:9333 -filer=seaweedfs:8888 || true; echo s3.bucket.list | weed shell -master=seaweedfs:9333 -filer=seaweedfs:8888 | grep -q \"$$BUCKET\""]
+    entrypoint: ["/bin/sh", "-c", "for i in $$(seq 1 30); do echo \"s3.bucket.create -name $$BUCKET\" | weed shell -master=seaweedfs:9333 -filer=seaweedfs:8888 >/dev/null 2>&1; echo s3.bucket.list | weed shell -master=seaweedfs:9333 -filer=seaweedfs:8888 2>/dev/null | grep -q \"$$BUCKET\" && exit 0; sleep 2; done; exit 1"]
     environment:
       BUCKET: ${PIM_S3_BUCKET:-pim-objects}
     networks: [internal]

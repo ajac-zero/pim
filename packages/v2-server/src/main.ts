@@ -10,6 +10,7 @@ import { pathToFileURL } from "node:url";
 import pg from "pg";
 import { createHost, type Host } from "./host.ts";
 import { migrateAll } from "./migrate.ts";
+import { markRestored, postRestoreSafetyPass, runnerMayStart } from "@pim/v2-ops/backup/reconcile";
 import { promoteToLive } from "./migration-bridge.ts";
 import { type Env, type Hooks, NatsPulse, type Role, startForge, startGate, startLive, startMaintenance, startRunner } from "./roles.ts";
 
@@ -88,6 +89,19 @@ export async function main(argv = process.argv.slice(2), env: Env = process.env)
 	if (!command) throw new Error("Name a role: migrate, " + PROCESS_ROLES.join(", "));
 	if (command === "promote") {
 		console.log(JSON.stringify({ event: "pim.promote", ...(await promoteCommand(env)) }));
+		return;
+	}
+	if (command === "post-restore") {
+		// After a restore and before any Runner starts (scripts/v2-backup/compose-restore.sh): the restore fence and the safety pass, as the schema owner.
+		if (!env.PIM_DATABASE_URL || !env.PIM_RESTORE_ID) throw new Error("PIM_DATABASE_URL and PIM_RESTORE_ID are required for post-restore");
+		const pool = new pg.Pool({ connectionString: env.PIM_DATABASE_URL, max: 2 });
+		try {
+			await markRestored(pool, env.PIM_RESTORE_ID);
+			const summary = await postRestoreSafetyPass(pool, { restoreId: env.PIM_RESTORE_ID });
+			console.log(JSON.stringify({ event: "pim.post_restore", ...summary, runnersMayStart: await runnerMayStart(pool) }));
+		} finally {
+			await pool.end();
+		}
 		return;
 	}
 	if (command === "migrate") {

@@ -27,6 +27,8 @@ import { openString, type KeyringCrypto } from "@pim/v2-app/crypto";
 import type { Db as RuntimeDb } from "@pim/v2-runtime/db";
 import type { PartitionContext, RunnerOptions } from "@pim/v2-runtime/runner";
 import { pimExtension, type ToolDeps } from "./agent-tools.ts";
+import { CodexImagesClient } from "./codex-images.ts";
+import { imageEndpoints } from "./image-tools.ts";
 import { chatgptCredentialStore, chatgptProvider, type ChatGPTRunnerOptions } from "./chatgpt-auth.ts";
 import type { ForgeParts } from "./forge-assembly.ts";
 import { createFailover } from "./provider-failover.ts";
@@ -205,6 +207,12 @@ export function createAgentHost(options: AgentHostOptions) {
 		return { provider: pick.provider, modelId: pick.id };
 	}
 
+	/** Where an owner's images are drawn: their ChatGPT images sign-in, and the endpoints `PIM_IMAGE_MODEL` can name. `PIM_IMAGE_MODEL=off` has no `generate_image`. */
+	const imageSources = (ownerId: string): ToolDeps["images"] =>
+		env.PIM_IMAGE_MODEL === "off"
+			? undefined
+			: { model: env.PIM_IMAGE_MODEL, codex: () => (options.crypto ? new CodexImagesClient(db, options.crypto, ownerId, env, { fetch: options.fetch, now }) : undefined), endpoints: () => imageEndpoints(db, options.crypto, env, ownerId) };
+
 	const harnessOptions = async (partition: PartitionContext): Promise<HarnessOptions> => {
 		const ownerId = partition.ownerId;
 		const models = await buildModels(ownerId);
@@ -217,7 +225,7 @@ export function createAgentHost(options: AgentHostOptions) {
 				.catch(() => {});
 		});
 		const registry = createRegistry();
-		const deps: ToolDeps = { ownerId, partitionId: partition.partitionId, runtime: db, app: options.app, forge: options.forge, relay: options.relay, fetch: options.fetch ?? fetch, now, crypto: options.crypto, allowPrivateConnectors: env.PIM_CONNECTOR_ALLOW_PRIVATE === "1", chatOf: (conversationId) => publicChatId(ownerId, conversationId) };
+		const deps: ToolDeps = { ownerId, partitionId: partition.partitionId, runtime: db, app: options.app, forge: options.forge, relay: options.relay, fetch: options.fetch ?? fetch, now, crypto: options.crypto, allowPrivateConnectors: env.PIM_CONNECTOR_ALLOW_PRIVATE === "1", images: imageSources(ownerId), chatOf: (conversationId) => publicChatId(ownerId, conversationId) };
 		const ctx = (conversationId: number | string) => publicChatId(ownerId, conversationId).then((chat) => readContext(ownerId, chat));
 		registry.install(pimExtension(deps, [
 			section("agent", async (input) => {

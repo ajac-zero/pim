@@ -1,6 +1,6 @@
 /**
  * The web app's model settings over the Gate: `GET /api/model` (the model agents run on when they have none of their own, the choices, the ChatGPT plan and the person's providers),
- * `PUT /api/model`, `PUT /api/model/utility`, the built-in services, and the ChatGPT image sign-in, which is not ported (it answers as not connected).
+ * `PUT /api/model`, `PUT /api/model/utility`, the built-in services. The ChatGPT images sign-in is `chatgpt-images.ts`; this only reports whether it is connected.
  * The choices are what the Gate can know: the plan's catalog when ChatGPT is signed in, the services whose key a person added, their own OpenAI-compatible endpoints,
  * the deployment's gateway and its default model. The Runner is what runs them, from its own catalog (`agent-host.ts`); a person's providers are `own:<id>` here and `<id>` there.
  */
@@ -11,6 +11,7 @@ import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 import { BadRequestError, PimError } from "@pim/v2-app/errors";
 import { ok, type Route, route } from "@pim/v2-app/http";
 import { toWebProvider } from "@pim/v2-app/web-providers";
+import { CodexImagesSignIn } from "../codex-images.ts";
 
 type Env = Record<string, string | undefined>;
 type ModelRef = { provider: string; id: string };
@@ -58,7 +59,7 @@ export function modelRoutes(env: Env): Route[] {
 			workersAi: false,
 			utility: { model: info(utility), default: null, choices },
 			chatgpt: { ...chatgpt, error: null },
-			chatgptImages: { connected: false, email: null },
+			chatgptImages: await new CodexImagesSignIn(app, env).status(p),
 			providers: providers.map((row: any) => ({ ...toWebProvider(row), provider: `${OWN}${row.id}` })),
 		};
 	}
@@ -78,7 +79,6 @@ export function modelRoutes(env: Env): Route[] {
 		return { model: found };
 	}
 
-	const unavailable = () => { throw new PimError(501, "capability_unavailable", "ChatGPT image generation is not available on this Pim yet."); };
 	return [
 		route("GET", "/api/model", async ({ app, principal }) => {
 			return ok(await settings(app, await principal()));
@@ -89,9 +89,5 @@ export function modelRoutes(env: Env): Route[] {
 			await app.identity.authz.enforce(await principal(), "api:read");
 			return ok({ providers: Object.entries(CATALOGS).map(([id, c]) => ({ id, name: c.name, models: c.models().map(catalogInfo) })) });
 		}),
-		route("GET", "/api/chatgpt/images", async () => ok({ connected: false, email: null })),
-		route("POST", "/api/chatgpt/images/login", async () => unavailable()),
-		route("POST", "/api/chatgpt/images/callback", async () => unavailable()),
-		route("DELETE", "/api/chatgpt/images", async () => ok({ connected: false, email: null })),
 	];
 }

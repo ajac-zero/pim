@@ -5,7 +5,7 @@
  *
  * It gets Node.js where the machine has none new enough (Node's official build, checked against the checksum here), downloads the program from this Pim into its own folder,
  * and runs the program's `install` command, which does the rest: its checks, and a service that keeps it running. Anything after the token goes to that command.
- * (v1's script also installed pim-host, which keeps managed computers; that is not part of this deployment yet.)
+ * `... -- host pimh_…` installs pim-host the same way, the program that keeps a computer for every person on a machine of the operator's (`hostops/`).
  */
 
 /** Node.js for the programs, where the machine has none new enough: its official build, as .tar.gz (which needs no xz), with each one's SHA-256. */
@@ -23,15 +23,17 @@ export function installScript(pimUrl: string): string {
 		.map(([machine, build]) => `\t${machine}) build="${build}" ;;`)
 		.join("\n");
 	return `#!/bin/sh
-# Installs pim-computer from the Pim at ${pimUrl}:
+# Installs pim-computer, or pim-host, from the Pim at ${pimUrl}:
 #   curl -fsSL ${pimUrl}/install.sh | sh -s -- computer pimc_…
+#   curl -fsSL ${pimUrl}/install.sh | sh -s -- host pimh_… --backend docker --image …
 # Anything after the token goes to the program's install command.
 set -eu
 PIM_URL="\${PIM_URL:-${pimUrl}}"
 case "\${1:-}" in
 computer) program=pim-computer; variable=PIM_COMPUTER_TOKEN ;;
+host) program=pim-host; variable=PIM_HOST_TOKEN ;;
 *)
-	echo "Usage: curl -fsSL $PIM_URL/install.sh | sh -s -- computer <token>" >&2
+	echo "Usage: curl -fsSL $PIM_URL/install.sh | sh -s -- computer|host <token>" >&2
 	exit 2
 	;;
 esac
@@ -75,7 +77,10 @@ ${builds}
 	NODE="$DIR/node/bin/node"
 fi
 
-for file in $program.ts; do
+# pim-host uses pim-computer's code for its service, so it has both.
+files="$program.ts"
+if [ "$program" = pim-host ]; then files="$files pim-computer.ts"; fi
+for file in $files; do
 	curl -fsSL --retry 5 -o "$DIR/$file.download" "$PIM_URL/$file"
 	mv "$DIR/$file.download" "$DIR/$file"
 done

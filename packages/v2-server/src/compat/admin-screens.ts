@@ -52,8 +52,6 @@ export function screenRoutes(env: Env): Route[] {
 		return ok({});
 	};
 
-	const hostStatus = { paired: false, pairedAt: null, seenAt: null, connected: false, image: null, kind: null, version: null, machines: 0, running: 0, pending: 0 };
-
 	return [
 		// ---- accounts ----
 		route("POST", "/api/admin/accounts/:username/suspend", status("suspended")),
@@ -166,9 +164,6 @@ export function screenRoutes(env: Env): Route[] {
 			const [method, path] = spec.split(" ") as [string, string];
 			return route(method, path, async ({ app, principal }) => (await admin(app, await principal(), "admin:compute"), unsupported("Managed compute")));
 		}),
-		route("GET", "/api/admin/computer-host", async ({ app, principal }) => (await admin(app, await principal(), "admin:compute"), ok(hostStatus))),
-		route("POST", "/api/admin/computer-host", async ({ app, principal }) => (await admin(app, await principal(), "admin:compute"), unsupported("Pairing a computer host"))),
-		route("DELETE", "/api/admin/computer-host", async ({ app, principal }) => (await admin(app, await principal(), "admin:compute"), ok(hostStatus))),
 	];
 }
 

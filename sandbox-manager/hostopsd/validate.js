@@ -3,6 +3,8 @@
 // before anything runs.
 
 export const SERVICES = ['sandbox-manager', 'egress-proxy', 'docker-socket-proxy', 'hostopsd']
+// The services of the Pim stack on Docker Compose (HOSTOPSD_STACK=compose), which packages/v2-server's HOST_SERVICES must list too.
+export const COMPOSE_SERVICES = ['caddy', 'postgres', 'pgbouncer', 'nats', 'seaweedfs', 'gate', 'live', 'runner', 'forge', 'maintenance', 'canvas', 'relay', 'pim-computer', 'sandbox-manager', 'hostopsd']
 export const REF = /^[A-Za-z0-9._/-]{1,100}$/
 export const COMMIT = /^[0-9a-fA-F]{7,40}$/
 const OP_ID = /^[A-Za-z0-9_.:-]{1,128}$/
@@ -24,25 +26,27 @@ const command = (v) => (typeof v === 'string' && v.trim() !== '' && v.length <= 
 const commit = (v) => (typeof v === 'string' && COMMIT.test(v) ? null : 'must be 7 to 40 hex characters')
 
 // name -> { arg: [check, required, default] }
-const OPS = {
+const opsFor = (services) => ({
 	stats: {},
 	deploy: { ref: [ref, false, 'origin/main'] },
 	rollback: { commit: [commit, true] },
-	restart: { service: [oneOf(SERVICES), true] },
-	logs: { service: [oneOf(SERVICES), true], lines: [int(1, 500), false, 200] },
+	restart: { service: [oneOf(services), true] },
+	logs: { service: [oneOf(services), true], lines: [int(1, 500), false, 200] },
 	set_slot_limit: { maxConcurrent: [int(1, 16), true] },
 	exec: { command: [command, true], timeoutSeconds: [int(1, 300), false, 60], maxOutputBytes: [int(1, 65536), false, 65536] },
-}
+})
+const OPS = opsFor(SERVICES)
 export const OP_NAMES = Object.keys(OPS)
 
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v) && Object.getPrototypeOf(v) === Object.prototype
 
 // Checks the envelope Pim sends. Returns the op id (or null when there is none to report against)
 // and either the validated op or an error.
-export function validateOp(op) {
+export function validateOp(op, services = SERVICES) {
 	const id = isPlainObject(op) && typeof op.id === 'string' && OP_ID.test(op.id) ? op.id : null
 	if (!id) return { id: null, error: 'operation has no valid id' }
-	const spec = Object.hasOwn(OPS, op.name) ? OPS[op.name] : null
+	const ops = services === SERVICES ? OPS : opsFor(services)
+	const spec = Object.hasOwn(ops, op.name) ? ops[op.name] : null
 	if (!spec) return { id, error: `unknown operation ${JSON.stringify(String(op.name).slice(0, 60))}` }
 	const raw = op.args ?? {}
 	if (!isPlainObject(raw)) return { id, error: 'args must be an object' }

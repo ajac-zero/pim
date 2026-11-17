@@ -15,7 +15,7 @@ import { readFile } from "node:fs/promises";
 import { dirname, join, posix } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type Computer, ComputerError } from "@pim/v2-app/relay";
-import { BadRequestError, ConflictError, NotFoundError, PimError } from "@pim/v2-app/errors";
+import { BadRequestError, ConflictError, NotFoundError } from "@pim/v2-app/errors";
 import { ok, type Reply, type Route, route } from "@pim/v2-app/http";
 import { filesPath, FILES_ROOT } from "../computer-tools.ts";
 import { installScript } from "../computer-install-script.ts";
@@ -132,7 +132,7 @@ export function computerRoutes(options: { source?: string } = {}): Route[] {
 		route("POST", "/api/computer", async (ctx) => {
 			const p = await ctx.principal();
 			const body = await ctx.json();
-			// Computers the host keeps for people (pim-host) are not part of this deployment yet.
+			// Where a host is paired the request is answered in `../hostops/routes.ts`; with none there is no computer to keep for them.
 			if (body.managed === true) throw new NotFoundError("This Pim has no computer host to keep a computer for you. Connect one of your own.");
 			const paired = await ctx.app.relay.pair(p, typeof body.name === "string" && body.name ? body.name.slice(0, 80) : "My computer", 2);
 			return ok({ ...(await status(ctx)), token: paired.token }, 201, noStore);
@@ -155,19 +155,6 @@ export function computerRoutes(options: { source?: string } = {}): Route[] {
 			if (typeof b.thread !== "string" || !b.thread) throw new BadRequestError("thread must name the thread whose display to take over");
 			if (b.mode !== "user" && b.mode !== "agent") throw new BadRequestError("mode must be 'user' or 'agent'");
 			return ok(await computer.call("display_control", { thread: b.thread, mode: b.mode }), 200, noStore);
-		}),
-		// The computer host (pim-host), which keeps a managed computer for every person, is not part of this deployment yet: the admin sees that none is paired, and cannot pair one.
-		route("GET", "/api/admin/computer-host", async (ctx) => {
-			await ctx.app.identity.authz.enforce(await ctx.principal(), "admin:settings");
-			return ok({ paired: false, pairedAt: null, seenAt: null, connected: false, image: null, kind: null, version: null, machines: 0, running: 0, pending: 0 }, 200, noStore);
-		}),
-		route("POST", "/api/admin/computer-host", async (ctx) => {
-			await ctx.app.identity.authz.enforce(await ctx.principal(), "admin:settings");
-			throw new PimError(501, "not_implemented", "Managed computers (pim-host) are not part of this deployment yet; people connect their own computer, which can run beside this stack (docs/v2-operations.md).");
-		}),
-		route("DELETE", "/api/admin/computer-host", async (ctx) => {
-			await ctx.app.identity.authz.enforce(await ctx.principal(), "admin:settings");
-			return ok({ paired: false, pairedAt: null, seenAt: null, connected: false, image: null, kind: null, version: null, machines: 0, running: 0, pending: 0 }, 200, noStore);
 		}),
 		route("GET", "/api/browser", async (ctx) => {
 			const p = await ctx.principal();

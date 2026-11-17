@@ -153,6 +153,8 @@ export function createOps(cfg, { state, save, log = () => {} }) {
 	// so a manager that is never idle can still be deployed to; a manager that doesn't answer has
 	// nothing to protect. Both outcomes are logged and returned for the operation's summary.
 	async function waitIdle(op) {
+		// On Compose there is a sandbox manager only with the coding profile, and its token is then in the stack's .env.
+		if (composeMode && !cfg.managerToken) return ''
 		const until = Date.now() + cfg.idleTimeoutMs
 		let running = 0
 		let deferred = false
@@ -181,6 +183,7 @@ export function createOps(cfg, { state, save, log = () => {} }) {
 	// The ids of the sessions the manager runs, from its authenticated listing, or null when it does
 	// not answer.
 	async function runningSessions() {
+		if (composeMode && !cfg.managerToken) return null
 		try {
 			const r = await manager('GET', '/sessions')
 			if (r.status !== 200 || !Array.isArray(r.json)) return null
@@ -216,8 +219,29 @@ export function createOps(cfg, { state, save, log = () => {} }) {
 		return { sessions: { runningBefore, runningAfter, survived, lost }, text }
 	}
 
+	// The Pim stack on Docker Compose (HOSTOPSD_STACK=compose): deploy/compose/pim.sh runs `docker compose` with the stack's files, in its directory, where its .env is.
+	const composeMode = cfg.stack === 'compose'
+	const pimSh = (args, timeoutMs) => run(path.join(cfg.composeDir, 'pim.sh'), args, { cwd: cfg.composeDir, env: { ...baseEnv, ...(cfg.pimDev ? { PIM_DEV: '1' } : {}) }, timeoutMs })
+
+	// Checks out a commit, builds the Pim image from it under the name the stack's .env gives (PIM_IMAGE), recreates the stack's containers and waits for them to be healthy
+	// (`up --wait`, which runs the migrator first). Database migrations are not undone by going back.
+	async function composeCheckoutAndUp(sha) {
+		const image = cfg.composeEnv.PIM_IMAGE
+		if (!image) return { ok: false, step: 'checkout', error: `PIM_IMAGE is not set in ${path.join(cfg.composeDir, '.env')}` }
+		const co = await git(['checkout', '--detach', '--quiet', sha], t.git)
+		if (co.code !== 0) return { ok: false, step: 'checkout', error: failText(`git checkout ${short(sha)}`, co) }
+		const build = await run('docker', ['build', '-f', 'deploy/Dockerfile.v2', '-t', image, '.'], { cwd: checkout, env: baseEnv, timeoutMs: t.up })
+		if (build.code !== 0) return { ok: false, step: 'build', error: failText('docker build', build) }
+		const up = await pimSh(['up', '-d', '--wait', '--wait-timeout', String(Math.ceil(cfg.healthTimeoutMs / 1000))], t.up)
+		if (up.code !== 0) return { ok: false, step: 'up', error: failText('docker compose up', up) }
+		const ps = await pimSh(['ps', '--format', '{{json .}}'], t.compose)
+		const services = ps.stdout.split('\n').filter((l) => l.trim()).map((l) => JSON.parse(l)).map((c) => ({ service: c.Service, state: c.State, health: c.Health || null }))
+		return { ok: true, health: { services } }
+	}
+
 	// Checks out a commit, rebuilds the stack with up.sh and waits for the manager to report it.
 	async function checkoutAndUp(sha) {
+		if (composeMode) return composeCheckoutAndUp(sha)
 		const co = await git(['checkout', '--detach', '--quiet', sha], t.git)
 		if (co.code !== 0) return { ok: false, step: 'checkout', error: failText(`git checkout ${short(sha)}`, co) }
 		let buildSha
@@ -255,7 +279,7 @@ export function createOps(cfg, { state, save, log = () => {} }) {
 			state.deploy = null
 			await save()
 			const verb = kind === 'deploy' ? 'Deployed' : 'Rolled back to'
-			return { result: done(op.id, 'succeeded', `${verb} ${short(target)} (was ${short(previous)}); the manager is healthy at it.`, { ...commits, health: r.health }), restartSelf: await ownCodeChanged() }
+			return { result: done(op.id, 'succeeded', `${verb} ${short(target)} (was ${short(previous)}); ${composeMode ? 'the stack is up and healthy' : 'the manager is healthy'} at it.`, { ...commits, health: r.health }), restartSelf: await ownCodeChanged() }
 		}
 		const moved = r.step !== 'checkout' || (await head().catch(() => null)) !== previous
 		if (!revert || !moved) {
@@ -311,6 +335,11 @@ export function createOps(cfg, { state, save, log = () => {} }) {
 				if (r.code !== 0) throw new Error(failText(`docker ${args[0]}`, r))
 				return r.stdout
 			}
+			const pimShOut = async (args) => {
+				const r = await pimSh(args, t.probe)
+				if (r.code !== 0) throw new Error(failText(`docker compose ${args[0]}`, r))
+				return r.stdout
+			}
 			const jsonLines = (s) => s.split('\n').filter((l) => l.trim()).map((l) => JSON.parse(l))
 			const disk = async (p) => {
 				const s = await fs.statfs(p)
@@ -337,7 +366,8 @@ export function createOps(cfg, { state, save, log = () => {} }) {
 				},
 				dockerDf: await tryTo('dockerDf', async () => jsonLines(await docker(['system', 'df', '--format', '{{json .}}'])).map((d) => ({ type: d.Type, total: d.TotalCount, active: d.Active, size: d.Size, reclaimable: d.Reclaimable }))),
 				containers: await tryTo('containers', async () => jsonLines(await docker(['ps', '--all', '--format', '{{json .}}'])).slice(0, 200).map((c) => ({ name: c.Names, state: c.State, status: c.Status, image: c.Image }))),
-				manager: await tryTo('manager', async () => {
+				compose: composeMode ? await tryTo('compose', async () => (await pimShOut(['ps', '--all', '--format', '{{json .}}'])).split('\n').filter((l) => l.trim()).map((l) => JSON.parse(l)).map((c) => ({ service: c.Service, state: c.State, health: c.Health || null }))) : undefined,
+				manager: !cfg.managerToken ? null : await tryTo('manager', async () => {
 					const r = await manager('GET', '/health')
 					if (r.status !== 200 || !r.json) throw new Error(`/health answered ${r.status}`)
 					return r.json
@@ -380,7 +410,7 @@ export function createOps(cfg, { state, save, log = () => {} }) {
 			const waited = await waitIdle(op)
 			const before = await runningSessions()
 			const out = await changeCheckout(op, { kind: 'deploy', previous, target, revert: true })
-			if (out.result.state === 'succeeded') {
+			if (out.result.state === 'succeeded' && !(composeMode && !cfg.managerToken)) {
 				const c = await compareSessions(before)
 				out.result = done(op.id, 'succeeded', `${out.result.summary} ${c.text}`, { ...out.result.data, sessions: c.sessions })
 			}
@@ -409,6 +439,12 @@ export function createOps(cfg, { state, save, log = () => {} }) {
 		async restart(op) {
 			const { service } = op.args
 			if (service === 'hostopsd') return { result: done(op.id, 'succeeded', 'hostopsd restarts after sending this result.', { service }), restartSelf: true }
+			if (composeMode) {
+				const waited = service === 'sandbox-manager' ? await waitIdle(op) : ''
+				const r = await pimSh(['restart', service], t.compose)
+				if (r.code !== 0) return fail(op, failText(`docker compose restart ${service}`, r), { service })
+				return { result: done(op.id, 'succeeded', `${waited ? `${waited} ` : ''}Restarted ${service}.`, { service }) }
+			}
 			let buildSha
 			try {
 				buildSha = await gitOut(['rev-parse', '--short', 'HEAD'])
@@ -423,8 +459,9 @@ export function createOps(cfg, { state, save, log = () => {} }) {
 
 		async logs(op) {
 			const { service, lines } = op.args
-			const r =
-				service === 'hostopsd'
+			const r = composeMode && service !== 'hostopsd'
+				? await pimSh(['logs', '--no-color', '--tail', String(lines), service], t.probe)
+				: service === 'hostopsd'
 					? await run('journalctl', ['--unit', 'hostopsd', '--lines', String(lines), '--no-pager', '--output', 'short-iso'], { cwd: '/', env: baseEnv, timeoutMs: t.probe })
 					: await run('docker', ['compose', 'logs', '--no-color', '--tail', String(lines), service], { cwd: smDir, env: composeEnv((await gitOut(['rev-parse', '--short', 'HEAD']).catch(() => 'unknown')) || 'unknown'), timeoutMs: t.probe })
 			if (r.code !== 0) return fail(op, failText(service === 'hostopsd' ? 'journalctl' : 'docker compose logs', r), { service })

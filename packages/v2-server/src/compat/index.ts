@@ -18,6 +18,7 @@ import { notificationRoutes } from "./notifications.ts";
 import { connectorScreens } from "./connectors.ts";
 import { chatgptImagesRoutes } from "./chatgpt-images.ts";
 import { guestRoutes } from "./guests.ts";
+import { hostRoutes, managedComputerRoutes } from "../hostops/routes.ts";
 
 /**
  * The files screen has two stores: the paired computer's folder (`computer.ts`) and the objects an agent saves under /workspace without one, such as the images it draws
@@ -58,7 +59,9 @@ export const webCompatRoutes: Route[] = [
 	// Model settings first: /api/providers/built-in is answered by both, and the model work's answer is the one the provider forms use.
 	...modelRoutes(process.env),
 	...chatgptImagesRoutes(process.env),
-	...filesOverBoth(computerRoutes(), fileRoutes()),
+	// The computer host and host operations, and a person's computer where the host keeps it (`../hostops/`): before the computer routes, which answer none paired.
+	...hostRoutes(),
+	...filesOverBoth(managedComputerRoutes(computerRoutes()), fileRoutes()),
 	...bridgeRoutes(process.env),
 	...adminCompatRoutes,
 	...chatRoutes,

@@ -35,8 +35,10 @@ ENV NODE_ENV=production
 WORKDIR /app/packages/v2-server
 COPY --from=build /app /app
 COPY --from=web /app/web/dist /app/web/dist
-# pim-computer and its triggers runtime: the Gate serves them (/pim-computer.ts, /triggers-host.ts, ...; machines update themselves from them) and the `local-computer` Compose profile runs it.
+# pim-computer, pim-host and the triggers runtime: the Gate serves them (/pim-computer.ts, /pim-host.ts, /triggers-host.ts, ...; machines update themselves from them), and the `local-computer` profile and a container host run them.
 COPY computer /app/computer
+# The folder a computer's files are mounted on, owned by `node`: a new volume takes the owner this folder has in the image.
+RUN mkdir -p /workspace && chown node:node /workspace
 ENV PIM_WEB_DIR=/app/web/dist
 # The roles listen on PIM_HTTP_PORT (8080) and PIM_METRICS_PORT (9464); the filesystem is read-only in both deployments, and /tmp is a tmpfs.
 USER node

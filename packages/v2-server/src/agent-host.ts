@@ -30,6 +30,7 @@ import { pimExtension, type ToolDeps } from "./agent-tools.ts";
 import { BUILTIN_SKILLS } from "./builtin-skills.ts";
 import { CodexImagesClient } from "./codex-images.ts";
 import { imageEndpoints } from "./image-tools.ts";
+import { hostopsExtension } from "./hostops/tools.ts";
 import { chatgptCredentialStore, chatgptProvider, type ChatGPTRunnerOptions } from "./chatgpt-auth.ts";
 import type { ForgeParts } from "./forge-assembly.ts";
 import { createFailover } from "./provider-failover.ts";
@@ -304,6 +305,9 @@ export function createAgentHost(options: AgentHostOptions) {
 				return c.contacts.length === 0 ? undefined : `Agents you can hand work to with delegate:\n${c.contacts.map((a) => `- ${a.id}: ${a.name}${a.about ? ` — ${a.about}` : ""}`).join("\n")}`;
 			}),
 		]));
+		// The admin's majordomo may ask the host daemon for operations, each after a person approves it (`./hostops/`).
+		const hostops = await hostopsExtension({ ownerId, partitionId: partition.partitionId, app: options.app, chatOf: deps.chatOf });
+		if (hostops) registry.install(hostops);
 		return { models: metered, registry } as HarnessOptions;
 	};
 

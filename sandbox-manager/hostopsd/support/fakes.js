@@ -39,6 +39,14 @@ if (tool === 'docker') {
 		console.log(JSON.stringify({ Names: 'sandbox-manager', State: 'running', Status: 'Up 2 hours', Image: 'pim-sandbox-manager' }))
 		console.log(JSON.stringify({ Names: 'egress-proxy', State: 'running', Status: 'Up 2 hours', Image: 'pim-sandbox-manager' }))
 		console.log(JSON.stringify({ Names: 'sandbox-manager-workspace-image-1', State: 'exited', Status: 'Exited (0) 2 hours ago', Image: 'pim-workspace:local' }))
+	} else if (args[0] === 'build') {
+		// The Pim image, on the Compose stack: built from whatever the checkout is at.
+		const head = spawnSync(ctl.realGit, ['rev-parse', '--short', 'HEAD'], { encoding: 'utf8' }).stdout.trim()
+		if (matches(ctl.buildFail, head)) {
+			console.error(`build failed for ${head}`)
+			process.exit(1)
+		}
+		writeFileSync(path.join(dir, 'built'), head)
 	} else if (args[0] === 'compose' && args[1] === 'restart') {
 		if (ctl.restartFail) {
 			console.error(`no such service: ${args[2]}`)
@@ -50,6 +58,33 @@ if (tool === 'docker') {
 		console.error(`fake docker: unexpected ${a}`)
 		process.exit(1)
 	}
+	process.exit(0)
+}
+
+if (tool === 'pimsh') {
+	// deploy/compose/pim.sh in the Compose stack's directory: `up --wait` runs what was last built, and fails for commits in `upFail`.
+	const built = (() => {
+		try {
+			return readFileSync(path.join(dir, 'built'), 'utf8').trim()
+		} catch {
+			return ''
+		}
+	})()
+	if (args[0] === 'up') {
+		if (matches(ctl.upFail, built)) {
+			console.error(`container gate is unhealthy at ${built}`)
+			process.exit(1)
+		}
+		writeFileSync(path.join(dir, 'deployed'), built)
+	} else if (args[0] === 'ps') {
+		console.log(JSON.stringify({ Service: 'gate', State: 'running', Health: 'healthy' }))
+		console.log(JSON.stringify({ Service: 'runner', State: 'running', Health: 'healthy' }))
+	} else if (args[0] === 'restart') {
+		if (ctl.restartFail) {
+			console.error(`no such service: ${args[1]}`)
+			process.exit(1)
+		}
+	} else if (args[0] === 'logs') console.log(ctl.logsText ?? '')
 	process.exit(0)
 }
 

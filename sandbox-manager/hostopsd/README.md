@@ -162,3 +162,7 @@ deploys are kept in `deploys` (the last 50), which `rollback` accepts.
 fake Pim and a fake manager, with a real git repository cloned from a local origin, and wrappers
 for git (which log and then run the real git), docker, journalctl and the checkout's `up.sh`
 (see `support/`). No Docker or systemd needed.
+
+## Looking after the Pim stack on Docker Compose
+
+`HOSTOPSD_STACK=compose` makes the operations about the Pim stack of `deploy/compose` instead of the sandbox manager's own: `PIM_COMPOSE_DIR` (default `$PIM_CHECKOUT/deploy/compose`) is where `pim.sh` and the stack's `.env` are. `restart` and `logs` take the stack's services (`COMPOSE_SERVICES` in `validate.js`), `stats` adds the stack's containers, and `deploy` and `rollback` build `deploy/Dockerfile.v2` as the `PIM_IMAGE` of the `.env` and run `pim.sh up -d --wait`, going back to the previous commit when the build or the wait fails. The sandbox manager's token is optional there (it is the `coding` profile's `PIM_CODING_MANAGER_TOKEN` in the `.env`). See `docs/v2-operations.md` ("Managed computers and host operations").

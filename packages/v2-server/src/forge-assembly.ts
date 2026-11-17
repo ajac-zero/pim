@@ -114,13 +114,15 @@ export function assembleForge(db: ForgeDb, objects: ObjectStore, env: Env, crypt
 	// Without a configured signing key a process signs with its own, so the broker tokens it issues die with it: fine for a trial, set one in a deployment.
 	const credentials = new Credentials(db, env.PIM_CODING_SIGNING_KEY ?? randomBytes(32).toString("base64url"), authz.policy, clock, opts.scoped ?? false);
 	const publicUrl = env.PIM_PUBLIC_URL ?? "";
+	// Where a workspace reaches the git broker: Pim's public address, or `PIM_CODING_BROKER_URL` where that isn't reachable from a workspace (a Compose stack with no public HTTPS address: the egress proxy's `EGRESS_INTERNAL_HOSTS` then lists it).
+	const brokerUrl = env.PIM_CODING_BROKER_URL || publicUrl;
 
 	const workspaces: WorkspaceProvider | null = env.PIM_CODING_MANAGER_URL && env.PIM_CODING_MANAGER_TOKEN ? new ComposeWorkspaceProvider({ managerUrl: env.PIM_CODING_MANAGER_URL, token: env.PIM_CODING_MANAGER_TOKEN, ...(overrides.fetch ? { fetch: overrides.fetch } : {}) }) : null;
 	const compute: ComputeProvider | null =
 		overrides.compute !== undefined
 			? overrides.compute
 			: workspaces
-				? new WorkspaceAgentComputeProvider(workspaces, { ...(env.PIM_CODING_IMAGE ? { image: env.PIM_CODING_IMAGE } : {}), egressAllow: [...(publicUrl ? [new URL(publicUrl).hostname] : []), ...(env.PIM_CODING_EGRESS ?? "").split(",").map((h) => h.trim()).filter(Boolean)] })
+				? new WorkspaceAgentComputeProvider(workspaces, { ...(env.PIM_CODING_IMAGE ? { image: env.PIM_CODING_IMAGE } : {}), egressAllow: [...(brokerUrl ? [new URL(brokerUrl).hostname] : []), ...(env.PIM_CODING_EGRESS ?? "").split(",").map((h) => h.trim()).filter(Boolean)] })
 				: null;
 
 	const vault = crypto ? new ForgeVault(db, crypto) : null;
@@ -161,12 +163,12 @@ export function assembleForge(db: ForgeDb, objects: ObjectStore, env: Env, crypt
 		clock,
 		...(env.PIM_FORGE_ORB_POLL_MS ? { orbPollMs: Number(env.PIM_FORGE_ORB_POLL_MS) } : {}),
 		...(env.PIM_FORGE_LEASE_MS ? { leaseMs: Number(env.PIM_FORGE_LEASE_MS) } : {}),
-		computeSpec: (t) => ({ repo: { url: `${publicUrl.replace(/\/$/, "")}/api/coding/git/${t.repo}.git`, ref: t.ref ?? "HEAD", branch: t.branch ?? "" } }),
+		computeSpec: (t) => ({ repo: { url: `${brokerUrl.replace(/\/$/, "")}/api/coding/git/${t.repo}.git`, ref: t.ref ?? "HEAD", branch: t.branch ?? "" } }),
 		prepareWorkspace: compute
 			? async (thread, handle) => {
 					const save = (await db.query("select head_sha, object_key from pim_forge.forge_autosaves where thread_id = $1", [thread.threadId])).rows[0];
 					const got = save ? await objects.get(save.object_key as string) : null;
-					await prepareCheckout({ compute, credentials, publicUrl }, thread, handle, got && save ? { bundle: got.body, head: save.head_sha as string } : null);
+					await prepareCheckout({ compute, credentials, publicUrl: brokerUrl }, thread, handle, got && save ? { bundle: got.body, head: save.head_sha as string } : null);
 				}
 			: undefined,
 	});

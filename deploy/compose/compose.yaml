@@ -67,7 +67,8 @@ services:
       - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
       - caddy-config:/config
-    networks: [internal, edge]
+    # `front.pim.internal` is the name a coding workspace's egress proxy reaches the front door by (PIM_CODING_BROKER_URL), dotted because the sandbox manager only takes dotted hostnames.
+    networks: { internal: { aliases: [front.pim.internal] }, edge: {} }
     depends_on:
       gate: { condition: service_healthy }
       live: { condition: service_healthy }
@@ -295,8 +296,9 @@ services:
     container_name: egress-proxy # the manager connects it to every workspace network by this name
     profiles: [coding]
     restart: unless-stopped
-    environment: { PROXY_ADMIN_TOKEN: "${PROXY_ADMIN_TOKEN:?}" }
-    networks: [control, outbound]
+    # EGRESS_INTERNAL_HOSTS: host:port pairs of the stack's own front door that a workspace may reach over plain HTTP, for a machine with no public HTTPS address (PIM_CODING_BROKER_URL names the same one).
+    environment: { PROXY_ADMIN_TOKEN: "${PROXY_ADMIN_TOKEN:?}", EGRESS_INTERNAL_HOSTS: "${PIM_CODING_INTERNAL_HOSTS:-}" }
+    networks: [control, outbound, internal]
 
   sandbox-manager:
     build: { context: ../../sandbox-manager, target: manager }

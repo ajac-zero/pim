@@ -1,7 +1,8 @@
 // A minimal CONNECT-allowlist proxy. Sessions live on an internal network whose only
 // neighbour is this proxy. The allowlist is per source IP (the session container's address
 // on the shared network), set by the manager through an authenticated admin endpoint.
-// Only HTTPS tunnels (CONNECT to :443) are supported; plain http:// requests get 405.
+// Only HTTPS tunnels (CONNECT to :443) are supported; plain http:// requests get 405, except to the operator's `internal` hosts (a stack's own front door, such as
+// caddy:8088 on a machine with no public HTTPS address): those are forwarded, to a session whose allowlist names the host.
 // Every refusal answers 403 with `x-pim-egress: denied`, so a 403 from Pim is told apart
 // from one the destination sent.
 import dns from 'node:dns/promises'
@@ -32,12 +33,28 @@ const sha = (s) => createHash('sha256').update(s).digest()
 export const tokenOk = (given, expected) => timingSafeEqual(sha(given ?? ''), sha(expected))
 
 // lookup and dial are injectable for tests.
-export function createProxy({ adminToken, lookup = (h) => dns.lookup(h, { all: true }), dial = (addr, port) => net.connect(port, addr) }) {
+export function createProxy({ adminToken, internal = [], lookup = (h) => dns.lookup(h, { all: true }), dial = (addr, port) => net.connect(port, addr), forward = (options) => http.request(options) }) {
 	const allow = new Map() // source ip -> string[]
 	const clean = (a) => (a ?? '').replace(/^::ffff:/, '')
 
-	const proxy = http.createServer((_req, res) => {
-		res.writeHead(405, { 'content-type': 'text/plain' }).end('only CONNECT to :443 is supported\n')
+	const internalHosts = new Set(internal.map((h) => h.toLowerCase()))
+	const proxy = http.createServer(async (req, res) => {
+		const refuse = (code, text) => res.writeHead(code, { 'content-type': 'text/plain', 'x-pim-egress': 'denied' }).end(text)
+		let target
+		try {
+			target = new URL(req.url ?? '')
+		} catch {
+			return refuse(405, 'only CONNECT to :443 is supported\n')
+		}
+		const hostPort = `${target.hostname}:${target.port || 80}`.toLowerCase()
+		if (target.protocol !== 'http:' || !internalHosts.has(hostPort)) return refuse(405, 'only CONNECT to :443 is supported\n')
+		if (!hostAllowed(target.hostname.toLowerCase(), allow.get(clean(req.socket.remoteAddress)) ?? [])) return refuse(403, 'Forbidden')
+		const headers = { ...req.headers }
+		for (const h of ['proxy-connection', 'proxy-authorization', 'connection']) delete headers[h]
+		const up = forward({ host: target.hostname, port: Number(target.port || 80), method: req.method, path: target.pathname + target.search, headers })
+		up.on('response', (r) => (res.writeHead(r.statusCode ?? 502, r.headers), r.pipe(res)))
+		up.on('error', () => (res.headersSent ? res.destroy() : refuse(502, 'Bad Gateway')))
+		req.pipe(up)
 	})
 	proxy.on('connect', async (req, client, head) => {
 		// Every refusal is marked as the proxy's, so a 403 from Pim is told apart from one the destination sent.

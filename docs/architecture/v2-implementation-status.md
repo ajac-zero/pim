@@ -54,14 +54,39 @@ Measured benchmark numbers are in [../v2-operations.md](../v2-operations.md#veri
 
 ## Measured: the integrated Runner, Gate, Projector and Live
 
-`packages/v2-server/test/integrated-bench.test.ts` runs real Gate, Live and two Runner processes against real PostgreSQL (non-superuser roles) and NATS, with a streaming scripted model: N people each start one turn at once, and a fifth person reads the sidebar and session list throughout. On this machine (4 vCPUs, one shared with everything, Node 26, PostgreSQL 17, results in `packages/v2-server/bench-results/`):
+`packages/v2-server/test/integrated-bench.test.ts` drives the product itself at 5, 50, 500 and 1,000 active streaming runs against real PostgreSQL (non-superuser roles, durability on for the qualification run) and NATS, with a scripted streaming model, while one person's `/api/sessions` and `/api/snapshot/sidebar` are read throughout. CI runs 5 and 50 with short windows. Full details, machines and definitions: [../v2-operations.md](../v2-operations.md#integrated-qualification-real-gate-live-projector-and-runners). Everything shares one 4-vCPU machine, load generator included, and each profile ran once.
 
-| People streaming at once | Gate 202, p50 / p95 | Answer readable after send, p50 / p95 | Foreground read, p50 / p95 / max | Peak projection lag (commits) | Runtime commits |
-|---|---|---|---|---|---|
-| 5 | 66 / 67 ms | 1.40 / 1.43 s | 6 / 25 / 59 ms | 13 | 66 |
-| 50 | 88 / 103 ms | 3.08 / 3.86 s | 14 / 35 / 81 ms | 156 | 721 |
+**Multi-process** (`ed372aa`: Gate, Live with the Projector, and several Runners each a Node process of its own):
 
-An answer takes about 1.4 s to stream by itself; 50 at once stretch it to about 3 s, and the projector trails by up to 156 commits at the peak and catches up within the turn. This is the integrated product, so it supersedes the reference-writer benchmark's claim about the Runner. The 500 and 1,000 profiles were run on a durable PostgreSQL ([../v2-operations.md](../v2-operations.md#integrated-qualification-on-the-real-v2-stack)): every answer landed, but the single Node process holding Gate, Live, Runners and Projector saturates near 100 commits per second, so 500 turns at once take about 55 s to become readable and 1,000 about 89 s, and foreground reads regress by more than 20% from 50 runs up (warm p95 stays under 80 ms). Separate processes on more cores were not measured.
+| Active runs | Runners | Commits/s | Turn latency p50 / p95 (solo 2.8 s) | Foreground p95 under load (warm baseline about 10 ms) | Machine CPU |
+|---:|---:|---:|---|---|---:|
+| 5 | 2 | 36 | 2.7 / 2.7 s | 9 ms | 44% |
+| 50 | 2 | 122 | 8.6 / 8.9 s | 15 ms | 69% |
+| 500 | 9 | 145 | 34 / 44 s (only 327 of 500 admitted when the window opened) | 86 ms | 95% |
+| 1,000 | 17 | 217 | none completed in the 30 s window (418 admitted) | 451 ms | 100% |
+
+**Scale is not accepted.** The relative budget (p95 within 20% of the warm baseline) **failed from 50 active runs upward in both harnesses** (multi-process 15.3 ms against about 10 ms; one process 54 ms against 12 ms) and was met only at 5. In the more realistic multi-process harness **1,000 active runs also missed the absolute budget (p95 under 250 ms) at 451 ms**: the machine was at 100% CPU, **no turn finished inside the 30 s window** (all eventually landed), and **only 418 of 1,000 runs were admitted when the window opened**; the absolute budget was met up to 500 runs. A paused socket's roughly 3 MB buffer absorbed everything sent, so the slow-reader coalescing path was not triggered. At 50 runs the Projector's single drain loop, not the Runners, limits readable turns (about 1,000 commits behind at a plateau); at 500 and above the machine is out of CPU. Every turn eventually landed and the projection caught up (82 s after the load at 1,000). Not measured: real providers, tools in turns, a separate database host, PgBouncer, Kubernetes, long stored histories. The slow-reader coalescing path was not reached by the load (socket buffers absorbed it); it is covered by Live's own tests.
+
+**In one process** (`1dcecd0`, the first run: Gate, Live, Runners and Projector in a single Node process; superseded as the method, results kept): 5 runs 1.3 s answer readable, 50 runs 4.5 s, 500 runs 55 s, 1,000 runs 89 s, about 95 to 109 commits/s from 50 runs up with the one process at 84 to 88% of a core; foreground p95 under load 19, 54, 78 and 78 ms, relative budget met only at 5 runs. The two methods agree on the shape: the integrated stack commits about 100 to 200 commits/s on this machine, far below the reference writer's 2,000 to 3,700, so the Runner's own per-commit work, not PostgreSQL's fsync, is what to profile; and neither holds 1,000 simultaneous streams here. The one-process result is the easier configuration and is never evidence of scale acceptance; the multi-process figures are the ones to quote.
+
+**Reproducing** (prerequisites: PostgreSQL 17 and nats-server, or `PIM_NATS_BIN`; details in [../v2-operations.md](../v2-operations.md#reproducing-both-harnesses-and-what-they-failed)):
+
+```sh
+node scripts/v2-bench/integrated.mjs --profiles 5,50,500,1000 --window 30      # multi-process; packages/v2-server/bench-results/2026-11-17-integrated-5-50-500-1000.json
+node scripts/v2-bench/integrated-inprocess.mjs --profile 5 --profile 50 --profile 500 --profile 1000   # one process; ...-integrated-{5,50,500,1000}.json
+```
+
+The 500 and 1,000 profiles were not repeated for this integration; both artifacts are the original measurements.
+
+## Executed in the sandbox, and not
+
+**Executed:** a physical PostgreSQL base backup (`pg_backup_start`/`pg_backup_stop`) with WAL archive, point-in-time restore and the post-restore `needs_reconciliation` pass (`v2-ops/test/backup.test.ts`); `kustomize build` and `kubeconform` validation of the Kubernetes manifests and `loadProcessConfig` against both deployments' environments (`v2-ops/test/deploy.test.ts`); real OS process start and SIGTERM drain of every role via `node --import tsx src/main.ts` (`v2-server/test/entrypoint.test.ts`).
+
+**Not executed, so unproven:** `deploy/Dockerfile.v2` and `deploy/compose/compose.yaml` (never built or booted; no Docker daemon in the orb); `scripts/v2-backup/compose-backup.sh` (the logical `pg_dump` script); an S3 or SeaweedFS client for backup and import (tests use a directory store and `s3rver`); the Kubernetes manifests on a live cluster, CloudNativePG, Barman archiving, OpenBao, gVisor and PgBouncer in the live path.
+
+## What a "Verified" inventory row means
+
+[v2-inventory-coverage.md](v2-inventory-coverage.md) has 162 entries: **81 Verified, 59 Partial, 20 Gap, 2 not behaviour.** Verified means an automated sandbox test exercises that entry's v2 behaviour; it is **not** full live production parity. The 20 gaps, plainly: Web Push (B1.29, B3.17), Majordomo approval reviews (B2.13), tool permissions Off/Ask/On (B2.15), the run guard and watchdog for chats (B2.23), the memory background nap (B2.28), skill sources and connector/built-in skills (B3.04, B3.05), watches (B3.13), in-app notifications and device routing (B3.16), email (B3.18), the credential store and ChatGPT-plan sign-in (B3.22), provider cooldowns and failover (B3.23), the app bridge `window.pim` (B4.07), file-change notices (B4.10), legacy stored files (kept in `pim_ops.legacy_rows`, B4.11), `generate_image` (B4.15), managed computers and the computer host (B4.17), host operations (B4.21, B6.19). The 59 Partials each carry their missing part in the matrix note.
 
 ## What is not proven or not built
 

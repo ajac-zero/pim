@@ -1,315 +1,479 @@
-// A load pass over the integrated product, not a synthetic writer: real Gate, Live and Runner processes, real PostgreSQL (non-superuser roles), NATS, and a streaming scripted model.
-// N people each start one streaming turn at once; the test measures what a person feels (the Gate answering 202, the time until the answer is projected and readable) and what a
-// person feels meanwhile (the sidebar snapshot of someone else's chat list), and fails only on a collapse (a turn that never lands, or a foreground read that stalls).
-// Numbers vary with the machine; the run prints them, and PIM_BENCH_OUT names a file to write them to. PIM_BENCH_PROFILES lists the sizes (default 5,50; the 500 and 1,000 qualification
-// runs use scripts/v2-bench/integrated.mjs, which also starts a durable PostgreSQL 17 and nats-server).
+// A load pass over the integrated product, not a synthetic writer: real Gate, Live (with the Projector) and Runner processes, each a Node process of its own, against real PostgreSQL
+// (non-superuser, NOBYPASSRLS logins) and a NATS server, with one controlled streaming model (pi-ai's faux provider: a reply of fixed length written at 25 tokens per second).
 //
-// Each profile measures the same foreground reads (the sidebar snapshot and the session list of one person, four closed-loop clients) twice: warm and idle (the baseline), then through the load,
-// so the two budgets (warm p95 under 250 ms, and at most 20% worse than the baseline) are read off one run. Through the load it also runs a slow Live client that never reads, a Live client whose
-// socket is cut mid-load and reconnects, and a flood of coding-thread projection writes. Gate, Live, both Runners and the Projector run in this one Node process (the model is scripted in-process),
-// so the whole stack shares one event loop: that is a limit of the harness, and the results say so.
+// A profile is N ACTIVE RUNS: N chats, each with a person's turn streaming at every moment of the measured window (a closed loop: the next message goes in 200 ms after the answer is
+// readable, so each chat's history grows through the run). Stored idle chats (created, never run in the window; two per active run) are counted separately, and so are the tenants
+// (people), the Runners and their `maxResident`. Beside the runs, the profile holds WebSocket followers (some that read slowly, some that are cut and reconnect) and a flood of
+// coding-thread transcript events. The foreground is one person's `/api/sessions` and `/api/snapshot/sidebar` read by closed-loop probes in a process of their own: first with no run
+// active (the warm baseline), then through the load. Both budgets are evaluated on the result: warm p95 under 250 ms, and p95 at most 20% above the baseline's.
+//
+// Default `vitest` runs 5 and 50 with short windows (a few minutes). `node scripts/v2-bench/integrated.mjs` runs 5, 50, 500 and 1,000 with long windows, on a PostgreSQL with durability on, and
+// writes `bench-results/`. PIM_BENCH_PROFILES, PIM_BENCH_WINDOW_S and PIM_BENCH_OUT override them. The test fails only on a collapse (and, at 50 runs or fewer, on a missed absolute budget);
+// the budgets met or missed at the larger profiles are results, not failures. Everything runs on one machine, the load generator included: the numbers say so.
+import { fork, spawnSync, type ChildProcess } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
-import { cpus, totalmem } from "node:os";
-import { monitorEventLoopDelay } from "node:perf_hooks";
-import { execFileSync } from "node:child_process";
+import { cpus, loadavg, totalmem } from "node:os";
+import { fileURLToPath } from "node:url";
+import { afterAll, describe, expect, it } from "vitest";
 import { WebSocket } from "ws";
-import { LiveClient, type LiveSocket, type LiveStatus, type LiveUpdate } from "@pim/shared/live-client";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createModels } from "@earendil-works/pi-ai";
-import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
-import { createRegistry, type HarnessOptions } from "@earendil-works/pi-durable";
+import { FakeOrbClient } from "@pim/coding/orb/fake";
+import { LiveClient, type LiveSocket, SnapshotRefused } from "@pim/shared/live-client";
 import { App } from "@pim/v2-app/app";
 import { connect as connectApp } from "@pim/v2-app/db";
 import { MemoryObjectStore } from "@pim/v2-app/objects";
-import type { Process } from "../src/main.ts";
-import { waitFor } from "../../v2-runtime/test/support/rig.ts";
-import { type Deployment, base, start, startS3 } from "./support/processes.ts";
+import { Authz } from "@pim/v2-forge/authz";
+import type { Db as ForgeDb } from "@pim/v2-forge/db";
+import { Forge } from "@pim/v2-forge/forge";
+import { MemoryObjects } from "@pim/v2-forge/ports";
+import { ForgeScheduler } from "@pim/v2-forge/scheduler";
+import { ForgeStore } from "@pim/v2-forge/store";
+import { Credentials } from "@pim/v2-forge/tokens";
+import { forgePartitionId } from "../src/forge-source.ts";
+import { type Deployment, envFor, startS3 } from "./support/processes.ts";
 import { createStack, describeWith, freePort, hasNats, startNats } from "./support/stack.ts";
 
 const real = describeWith(hasNats());
+const FULL = Boolean(process.env.PIM_BENCH_FULL);
 const PROFILES = (process.env.PIM_BENCH_PROFILES ?? "5,50").split(",").map(Number);
-const pct = (xs: number[], p: number) => [...xs].sort((a, b) => a - b)[Math.min(xs.length - 1, Math.floor((p / 100) * xs.length))] ?? 0;
-const ms = (n: number) => Math.round(n);
+const WINDOW_S = Number(process.env.PIM_BENCH_WINDOW_S ?? 10);
+const RAMP_S = FULL ? 15 : 5;
+const BASELINE_S = FULL ? 20 : 8;
+const IDLE_PER_ACTIVE = 2;
+const MAX_RESIDENT = 64; // The Runner's default: `startRunner` does not expose it, so capacity is set by the number of Runners.
+const POLL_MS = process.env.PIM_BENCH_POLL_MS ?? ""; // unset: the processes' own defaults (a Runner claims and pumps every 500 ms, Live projects every 500 ms and on a wake)
+const REPLY_CHARS = 240;
+const TOKENS_PER_SECOND = 25;
+const REPO = "https://github.com/acme/app";
+const SCRIPT = fileURLToPath(new URL("../../../scripts/v2-bench/integrated-process.ts", import.meta.url));
+const PKG = fileURLToPath(new URL("..", import.meta.url));
 
-real("the integrated Gate, Runner, Projector and Live under concurrent streaming turns", () => {
-	let d: Deployment;
-	let gate: Process;
-	const procs: Process[] = [];
-	let app: App;
-	const faux = fauxProvider({ provider: "faux", models: [{ id: "m" }], tokensPerSecond: 25, tokenSize: { min: 2, max: 3 } });
-	const results: Record<string, unknown>[] = [];
-	const ANSWER = "This is a streamed answer of a fair length, so that it commits several partial messages as it is written.";
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const pct = (xs: number[], p: number) => (xs.length ? [...xs].sort((a, b) => a - b)[Math.min(xs.length - 1, Math.floor((p / 100) * xs.length))]! : 0);
+const r1 = (n: number) => Math.round(n * 10) / 10;
+const dist = (xs: number[]) => ({ n: xs.length, p50: r1(pct(xs, 50)), p95: r1(pct(xs, 95)), p99: r1(pct(xs, 99)), max: r1(Math.max(0, ...xs)) });
+async function limited<T>(items: T[], k: number, fn: (item: T, i: number) => Promise<void>) {
+	let next = 0;
+	await Promise.all(Array.from({ length: Math.min(k, items.length) }, async () => void (await (async () => { while (next < items.length) { const i = next++; await fn(items[i]!, i); } })())));
+}
 
-	beforeAll(async () => {
-		const stack = await createStack();
-		d = { stack, nats: await startNats(), s3: await startS3(), gatePort: await freePort(), ingressSecret: "ingress" };
-		app = new App(connectApp(stack.url("gate"), 8), new MemoryObjectStore());
-		const models = createModels();
-		models.setProvider(faux.provider);
-		const agent = { model: { provider: "faux", modelId: "m" } };
-		const hooks = { harnessOptions: (): HarnessOptions => ({ models, registry: createRegistry(), settings: { retry: { enabled: false, maxRetries: 0, baseDelayMs: 1_000 } } as never }), homeRoot: () => ({ agent }), chatAgent: () => agent, pollMs: 40 };
-		// Tuning knobs for the qualification runs: pool sizes per process and how many Runners share the work (all in this process, so they add no CPU, only concurrency).
-		const runtimePool = process.env.PIM_BENCH_RUNTIME_POOL ?? "20";
-		const runners = Number(process.env.PIM_BENCH_RUNNERS ?? 2);
-		gate = await start(d, "gate", {}, { PIM_POOL_FOREGROUND_MAX: process.env.PIM_BENCH_GATE_POOL ?? "20" });
-		procs.push(gate, await start(d, "live", { pollMs: 40 }));
-		for (let i = 1; i <= runners; i++) procs.push(await start(d, "runner", hooks, { PIM_RUNNER_HOLDER_ID: `bench-${i}`, PIM_POOL_RUNTIME_MAX: runtimePool }));
-	}, 180_000);
-	afterAll(async () => {
-		if (process.env.PIM_BENCH_OUT) writeFileSync(process.env.PIM_BENCH_OUT, `${JSON.stringify(results, null, 2)}\n`);
-		await Promise.allSettled(procs.map((p) => p.close()));
-		await app?.db.end();
-		d?.nats.stop();
-		await d?.s3.stop();
-		await d?.stack.drop();
-	}, 60_000);
-
-	const sessions: { token: string; ownerId: string }[] = [];
-	async function person(i: number) {
-		const existing = sessions[i];
-		if (existing) return existing;
-		await openRegistration();
-		const account = await app.identity.register({ username: `bench${i}` });
-		const token = await app.identity.createSession(account.ownerId);
-		return (sessions[i] = { token, ownerId: account.ownerId });
-	}
-	let opened: Promise<void> | undefined;
-	const openRegistration = () => (opened ??= bootstrapAdmin().then((a) => app.identity.setRegistrationOpen(a.principal, true)));
-	let admin: { principal: never } | undefined;
-	async function bootstrapAdmin() {
-		if (admin) return admin;
-		const account = await app.identity.register({ username: "root", bootstrap: await app.identity.issueClaim("bootstrap", null, 3_600_000) });
-		const token = await app.identity.createSession(account.ownerId);
-		return (admin = { principal: { kind: "user", ownerId: account.ownerId, role: "admin", sessionId: token } as never });
-	}
-	const call = async (token: string, method: string, path: string, body?: unknown) => {
-		const t0 = performance.now();
-		const res = await fetch(base(gate) + path, { method, headers: { authorization: `Bearer ${token}`, "x-pim-ingress-secret": d.ingressSecret, ...(body ? { "content-type": "application/json" } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) });
-		const json = (await res.json()) as any;
-		return { status: res.status, json, ms: performance.now() - t0 };
-	};
-
-	const pcts = (xs: number[]) => ({ n: xs.length, p50: ms(pct(xs, 50)), p95: ms(pct(xs, 95)), p99: ms(pct(xs, 99)), max: ms(xs.length ? Math.max(...xs) : 0) });
-	/** Four closed-loop clients reading the person's sidebar snapshot and session list, until `stop()`; samples by endpoint. */
-	function probe(token: string) {
-		const samples: Record<"sessions" | "sidebar", number[]> = { sessions: [], sidebar: [] };
-		let running = true;
-		const loops = Array.from({ length: 4 }, (_, k) =>
-			(async () => {
-				while (running) {
-					const kind = k % 2 ? "sessions" : "sidebar";
-					samples[kind].push((await call(token, "GET", kind === "sessions" ? "/api/sessions" : "/api/snapshot/sidebar")).ms);
-					await new Promise((r) => setTimeout(r, 40));
-				}
-			})(),
-		);
-		return { samples, async stop() { running = false; await Promise.all(loops); return samples; } };
-	}
-	/** WAL flush counts: pg_stat_wal has them through PostgreSQL 17 and not after, so a newer server reports none. */
-	const walStats = async (): Promise<{ sync: number; time: number } | null> => {
-		try {
-			const r = (await d.stack.admin.query("SELECT wal_sync, wal_sync_time FROM pg_stat_wal")).rows[0];
-			return { sync: Number(r.wal_sync), time: Number(r.wal_sync_time) };
-		} catch {
-			return null;
-		}
-	};
-	const cpuTimes = () => {
-		const f = readFileSync("/proc/stat", "utf8").split("\n")[0]!.split(/\s+/).slice(1).map(Number);
-		return { idle: (f[3] ?? 0) + (f[4] ?? 0), total: f.reduce((a, b) => a + b, 0) };
-	};
-	const rssMb = (name: string) => {
-		try {
-			return execFileSync("ps", ["-C", name, "-o", "rss="], { encoding: "utf8" }).split("\n").reduce((n, l) => n + (Number(l.trim()) || 0), 0) / 1024;
-		} catch {
-			return 0;
-		}
-	};
-	const livePort = () => (procs[1] as unknown as { host: { port: number } }).host.port;
-	/** A Live client over a real WebSocket to the Live process, with the person's session as its bearer. `slow` pauses the socket after it opens, so it never reads. */
-	function liveClient(token: string, slow = false) {
-		const log = { updates: 0, progress: 0, skipped: 0, statuses: [] as { status: LiveStatus; at: number }[] };
-		let socket: WebSocket | undefined;
-		const client = new LiveClient({
-			openSocket: () => {
-				socket = new WebSocket(`ws://127.0.0.1:${livePort()}/live`, { headers: { authorization: `Bearer ${token}`, "x-pim-ingress-secret": d.ingressSecret } });
-				if (slow) socket.on("open", () => (socket as unknown as { _socket: { pause(): void } })._socket.pause());
-				socket.on("error", () => undefined);
-				return socket as unknown as LiveSocket;
-			},
-			loadSnapshot: async (topic) => {
-				const [kind, id] = topic.split(":");
-				const r = await fetch(`http://127.0.0.1:${livePort()}/snapshot/${kind}${id ? `/${id}` : ""}`, { headers: { authorization: `Bearer ${token}`, "x-pim-ingress-secret": d.ingressSecret } });
-				return { liveCursor: r.ok ? ((await r.json()) as { liveCursor: string | null }).liveCursor : null };
-			},
-			onUpdate: (u: LiveUpdate) => {
-				log.updates++;
-				if (u.kind === "progress") (log.progress++, (log.skipped += u.skipped ?? 0));
-			},
-			onStatus: (status) => log.statuses.push({ status, at: performance.now() }),
-			onUnauthorized: () => undefined,
+type Child = { name: string; proc: ChildProcess; port: number; metricsPort: number; messages: ((m: any) => void)[] };
+function spawnChild(name: string, role: string, env: Record<string, string>): Promise<Child> {
+	const proc = fork(SCRIPT, [role], { cwd: PKG, execArgv: ["--import", "tsx"], env: { ...process.env, ...env } as never, stdio: ["ignore", "ignore", "inherit", "ipc"] });
+	const child: Child = { name, proc, port: 0, metricsPort: 0, messages: [] };
+	return new Promise((resolve, reject) => {
+		proc.on("message", (m: any) => {
+			if (m.ready && !child.port) (Object.assign(child, { port: m.port ?? 0, metricsPort: m.metricsPort ?? 0 }), resolve(child));
+			for (const f of child.messages.splice(0)) f(m);
 		});
-		client.follow(["sidebar"]);
-		return { client, log, cut: () => socket?.terminate(), stop: () => client.stop() };
+		proc.on("exit", (c) => reject(new Error(`${name} exited with ${c}`)));
+	});
+}
+const reply = (child: Child, message: unknown) => new Promise<any>((resolve) => (child.messages.push(resolve), child.proc.send(message as never)));
+
+const readStatus = (pid: number, key: string) => Number(new RegExp(`^${key}:\\s+(\\d+)`, "m").exec(readFileSync(`/proc/${pid}/status`, "utf8"))?.[1] ?? 0);
+const pidsUnder = (pid: number): number[] => spawnSync("pgrep", ["-P", String(pid)], { encoding: "utf8" }).stdout.split("\n").filter(Boolean).map(Number);
+const cpuTicks = (pid: number) => {
+	const f = readFileSync(`/proc/${pid}/stat`, "utf8").split(") ")[1]!.split(" ");
+	return Number(f[11]) + Number(f[12]);
+};
+const machineTicks = () => {
+	const f = readFileSync("/proc/stat", "utf8").split("\n")[0]!.split(/\s+/).slice(1).map(Number);
+	return { total: f.reduce((a, b) => a + b, 0), idle: f[3]! + (f[4] ?? 0) };
+};
+const TICKS_PER_S = 100;
+
+type Person = { token: string; ownerId: string };
+
+async function runProfile(n: number) {
+	const tenants = n <= 5 ? 3 : n <= 50 ? 10 : n <= 500 ? 50 : 100;
+	const idleChats = IDLE_PER_ACTIVE * n;
+	const runners = Math.max(2, Math.ceil(n / MAX_RESIDENT) + 1);
+	const stack = await createStack();
+	const nats = await startNats();
+	const s3 = await startS3();
+	const d: Deployment = { stack, nats, s3, gatePort: await freePort(), ingressSecret: "ingress" };
+	const app = new App(connectApp(stack.url("gate"), 8), new MemoryObjectStore());
+	const children: Child[] = [];
+	const sockets: { close(): void }[] = [];
+	let pgPid = 0;
+	try {
+		const pgSettings = Object.fromEntries((await stack.admin.query("SELECT name, setting FROM pg_settings WHERE name IN ('fsync','synchronous_commit','full_page_writes','shared_buffers','max_connections','wal_level')")).rows.map((r) => [r.name, r.setting]));
+		const pgVersion = (await stack.admin.query("SHOW server_version")).rows[0].server_version as string;
+		try {
+			pgPid = Number(readFileSync(`${(await stack.admin.query("SHOW data_directory")).rows[0].data_directory}/postmaster.pid`, "utf8").split("\n")[0]);
+		} catch {}
+		const gate = await spawnChild("gate", "gate", { ...envFor(d, "gate"), PIM_POOL_FOREGROUND_MAX: "30" });
+		const live = await spawnChild("live", "live", { ...envFor(d, "live"), PIM_POOL_FOREGROUND_MAX: "30", BENCH_POLL_MS: POLL_MS });
+		for (let i = 0; i < runners; i++) children.push(await spawnChild(`runner-${i + 1}`, "runner", { ...envFor(d, "runner", { PIM_RUNNER_HOLDER_ID: `bench-${i + 1}`, PIM_POOL_RUNTIME_MAX: "10" }), BENCH_POLL_MS: POLL_MS, BENCH_REPLY_CHARS: String(REPLY_CHARS), BENCH_TOKENS_PER_SECOND: String(TOKENS_PER_SECOND) }));
+		children.unshift(gate, live);
+		const gateUrl = `http://127.0.0.1:${gate.port}`;
+		const liveUrl = `http://127.0.0.1:${live.port}`;
+
+		// Tenants: real accounts, each with a session.
+		const root = await app.identity.register({ username: "root", bootstrap: await app.identity.issueClaim("bootstrap", null, 3_600_000) });
+		const rootSession = await app.identity.createSession(root.ownerId);
+		await app.identity.setRegistrationOpen({ kind: "user", ownerId: root.ownerId, role: "admin", sessionId: rootSession } as never, true);
+		const people: Person[] = [];
+		await limited(Array.from({ length: tenants }), 8, async (_, i) => {
+			const account = await app.identity.register({ username: `bench${i}` });
+			people[i] = { token: await app.identity.createSession(account.ownerId), ownerId: account.ownerId };
+		});
+		const call = async (p: Person, method: string, path: string, body?: unknown) => {
+			const res = await fetch(gateUrl + path, { method, headers: { authorization: `Bearer ${p.token}`, "x-pim-ingress-secret": d.ingressSecret, ...(body ? { "content-type": "application/json" } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) });
+			return { status: res.status, json: (await res.json()) as any };
+		};
+
+		// Chats: the active ones, a spare for the solo turn, and the stored idle ones.
+		const chatOf: { person: Person; id: string }[] = [];
+		await limited(Array.from({ length: n + 1 + idleChats }), 24, async (_, i) => {
+			const person = people[i % tenants]!;
+			const r = await call(person, "POST", "/api/sessions", { title: "bench" });
+			expect(r.status).toBeLessThan(300);
+			chatOf[i] = { person, id: r.json.id };
+		});
+		const active = chatOf.slice(0, n);
+		const spare = chatOf[n]!;
+		const idleIds = chatOf.slice(n + 1).map((c) => c.id);
+		const submit = async (c: { person: Person; id: string }, key: string) => {
+			const t = performance.now();
+			const r = await call(c.person, "POST", `/api/sessions/${c.id}/messages`, { commandId: key, text: `message ${key}` });
+			return { status: r.status, ms: performance.now() - t };
+		};
+		const assistantCounts = async (ids: string[]) => new Map<string, number>((await stack.admin.query("SELECT chat_id, count(*)::int AS n FROM pim_projection.chat_transcript_projection WHERE message->>'role' = 'assistant' AND NOT partial AND chat_id = ANY($1) GROUP BY chat_id", [ids])).rows.map((r) => [r.chat_id, r.n]));
+		const waitFor = async <T>(what: string, fn: () => Promise<T | undefined>, ms = 240_000) => {
+			for (const end = Date.now() + ms; Date.now() < end; await sleep(250)) {
+				const v = await fn();
+				if (v !== undefined) return v;
+			}
+			throw new Error(`timed out waiting for ${what}`);
+		};
+		const lagSql = "SELECT coalesce(sum(p.next_seq - 1 - w.projected_seq), 0)::int AS lag FROM pim_runtime.partitions p JOIN pim_projection.projection_watermarks w ON w.partition_id = p.partition_id";
+
+		// The solo turn: one chat on an otherwise idle deployment, so that a late turn means late against this.
+		const t0 = performance.now();
+		await submit(spare, "solo");
+		await waitFor("the solo turn", async () => ((await assistantCounts([spare.id])).get(spare.id) ? true : undefined), 60_000);
+		const soloMs = performance.now() - t0;
+
+		// The foreground probes, a process of their own, reading the first tenant's pages.
+		const probe = await spawnChild("probe", "probe", { BENCH_PROBE: JSON.stringify({ token: people[0]!.token, gate: gateUrl, ingress: d.ingressSecret }) });
+		children.push(probe);
+		const measure = async (seconds: number) => (probe.proc.send({ type: "start" }), await sleep(seconds * 1000), (await reply(probe, { type: "stop" })).samples as { path: string; ms: number; status: number }[]);
+		const summarize = (samples: { path: string; ms: number; status: number }[]) => ({
+			all: dist(samples.map((s) => s.ms)),
+			sessions: dist(samples.filter((s) => s.path === "/api/sessions").map((s) => s.ms)),
+			sidebar: dist(samples.filter((s) => s.path !== "/api/sessions").map((s) => s.ms)),
+			non_200: samples.filter((s) => s.status !== 200).length,
+		});
+		await measure(3); // warm: connections open, plans cached
+		const baseline = summarize(await measure(BASELINE_S));
+
+		// Followers: normal ones, slow ones that read in bursts, and the churn that cuts a socket and lets it reconnect.
+		const stats = { updates: 0, opens: 0, reconnects: 0, slowFrames: 0, slowSkipped: 0, slowCoalescedFrames: 0, slowClosed: 0, churned: 0, refused: [] as string[] };
+		const followers = Math.min(n, 100 + tenants);
+		const slowCount = Math.max(2, Math.floor(followers / 10));
+		const clients: { client: LiveClient; ws: () => WebSocket | undefined; slow: boolean }[] = [];
+		const follow = (person: Person, topics: string[], slow: boolean) => {
+			let current: WebSocket | undefined;
+			let opened = false;
+			const client = new LiveClient({
+				openSocket: () => {
+					const ws = new WebSocket(`ws://127.0.0.1:${live.port}/api/ws`, { headers: { authorization: `Bearer ${person.token}`, "x-pim-ingress-secret": d.ingressSecret } });
+					current = ws;
+					stats.opens++;
+					if (opened) stats.reconnects++;
+					opened = true;
+					ws.on("error", () => {});
+					ws.on("close", (code) => void (slow && code === 4009 && stats.slowClosed++));
+					if (slow) {
+						ws.on("open", () => (ws as any)._socket.pause());
+						ws.on("message", (raw) => {
+							const text = String(raw);
+							stats.slowFrames++;
+							if (text.includes('"coalesced_progress"')) (stats.slowCoalescedFrames++, (stats.slowSkipped += Number(/"skipped":(\d+)/.exec(text)?.[1] ?? 0)));
+						});
+					}
+					return ws as unknown as LiveSocket;
+				},
+				loadSnapshot: async (topic) => {
+					const [kind, id] = topic.split(":");
+					const res = await fetch(`${liveUrl}/snapshot/${kind}${id ? `/${id}` : ""}`, { headers: { authorization: `Bearer ${person.token}`, "x-pim-ingress-secret": d.ingressSecret } });
+					if (!res.ok) {
+						stats.refused.push(`${topic}:${res.status}`);
+						throw new SnapshotRefused(res.status);
+					}
+					return { liveCursor: ((await res.json()) as { liveCursor: string | null }).liveCursor };
+				},
+				onUpdate: () => void stats.updates++,
+				onUnauthorized: () => {},
+			});
+			client.follow(topics);
+			clients.push({ client, ws: () => current, slow });
+			sockets.push({ close: () => client.stop() });
+		};
+
+		// A coding-thread transcript flood: Forge's outbox written fast on a few threads, projected by Live, followed by sockets.
+		const forgeDb = stack.admin as unknown as ForgeDb;
+		const store = new ForgeStore(forgeDb);
+		const authz = new Authz(forgeDb, { allowedRepos: ["acme/*"], branchPrefix: "pim/" });
+		const scheduler = new ForgeScheduler(forgeDb, store, Date.now);
+		await scheduler.upsertPool({ poolId: "default", provider: "local", size: 50 });
+		const forge = new Forge({ db: forgeDb, store, authz, scheduler, credentials: new Credentials(forgeDb, "bench-signing-key", authz.policy, Date.now), git: {} as never, objects: new MemoryObjects(), orbs: () => new FakeOrbClient(), compute: {} as never, ampConfigured: false });
+		const threads: { threadId: string; ownerId: string }[] = [];
+		for (const person of people.slice(0, Math.min(3, tenants))) {
+			await authz.grant({ subjectType: "user", subjectId: person.ownerId, permission: "coding:start", grantedBy: "admin" });
+			const { threadId } = await forge.start({ ownerId: person.ownerId as never, role: "member" }, { operationId: `flood-${person.ownerId}`, task: "Flood the transcript", repo: REPO });
+			await store.locked(threadId, (q) => store.setState(q, threadId, "running"));
+			threads.push({ threadId, ownerId: person.ownerId });
+			follow(person, ["sidebar", `coding:${threadId}`], false);
+		}
+		// Followers of the chats; the slow readers also follow the first flooded coding thread, whose big events fill their queue past Live's high-water mark.
+		for (let i = 0; i < followers; i++) {
+			const slowOnCoding = i < slowCount && threads[0];
+			const person = slowOnCoding ? people.find((p) => p.ownerId === threads[0]!.ownerId)! : active[i]!.person;
+			const chat = slowOnCoding ? active.find((c) => c.person === person)! : active[i]!;
+			follow(person, ["sidebar", `chat:${chat.id}`, ...(slowOnCoding ? [`coding:${threads[0]!.threadId}`] : [])], i < slowCount);
+		}
+		let flooding = true;
+		let flooded = 0;
+		const flood = Promise.all(
+			threads.map(async ({ threadId }) => {
+				while (flooding) {
+					await store.locked(threadId, async (q) => {
+						await store.appendEvent(q, threadId, { kind: "message", role: "assistant", data: { text: "Reading the file and thinking about the change. ".repeat(4), toolCalls: [{ id: `t${flooded}`, name: "read", arguments: { path: "src/a.ts" } }] } });
+						await store.appendEvent(q, threadId, { kind: "message", role: "tool", data: { toolCallId: `t${flooded}`, name: "read", text: "x".repeat(8_000) } });
+					});
+					flooded += 2;
+					await sleep(60);
+				}
+			}),
+		);
+		const churn = setInterval(() => {
+			for (const c of clients.filter((c) => !c.slow).sort(() => Math.random() - 0.5).slice(0, Math.max(1, Math.floor(followers / 20)))) (c.ws()?.terminate(), stats.churned++);
+		}, 3_000);
+		const slowCycle = setInterval(() => {
+			for (const c of clients.filter((c) => c.slow)) {
+				const sock = (c.ws() as any)?._socket;
+				if (!sock) continue;
+				sock.resume();
+				setTimeout(() => sock.pause(), 3_000);
+			}
+		}, 40_000);
+
+		// The runs: every active chat streams a turn at once, then another 200 ms after each answer is readable.
+		const submitted = new Map<string, { turns: number; sentAt: number }>();
+		const turnMs: number[] = [];
+		const admissionMs: number[] = [];
+		let completedInWindow = 0;
+		let windowOpen = false;
+		let running = true;
+		const inFlightSamples: number[] = [];
+		let landedKnown = 0;
+		const lagSamples: number[] = [];
+		const forgeLagSamples: number[] = [];
+		const send = async (c: (typeof active)[number]) => {
+			const state = submitted.get(c.id) ?? { turns: 0, sentAt: 0 };
+			state.turns++;
+			state.sentAt = performance.now();
+			submitted.set(c.id, state);
+			const r = await submit(c, `run-${c.id}-${state.turns}`);
+			admissionMs.push(r.ms);
+			if (r.status !== 202) throw new Error(`admission refused: ${r.status}`);
+		};
+		let loopError: unknown;
+		const driver = (async () => {
+			try {
+				// The runs start spread over a few seconds, as people do, not as one wave that stays in step.
+				await limited(active, 32, async (c, i) => (await sleep((i / n) * Math.min(4_000, RAMP_S * 600)), send(c)));
+				while (running) {
+					const counts = await assistantCounts(active.map((c) => c.id));
+					const now = performance.now();
+					const due = active.filter((c) => (counts.get(c.id) ?? 0) >= submitted.get(c.id)!.turns);
+					for (const c of due) {
+						const s = submitted.get(c.id)!;
+						if (windowOpen) (turnMs.push(now - s.sentAt), completedInWindow++);
+					}
+					landedKnown = due.length;
+					await sleep(200);
+					if (running) await limited(due, 32, (c) => send(c));
+				}
+			} catch (error) {
+				loopError = error;
+			}
+		})();
+
+		await sleep(RAMP_S * 1000);
+		const pgPids = () => (pgPid ? [pgPid, ...pidsUnder(pgPid)] : []);
+		const pgTicks = () => pgPids().reduce((a, pid) => { try { return a + cpuTicks(pid); } catch { return a; } }, 0);
+		const pgTicksBefore = pgTicks();
+		const generatorBefore = process.cpuUsage();
+		const ticksBefore = new Map(children.map((c) => [c.name, cpuTicks(c.proc.pid!)]));
+		const machineBefore = machineTicks();
+		const commitsBefore = Number((await stack.admin.query("SELECT count(*) n FROM pim_runtime.commit_receipts")).rows[0].n);
+		const walBefore = (await stack.admin.query("SELECT wal_sync, wal_sync_time, wal_records FROM pg_stat_wal")).rows[0];
+		const xactBefore = Number((await stack.admin.query("SELECT xact_commit FROM pg_stat_database WHERE datname = current_database()")).rows[0].xact_commit);
+		const updatesBefore = stats.updates;
+		const floodedBefore = flooded;
+		const admittedAtStart = submitted.size;
+		windowOpen = true;
+		const win0 = performance.now();
+		let sampling = true;
+		const rss = { node: 0, nodeByRole: {} as Record<string, number>, postgresPss: 0, bench: 0 };
+		const sampler = (async () => {
+			while (sampling) {
+				inFlightSamples.push(submitted.size - landedKnown);
+				lagSamples.push((await stack.admin.query(lagSql)).rows[0].lag);
+				const forgeLag = await (async () => {
+					let lag = 0;
+					for (const t of threads) {
+						const head = (await stack.admin.query("SELECT last_seq FROM pim_forge.forge_outbox_counters WHERE owner_id = $1", [t.ownerId])).rows[0]?.last_seq;
+						const mark = (await stack.admin.query("SELECT projected_seq FROM pim_projection.projection_watermarks WHERE partition_id = $1", [forgePartitionId(t.ownerId)])).rows[0]?.projected_seq;
+						lag += Number(head ?? 0) - Number(mark ?? 0);
+					}
+					return threads.length ? lag : undefined;
+				})();
+				if (forgeLag !== undefined) forgeLagSamples.push(forgeLag);
+				let total = 0;
+				const byRole: Record<string, number> = {};
+				for (const c of children) {
+					const kb = readStatus(c.proc.pid!, "VmRSS");
+					const role = c.name.replace(/-\d+$/, "");
+					byRole[role] = (byRole[role] ?? 0) + kb;
+					total += kb;
+				}
+				if (total > rss.node) (rss.node = total, (rss.nodeByRole = byRole));
+				if (pgPid) {
+					let pss = 0;
+					for (const pid of [pgPid, ...pidsUnder(pgPid)]) {
+						try {
+							pss += Number(/Pss:\s+(\d+)/.exec(readFileSync(`/proc/${pid}/smaps_rollup`, "utf8"))?.[1] ?? 0);
+						} catch {}
+					}
+					rss.postgresPss = Math.max(rss.postgresPss, pss);
+				}
+				rss.bench = Math.max(rss.bench, readStatus(process.pid, "VmRSS"));
+				await sleep(1_000);
+			}
+		})();
+		const loaded = summarize(await measure(WINDOW_S));
+		const seconds = (performance.now() - win0) / 1000;
+		windowOpen = false;
+		const machineAfter = machineTicks();
+		const commitsAfter = Number((await stack.admin.query("SELECT count(*) n FROM pim_runtime.commit_receipts")).rows[0].n);
+		const walAfter = (await stack.admin.query("SELECT wal_sync, wal_sync_time, wal_records FROM pg_stat_wal")).rows[0];
+		const xactAfter = Number((await stack.admin.query("SELECT xact_commit FROM pg_stat_database WHERE datname = current_database()")).rows[0].xact_commit);
+		const cpuSeconds: Record<string, number> = {};
+		for (const c of children) {
+			const role = c.name.replace(/-\d+$/, "");
+			cpuSeconds[role] = r1((cpuSeconds[role] ?? 0) + (cpuTicks(c.proc.pid!) - ticksBefore.get(c.name)!) / TICKS_PER_S);
+		}
+		if (pgPid) cpuSeconds.postgres = r1((pgTicks() - pgTicksBefore) / TICKS_PER_S);
+		const g = process.cpuUsage(generatorBefore);
+		cpuSeconds.load_generator = r1((g.user + g.system) / 1e6);
+		const updatesInWindow = stats.updates - updatesBefore;
+		const floodedInWindow = flooded - floodedBefore;
+		sampling = false;
+		await sampler;
+
+		// Stop the load; every run's last turn lands, the projection catches up, and the idle chats were never touched.
+		running = false;
+		flooding = false;
+		clearInterval(churn);
+		clearInterval(slowCycle);
+		await driver;
+		await flood;
+		const drainStart = performance.now();
+		const settled = await waitFor("the last turns to land", async () => {
+			const counts = await assistantCounts(active.map((c) => c.id));
+			return active.every((c) => (counts.get(c.id) ?? 0) >= submitted.get(c.id)!.turns) ? true : undefined;
+		}, 120_000).catch(() => false);
+		const turnsLanded = settled === true;
+		const caught = await waitFor("the projection to catch up", async () => ((await stack.admin.query(lagSql)).rows[0].lag === 0 ? true : undefined), 120_000).then(() => true, () => false);
+		const catchUpMs = performance.now() - drainStart;
+		const idleTouched = (await assistantCounts(idleIds)).size;
+		const turnsSubmitted = [...submitted.values()].reduce((a, s) => a + s.turns, 0);
+		const lateOver2xSolo = turnMs.filter((t) => t > 2 * soloMs).length;
+
+		const regression = (a: number, b: number) => (a > 0 ? r1(((b - a) / a) * 100) : null);
+		const budget = (name: "sessions" | "sidebar" | "all") => ({
+			baseline_p95_ms: baseline[name].p95,
+			loaded_p95_ms: loaded[name].p95,
+			regression_pct: regression(baseline[name].p95, loaded[name].p95),
+			regression_ms: r1(loaded[name].p95 - baseline[name].p95),
+			absolute_p95_under_250ms: loaded[name].p95 < 250,
+			relative_regression_within_20pct: loaded[name].p95 <= baseline[name].p95 * 1.2,
+		});
+		const row = {
+			active_runs: n,
+			stored_idle_chats: idleChats,
+			tenants,
+			runners,
+			runner_max_resident: MAX_RESIDENT,
+			runner_resident_capacity: runners * MAX_RESIDENT,
+			websocket_followers: { normal: followers - slowCount + threads.length, slow_reader: slowCount, churn_cuts: stats.churned, reconnects: stats.reconnects, socket_opens: stats.opens },
+			window_s: r1(seconds),
+			ramp_s: RAMP_S,
+			baseline_s: BASELINE_S,
+			foreground: { baseline_0_active_runs: baseline, under_load: loaded, slo: { sessions: budget("sessions"), sidebar: budget("sidebar"), all: budget("all") } },
+			turns: {
+				model: { tokens_per_second: TOKENS_PER_SECOND, reply_chars: REPLY_CHARS, process_poll_ms: POLL_MS || "product defaults" },
+				solo_turn_ms: Math.round(soloMs),
+				runs_first_turn_admitted: { at_window_start: admittedAtStart, at_window_end: submitted.size },
+				mean_in_flight_runs: r1(inFlightSamples.reduce((a, b) => a + b, 0) / Math.max(1, inFlightSamples.length)),
+				p05_in_flight_runs: pct(inFlightSamples, 5),
+				completed_in_window: completedInWindow,
+				completion_rate_per_s: r1(completedInWindow / seconds),
+				latency_ms: dist(turnMs),
+				late_over_2x_solo: lateOver2xSolo,
+				late_over_2x_solo_pct: r1((lateOver2xSolo / Math.max(1, turnMs.length)) * 100),
+				submitted_total: turnsSubmitted,
+				all_last_turns_landed: turnsLanded,
+				admission_ms: dist(admissionMs),
+				in_flight_note: "in flight = chats with a turn sent whose answer the 200 ms poll of the projection has not yet seen, sampled once a second",
+				note: "turn latency is the time from the Gate accepting the send to a 200 ms poll of the projection seeing the answer, so it includes up to 200 ms of polling",
+			},
+			runtime: { commits_in_window: commitsAfter - commitsBefore, commits_per_s: r1((commitsAfter - commitsBefore) / seconds), pg_transactions_per_s: r1((xactAfter - xactBefore) / seconds), wal_flushes_per_s: r1((walAfter.wal_sync - walBefore.wal_sync) / seconds), wal_flush_mean_ms: walAfter.wal_sync > walBefore.wal_sync ? r1((walAfter.wal_sync_time - walBefore.wal_sync_time) / (walAfter.wal_sync - walBefore.wal_sync)) : null },
+			projection: { max_lag_commits: Math.max(0, ...lagSamples), p95_lag_commits: pct(lagSamples, 95), mean_lag_commits: r1(lagSamples.reduce((a, b) => a + b, 0) / Math.max(1, lagSamples.length)), caught_up_after_load: caught, catch_up_ms: Math.round(catchUpMs), forge_max_lag_events: Math.max(0, ...forgeLagSamples) },
+			live: { updates_delivered_per_s: r1(updatesInWindow / seconds), slow_client: { frames_read: stats.slowFrames, coalesced_progress_frames: stats.slowCoalescedFrames, progress_updates_folded: stats.slowSkipped, closed_as_slow: stats.slowClosed } },
+			coding_flood: { threads: threads.length, events_appended_in_window: floodedInWindow, events_per_s: r1(floodedInWindow / seconds) },
+			refused_snapshots: stats.refused.slice(0, 5),
+			idle_chats_run_in_window: idleTouched,
+			machine: { cpu_busy_pct: r1((1 - (machineAfter.idle - machineBefore.idle) / (machineAfter.total - machineBefore.total)) * 100), process_cpu_seconds_in_window: cpuSeconds, load_average_1m_after: r1(loadavg()[0]!) },
+			memory_mb: { node_processes_peak_rss_total: Math.round(rss.node / 1024), node_by_role_at_peak: Object.fromEntries(Object.entries(rss.nodeByRole).map(([k, v]) => [k, Math.round(v / 1024)])), postgres_peak_pss: pgPid ? Math.round(rss.postgresPss / 1024) : null, load_generator_peak_rss: Math.round(rss.bench / 1024) },
+			postgres: { version: pgVersion, ...pgSettings },
+		};
+		if (loopError) throw loopError;
+		return { row, turnsLanded, caught };
+	} finally {
+		for (const s of sockets) s.close();
+		for (const c of children) c.proc.removeAllListeners("exit"), c.proc.kill("SIGKILL");
+		await app.db.end().catch(() => {});
+		nats.stop();
+		await s3.stop();
+		await stack.drop();
 	}
+}
+
+real("the integrated Gate, Live, Projector and Runners under concurrent streaming runs", () => {
+	const results: Record<string, unknown>[] = [];
+	const environment = { cpus: cpus().length, cpu_model: cpus()[0]?.model, memory_gb: r1(totalmem() / 1024 ** 3), node: process.version, platform: process.platform, nats: spawnSync("nats-server", ["--version"], { encoding: "utf8" }).stdout.trim(), durable_postgres: FULL, load_generator: "same machine" };
+	afterAll(() => {
+		if (process.env.PIM_BENCH_OUT) writeFileSync(process.env.PIM_BENCH_OUT, `${JSON.stringify({ environment, profiles: results }, null, 2)}\n`);
+	});
 
 	for (const n of PROFILES) {
-		it(`${n} people each stream one turn at once`, async () => {
-			const rounds = Number(process.env.PIM_BENCH_ROUNDS ?? (n <= 50 ? 2 : 1));
-			faux.setResponses(Array.from({ length: n * rounds + 5 }, () => fauxAssistantMessage(ANSWER)));
-			const people: { token: string; ownerId: string }[] = [];
-			for (let i = 0; i < n; i += 50) people.push(...(await Promise.all(Array.from({ length: Math.min(50, n - i) }, (_, k) => person(i + k + 1)))));
-			const chats: string[] = [];
-			for (let i = 0; i < n; i += 100) chats.push(...(await Promise.all(people.slice(i, i + 100).map(async (p) => (await call(p.token, "POST", "/api/sessions", { title: "bench" })).json.id as string))));
-			// Idle stored chats: they exist and are listed, and nothing runs in them. They are not active runs.
-			const idlePerPerson = Number(process.env.PIM_BENCH_IDLE_CHATS ?? 3);
-			for (let i = 0; i < n; i += 100) await Promise.all(people.slice(i, i + 100).map(async (p) => { for (let k = 0; k < idlePerPerson; k++) await call(p.token, "POST", "/api/sessions", { title: `idle ${k}` }); }));
-			const watcher = people[0]!;
-
-			// Baseline: the same reads, warm, with nothing running.
-			const warm = probe(watcher.token);
-			await new Promise((r) => setTimeout(r, 2_000));
-			await warm.stop();
-			const idle = probe(watcher.token);
-			await new Promise((r) => setTimeout(r, 6_000));
-			const baseline = await idle.stop();
-
-			// The load: a slow client, a client to be cut, a flood, and the foreground reads, around n turns started at once.
-			const slow = liveClient(watcher.token, true);
-			const flaky = liveClient(watcher.token);
-			const floodOwner = watcher.ownerId;
-			let flooding = true;
-			const flood = (async () => {
-				let seq = 0;
-				const thread = `flood-${n}`;
-				while (flooding) {
-					const rows = Array.from({ length: 40 }, () => ({ id: `${thread}-${seq % 400}`, n: ++seq }));
-					await d.stack.admin.query(
-						"INSERT INTO pim_projection.coding_thread_projection (owner_id, thread_id, title, harness, state, running, updated_at, summary, partition_id, commit_seq, projection_version) SELECT $1, t, 'flood', 'pi', 'running', true, $4, jsonb_build_object('line', 'build output '), gen_random_uuid(), s, 1 FROM unnest($2::text[], $3::bigint[]) x(t, s) ON CONFLICT (owner_id, thread_id) DO UPDATE SET updated_at = EXCLUDED.updated_at, commit_seq = EXCLUDED.commit_seq, summary = EXCLUDED.summary",
-						[floodOwner, rows.map((r) => r.id), rows.map((r) => r.n), Date.now()],
-					);
-					await new Promise((r) => setTimeout(r, 100));
-				}
-				return seq;
-			})();
-			const lp = new (monitorEventLoopDelay as unknown as new (o: object) => ReturnType<typeof monitorEventLoopDelay>)({ resolution: 10 });
-			lp.enable();
-			const rss: { node: number; pg: number; nats: number }[] = [];
-			const memTimer = setInterval(() => rss.push({ node: process.memoryUsage().rss / 1048576, pg: rssMb("postgres"), nats: rssMb("nats-server") }), 1_000);
-			const db0 = (await d.stack.admin.query("SELECT xact_commit AS x FROM pg_stat_database WHERE datname = current_database()")).rows[0].x as string;
-			const wal0 = await walStats();
-			const receipts0 = Number((await d.stack.admin.query("SELECT count(*) n FROM pim_runtime.commit_receipts")).rows[0].n);
-			const cpu0 = cpuTimes();
-			const proc0 = process.cpuUsage();
-			const wall0 = performance.now();
-			const loadedProbe = probe(watcher.token);
-			const t0 = performance.now();
-			let cutAt = 0;
-			let reconnectedMs: number | null = null;
-			setTimeout(() => {
-				cutAt = performance.now();
-				flaky.cut();
-				void (async () => {
-					while (reconnectedMs === null && performance.now() - cutAt < 60_000) {
-						await new Promise((r) => setTimeout(r, 25));
-						const last = flaky.log.statuses.at(-1);
-						if (last && last.at > cutAt && last.status === "live") reconnectedMs = ms(last.at - cutAt);
-					}
-				})();
-			}, 4_000);
-			const admissions: number[] = [];
-			const e2e: number[] = [];
-			let maxLag = 0;
-			let admittedAt = 0;
-			for (let round = 1; round <= rounds; round++) {
-				const sent = new Map<string, number>();
-				for (let i = 0; i < n; i += 250)
-					admissions.push(
-						...(await Promise.all(
-							people.slice(i, i + 250).map(async (p, k) => {
-								sent.set(chats[i + k]!, performance.now());
-								const r = await call(p.token, "POST", `/api/sessions/${chats[i + k]}/messages`, { commandId: `bench-${n}-${round}-${i + k}`, text: `hello ${i + k}` });
-								expect(r.status).toBe(202);
-								return r.ms;
-							}),
-						)),
-					);
-				if (round === 1) admittedAt = performance.now() - t0;
-				// When each answer is readable: sampled from the projection every 50 ms; and how far the Projector is behind.
-				const landed = new Map<string, number>();
-				await waitFor(`${n} answers of round ${round} to be projected`, async () => {
-					const rows = (await d.stack.admin.query("SELECT chat_id FROM pim_projection.chat_transcript_projection WHERE message->>'role' = 'assistant' AND NOT partial AND chat_id = ANY($1) GROUP BY chat_id HAVING count(*) >= $2", [chats, round])).rows;
-					const at = performance.now();
-					for (const r of rows) if (!landed.has(r.chat_id)) landed.set(r.chat_id, at);
-					const lag = (await d.stack.admin.query("SELECT coalesce(sum(p.next_seq - 1 - w.projected_seq), 0)::int AS lag FROM pim_runtime.partitions p JOIN pim_projection.projection_watermarks w ON w.partition_id = p.partition_id")).rows[0].lag;
-					maxLag = Math.max(maxLag, lag);
-					return landed.size === n ? true : undefined;
-				}, 1_500_000);
-				for (const c of chats) e2e.push(landed.get(c)! - sent.get(c)!);
-			}
-			const total = performance.now() - t0;
-			const cpu1 = cpuTimes();
-			const procCpu = process.cpuUsage(proc0);
-			const wallMs = performance.now() - wall0;
-			clearInterval(memTimer);
-			lp.disable();
-			flooding = false;
-			const floodRows = await flood;
-			const loaded = await loadedProbe.stop();
-			const db1 = (await d.stack.admin.query("SELECT xact_commit AS x FROM pg_stat_database WHERE datname = current_database()")).rows[0].x as string;
-			const wal1 = await walStats();
-			const receipts1 = Number((await d.stack.admin.query("SELECT count(*) n FROM pim_runtime.commit_receipts")).rows[0].n);
-			const settings = Object.fromEntries((await d.stack.admin.query("SELECT name, setting FROM pg_settings WHERE name IN ('fsync','synchronous_commit','full_page_writes','shared_buffers','max_connections')")).rows.map((r) => [r.name, r.setting]));
-			const version = (await d.stack.admin.query("SHOW server_version")).rows[0].server_version as string;
-			const liveStatus = { slow: slow.client.status, flaky: flaky.client.status };
-			slow.stop();
-			flaky.stop();
-			const all = (x: Record<"sessions" | "sidebar", number[]>) => [...x.sessions, ...x.sidebar];
-			const regress = (a: number, b: number) => (a > 0 ? Math.round(((b - a) / a) * 1000) / 10 : null);
-			const base = { sessions: pcts(baseline.sessions), sidebar: pcts(baseline.sidebar) };
-			const load = { sessions: pcts(loaded.sessions), sidebar: pcts(loaded.sidebar) };
-			const seconds = total / 1000;
-			const row = {
-				people: n,
-				rounds,
-				active_streaming_runs: n,
-				idle_stored_chats: n * idlePerPerson,
-				tenants: n,
-				admission_ms: { p50: ms(pct(admissions, 50)), p95: ms(pct(admissions, 95)), max: ms(Math.max(...admissions)) },
-				all_admitted_after_ms: ms(admittedAt),
-				answer_readable_ms: { p50: ms(pct(e2e, 50)), p95: ms(pct(e2e, 95)), p99: ms(pct(e2e, 99)), max: ms(Math.max(...e2e)) },
-				// The two budgets, read off one run: warm p95 under 250 ms, and at most 20% worse than the same read with nothing running.
-				foreground: {
-					baseline: base,
-					under_load: load,
-					budget_absolute_p95_under_250ms: Math.max(load.sessions.p95, load.sidebar.p95) < 250,
-					p95_regression_pct: { sessions: regress(base.sessions.p95, load.sessions.p95), sidebar: regress(base.sidebar.p95, load.sidebar.p95) },
-					p50_regression_pct: { sessions: regress(base.sessions.p50, load.sessions.p50), sidebar: regress(base.sidebar.p50, load.sidebar.p50) },
-					budget_relative_within_20pct: (regress(base.sessions.p95, load.sessions.p95) ?? 999) <= 20 && (regress(base.sidebar.p95, load.sidebar.p95) ?? 999) <= 20,
-				},
-				foreground_read_ms: { reads: all(loaded).length, p50: ms(pct(all(loaded), 50)), p95: ms(pct(all(loaded), 95)), max: ms(Math.max(...all(loaded))) },
-				max_projection_lag_commits: maxLag,
-				total_s: Math.round(total / 100) / 10,
-				runtime_commits_total: receipts1,
-				runtime_commits_per_second: Math.round(((receipts1 - receipts0) / seconds) * 10) / 10,
-				pg_transactions_per_second: Math.round((Number(db1) - Number(db0)) / seconds),
-				pg_wal_flushes_per_second: wal0 && wal1 ? Math.round((wal1.sync - wal0.sync) / seconds) : null,
-				pg_wal_flush_mean_ms: wal0 && wal1 && wal1.sync > wal0.sync ? Math.round(((wal1.time - wal0.time) / (wal1.sync - wal0.sync)) * 1000) / 1000 : null,
-				machine_cpu_busy_pct: Math.round((1 - (cpu1.idle - cpu0.idle) / (cpu1.total - cpu0.total)) * 1000) / 10,
-				// The stack's Node process: CPU seconds used per wall second, as a percent of ONE core (100 means its one event loop is saturated).
-				stack_node_process_cpu_pct_of_one_core: Math.round(((procCpu.user + procCpu.system) / 1000 / wallMs) * 1000) / 10,
-				rss_mb_max: { stack_node_process: ms(Math.max(...rss.map((r) => r.node))), postgres_sum_of_backends: ms(Math.max(...rss.map((r) => r.pg))), nats: ms(Math.max(...rss.map((r) => r.nats))) },
-				event_loop_delay_ms: { p50: Math.round(lp.percentile(50) / 1e4) / 100, p99: Math.round(lp.percentile(99) / 1e4) / 100, max: Math.round(lp.max / 1e4) / 100 },
-				live: { slow_client_status: liveStatus.slow, slow_client_updates_received: slow.log.updates, reconnect_cut_to_live_ms: reconnectedMs, reconnecting_client_updates: flaky.log.updates, reconnecting_client_final_status: liveStatus.flaky, coalesced_progress_updates: flaky.log.progress, coalesced_updates_skipped: flaky.log.skipped },
-				coding_projection_flood_rows: floodRows,
-				environment: { cpus: cpus().length, cpu_model: cpus()[0]?.model, mem_gb: Math.round((totalmem() / 2 ** 30) * 10) / 10, node: process.version, postgres: version, postgres_settings: settings, knobs: { runtime_pool: process.env.PIM_BENCH_RUNTIME_POOL ?? "20", gate_pool: process.env.PIM_BENCH_GATE_POOL ?? "20", runners: Number(process.env.PIM_BENCH_RUNNERS ?? 2) }, shape: "Gate, Live, the Runners and the Projector in one Node process; PostgreSQL and nats-server separate; scripted model at 25 tokens/s" },
-				cpus: cpus().length,
-			};
+		it(`${n} active runs, ${IDLE_PER_ACTIVE * n} stored idle chats`, async () => {
+			const { row, turnsLanded, caught } = await runProfile(n);
 			results.push(row);
 			console.log("BENCH", JSON.stringify(row));
-			// A collapse, not a target: every turn landed, the Gate kept admitting, and a foreground read never stalled.
-			expect(admissions.every((a) => a < 60_000)).toBe(true);
-			expect(Math.max(...all(loaded))).toBeLessThan(30_000);
+			// A collapse, not a target: at 50 runs or fewer turns completed in the window; at any size the last turns landed, the projection caught up, and a foreground read never stalled.
+			if (n <= 50) expect(row.turns.completed_in_window).toBeGreaterThan(0);
+			expect(turnsLanded).toBe(true);
+			expect(caught).toBe(true);
+			expect(row.foreground.under_load.all.max).toBeLessThan(10_000);
+			expect(row.foreground.under_load.non_200).toBe(0);
+			expect(row.idle_chats_run_in_window).toBe(0);
+			if (n <= 50) expect(row.foreground.slo.all.absolute_p95_under_250ms).toBe(true);
 		}, 1_800_000);
 	}
 });

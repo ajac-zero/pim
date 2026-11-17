@@ -1,6 +1,11 @@
 // How each inventory entry (a `###` heading of docs/architecture/inventory/B1..B6*.md) is carried by v2. First match wins. This is a judgment recorded by a person, not derived
 // from the code: `status` is "Verified" only where a named test exercises the behaviour on the real stack; "Partial" where it is implemented but a part is untested or missing;
 // "Gap" where v2 does not carry it; "N/A" where the entry describes analysis, not behaviour. Edit a row here when the code changes, then run `node scripts/v2-coverage/build.mjs`.
+// HONESTY ABOUT SCALE AND DEPLOYMENT. A "Verified" row is a sandbox test, never live parity. In particular no row here claims scale acceptance: the integrated load runs
+// (docs/v2-operations.md, "Integrated qualification") MISSED the relative budget (p95 within 20% of the warm baseline) from 50 active runs upward in both harnesses (multi-process 15.3 ms
+// against about 10 ms; one process 54 ms against 12 ms), and the realistic multi-process harness also MISSED the absolute budget (p95 under 250 ms) at 1,000 active runs, at 451 ms, with the
+// machine at 100% CPU, no turn finished in the 30 s window (all eventually landed) and only 418 of 1,000 runs admitted when it opened. The slow-reader path was not reached by that load.
+// The single-process result is the easier one and is never evidence of scale acceptance. Docker, Compose, the logical backup script, an S3 backup client and every live-cluster path were never run.
 const V = "Verified", P = "Partial", G = "Gap", NA = "N/A";
 const app = (...f) => f.map((x) => `v2-app/test/${x}.test.ts`).join(", ");
 const rt = (...f) => f.map((x) => `v2-runtime/test/${x}.test.ts`).join(", ");
@@ -163,11 +168,11 @@ export const RULES = [
 	["B6", /^5\.3 /, "Preserved", "origin checks on cookies and sockets", app("auth"), V, ""],
 	["B6", /^5\.4 /, "Preserved", "cookies, WebAuthn rp id", app("auth"), V, ""],
 	["B6", /^5\.5 /, "Replaced", "stateless Live replicas", live("ws", "hub"), V, ""],
-	["B6", /^5\.6 /, "Changed", "pool budgets and statement timeouts", ent, P, ""],
+	["B6", /^5\.6 /, "Changed", "pool budgets and statement timeouts", [ent, srv("integrated-bench")].join(", "), P, "Scale is NOT accepted: the relative p95 budget (within 20% of baseline) failed from 50 active runs up in both harnesses, and the multi-process harness missed the absolute 250 ms budget at 1,000 active runs (451 ms, 100% CPU, 418 of 1,000 admitted, no turn done in the 30 s window)."],
 	["B6", /^5\.7 /, "Changed", "—", "—", P, ""],
-	["B6", /^8\.1 /, "Changed", "Gate, Caddy", [ent, slice].join(", "), V, ""],
+	["B6", /^8\.1 /, "Changed", "Gate, Caddy", [ent, slice].join(", "), V, "Run as real OS processes. The Caddy and Compose files were never booted (no Docker)."],
 	["B6", /^8\.2 /, "Changed", "pim_app identity, bootstrap claim", [app("security"), slice].join(", "), V, ""],
-	["B6", /^8\.3 /, "Replaced", "Runner, Projector, Live", [srv("runtime-source", "live-e2e"), slice].join(", "), V, ""],
+	["B6", /^8\.3 /, "Replaced", "Runner, Projector, Live", [srv("runtime-source", "live-e2e"), slice].join(", "), V, "Correct under test; not shown to hold 1,000 simultaneous streams (see the scale note on 5.6)."],
 	["B6", /^8\.4 /, "Replaced", "S3 ObjectStore", app("files"), V, ""],
 	["B6", /^8\.5 /, "Replaced", "runtime due work, maintenance sweeps", [rt("activation"), srv("sweeps")].join(", "), P, ""],
 	["B6", /^8\.6 /, "Changed", "optional roles and capability errors", [app("files"), slice].join(", "), P, ""],

@@ -176,6 +176,9 @@ export function sessionOf(row: SidebarRow): Session {
       typeof summary.responseAt === "number" ? summary.responseAt : null,
     unread: row.unread,
     archived: summary.archived === true,
+    ...(typeof summary.model === "object" && summary.model !== null
+      ? { model: summary.model as Session["model"] }
+      : {}),
     agent:
       typeof agent === "object" && agent !== null
         ? (agent as { id: string; name: string })
@@ -189,7 +192,12 @@ export function upsertSession(
   next: Session,
 ): Session[] {
   const others = (list ?? []).filter((s) => s.id !== next.id);
-  return [...others, next].sort(
-    (a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0),
-  );
+  // A live row does not carry the chat's agent or own model; it keeps the ones the list had.
+  const before = list?.find((s) => s.id === next.id);
+  const model = next.model ?? before?.model;
+  const agent = next.agent ?? before?.agent;
+  return [
+    ...others,
+    { ...next, ...(model ? { model } : {}), ...(agent ? { agent } : {}) },
+  ].sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
 }

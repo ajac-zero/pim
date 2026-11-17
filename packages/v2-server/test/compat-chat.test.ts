@@ -7,6 +7,8 @@ import { connect } from "@pim/v2-app/db";
 import { createGate } from "@pim/v2-app/gate";
 import { MemoryObjectStore } from "@pim/v2-app/objects";
 import { chatRoutes } from "../src/compat/chat.ts";
+import { modelRoutes } from "../src/compat/model.ts";
+import { snapshotRoutes } from "../src/gate-extras.ts";
 import { createStack, type Stack } from "./support/stack.ts";
 
 let stack: Stack;
@@ -16,6 +18,8 @@ let base: string;
 let ada: string;
 let bob: string;
 let agent: string;
+let utility: Server;
+const asked: any[] = [];
 
 const call = async (token: string, method: string, path: string, body?: unknown, headers: Record<string, string> = {}) => {
 	const response = await fetch(base + path, { method, headers: { authorization: `Bearer ${token}`, ...(typeof body === "object" ? { "content-type": "application/json" } : {}), ...headers }, ...(body === undefined ? {} : { body: typeof body === "string" ? body : JSON.stringify(body) }) });
@@ -26,7 +30,19 @@ const call = async (token: string, method: string, path: string, body?: unknown,
 beforeAll(async () => {
 	stack = await createStack();
 	app = new App(connect(stack.url("gate"), 4), new MemoryObjectStore());
-	server = createGate(app, { first: chatRoutes });
+	// A stand-in utility model: answers each side job the way a small model would, and records what it was asked.
+	utility = createServer(async (req, res) => {
+		let raw = "";
+		for await (const chunk of req) raw += chunk;
+		const body = JSON.parse(raw);
+		asked.push(body);
+		const system = String(body.messages[0].content);
+		const content = system.includes("name chats") ? 'Title: "Fresh Garden Plan".' : system.includes("improve messages") ? "Plan my week in detail" : system.includes("suggest") ? 'Sure! {"messages":["Plan my week","Water the garden","Plan my week"]}' : "- They planned a garden";
+		res.setHeader("content-type", "application/json").end(JSON.stringify({ choices: [{ message: { content } }] }));
+	});
+	await new Promise<void>((resolve) => utility.listen(0, "127.0.0.1", resolve));
+	const gateway = { PIM_AI_GATEWAY_URL: `http://127.0.0.1:${(utility.address() as { port: number }).port}/v1`, PIM_AI_GATEWAY_MODELS: "u1,u2" };
+	server = createGate(app, { first: [...modelRoutes(gateway), ...chatRoutes, ...snapshotRoutes(app.db.pool)] });
 	await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
 	base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
 	const claim = await app.identity.issueClaim("bootstrap", null, 3600_000);
@@ -36,9 +52,11 @@ beforeAll(async () => {
 	const b = await app.identity.register({ username: "bob" });
 	bob = await app.identity.createSession(b.ownerId);
 	agent = (await call(ada, "POST", "/api/agents", { name: "Pim" })).body.id;
+	process.env.PIM_AI_GATEWAY_URL = gateway.PIM_AI_GATEWAY_URL;
 });
 afterAll(async () => {
 	server?.close();
+	utility?.close();
 	await app?.db.end();
 	await stack?.drop();
 });
@@ -119,5 +137,71 @@ describe("chats and the account", () => {
 		expect(listed).toMatchObject([{ id: token.id, name: "cli" }]);
 		expect(JSON.stringify(listed)).not.toContain(token.token);
 		expect((await call(ada, "GET", "/api/email")).body).toEqual({ available: false, address: null, pending: null });
+	});
+});
+
+describe("a new chat", () => {
+	it("is listed in the sidebar before the projection has heard of it", async () => {
+		const chat = (await call(ada, "POST", "/api/sessions", { agentId: agent, title: "Welcome" })).body.id as string;
+		const listed = (await call(ada, "GET", "/api/snapshot/sidebar")).body.sessions as { chatId: string; title: string }[];
+		expect(listed.find((s) => s.chatId === chat)).toMatchObject({ title: "Welcome" });
+		// Another person does not see it, and a deleted chat is gone.
+		expect(((await call(bob, "GET", "/api/snapshot/sidebar")).body.sessions as { chatId: string }[]).some((s) => s.chatId === chat)).toBe(false);
+		await call(ada, "DELETE", `/api/sessions/${chat}`);
+		expect(((await call(ada, "GET", "/api/snapshot/sidebar")).body.sessions as { chatId: string }[]).some((s) => s.chatId === chat)).toBe(false);
+	});
+});
+
+describe("the utility model", () => {
+	const say = (ownerId: string, chat: string, n: number, role: "user" | "assistant", text: string) =>
+		stack.admin.query("INSERT INTO pim_projection.chat_transcript_projection (owner_id, stream_kind, chat_id, entry_id, position, message, partition_id, commit_seq, projection_version) VALUES ($1,'chat',$2,$3,$4,$5,'00000000-0000-0000-0000-000000000001',$4,1)", [
+			ownerId, chat, `m${n}-${chat}`, n, JSON.stringify({ id: `m${n}-${chat}`, role, timestamp: n, parts: role === "user" ? [{ type: "text", text }] : [{ type: "tool-call", id: "c", name: "send_to_user", arguments: { message: text } }] }),
+		]);
+
+	it("is off until one is chosen: no suggestions, no title, no improved prompt", async () => {
+		const chat = (await call(ada, "POST", "/api/sessions", { agentId: agent })).body.id as string;
+		expect((await call(ada, "GET", `/api/sessions/${chat}/suggestions`)).body).toEqual({ suggestions: [] });
+		expect((await call(ada, "POST", `/api/sessions/${chat}/title`)).status).toBe(501);
+		expect((await call(ada, "POST", "/api/prompts/improve", { text: "plan" })).status).toBe(501);
+		expect((await call(ada, "GET", `/api/sessions/${chat}/summary`)).body).toEqual({ summary: null });
+		expect(asked).toHaveLength(0);
+	});
+
+	it("names, summarizes, improves and suggests through the model chosen in Settings", async () => {
+		const owner = (await stack.admin.query("SELECT owner_id FROM pim_app.accounts WHERE username = 'ada'")).rows[0].owner_id as string;
+		expect((await call(ada, "PUT", "/api/model/utility", { provider: "gateway", id: "u2" })).status).toBe(200);
+		const chat = (await call(ada, "POST", "/api/sessions", { agentId: agent })).body.id as string;
+		// Nothing has been answered yet, so there is nothing to name.
+		expect((await call(ada, "POST", `/api/sessions/${chat}/title`)).status).toBe(501);
+		await say(owner, chat, 1, "user", "Help me plan my garden");
+		await say(owner, chat, 2, "assistant", "Start with the beds by the fence.");
+		expect((await call(ada, "POST", `/api/sessions/${chat}/title`)).body).toMatchObject({ id: chat, title: "Fresh Garden Plan" });
+		expect(asked.at(-1)).toMatchObject({ model: "u2", stream: false });
+		expect(JSON.stringify(asked.at(-1).messages[1].content)).toBe('"Person: Help me plan my garden\\n\\nAssistant: Start with the beds by the fence."');
+		expect((await call(ada, "POST", "/api/prompts/improve", { text: "plan" })).body).toEqual({ text: "Plan my week in detail" });
+		expect((await call(ada, "GET", `/api/sessions/${chat}/suggestions?locale=en`)).body).toEqual({ suggestions: ["Plan my week", "Water the garden"] });
+		expect((await call(ada, "GET", `/api/sessions/${chat}/summary`)).body).toEqual({ summary: "- They planned a garden" });
+		// Asked again with nothing more said, the summary is not written again; another person's chat is not reachable.
+		const before = asked.length;
+		await call(ada, "GET", `/api/sessions/${chat}/summary`);
+		expect(asked).toHaveLength(before);
+		expect((await call(bob, "POST", `/api/sessions/${chat}/title`)).status).toBe(404);
+	});
+});
+
+describe("a chat's own model", () => {
+	it("is kept for the chat, shown in the sidebar and handed to the Runner as its next turn's model, until the chat follows its agent again", async () => {
+		const owner = (await stack.admin.query("SELECT owner_id FROM pim_app.accounts WHERE username = 'ada'")).rows[0].owner_id as string;
+		const chat = (await call(ada, "POST", "/api/sessions", { agentId: agent, title: "Pinned" })).body.id as string;
+		const context = async () => (await stack.admin.query("SELECT pim_app.runner_context($1, $2) AS c", [owner, chat])).rows[0].c;
+		expect((await context()).chat_model).toBeNull();
+		expect((await call(ada, "PUT", `/api/sessions/${chat}/model`, { provider: "gateway", id: "nope" })).status).toBe(400);
+		expect((await call(ada, "PUT", `/api/sessions/${chat}/model`, { provider: "gateway", id: "u1" })).body).toMatchObject({ model: { provider: "gateway", id: "u1" } });
+		expect((await context()).chat_model).toEqual({ provider: "gateway", id: "u1" });
+		const row = ((await call(ada, "GET", "/api/snapshot/sidebar")).body.sessions as { chatId: string; summary: any }[]).find((s) => s.chatId === chat);
+		expect(row?.summary.model).toMatchObject({ override: true, model: { provider: "gateway", id: "u1" } });
+		expect((await call(bob, "PUT", `/api/sessions/${chat}/model`, { provider: "gateway", id: "u1" })).status).toBe(404);
+		await call(ada, "PUT", `/api/sessions/${chat}/model`, { provider: null, id: null });
+		expect((await context()).chat_model).toBeNull();
 	});
 });

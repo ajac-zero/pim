@@ -34,7 +34,7 @@ export async function waitFor<T>(what: string, check: () => Promise<T | undefine
  * decision has been recorded for its task, which is how Pim holds a tool call for an approval.
  */
 export function createRig(db: Db, ownerId: string) {
-	const faux = fauxProvider({ provider: "faux", models: [{ id: "m" }] });
+	const faux = fauxProvider({ provider: "faux", models: [{ id: "m" }, { id: "m2" }] });
 	const models = createModels();
 	models.setProvider(faux.provider);
 	const state = {

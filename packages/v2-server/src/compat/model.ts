@@ -8,7 +8,7 @@ import type { Api, Model } from "@earendil-works/pi-ai";
 import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
 import { googleProvider } from "@earendil-works/pi-ai/providers/google";
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
-import { BadRequestError, PimError } from "@pim/v2-app/errors";
+import { BadRequestError, NotFoundError, PimError } from "@pim/v2-app/errors";
 import { ok, type Route, route } from "@pim/v2-app/http";
 import { toWebProvider } from "@pim/v2-app/web-providers";
 
@@ -85,6 +85,18 @@ export function modelRoutes(env: Env): Route[] {
 		}),
 		route("PUT", "/api/model", async ({ app, principal, json }) => ok(await choose(app, await principal(), "model", await json()))),
 		route("PUT", "/api/model/utility", async ({ app, principal, json }) => ok(await choose(app, await principal(), "model_utility", await json()))),
+		// One chat's own model, over its agent's; null follows the agent's again. The Runner reads it before the chat's next turn (migration 0670).
+		route("PUT", "/api/sessions/:id/model", async ({ app, principal, params, json }) => {
+			const p = await principal();
+			await app.identity.authz.enforce(p, "api:write");
+			const body = await json();
+			const now = await settings(app, p);
+			const found = body.provider === null || body.provider === undefined ? null : now.choices.find((c) => c.provider === body.provider && c.id === body.id);
+			if (found === undefined) throw new PimError(400, "bad_request", "That model is not one of the choices");
+			const changed = await app.db.owner(p.ownerId, async (tx: any) => (await tx.query("UPDATE pim_app.conversations SET model = $2 WHERE public_chat_id::text = $1 AND deleted_at IS NULL", [params[0]!, found && JSON.stringify({ provider: found.provider, id: found.id })])).rowCount);
+			if (!changed) throw new NotFoundError("No such chat");
+			return ok({ model: found ?? now.model });
+		}),
 		route("GET", "/api/providers/built-in", async ({ app, principal }) => {
 			await app.identity.authz.enforce(await principal(), "api:read");
 			return ok({ providers: Object.entries(CATALOGS).map(([id, c]) => ({ id, name: c.name, models: c.models().map(catalogInfo) })) });

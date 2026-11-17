@@ -267,3 +267,25 @@ describe("one person's active chats", () => {
 		await Promise.all([runnerA.stop(), runnerB.stop()]);
 	});
 });
+
+describe("a chat's model", () => {
+	it("is read again before each message, so a model chosen since the last turn answers the next", async () => {
+		const ownerId = uniqueOwner();
+		const rig = createRig(database.db, ownerId);
+		const home = await new PartitionDirectory(database.db).createPartition(ownerId, { kind: "home" });
+		const chosen = { model: { provider: "faux", modelId: "m" } };
+		const runner = rig.runner({ chatAgent: () => chosen });
+		const answeredBy = async (): Promise<string[]> => (await readTranscript(database.db, ownerId, home, 1)).flatMap((e) => (e.kind === "pi.assistant" ? (e.model ?? []).map((m) => (m as { model?: string }).model ?? "") : []));
+		rig.faux.setResponses([fauxAssistantMessage("one"), fauxAssistantMessage("two"), fauxAssistantMessage("three")]);
+		await runner.start();
+		await hello(runner, ownerId, home, "first");
+		await waitFor("the first answer", async () => ((await answeredBy()).length === 1 ? true : undefined));
+		chosen.model = { provider: "faux", modelId: "m2" };
+		await hello(runner, ownerId, home, "second");
+		await waitFor("the second answer", async () => ((await answeredBy()).length === 2 ? true : undefined));
+		await hello(runner, ownerId, home, "third");
+		await waitFor("the third answer", async () => ((await answeredBy()).length === 3 ? true : undefined));
+		expect(await answeredBy()).toEqual(["m", "m2", "m2"]);
+		await runner.stop();
+	});
+});

@@ -8,6 +8,7 @@ import type { Tx } from "@pim/v2-app/db";
 import { BadRequestError, ConflictError, GoneError, NotFoundError, RefusedError } from "@pim/v2-app/errors";
 import { route, type Reply, type Route } from "@pim/v2-app/http";
 import type { Principal } from "@pim/v2-contracts/identity";
+import { framePage } from "./app-frame.ts";
 import { deleted, digestOf, type Files, ms, ok, sizeOf, typeOf } from "./admin-util.ts";
 
 const MAIN: Record<string, string[]> = { html: ["index.html"], jsx: ["App.jsx", "App.tsx"], backend: ["pim.app.json"] };
@@ -26,7 +27,7 @@ const LATEST =
 /** An app as its latest version (`Artifact`). */
 const artifactOf = (r: Latest) => ({ id: r.id, title: r.title, kind: kindOut(r.kind), session: null, version: r.latest_version, versions: r.versions, size: sizeOf(r.files), files: Object.keys(r.files).length, sha256: digestOf(r.files), createdAt: ms(r.created_at), updatedAt: ms(r.updated_at) });
 
-const readable = (app: App, p: Principal) => app.identity.authz.enforce(p, "api:read");
+export const readable = (app: App, p: Principal) => app.identity.authz.enforce(p, "api:read");
 
 /** One of the caller's own apps, as its latest version. */
 async function ownLatest(tx: Tx, ownerId: string, id: string): Promise<Latest> {
@@ -59,7 +60,7 @@ function versionOf(head: { id: string; title: string; kind: string; latest: numb
 	};
 }
 
-async function ownVersion(tx: Tx, ownerId: string, id: string, version: number) {
+export async function ownVersion(tx: Tx, ownerId: string, id: string, version: number) {
 	const head = (await tx.query("SELECT id, title, kind, latest_version FROM pim_app.artifacts WHERE owner_id = $1 AND id = $2", [ownerId, id])).rows[0];
 	if (!head) throw new NotFoundError("No such app");
 	const v = (await tx.query("SELECT version, files, message, created_at FROM pim_app.artifact_versions WHERE owner_id = $1 AND artifact_id = $2 AND version = $3", [ownerId, id, version])).rows[0] as Version | undefined;
@@ -67,35 +68,7 @@ async function ownVersion(tx: Tx, ownerId: string, id: string, version: number) 
 	return { head: { id: head.id as string, title: head.title as string, kind: head.kind as string, latest: head.latest_version as number }, v };
 }
 
-const num = (s: string | undefined) => (Number.isInteger(Number(s)) ? Number(s) : Number.NaN);
-
-const FRAME_CSP = "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; connect-src 'none'; frame-ancestors 'self'; sandbox allow-scripts";
-const RESIZE = `<script>(()=>{let last=-1;const post=()=>{const h=Math.ceil(document.documentElement.scrollHeight);if(h!==last){last=h;parent.postMessage({type:"pim:artifact-height",height:h},"*")}};addEventListener("load",post);new ResizeObserver(post).observe(document.documentElement);post()})()</script>`;
-const escapeScript = (text: string) => text.replace(/<\/(script|style)/gi, "<\\/$1");
-
-/** An app's own files, the page's script and style references inlined: a framed page has no origin to load them from. */
-function inlineOwnFiles(html: string, files: Files): string {
-	const own = (ref: string) => files[ref.trim().replace(/^\.\//, "").split(/[?#]/)[0]!];
-	const value = String.raw`(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))`;
-	return html
-		.replace(new RegExp(String.raw`<script\b([^>]*?)\bsrc=${value}([^>]*)></script>`, "gi"), (whole, a, q1, q2, q3, b) => {
-			const text = own(q1 ?? q2 ?? q3);
-			return text !== undefined ? `<script${a}${b}>${escapeScript(text)}</script>` : whole;
-		})
-		.replace(new RegExp(String.raw`<link\b[^>]*\brel=["']?stylesheet["']?[^>]*\bhref=${value}[^>]*>`, "gi"), (whole, q1, q2, q3) => {
-			const text = own(q1 ?? q2 ?? q3);
-			return text !== undefined ? `<style>${escapeScript(text)}</style>` : whole;
-		});
-}
-
-const FRAME_HEADERS = { "content-type": "text/html; charset=utf-8", "content-security-policy": FRAME_CSP, "x-content-type-options": "nosniff", "referrer-policy": "no-referrer", "cache-control": "no-store" };
-
-/** The sandboxed page a version is shown in. A JSX app is compiled by a runtime this deployment doesn't serve yet, so it shows a note. */
-function framePage(kind: string, files: Files): Reply {
-	if (kind === "html") return { status: 200, headers: FRAME_HEADERS, raw: inlineOwnFiles(files["index.html"] ?? "", files) + RESIZE };
-	const note = kind === "backend" ? "An app with a backend opens at its own address." : "This kind of app can't be previewed on this deployment yet.";
-	return { status: 200, headers: FRAME_HEADERS, raw: `<!doctype html><meta charset="utf-8"><body style="font:14px system-ui;padding:16px;color:#555">${note}</body>${RESIZE}` };
-}
+export const num = (s: string | undefined) => (Number.isInteger(Number(s)) ? Number(s) : Number.NaN);
 
 function downloadReply(files: Files, path: string | undefined): Reply {
 	const chosen = path ?? "";
@@ -107,7 +80,7 @@ function downloadReply(files: Files, path: string | undefined): Reply {
 // ---- someone else's: shared with a circle you are in, or published to everyone ----
 
 /** The latest version of an app a circle shares with the caller, by its host's username; row-level security decides whether they may see it. */
-async function sharedLatest(app: App, p: Principal, host: string, id: string) {
+export async function sharedLatest(app: App, p: Principal, host: string, id: string) {
 	await readable(app, p);
 	if ((await app.identity.authz.account(p.ownerId))?.role === "guest") throw new RefusedError("Guests cannot open shared apps.", "guest");
 	const owner = (await app.db.anonymous(async (tx) => (await tx.query("SELECT owner_id FROM pim_app.accounts WHERE username = $1 AND status = 'active'", [host.toLowerCase()])).rows[0]))?.owner_id as string | undefined;
@@ -125,7 +98,7 @@ const sharedOf = (host: string, r: Latest) => {
 type Published = { public_id: string; owner_id: string; artifact_id: string; version: number; published_at: Date; uses: number; username: string; status: string; display_name: string | null };
 
 /** The pinned copy a published app is: its row, then its author's version of it, read as the author as the published address does. */
-async function publishedCopy(app: App, publicId: string) {
+export async function publishedCopy(app: App, publicId: string) {
 	const pub = (await app.db.lookup(publicId, async (tx) => (await tx.query("SELECT p.public_id, p.owner_id, p.artifact_id, p.version, p.published_at, p.uses, a.username, a.status, pr.display_name FROM pim_app.published_artifacts p JOIN pim_app.accounts a ON a.owner_id = p.owner_id LEFT JOIN pim_app.profiles pr ON pr.owner_id = p.owner_id AND pr.published WHERE p.public_id = $1 AND p.unpublished_at IS NULL", [publicId])).rows[0])) as Published | undefined;
 	if (!pub) throw new NotFoundError();
 	if (pub.status === "deleting" || pub.status === "deleted") throw new GoneError("The author of this has deleted their account");
@@ -139,8 +112,6 @@ async function publishedCopy(app: App, publicId: string) {
 }
 
 const publishedOf = (c: Awaited<ReturnType<typeof publishedCopy>>) => ({ id: c.pub.public_id, author: c.pub.username, authorName: c.pub.display_name, artifactId: c.pub.artifact_id, version: c.pub.version, title: c.title, kind: kindOut(c.kind), sha256: digestOf(c.v.files), size: sizeOf(c.v.files), publishedAt: ms(c.pub.published_at), uses: c.pub.uses, public: true });
-
-const unsupported = (what: string): Reply => ({ status: 501, body: { error: "not_supported", message: `${what} isn't available on this deployment yet.` } });
 
 export function artifactRoutes(): Route[] {
 	const publication = async (app: App, p: Principal, origin: string, id: string) => {
@@ -175,11 +146,11 @@ export function artifactRoutes(): Route[] {
 			const { head, v } = await app.db.owner(p.ownerId, (tx) => ownVersion(tx, p.ownerId, params[0]!, num(params[1])));
 			return ok(versionOf(head, v, url.searchParams.get("path") ?? undefined));
 		}),
-		route("GET", "/api/artifacts/:id/versions/:version/frame", async ({ app, principal, params }) => {
+		route("GET", "/api/artifacts/:id/versions/:version/frame", async ({ app, principal, params, origin, url }) => {
 			const p = await principal();
 			await readable(app, p);
 			const { head, v } = await app.db.owner(p.ownerId, (tx) => ownVersion(tx, p.ownerId, params[0]!, num(params[1])));
-			return framePage(head.kind, v.files);
+			return framePage(head.kind, v.files, origin, { thumbnail: url.searchParams.has("thumbnail") });
 		}),
 		route("GET", "/api/artifacts/:id/versions/:version/download", async ({ app, principal, params, url }) => {
 			const p = await principal();
@@ -235,8 +206,6 @@ export function artifactRoutes(): Route[] {
 		route("GET", "/api/artifacts/:id/backend/logs", async ({ app, principal, params }) => (await latestOf(app, await principal(), params[0]!), ok({ text: "" }))),
 		route("POST", "/api/artifacts/:id/backend/stop", async ({ app, principal, params }) => (await latestOf(app, await principal(), params[0]!), ok({ stopped: false }))),
 		route("POST", "/api/artifacts/:id/backend/run", async ({ app, principal, params }) => (await latestOf(app, await principal(), params[0]!), { status: 409, body: { error: "no_computer", message: "Pair a computer to run an app's backend." } })),
-		route("POST", "/api/artifacts/:id/versions/:version/bridge", async ({ app, principal }) => (await readable(app, await principal()), unsupported("An app's bridge"))),
-		route("POST", "/api/artifacts/:id/versions/:version/grants", async ({ app, principal }) => (await readable(app, await principal()), unsupported("An app's grants"))),
 
 		// ---- shared with you ----
 		route("GET", "/api/shared-artifacts", async ({ app, principal }) => {
@@ -254,17 +223,15 @@ export function artifactRoutes(): Route[] {
 			if (num(params[2]) !== r.latest_version) throw new NotFoundError("No such version");
 			return ok(versionOf({ id: r.id, title: r.title, kind: r.kind, latest: r.latest_version }, { version: r.latest_version, files: r.files, message: "", created_at: r.updated_at }, url.searchParams.get("path") ?? undefined));
 		}),
-		route("GET", "/api/shared-artifacts/:host/:id/versions/:version/frame", async ({ app, principal, params }) => {
+		route("GET", "/api/shared-artifacts/:host/:id/versions/:version/frame", async ({ app, principal, params, origin, url }) => {
 			const r = await sharedLatest(app, await principal(), params[0]!, params[1]!);
 			if (num(params[2]) !== r.latest_version) throw new NotFoundError("No such version");
-			return framePage(r.kind, r.files);
+			return framePage(r.kind, r.files, origin, { thumbnail: url.searchParams.has("thumbnail") });
 		}),
 		route("GET", "/api/shared-artifacts/:host/:id/versions/:version/download", async ({ app, principal, params, url }) => {
 			const r = await sharedLatest(app, await principal(), params[0]!, params[1]!);
 			return downloadReply(r.files, url.searchParams.get("path") ?? undefined);
 		}),
-		route("POST", "/api/shared-artifacts/:host/:id/versions/:version/bridge", async ({ app, principal }) => (await readable(app, await principal()), unsupported("An app's bridge"))),
-		route("POST", "/api/shared-artifacts/:host/:id/versions/:version/grants", async ({ app, principal }) => (await readable(app, await principal()), unsupported("An app's grants"))),
 
 		// ---- published for everyone ----
 		route("GET", "/api/published-artifacts", async ({ app, principal, url }) => {
@@ -281,18 +248,16 @@ export function artifactRoutes(): Route[] {
 			const c = await publishedCopy(app, params[0]!);
 			return ok(versionOf({ id: c.pub.public_id, title: c.title, kind: c.kind, latest: c.v.version }, c.v, url.searchParams.get("path") ?? undefined));
 		}),
-		route("GET", "/api/published-artifacts/:id/versions/:version/frame", async ({ app, principal, params }) => {
+		route("GET", "/api/published-artifacts/:id/versions/:version/frame", async ({ app, principal, params, origin, url }) => {
 			await readable(app, await principal());
 			const c = await publishedCopy(app, params[0]!);
-			return framePage(c.kind, c.v.files);
+			return framePage(c.kind, c.v.files, origin, { thumbnail: url.searchParams.has("thumbnail") });
 		}),
 		route("GET", "/api/published-artifacts/:id/versions/:version/download", async ({ app, principal, params, url }) => {
 			await readable(app, await principal());
 			const c = await publishedCopy(app, params[0]!);
 			return downloadReply(c.v.files, url.searchParams.get("path") ?? undefined);
 		}),
-		route("POST", "/api/published-artifacts/:id/versions/:version/bridge", async ({ app, principal }) => (await readable(app, await principal()), unsupported("An app's bridge"))),
-		route("POST", "/api/published-artifacts/:id/versions/:version/grants", async ({ app, principal }) => (await readable(app, await principal()), unsupported("An app's grants"))),
 		// Making a published app your own: a copy of that version, yours to change.
 		route("POST", "/api/published-artifacts/:id/use", async ({ app, principal, params }) => {
 			const p = await principal();

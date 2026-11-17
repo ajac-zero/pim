@@ -299,6 +299,9 @@ importers:
       pg:
         specifier: ^8.13.0
         version: 8.23.1
+      sucrase:
+        specifier: ^3.35.1
+        version: 3.35.1
       ws:
         specifier: ^8.18.0
         version: 8.22.0

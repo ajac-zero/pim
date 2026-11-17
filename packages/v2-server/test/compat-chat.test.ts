@@ -7,6 +7,7 @@ import { connect } from "@pim/v2-app/db";
 import { createGate } from "@pim/v2-app/gate";
 import { MemoryObjectStore } from "@pim/v2-app/objects";
 import { chatRoutes } from "../src/compat/chat.ts";
+import { apiClientRoutes } from "../src/compat/api-clients.ts";
 import { usageRoutes } from "../src/compat/usage.ts";
 import { createStack, type Stack } from "./support/stack.ts";
 
@@ -27,7 +28,7 @@ const call = async (token: string, method: string, path: string, body?: unknown,
 beforeAll(async () => {
 	stack = await createStack();
 	app = new App(connect(stack.url("gate"), 4), new MemoryObjectStore()).limitSpaces();
-	server = createGate(app, { first: [...chatRoutes, ...usageRoutes()] });
+	server = createGate(app, { first: [...chatRoutes, ...usageRoutes(), ...apiClientRoutes()] });
 	await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
 	base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
 	const claim = await app.identity.issueClaim("bootstrap", null, 3600_000);
@@ -159,3 +160,28 @@ describe("usage and per-space limits", () => {
 });
 
 const ownerOf = async (token: string) => (await app.identity.authenticate(token))!.ownerId;
+
+describe("the API's clients", () => {
+	it("takes a message as { content, operationId } once, tells how it went, and keeps to the owner", async () => {
+		const chat = (await call(ada, "POST", "/api/sessions", { title: "api" })).body.id as string;
+		const first = await call(ada, "POST", `/api/sessions/${chat}/messages`, { content: [{ type: "text", text: "from a client" }], operationId: "op-1" });
+		expect(first).toMatchObject({ status: 202, body: { operationId: "op-1", session: chat, state: "inbox_accepted", duplicate: false } });
+		expect((await call(ada, "POST", `/api/sessions/${chat}/messages`, { content: "something else", operationId: "op-1" })).status).toBe(409); // another message under the same id
+		expect((await call(ada, "POST", `/api/sessions/${chat}/messages`, { content: [{ type: "text", text: "from a client" }], operationId: "op-1" })).status).toBe(200);
+		expect((await call(ada, "POST", `/api/sessions/${chat}/messages`, { content: "  " })).status).toBe(400);
+		expect((await call(ada, "GET", `/api/sessions/${chat}/operations/op-1`)).body).toMatchObject({ status: "pending", session: chat });
+		expect((await call(ada, "GET", `/api/sessions/${chat}/operations/nope`)).status).toBe(404);
+		expect((await call(ada, "GET", `/api/sessions/${chat}/messages`)).body).toMatchObject({ session: chat, busy: true, pending: ["op-1"], messages: [] });
+		expect((await call(bob, "GET", `/api/sessions/${chat}/messages`)).status).toBe(404);
+		expect((await call(ada, "GET", "/api")).body).toMatchObject({ timeZone: expect.any(String), tools: [] });
+		expect((await call(ada, "GET", "/api/health")).body).toEqual({ name: "pim", ok: true });
+	});
+
+	it("shows one trigger run by its id, and no other person's", async () => {
+		const made = (await call(ada, "POST", "/api/triggers", { label: "Runs", instruction: "go", agentId: agent, source: { kind: "time", schedule: "cron", expression: "0 8 * * *", timeZone: "UTC" }, destination: { type: "new_chat" } })).body;
+		const owner = await ownerOf(ada);
+		await app.db.owner(owner, (tx) => tx.query("INSERT INTO pim_app.trigger_runs (id, owner_id, trigger_id, phase, detail) VALUES ('tr1', $1, $2, 'fired', '{\"scheduledFor\": 1000}')", [owner, made.id]));
+		expect((await call(ada, "GET", "/api/trigger-runs/tr1")).body).toMatchObject({ id: "tr1", triggerId: made.id, phase: "fired", dueAt: 1000, evidence: { reason: "time", scheduledFor: 1000 } });
+		expect((await call(bob, "GET", "/api/trigger-runs/tr1")).status).toBe(404);
+	});
+});

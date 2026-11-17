@@ -10,6 +10,7 @@ import { modelRoutes } from "./model.ts";
 import { computerRoutes } from "./computer.ts";
 import { connectorRoutes } from "../connector-routes.ts";
 import { chatRoutes } from "./chat.ts";
+import { apiClientRoutes } from "./api-clients.ts";
 import { usageRoutes } from "./usage.ts";
 
 export const webCompatRoutes: Route[] = [
@@ -22,4 +23,5 @@ export const webCompatRoutes: Route[] = [
 	...adminCompatRoutes,
 	...chatRoutes,
 	...usageRoutes(),
+	...apiClientRoutes(),
 ];

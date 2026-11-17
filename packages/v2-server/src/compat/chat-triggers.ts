@@ -131,6 +131,20 @@ const RUN_STATE: Record<string, { state: string; status: string }> = {
 	failed: { state: "not_submitted", status: "failed" },
 };
 
+/** A run as the triggers screen and `GET /api/trigger-runs/:run` read it: what the occurrence was, and where it got to. */
+function runView(r: Record<string, any>, row: Row) {
+	const at = ms(r.at)!;
+	const detail = (r.detail ?? {}) as { scheduledFor?: number; older?: unknown; event?: string };
+	const mapped = RUN_STATE[r.phase as string] ?? { state: "outcome_unknown", status: "outcome_unknown" };
+	return {
+		id: r.id as string, triggerId: row.id, revision: revisionOf(row), state: mapped.state, outcomeKnown: mapped.state !== "accepted" && mapped.state !== "outcome_unknown", occurrenceStatus: mapped.status, phase: r.phase as string,
+		dueAt: detail.scheduledFor ?? at,
+		evidence: detail.scheduledFor !== undefined ? { reason: "time", scheduledFor: detail.scheduledFor, ...(detail.older === undefined ? {} : { older: detail.older }) } : { reason: detail.event ?? "event", truth: "true", observedAt: at, fields: [] },
+		chatId: (r.chat as string | null) ?? null, deliverBy: null, submittedAt: r.phase === "fired" ? at : null, acceptedAt: r.phase === "fired" ? at : null, endedAt: r.phase === "fired" ? null : at,
+		deferrals: 0, unknownAnswers: 0, createdAt: at, updatedAt: at,
+	};
+}
+
 export function triggerRoutes(): Route[] {
 	return [
 		route("GET", "/api/triggers", async ({ app, principal, url }) => {
@@ -223,6 +237,16 @@ export function triggerRoutes(): Route[] {
 				...(dry.firings ? { firings: dry.firings, skippedCount: dry.skippedCount ?? 0, exhausted: dry.exhausted ?? false } : {}),
 			});
 		}),
+		route("GET", "/api/trigger-runs/:run", async ({ app, principal, params }) => {
+			const p = await principal();
+			await app.identity.authz.enforce(p, "api:read");
+			const found = await app.db.owner(p.ownerId, async (tx) => (await tx.query(
+				`SELECT r.id, r.trigger_id, r.phase, r.command_id, r.detail, r.at, c.public_chat_id AS chat
+				 FROM pim_app.trigger_runs r LEFT JOIN pim_app.accepted_commands c ON c.command_id = r.command_id AND c.owner_id = r.owner_id
+				 WHERE r.id = $1 AND r.phase <> 'test'`, [params[0]!])).rows[0]);
+			if (!found) throw new NotFoundError("No such trigger run");
+			return ok(runView(found, (await load(app, p, found.trigger_id)).row));
+		}),
 		route("GET", "/api/triggers/:id/runs", async ({ app, principal, params, url }) => {
 			const p = await principal();
 			await app.identity.authz.enforce(p, "api:read");
@@ -239,18 +263,7 @@ export function triggerRoutes(): Route[] {
 			const page = runs.slice(0, limit);
 			const last = page.at(-1);
 			return ok({
-				runs: page.map((r) => {
-					const at = ms(r.at)!;
-					const detail = (r.detail ?? {}) as { scheduledFor?: number; older?: unknown; event?: string };
-					const mapped = RUN_STATE[r.phase as string] ?? { state: "outcome_unknown", status: "outcome_unknown" };
-					return {
-						id: r.id as string, triggerId: row.id, revision: revisionOf(row), state: mapped.state, outcomeKnown: mapped.state !== "accepted" && mapped.state !== "outcome_unknown", occurrenceStatus: mapped.status, phase: r.phase as string,
-						dueAt: detail.scheduledFor ?? at,
-						evidence: detail.scheduledFor !== undefined ? { reason: "time", scheduledFor: detail.scheduledFor, ...(detail.older === undefined ? {} : { older: detail.older }) } : { reason: detail.event ?? "event", truth: "true", observedAt: at, fields: [] },
-						chatId: (r.chat as string | null) ?? null, deliverBy: null, submittedAt: r.phase === "fired" ? at : null, acceptedAt: r.phase === "fired" ? at : null, endedAt: r.phase === "fired" ? null : at,
-						deferrals: 0, unknownAnswers: 0, createdAt: at, updatedAt: at,
-					};
-				}),
+				runs: page.map((r) => runView(r, row)),
 				nextCursor: runs.length > limit && last ? `${ms(last.at)}:${last.id}` : null,
 			});
 		}),

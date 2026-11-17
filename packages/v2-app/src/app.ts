@@ -45,7 +45,7 @@ export class App {
 	readonly apps: Apps;
 	readonly sharing: Sharing;
 	readonly crypto: EnvelopeCrypto;
-	constructor(readonly db: Db, store: ObjectStore, opts: { hideSuspended?: boolean; providers?: Partial<Record<ProviderId, ProviderSettings>>; crypto?: EnvelopeCrypto; appKey?: string; fetchTools?: ToolFetcher; exchange?: CodeExchanger; transcripts?: TranscriptSource; chatgpt?: ChatGPTOptions } = {}) {
+	constructor(readonly db: Db, store: ObjectStore, opts: { hideSuspended?: boolean; providers?: Partial<Record<ProviderId, ProviderSettings>>; crypto?: EnvelopeCrypto; appKey?: string; fetchTools?: ToolFetcher; exchange?: CodeExchanger; transcripts?: TranscriptSource; chatgpt?: ChatGPTOptions; mcpReplyWaitMs?: number } = {}) {
 		this.identity = new Identity(db);
 		this.conversations = new Conversations(db);
 		this.memories = new Memories(db);
@@ -57,7 +57,7 @@ export class App {
 		this.relay = new Relay(db, this.identity, undefined, opts.appKey);
 		this.signin = new SignIn(db, this.identity);
 		this.external = new ExternalSignIn(db, this.signin, this.identity, opts.providers ?? {});
-		this.mcp = new McpOAuth(db, this.identity, this.signin, this.conversations);
+		this.mcp = new McpOAuth(db, this.identity, this.signin, this.conversations, { ...(opts.transcripts ? { transcripts: opts.transcripts } : {}), ...(opts.mcpReplyWaitMs !== undefined ? { replyWaitMs: opts.mcpReplyWaitMs } : {}) });
 		// Without a configured keyring (PIM_KEYS) a process gets a key of its own, so values it seals do not survive a restart: fine for a trial, never for a deployment.
 		this.crypto = opts.crypto ?? new KeyringCrypto("ephemeral", { ephemeral: new Uint8Array(randomBytes(32)) });
 		this.agents = new Agents(db);

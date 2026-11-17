@@ -7,6 +7,7 @@ import { digest, newId, secret } from "./ids.ts";
 import type { Identity } from "./identity.ts";
 import { pkceChallenge } from "./oauth.ts";
 import type { SignIn } from "./signin.ts";
+import type { TranscriptSource } from "./sharing.ts";
 
 export const ACCESS_TOKEN_S = 3600;
 export const GRANT_DAYS = 30;
@@ -23,7 +24,7 @@ const oauthError = (error: string, description: string) => Object.assign(new Bad
  * and an owner's suspension or deletion stops every one. Guests may not connect.
  */
 export class McpOAuth {
-	constructor(private readonly db: Db, private readonly identity: Identity, private readonly signin: SignIn, private readonly conversations: Conversations) {}
+	constructor(private readonly db: Db, private readonly identity: Identity, private readonly signin: SignIn, private readonly conversations: Conversations, private readonly opts: { transcripts?: TranscriptSource; replyWaitMs?: number } = {}) {}
 
 	authorizationServerMetadata(origin: string) {
 		return {
@@ -147,12 +148,42 @@ export class McpOAuth {
 		if (!n) throw new NotFoundError("No such connection");
 	}
 
+	/** What the agent has sent the person in a chat so far (`send_to_user` calls), by tool-call id. */
+	async #read(ownerId: string, chat: string): Promise<{ sent: Map<string, string>; last: any }> {
+		const messages = (await this.opts.transcripts?.read(ownerId, chat, 200).catch(() => [])) as any[] | undefined;
+		const sent = new Map<string, string>();
+		for (const m of messages ?? []) for (const part of m.role === "assistant" ? m.parts ?? [] : []) if (part.type === "tool-call" && part.name === "send_to_user" && typeof part.arguments?.message === "string") sent.set(String(part.id), part.arguments.message);
+		return { sent, last: messages?.at(-1) };
+	}
+
+	async #sent(ownerId: string, chat: string): Promise<Set<string>> {
+		return new Set((await this.#read(ownerId, chat)).sent.keys());
+	}
+
+	/** Waits for the turn to end, and answers what it sent the person (or why it did not finish). */
+	async #await(ownerId: string, chat: string, before: Set<string>): Promise<{ replies: string[]; failed: string | null }> {
+		if (!this.opts.transcripts) return { replies: [], failed: null };
+		const until = Date.now() + (this.opts.replyWaitMs ?? 45_000);
+		let replies: string[] = [];
+		let failed: string | null = null;
+		for (;;) {
+			await new Promise((r) => setTimeout(r, 300));
+			const { sent, last } = await this.#read(ownerId, chat);
+			replies = [...sent].filter(([id]) => !before.has(id)).map(([, text]) => text);
+			// The turn is over when the newest message is the agent's final one, after it sent something, or when it ended in an error.
+			const ended = last?.role === "assistant" && last.partial !== true && last.stopReason !== undefined && last.stopReason !== "toolUse";
+			if (ended && last.stopReason === "error") failed = String(last.error ?? "the turn ended with an error").slice(0, 200);
+			if ((ended && replies.length) || (ended && failed) || Date.now() >= until) return { replies, failed };
+		}
+	}
+
 	// ---- the MCP endpoint ----
 
 	/**
 	 * `/mcp`: JSON-RPC 2.0 over HTTP (initialize, ping, tools/list, tools/call) with one tool, `pim`, a message to the person's majordomo. Every call
-	 * re-checks the bearer, the account's status and the `mcp:call` scope, and refuses guests. The tool accepts the message into the command inbox and
-	 * answers at once with the chat it went to: it never waits on a model.
+	 * re-checks the bearer, the account's status and the `mcp:call` scope, and refuses guests. The tool accepts the message into the command inbox and then, as v1's did,
+	 * waits (up to `replyWaitMs`, 45 s) for what the agent sends the person in this turn and answers with it and the chat it went to; a turn that outlasts the wait answers that
+	 * the agent is still working. Without a transcript source (a process that cannot read chats) it answers at once that the message was accepted.
 	 */
 	async rpc(bearer: string | undefined, message: any): Promise<{ status: number; body?: unknown }> {
 		const p = await this.identity.authenticate(bearer);
@@ -177,10 +208,18 @@ export class McpOAuth {
 				let chat = typeof conversation === "string" ? conversation : undefined;
 				if (chat) await this.conversations.get(p.ownerId, chat).catch(() => { chat = undefined; throw new BadRequestError("That conversation doesn't exist."); });
 				else chat = await this.conversations.create(agent, { title: text.slice(0, 60) });
+				const before = await this.#sent(p.ownerId, chat!);
 				const commandId = `mcp:${createHash("sha256").update(`${p.ownerId}\n${chat}\n${text}\n${Date.now()}\n${Math.random()}`).digest("hex").slice(0, 24)}`;
 				await this.conversations.admit(agent, { commandId, kind: "user_message", chatId: chat!, payload: { text, via: "mcp" } });
-				const said = "Pim accepted your message and is working on it. Ask again in this conversation to hear how it went.";
-				return ok({ content: [{ type: "text", text: `${said}\n\n[conversation: ${chat}]` }], structuredContent: { conversation: chat, reply: said }, isError: false });
+				const turn = await this.#await(p.ownerId, chat!, before);
+				const said = !this.opts.transcripts
+					? "Pim accepted your message and is working on it. Ask again in this conversation to hear how it went."
+					: turn.replies.length
+						? turn.replies.join("\n\n")
+						: turn.failed
+							? `Pim didn't finish: ${turn.failed}.`
+							: "Pim is still working on this. Ask again in a little while, in this conversation.";
+				return ok({ content: [{ type: "text", text: `${said}\n\n[conversation: ${chat}]` }], structuredContent: { conversation: chat, reply: said }, isError: !turn.replies.length && !!turn.failed });
 			}
 			default:
 				return fail(-32601, "Method not found");
@@ -191,7 +230,10 @@ export class McpOAuth {
 const PIM_TOOL = {
 	name: "pim",
 	title: "Message Pim",
-	description: "Send a message to the person's majordomo in Pim. Each call starts a new conversation unless you pass back the one an earlier reply named.",
-	inputSchema: { type: "object", properties: { message: { type: "string", minLength: 1 }, conversation: { type: "string" } }, required: ["message"] },
+	description:
+		"Send a message to Pim, the person's majordomo, and get its reply. It knows them, their memory, goals, schedules and connectors, and hands bigger work to their other agents, whose answers come back to it. " +
+		"Each call starts a new conversation, which the person can also continue in Pim. Every reply names its conversation: pass it back as conversation to continue, for example to follow up or to hear how handed-off work went.",
+	inputSchema: { type: "object", properties: { message: { type: "string", minLength: 1, description: "What to say, in plain words." }, conversation: { type: "string", minLength: 1, description: "A conversation an earlier reply named, to continue it. Leave out to start a new one." } }, required: ["message"] },
+	outputSchema: { type: "object", properties: { conversation: { type: "string", description: "The conversation this happened in: pass it as conversation to continue." }, reply: { type: "string", description: "What Pim said." } }, required: ["conversation", "reply"] },
 	annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
 };

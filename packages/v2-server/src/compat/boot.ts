@@ -146,7 +146,7 @@ async function readSettings(app: App, ownerId: string) {
 
 // ---- approvals ----
 const STATUS: Record<string, "pending" | "approved" | "denied"> = { waiting: "pending", approved: "approved", timed_out_approved: "approved", denied: "denied", timed_out_denied: "denied" };
-const webApproval = (r: any) => {
+export const webApproval = (r: any) => {
 	// The runtime's bookkeeping (task, call, policy resource) is not what the person reads.
 	const { taskId: _task, callId, resource: _resource, ...args } = (r.args ?? {}) as Record<string, unknown>;
 	const brief = typeof args.summary === "string" ? args.summary : Object.entries(args).slice(0, 3).map(([k, v]) => `${k}: ${typeof v === "string" ? v : JSON.stringify(v)}`.slice(0, 120)).join(", ");
@@ -221,13 +221,6 @@ export const bootRoutes: Route[] = [
 	route("GET", "/api/themes.css", async () => ({ status: 200, raw: themes.stylesheet(), headers: { "content-type": "text/css; charset=utf-8", "cache-control": "no-cache" } })),
 	// Extensions with widgets are not ported to v2; the app draws without them.
 	route("GET", "/api/extensions", async ({ principal }) => (await principal(), ok({ extensions: [], logo: null }))),
-	// In-app notifications are not ported to v2 (deferred); an empty list is what a space without any shows.
-	route("GET", "/api/notifications", async ({ principal }) => (await principal(), ok({ notifications: [] }))),
-	route("POST", "/api/notifications/:id/read", async ({ principal }) => {
-		await principal();
-		throw new NotFoundError("No such notification");
-	}),
-
 	route("GET", "/api/majordomo", async ({ app, principal }) => ok(await majordomoState(app, await principal()))),
 	route("PUT", "/api/majordomo/preferences", async ({ app, principal, json }) => {
 		const p = await principal();

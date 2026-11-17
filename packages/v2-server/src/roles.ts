@@ -35,6 +35,8 @@ import type { Host } from "./host.ts";
 import { AppLiveIdentity, deliverApprovalDecisions, LiveAuthorizer, mirrorCodingGrants, publishRevocations } from "./identity.ts";
 import { runtimeOutboxSource } from "./runtime-source.ts";
 import { natsRelayBus } from "./relay-bus.ts";
+import { notifyPass } from "./notifier.ts";
+import { vapidFromEnv } from "./push.ts";
 import { sweepApprovals, trimForgeOutbox } from "./sweeps.ts";
 import { webAssets } from "./web-assets.ts";
 import { poolRoutes } from "./compat/admin.ts";
@@ -296,6 +298,7 @@ export async function startMaintenance(config: ProcessConfig, env: Env, host: Ho
 	let lastTrim = 0;
 	const { App } = await import("@pim/v2-app/app");
 	const sweeper = new App(app, objects);
+	const notifier = { vapid: vapidFromEnv(env), subject: env.PIM_VAPID_SUBJECT || config.publicUrl, allowPrivate: env.PIM_PUSH_ALLOW_PRIVATE === "1" };
 	const pass = async () => {
 		await sweepApprovals(sweeper, maint).catch((e) => console.error("approval sweep", e));
 		if (Date.now() - lastTrim > 60_000) {
@@ -304,6 +307,7 @@ export async function startMaintenance(config: ProcessConfig, env: Env, host: Ho
 		}
 		await deliverForgeWakes({ forge: parts.forge, forgeDb: maint as never, runtime, inbox, onUnroutable: (id, why) => console.warn("wake dropped", id, why) });
 		await deliverCosts({ forge: parts.forge, forgeDb: maint as never, usage, onUnroutable: (id, why) => console.warn("cost dropped", id, why) });
+		await notifyPass(sweeper, maint, notifier).catch((e) => console.error("notifications", e));
 	};
 	let running = true;
 	let active: Promise<void> | undefined;

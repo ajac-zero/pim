@@ -1,7 +1,7 @@
 /**
  * The account surfaces the web app's settings and sign-in screens call, in the shapes the app reads: who is signed in (and whether this Pim has
  * its admin yet), passkeys and linked identities with their times as epoch milliseconds, API tokens, the device link, and the email and push
- * settings, which this Pim does not have and answers as such.
+ * email setting, which this Pim does not have and answers as such (push is `notifications.ts`).
  */
 import { CapabilityUnavailableError } from "@pim/v2-app/errors";
 import { ok, type Reply, type Route, route } from "@pim/v2-app/http";
@@ -61,12 +61,10 @@ export function accountRoutes(): Route[] {
 		}),
 		route("GET", "/api/tokens", tokenList),
 
-		// Email and push need a mail sender and a push service this Pim does not run: the settings show them as not available.
+		// Email needs a mail sender this Pim does not run: the settings show it as not available.
 		route("GET", "/api/email", async ({ principal }) => (await principal(), noEmail)),
 		route("PUT", "/api/email", async ({ principal }) => (await principal(), unavailable("email", "this Pim cannot send email"))),
 		route("POST", "/api/email/confirm", async ({ principal }) => (await principal(), unavailable("email", "this Pim cannot send email"))),
 		route("DELETE", "/api/email", async ({ principal }) => (await principal(), noEmail)),
-		route("GET", "/api/push/key", async ({ principal }) => (await principal(), unavailable("push", "this Pim has no push service"))),
-		route("PUT", "/api/push/subscription", async ({ principal }) => (await principal(), unavailable("push", "this Pim has no push service"))),
 	];
 }

@@ -730,7 +730,8 @@ async function promoteDeployment(pool: Pool, options: PromoteOptions, d: Domain)
 			continue;
 		}
 		const bundle = { agent: { name: t.name, instructions: t.instructions, emoji: t.symbol ?? null, color: t.color ?? null }, description: t.description ?? "", apps: parseJson(t.apps, []) };
-		const r = await pool.query("INSERT INTO pim_app.templates (id, owner_id, agent_id, title, bundle, published_at, uses) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING", [t.id, owner, t.agent_id, t.name, JSON.stringify(bundle), ms(t.published_at), Number(t.uses ?? 0)]);
+		// The tables are sealed to their owner: a row is written as the person it belongs to.
+		const r = await asOwner(pool, owner, (c) => c.query("INSERT INTO pim_app.templates (id, owner_id, agent_id, title, bundle, published_at, uses) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING", [t.id, owner, t.agent_id, t.name, JSON.stringify(bundle), ms(t.published_at), Number(t.uses ?? 0)]));
 		bump(d, "templates", r.rowCount ?? 0);
 		if (parseJson(t.bundle, []).length > 0 || parseJson(t.team, []).length > 0 || t.icon_data) d.skipped.push(`template ${t.id}: its bundled agents and icon are not carried`);
 	}
@@ -743,7 +744,7 @@ async function promoteDeployment(pool: Pool, options: PromoteOptions, d: Domain)
 		}
 		const tools = parseJson(b.tools, []) as { name?: string; ask?: boolean }[];
 		const settings = { dailyMessages: b.daily_messages ?? null, dailyToolCalls: b.daily_tool_calls ?? null, model: modelRef(b.model), tools: tools.map((x) => x.name).filter(Boolean), ask: tools.filter((x) => x.ask).map((x) => x.name).filter(Boolean) };
-		const r = await pool.query("INSERT INTO pim_app.bots (id, owner_id, name, agent_id, settings, created_at) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING", [b.id, owner, b.name, b.agent_id, JSON.stringify(settings), ms(b.shared_at)]);
+		const r = await asOwner(pool, owner, (c) => c.query("INSERT INTO pim_app.bots (id, owner_id, name, agent_id, settings, created_at) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING", [b.id, owner, b.name, b.agent_id, JSON.stringify(settings), ms(b.shared_at)]));
 		bump(d, "bots", r.rowCount ?? 0);
 		if (b.icon_data) d.skipped.push(`bot ${b.id}: its icon is not carried`);
 	}
@@ -756,9 +757,9 @@ async function promoteDeployment(pool: Pool, options: PromoteOptions, d: Domain)
 			continue;
 		}
 		const bundle = { agent: { name: a.name, instructions: a.instructions, emoji: a.symbol ?? null, color: a.color ?? null }, description: a.description ?? "", apps: parseJson(a.apps, []) };
-		const marked = await pool.query("UPDATE pim_app.templates SET default_for_everyone = true WHERE owner_id = $1 AND agent_id = $2 AND NOT EXISTS (SELECT 1 FROM pim_app.templates WHERE default_for_everyone)", [owner, a.agent_id]);
+		const marked = await asOwner(pool, owner, (c) => c.query("UPDATE pim_app.templates SET default_for_everyone = true WHERE owner_id = $1 AND agent_id = $2 AND NOT EXISTS (SELECT 1 FROM pim_app.templates WHERE default_for_everyone)", [owner, a.agent_id]));
 		if (marked.rowCount) continue;
-		const r = await pool.query("INSERT INTO pim_app.templates (id, owner_id, agent_id, title, bundle, published_at, default_for_everyone) SELECT $1,$2,$3,$4,$5,$6,true WHERE NOT EXISTS (SELECT 1 FROM pim_app.templates WHERE default_for_everyone) ON CONFLICT DO NOTHING", [`tpl_legacy_default`, owner, a.agent_id, a.name, JSON.stringify(bundle), ms(a.updated_at)]);
+		const r = await asOwner(pool, owner, (c) => c.query("INSERT INTO pim_app.templates (id, owner_id, agent_id, title, bundle, published_at, default_for_everyone) SELECT $1,$2,$3,$4,$5,$6,true WHERE NOT EXISTS (SELECT 1 FROM pim_app.templates WHERE default_for_everyone) ON CONFLICT DO NOTHING", [`tpl_legacy_default`, owner, a.agent_id, a.name, JSON.stringify(bundle), ms(a.updated_at)]));
 		bump(d, "default agent", r.rowCount ?? 0);
 	}
 }

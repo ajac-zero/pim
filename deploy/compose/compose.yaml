@@ -264,8 +264,9 @@ services:
       HOME: /home/node
     volumes: [pim-files:/workspace]
     networks: [computer]
-    # The host's own address, so the stack's public hostname or localhost trial address resolves from inside the container.
-    extra_hosts: ["host.docker.internal:host-gateway", "${PIM_DOMAIN:-pim.invalid}:host-gateway"]
+    # The host's own address, so the localhost trial stack is reachable from inside the container; set PIM_COMPUTER_HOST_ALIAS to the public hostname
+    # when the host cannot reach its own public address (no hairpin NAT).
+    extra_hosts: ["host.docker.internal:host-gateway", "${PIM_COMPUTER_HOST_ALIAS:-pim.invalid}:host-gateway"]
 
   sandbox-manager:
     build: { context: ../../sandbox-manager }

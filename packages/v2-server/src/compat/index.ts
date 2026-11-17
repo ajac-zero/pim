@@ -4,12 +4,15 @@
  * configured, so the app shows it as off rather than failing.
  */
 import type { Route } from "@pim/v2-app/http";
+import { adminCompatRoutes } from "./admin.ts";
 import { bootRoutes } from "./boot.ts";
 import { modelRoutes } from "./model.ts";
 import { computerRoutes } from "./computer.ts";
 
 export const webCompatRoutes: Route[] = [
 	...bootRoutes,
+	// Model settings first: /api/providers/built-in is answered by both, and the model work's answer is the one the provider forms use.
 	...modelRoutes(process.env),
 	...computerRoutes(),
+	...adminCompatRoutes,
 ];

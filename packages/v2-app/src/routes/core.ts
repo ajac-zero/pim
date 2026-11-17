@@ -40,11 +40,11 @@ export const coreRoutes: Route[] = [
 	route("GET", "/api/sessions/:id", async ({ app, principal, params }) => ok(await app.conversations.get((await principal()).ownerId, params[0]!))),
 	route("GET", "/api/sessions/:id/pending", async ({ app, principal, params }) => ok({ commands: await app.conversations.pending((await principal()).ownerId, params[0]!) })),
 	route("POST", "/api/sessions/:id/:command", async ({ app, principal, json, params }) => {
-		const kinds = { messages: "user_message", abort: "abort", fork: "fork", unarchive: "unarchive", delegate: "delegate" } as const;
+		const kinds = { messages: "user_message", abort: "abort", reset: "compaction_handoff", fork: "fork", unarchive: "unarchive", delegate: "delegate" } as const;
 		const kind = (kinds as Record<string, (typeof kinds)[keyof typeof kinds]>)[params[1]!];
 		if (!kind) throw new NotFoundError();
 		const b = await json();
-		const admission = await app.conversations.admit(await principal(), { commandId: String(b.commandId ?? ""), kind, chatId: params[0]!, payload: b.payload ?? { text: b.text } });
+		const admission = await app.conversations.admit(await principal(), { commandId: String(b.commandId ?? ""), kind, chatId: params[0]!, payload: b.payload ?? (kind === "compaction_handoff" ? { handoff: b.handoff } : { text: b.text }) });
 		return ok(admission, admission.duplicate ? 200 : 202);
 	}),
 	route("POST", "/api/approvals/:id/decision", async ({ app, principal, json, params }) => {

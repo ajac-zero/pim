@@ -23,6 +23,7 @@ real("the default agent host", () => {
 	let gate: Process;
 	let runner: Process;
 	let maintenance: Process;
+	let live: Process;
 	let web: Client;
 	let app: App;
 	let ownerId: string;
@@ -77,9 +78,11 @@ real("the default agent host", () => {
 		);
 		// Maintenance applies approval timeouts, as the auto policy needs.
 		maintenance = await start(d, "maintenance", { pollMs: 100 });
+		// Live projects the transcript the Gate serves, which a retry reads.
+		live = await start(d, "live", { pollMs: 40 });
 	}, 180_000);
 	afterAll(async () => {
-		await Promise.allSettled([maintenance?.close(), runner?.close(), gate?.close()]);
+		await Promise.allSettled([live?.close(), maintenance?.close(), runner?.close(), gate?.close()]);
 		await app?.db.end();
 		d?.nats.stop();
 		await d?.s3.stop();
@@ -187,6 +190,37 @@ real("the default agent host", () => {
 		expect((await approvalOf(13)).decided_by).not.toBe("majordomo");
 		expect((await web.call("PUT", "/api/settings", { approvalPolicy: "explicit" })).status).toBe(200);
 	}, 360_000);
+
+	it("asks the model again in a chat whose request failed, and starts a new context at a person's request", async () => {
+		const chat = (await web.call("POST", "/api/sessions", { title: "Retry" })).json.id as string;
+		const entries = async () => {
+			// A chat made after the cutover has its real conversation id in the runtime's directory; the application's is provisional.
+			const c = (await d.stack.admin.query("SELECT partition_id, conversation_id FROM pim_runtime.conversation_partitions WHERE public_chat_id = $1", [chat])).rows[0];
+			return c ? readTranscript(d.stack.runtime, ownerId, c.partition_id, Number(c.conversation_id)) : [];
+		};
+		const said = async (words: string) => (await entries()).some((e) => JSON.stringify(e).includes(words));
+		// A request the provider refuses outright is not retried by the Runner's failover or by pi: the chat ends with the error.
+		faux.setResponses([fauxAssistantMessage([], { stopReason: "error", errorMessage: "400 invalid request body" })] as never);
+		expect((await web.call("POST", `/api/sessions/${chat}/messages`, { commandId: "retry-1", text: "what is 2+2" })).status).toBe(202);
+		await waitFor("the failed request", async () => ((await said("invalid request body")) ? true : undefined), 60_000);
+		// Nothing to retry in a chat that is not held.
+		const other = (await web.call("POST", "/api/sessions", { title: "Fine" })).json.id as string;
+		expect((await web.call("POST", `/api/sessions/${other}/retry`, {})).status).toBe(409);
+		// Retrying sends the person's last message again; the model answers it.
+		faux.setResponses([toolUse(fauxToolCall("send_to_user", { message: "Four." })), fauxAssistantMessage("answered after the retry")] as never);
+		expect((await web.call("POST", `/api/sessions/${chat}/retry`, {})).status).toBe(200);
+		await waitFor("the answer after the retry", async () => ((await said("answered after the retry")) ? true : undefined), 60_000);
+		expect((await entries()).filter((e) => e.kind === "pi.user" && JSON.stringify(e).includes("what is 2+2"))).toHaveLength(2);
+		// A chat that has been answered is not held any more.
+		expect((await web.call("POST", `/api/sessions/${chat}/retry`, {})).status).toBe(409);
+
+		// Reset: the chat starts a new context, carrying the handoff the person gave, and keeps answering from there.
+		expect((await web.call("POST", `/api/sessions/${chat}/reset`, { commandId: "reset-1", handoff: "We were doing sums; the last answer was four." })).status).toBe(202);
+		await waitFor("the new context", async () => ((await entries()).some((e) => e.kind === "pi.reset") && (await said("We were doing sums")) ? true : undefined), 60_000);
+		faux.setResponses([toolUse(fauxToolCall("send_to_user", { message: "Six." })), fauxAssistantMessage("answered in the new context")] as never);
+		expect((await web.call("POST", `/api/sessions/${chat}/messages`, { commandId: "retry-2", text: "and 3+3" })).status).toBe(202);
+		await waitFor("the answer in the new context", async () => ((await said("answered in the new context")) ? true : undefined), 60_000);
+	}, 180_000);
 
 	it("starts a coding thread only under an admin's grant, through Forge", async () => {
 		await say("start a coding thread", toolUse(fauxToolCall("coding_start", { task: "Fix the flaky test", repo: REPO })));

@@ -35,7 +35,7 @@ import type { Host } from "./host.ts";
 import { AppLiveIdentity, deliverApprovalDecisions, LiveAuthorizer, mirrorCodingGrants, publishRevocations } from "./identity.ts";
 import { runtimeOutboxSource } from "./runtime-source.ts";
 import { natsRelayBus } from "./relay-bus.ts";
-import { sweepApprovals, trimForgeOutbox } from "./sweeps.ts";
+import { sweepApprovals, sweepErasures, trimForgeOutbox } from "./sweeps.ts";
 import { webAssets } from "./web-assets.ts";
 import { poolRoutes } from "./compat/admin.ts";
 import { webCompatRoutes } from "./compat/index.ts";
@@ -300,6 +300,7 @@ export async function startMaintenance(config: ProcessConfig, env: Env, host: Ho
 		await sweepApprovals(sweeper, maint).catch((e) => console.error("approval sweep", e));
 		if (Date.now() - lastTrim > 60_000) {
 			lastTrim = Date.now();
+			await sweepErasures(sweeper, maint, objects).catch((e) => console.error("erasure sweep", e));
 			await trimForgeOutbox(maint).catch((e) => console.error("outbox trim", e));
 		}
 		await deliverForgeWakes({ forge: parts.forge, forgeDb: maint as never, runtime, inbox, onUnroutable: (id, why) => console.warn("wake dropped", id, why) });

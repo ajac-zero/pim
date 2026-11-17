@@ -175,6 +175,11 @@ describe("the API's clients", () => {
 		expect((await call(bob, "GET", `/api/sessions/${chat}/messages`)).status).toBe(404);
 		expect((await call(ada, "GET", "/api")).body).toMatchObject({ timeZone: expect.any(String), tools: [] });
 		expect((await call(ada, "GET", "/api/health")).body).toEqual({ name: "pim", ok: true });
+		// The export carries each chat with its messages, the settings, approvals and the days of usage, and only the person's own.
+		const exported = (await call(ada, "GET", "/api/export")).body;
+		expect(exported.chats.find((c: { id: string }) => c.id === chat)).toMatchObject({ title: "api", messages: [] });
+		expect(Object.keys(exported)).toEqual(expect.arrayContaining(["settings", "approvals", "permissions", "usage"]));
+		expect((await call(bob, "GET", "/api/export")).body.chats.some((c: { id: string }) => c.id === chat)).toBe(false);
 	});
 
 	it("shows one trigger run by its id, and no other person's", async () => {

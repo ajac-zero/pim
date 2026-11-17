@@ -8,13 +8,25 @@ import type { App } from "@pim/v2-app/app";
 import { bearerOf, ok, type Reply, type Route } from "@pim/v2-app/http";
 import { principalId } from "@pim/v2-app/authz";
 import type { TranscriptSource } from "@pim/v2-app/sharing";
-import { sidebarPage, transcriptPage } from "@pim/v2-live/projections/snapshots";
+import { MAX_PAGE, sidebarPage, transcriptPage } from "@pim/v2-live/projections/snapshots";
 import type { Authenticate, Caller, Handler } from "@pim/v2-forge/http/common";
 import type { Pool } from "pg";
 
 /** Shared chats read the same projected transcript a person sees, as that chat's owner. */
 export function projectedTranscripts(pool: Pool): TranscriptSource {
-	return { read: async (ownerId, chatId, limit) => (await transcriptPage(pool, ownerId, chatId, { limit })).messages };
+	return {
+		read: async (ownerId, chatId, limit) => (await transcriptPage(pool, ownerId, chatId, { limit })).messages,
+		// Page by page back to the first message, so an export is whole however long the chat is.
+		readAll: async (ownerId, chatId) => {
+			const all: unknown[] = [];
+			for (let before: string | null = null; ; ) {
+				const page: Awaited<ReturnType<typeof transcriptPage>> = await transcriptPage(pool, ownerId, chatId, { before, limit: MAX_PAGE });
+				all.unshift(...page.messages);
+				if (!page.nextBefore) return all;
+				before = page.nextBefore;
+			}
+		},
+	};
 }
 
 /** `GET /api/snapshot/sidebar`, `/api/snapshot/chat/:id` and `/api/snapshot/coding/:id`: bounded, paginated, read as the caller. */

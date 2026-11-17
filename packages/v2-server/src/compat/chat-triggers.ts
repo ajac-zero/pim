@@ -229,12 +229,13 @@ export function triggerRoutes(): Route[] {
 			const { row, ctx } = await load(app, p, params[0]!);
 			const view = await viewOf(app, row, ctx);
 			const b = await json();
-			const dry = (await app.triggers.test(p, params[0]!, { ...(Number.isInteger(b.count) ? { count: b.count } : {}) })) as { firings?: unknown[]; skippedCount?: number; exhausted?: boolean };
+			const dry = (await app.triggers.test(p, params[0]!, { ...(Number.isInteger(b.count) ? { count: b.count } : {}), ...(b.samples !== undefined ? { samples: b.samples } : {}) })) as { firings?: unknown[]; skippedCount?: number; exhausted?: boolean; evaluations?: unknown[] };
 			const blockers = [...(view.capability.status !== "available" ? ["source_not_wired"] : []), ...(view.grant.required && view.grant.state !== "current" ? ["grant_required"] : [])];
 			return ok({
 				dryRun: true, valid: true, sourceKind: row.spec.source.kind, capability: view.capability, grant: view.grant, policies: view.policies, blockers,
 				id: row.id, revision: view.revision, lifecycle: row.lifecycle,
 				...(dry.firings ? { firings: dry.firings, skippedCount: dry.skippedCount ?? 0, exhausted: dry.exhausted ?? false } : {}),
+				...(dry.evaluations ? { evaluations: dry.evaluations } : {}),
 			});
 		}),
 		route("GET", "/api/trigger-runs/:run", async ({ app, principal, params }) => {

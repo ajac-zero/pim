@@ -268,7 +268,7 @@ export class Sharing {
 			chats: await Promise.all((await take("SELECT public_chat_id AS id, title, kind, created_at, archived_at FROM pim_app.conversations WHERE deleted_at IS NULL")).map(async (chat) => ({ ...chat, messages: await this.transcripts?.readAll?.(p.ownerId, chat.id as string) ?? [] }))),
 			settings: Object.fromEntries((await take("SELECT key, value FROM pim_app.owner_settings WHERE key LIKE 'settings.%' OR key IN ('model', 'your_name')")).map((r) => [(r.key as string).replace(/^settings\./, ""), r.value])),
 			approvals: await take("SELECT id, public_chat_id AS chat, tool, state, created_at, decided_at FROM pim_app.approvals ORDER BY created_at"),
-			permissions: await take("SELECT audience, app, tool, permission FROM pim_app.tool_permissions"),
+			permissions: await take("SELECT audience, app, tool, permission FROM pim_app.tool_permissions").catch(() => []), // the server's migrations make this table; the application alone has none
 			usage: await take("SELECT to_char(at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day, count(*)::int AS requests, sum(input_tokens)::bigint AS input, sum(output_tokens)::bigint AS output FROM pim_app.model_calls WHERE at >= now() - interval '90 days' GROUP BY 1 ORDER BY 1"),
 			apps: await take("SELECT a.id, a.title, a.kind, a.latest_version, (SELECT jsonb_agg(jsonb_build_object('version', v.version, 'files', v.files) ORDER BY v.version) FROM pim_app.artifact_versions v WHERE v.artifact_id = a.id) AS versions FROM pim_app.artifacts a WHERE a.owner_id = $1", [p.ownerId]),
 			circles: await take("SELECT id, name, members FROM pim_app.circles WHERE owner_id = $1", [p.ownerId]),

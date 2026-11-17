@@ -235,6 +235,22 @@ describe("connectors", () => {
 describe("triggers", () => {
 	const cron = (agentId: string, expression = "0 * * * *") => ({ version: 1, owningAgentId: agentId, originChatId: "api", label: "Hourly", instruction: "check in", source: { kind: "time", schedule: "cron", expression, timeZone: "UTC" }, condition: null, destination: { type: "new_chat" }, delivery: {}, authorizationRef: null });
 
+	it("dry-runs a trigger before it exists: what blocks it, and what its condition says of each sample", async () => {
+		const u = await mk("dry");
+		const agent = await app.agents.create(u.principal, { name: "Watcher" });
+		const poll = { ...cron(agent.id), source: { kind: "poll", command: "price-check", intervalMs: 300_000 }, condition: { when: { op: "compare", path: ["price"], cmp: "lt", value: 500 } } };
+		const run = (await app.triggers.test(u.principal, null, { spec: poll, samples: [{ value: { price: 600 } }, { value: { price: 400 } }, { value: { price: 300 } }, { value: { other: 1 } }] })) as any;
+		expect(run).toMatchObject({ dryRun: true, valid: true, sourceKind: "poll", blockers: ["grant_required"], grant: { required: true, state: "missing" } });
+		// It fires when the price falls below 500, not again while it stays there, and a sample without the field reads as such.
+		expect(run.evaluations.map((e: any) => [e.truth, e.fires])).toEqual([["false", false], ["true", true], ["true", false], ["unknown", false]]);
+		expect(run.evaluations[3].fields).toEqual([{ path: ["price"], present: false }]);
+		expect(JSON.stringify(run)).not.toContain("600");
+		await expect(app.triggers.test(u.principal, null, { spec: { ...poll, version: 9 } })).rejects.toMatchObject({ status: 400 });
+		await expect(app.triggers.test(u.principal, null, {})).rejects.toMatchObject({ status: 400 });
+		await expect(app.triggers.test(u.principal, null, { spec: cron(agent.id), samples: [{ value: 1 }] })).rejects.toMatchObject({ status: 400 });
+		expect(await app.db.owner(u.account.ownerId, (tx) => tx.query("SELECT count(*)::int AS n FROM pim_app.triggers"))).toMatchObject({ rows: [{ n: 0 }] });
+	});
+
 	it("moves through its lifecycle, previews firings, and fires only the latest due occurrence after downtime", async () => {
 		const u = await mk("trig");
 		const o = u.account.ownerId;

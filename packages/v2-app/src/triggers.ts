@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
 import { CapabilityUnavailableError } from "@pim/v2-contracts/authz";
 import { OwnerId, type Principal } from "@pim/v2-contracts/identity";
-import { parseTriggerSpec, runsOnComputer, TRIGGER_LIFECYCLES, type TriggerLifecycle, type TriggerSpec } from "@pim/triggers/spec";
+import { conditionMode, parseTriggerSpec, runsOnComputer, TRIGGER_LIFECYCLES, type TriggerLifecycle, type TriggerSpec } from "@pim/triggers/spec";
 import { previewFirings, selectDueFiring } from "@pim/triggers/time";
+import { type Condition, type ConditionState, evaluate, lookup, referencedPaths } from "@pim/triggers/condition";
 import { TriggerValidationError } from "@pim/triggers/validate";
 import { Authorizer } from "./authz.ts";
 import type { Conversations } from "./conversations.ts";
@@ -20,6 +21,16 @@ const NEXT: Record<TriggerLifecycle, readonly TriggerLifecycle[]> = {
 	ended: ["deleted"],
 	deleted: [],
 };
+
+/** The samples of a test: at most ten, each a value (any JSON), when it was observed (now by default) and whether there was a gap before it. */
+function samplesOf(input: unknown, now: number) {
+	if (!Array.isArray(input) || input.length > 10) throw new BadRequestError("samples: must be a list of at most 10");
+	return input.map((item, index) => {
+		const sample = (item ?? {}) as { value?: unknown; observedAt?: unknown; gap?: unknown };
+		if (sample.observedAt !== undefined && !(Number.isInteger(sample.observedAt) && (sample.observedAt as number) >= 0)) throw new BadRequestError(`samples[${index}].observedAt: milliseconds`);
+		return { value: (sample.value ?? null) as never, observedAt: (sample.observedAt as number | undefined) ?? now, gap: sample.gap === true };
+	});
+}
 
 const SOURCE_COLUMN: Record<string, string> = { time: "time", connector_event: "connector_event", poll: "poll", stream: "stream", process: "process", file: "file" };
 
@@ -121,19 +132,47 @@ export class Triggers {
 		});
 	}
 
-	/** A pure dry run: what a time trigger would do next. Writes nothing and starts no turn. */
-	async test(p: Principal, id: string, opts: { count?: number; now?: number } = {}) {
+	/**
+	 * A pure dry run of a trigger as it is (`id`) or as it would be made (`spec`, what `create` takes): whether it is valid, what would stop it being
+	 * enabled, a time source's next firings, and for other sources what its condition says of each sample, in order, from a fresh start (a sample's values
+	 * are never in the answer, only whether the fields the condition reads were there). Writes nothing and starts no turn.
+	 */
+	async test(p: Principal, id: string | null, opts: { count?: number; now?: number; spec?: unknown; samples?: unknown } = {}) {
 		await this.authz.enforce(p, "api:read");
-		const t = await this.get(p, id);
-		const source = t.spec.source;
-		if (source.kind !== "time") return { wouldRun: false, reason: `a ${source.kind} trigger fires on its source's events, not on a timetable` };
-		try {
-			const preview = previewFirings(source, { now: opts.now ?? Date.now(), ...(opts.count ? { count: opts.count } : {}) });
-			return { wouldRun: preview.firings.length > 0, firings: preview.firings, skippedCount: preview.skippedCount, exhausted: preview.exhausted };
-		} catch (error) {
-			if (error instanceof TriggerValidationError) throw new BadRequestError(error.message);
-			throw error;
+		if ((id === null) === (opts.spec === undefined)) throw new BadRequestError("Give exactly one of id or trigger");
+		const now = opts.now ?? Date.now();
+		const found = id === null ? null : await this.get(p, id);
+		const spec = found ? found.spec : validated(opts.spec);
+		const source = spec.source;
+		const computer = runsOnComputer(source);
+		const granted = found && computer ? !!(await this.db.owner(p.ownerId, (tx) => tx.query("SELECT 1 FROM pim_app.trigger_computer_grants WHERE trigger_id = $1 AND revoked_at IS NULL", [found.id]))).rowCount : false;
+		const blockers = [...(source.kind === "file" ? ["source_not_wired"] : []), ...(computer && !granted ? ["grant_required"] : [])];
+		const result: Record<string, unknown> = { dryRun: true, valid: true, ...(found ? { id: found.id, lifecycle: found.lifecycle } : {}), sourceKind: source.kind, grant: { required: computer, state: !computer ? "not_required" : granted ? "current" : "missing" } };
+		const samples = opts.samples === undefined ? [] : samplesOf(opts.samples, now);
+		if (source.kind === "time") {
+			if (samples.length > 0) throw new BadRequestError("samples: a time source observes nothing");
+			try {
+				const preview = previewFirings(source, { now, ...(opts.count ? { count: opts.count } : {}) });
+				if (preview.firings.length === 0) blockers.push("schedule_exhausted");
+				Object.assign(result, { wouldRun: preview.firings.length > 0, firings: preview.firings, skippedCount: preview.skippedCount, exhausted: preview.exhausted });
+			} catch (error) {
+				if (error instanceof TriggerValidationError) throw new BadRequestError(error.message);
+				throw error;
+			}
+		} else {
+			result.wouldRun = false;
+			result.reason = `a ${source.kind} trigger fires on its source's events, not on a timetable`;
+			const mode = conditionMode(source);
+			let state: ConditionState | null = null;
+			result.evaluations = samples.map((sample, index) => {
+				if (!spec.condition || !mode) return { index, truth: "true", fires: true, stale: false, fields: [] };
+				const evaluated = evaluate(spec.condition as Condition, mode, state, sample, now);
+				state = evaluated.state;
+				return { index, truth: evaluated.truth, fires: evaluated.fire, stale: evaluated.stale, fields: referencedPaths((spec.condition as Condition).when).map((path) => ({ path: [...path], present: lookup(sample.value, path) != null })) };
+			});
 		}
+		result.blockers = [...new Set(blockers)];
+		return result;
 	}
 
 	async runs(p: Principal, id: string, limit = 20) {

@@ -227,7 +227,18 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 		write("pause_trigger", "Pause a trigger.", Type.Object({ id: S() }), async (app, call, a) => text(`Now ${(await app.triggers.setLifecycle(call.p, a.id, "paused")).lifecycle}.`)),
 		write("resume_trigger", "Enable a trigger, or start one that is paused. A time trigger counts from now.", Type.Object({ id: S() }), async (app, call, a) => text(`Now ${(await app.triggers.setLifecycle(call.p, a.id, "enabled")).lifecycle}.`)),
 		write("delete_trigger", "Delete a trigger.", Type.Object({ id: S() }), async (app, call, a) => (await app.triggers.setLifecycle(call.p, a.id, "deleted"), text("Deleted."))),
-		read("test_trigger", "See what a time trigger would do next, without running it.", Type.Object({ id: S(), count: O(Type.Integer({ minimum: 1, maximum: 20 })) }), async (app, call, a) => json(await app.triggers.test(call.p, a.id, { count: a.count }))),
+		read("test_trigger", "A dry run, changing nothing and running nothing: whether a trigger (by id, or as you would make it with trigger) is valid, what would stop it being enabled, a time source's next firings, or what its condition says of each sample.", Type.Object({ id: O(S()), trigger: O(anyObject), samples: O(Type.Array(anyObject, { maxItems: 10 })), count: O(Type.Integer({ minimum: 1, maximum: 20 })) }), async (app, call, a) => json(await app.triggers.test(call.p, a.id ?? null, { ...(a.count ? { count: a.count } : {}), ...(a.trigger ? { spec: { ...(call.chat ? { originChatId: call.chat } : {}), ...(call.agentId ? { owningAgentId: call.agentId } : {}), ...a.trigger } } : {}), ...(a.samples ? { samples: a.samples } : {}) }))),
+		read("list_trigger_runs", "A trigger's runs, newest first, with what is known of each.", Type.Object({ id: S(), limit: O(Type.Integer({ minimum: 1, maximum: 50 })) }), async (app, call, a) => json(await app.triggers.runs(call.p, a.id, a.limit))),
+		read("list_trigger_sources", "What a trigger can watch here: each kind of source, and whether it can run now.", Type.Object({}), async (app, call) => {
+			const paired = !!(await app.db.owner(call.p.ownerId, (tx) => tx.query("SELECT 1 FROM pim_app.computers WHERE revoked_at IS NULL LIMIT 1"))).rowCount;
+			const draft = (reason: string) => ({ status: "draft_only", delivers: false, reason });
+			return json({ sources: [
+				{ kind: "time", status: "available", delivers: true, reason: null },
+				{ kind: "connector_event", status: "available", delivers: true, reason: null },
+				{ kind: "file", status: "unavailable", delivers: false, reason: "not_wired" },
+				...["poll", "stream", "process"].map((kind) => ({ kind, ...draft(paired ? "not_wired" : "computer_not_paired") })),
+			] });
+		}),
 
 		// Notes and apps.
 		write("note_create", "Create a note a person can open and edit alongside you.", Type.Object({ title: S({ minLength: 1 }), text: O(S()) }), async (app, call, a) => text(`Created note ${await app.canvas.create(call.p, a.title, a.text ?? "")}.`)),

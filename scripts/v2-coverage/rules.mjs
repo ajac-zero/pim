@@ -5,7 +5,7 @@
 // (docs/v2-operations.md, "Integrated qualification") MISSED the relative budget (p95 within 20% of the warm baseline) from 50 active runs upward in both harnesses (multi-process 15.3 ms
 // against about 10 ms; one process 54 ms against 12 ms), and the realistic multi-process harness also MISSED the absolute budget (p95 under 250 ms) at 1,000 active runs, at 451 ms, with the
 // machine at 100% CPU, no turn finished in the 30 s window (all eventually landed) and only 418 of 1,000 runs admitted when it opened. The slow-reader path was not reached by that load.
-// The single-process result is the easier one and is never evidence of scale acceptance. Docker, Compose, the logical backup script, an S3 backup client and every live-cluster path were never run.
+// The single-process result is the easier one and is never evidence of scale acceptance. The Compose stack (image, PgBouncer, NATS, SeaweedFS, Caddy, the logical backup and restore, a v1 rehearsal into it) is booted by scripts/v2-compose/smoke.sh in CI; every live-cluster path was never run.
 const V = "Verified", P = "Partial", G = "Gap", NA = "N/A";
 const app = (...f) => f.map((x) => `v2-app/test/${x}.test.ts`).join(", ");
 const rt = (...f) => f.map((x) => `v2-runtime/test/${x}.test.ts`).join(", ");
@@ -133,7 +133,7 @@ export const RULES = [
 	["B4", /^Agents' browser/, "Changed", "Relay browser over cdp; browser_* agent tools; /api/browser (page, screenshot, close)", [app("relay"), srv("computer-agent")].join(", "), P, "Agent tools tested against the real daemon and a real Chrome (link click free, form post waits for approval); takeover socket tested with a fake computer only; per-chat displays need displayd, else chats share one browser."],
 	["B4", /^Computer-hosted trigger runtime/, "Changed", "computer triggers", app("surfaces"), P, ""],
 	["B4", /^Host operations/, "Not carried", "—", "—", G, ""],
-	["B4", /^celld deployment/, "Replaced", "deploy/compose and deploy/k8s", ops("deploy"), V, "Never started here (no Docker)."],
+	["B4", /^celld deployment/, "Replaced", "deploy/compose and deploy/k8s", ops("deploy"), V, "The Compose stack is built and booted by scripts/v2-compose/smoke.sh (CI job compose); Kubernetes was never applied."],
 	// ---- B5 coding
 	["B5", /^Coding thread DO/, "Replaced", "pim_forge.forge_threads, fenced lease, inbox", forge("lifecycle"), V, ""],
 	["B5", /^Scheduler/, "Replaced", "ForgeScheduler (slots, queue, breakers, login locks)", forge("scheduler"), V, ""],
@@ -170,7 +170,7 @@ export const RULES = [
 	["B6", /^5\.5 /, "Replaced", "stateless Live replicas", live("ws", "hub"), V, ""],
 	["B6", /^5\.6 /, "Changed", "pool budgets and statement timeouts", [ent, srv("integrated-bench")].join(", "), P, "Scale is NOT accepted: the relative p95 budget (within 20% of baseline) failed from 50 active runs up in both harnesses, and the multi-process harness missed the absolute 250 ms budget at 1,000 active runs (451 ms, 100% CPU, 418 of 1,000 admitted, no turn done in the 30 s window)."],
 	["B6", /^5\.7 /, "Changed", "—", "—", P, ""],
-	["B6", /^8\.1 /, "Changed", "Gate, Caddy", [ent, slice].join(", "), V, "Run as real OS processes. The Caddy and Compose files were never booted (no Docker)."],
+	["B6", /^8\.1 /, "Changed", "Gate, Caddy", [ent, slice].join(", "), V, "Run as real OS processes, and behind Caddy in the booted Compose stack (scripts/v2-compose/smoke.sh)."],
 	["B6", /^8\.2 /, "Changed", "pim_app identity, bootstrap claim", [app("security"), slice].join(", "), V, ""],
 	["B6", /^8\.3 /, "Replaced", "Runner, Projector, Live", [srv("runtime-source", "live-e2e"), slice].join(", "), V, "Correct under test; not shown to hold 1,000 simultaneous streams (see the scale note on 5.6)."],
 	["B6", /^8\.4 /, "Replaced", "S3 ObjectStore", app("files"), V, ""],

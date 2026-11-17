@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // Checks a promoted v2 stack against what a populated v1 space held (the expectations file `populate-v1.mjs` wrote), through the stack's public API and the same sign-in
 // a person uses. Run against the local rehearsal's stack or the Docker Compose stack:
-//   node scripts/v2-migrate/verify-v2.mjs --public-url https://pim.example.test --expect v1-expectations.json [--database-url postgres://...] [--ingress-secret S] [--no-run]
+//   node scripts/v2-migrate/verify-v2.mjs --public-url https://pim.example.test --expect v1-expectations.json [--database-url postgres://...] [--ingress-secret S] [--no-run] [--provider-host 0.0.0.0]
 // Exit status 0 only when every check passed. `--no-run` skips the checks that need a Runner and a model (a new message in an imported chat).
+// `--provider-host` is where the stand-in for the imported provider listens: 0.0.0.0 when the Runners run in containers and reach it through the Docker gateway.
 import { createHash, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import { readFileSync } from "node:fs";
@@ -10,7 +11,7 @@ import { parseArgs } from "node:util";
 import { Passkey } from "./passkey.mjs";
 
 const { values } = parseArgs({
-	options: { "public-url": { type: "string" }, expect: { type: "string" }, "database-url": { type: "string" }, "ingress-secret": { type: "string", default: "" }, "no-run": { type: "boolean", default: false }, "run-timeout": { type: "string", default: "60" } },
+	options: { "public-url": { type: "string" }, expect: { type: "string" }, "database-url": { type: "string" }, "ingress-secret": { type: "string", default: "" }, "no-run": { type: "boolean", default: false }, "run-timeout": { type: "string", default: "60" }, "provider-host": { type: "string", default: "127.0.0.1" } },
 });
 const BASE = values["public-url"]?.replace(/\/$/, "");
 if (!BASE || !values.expect) throw new Error("--public-url and --expect are required");
@@ -197,7 +198,7 @@ if (!values["no-run"]) {
 			res.end("data: [DONE]\n\n");
 		});
 	});
-	await new Promise((resolve, reject) => fake.once("error", reject).listen(port, "127.0.0.1", resolve));
+	await new Promise((resolve, reject) => fake.once("error", reject).listen(port, values["provider-host"], resolve));
 	try {
 		for (const role of ["root", "mid-tool"]) {
 			const chat = expect.chats.find((c) => c.owner === "ada" && c.role === role).id;

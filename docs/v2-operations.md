@@ -36,14 +36,23 @@ One Pim image runs one role per container, chosen by `PIM_ROLE`: `gate`, `live`,
 
 ## Compose (homelab)
 
+A trial on one machine, over plain HTTP on `127.0.0.1:8088` (a browser treats `localhost` as secure, so passkeys work):
+
 ```sh
-cd deploy/compose && cp env.example .env     # replace every CHANGE_ME
-docker compose up -d                          # caddy, postgres 17, pgbouncer, nats, seaweedfs, migrator, gate, live, runner, forge, maintenance
-docker compose up -d --scale runner=3
-docker compose --profile canvas|computer|coding|observability up -d
+deploy/compose/init-env.sh http://localhost:8088 --image pim:v2-local   # writes deploy/compose/.env with random secrets and keys
+docker build -f deploy/Dockerfile.v2 -t pim:v2-local .
+deploy/compose/pim.sh up -d --wait          # caddy, postgres 17, pgbouncer, nats, seaweedfs, migrator, gate, live, runner, forge, maintenance
+curl -s -X POST -H 'origin: http://localhost:8088' http://localhost:8088/auth/setup-link
+deploy/compose/pim.sh logs gate | grep -o 'http[^ "]*#claim=[^ "]*'   # open it, make the admin's passkey, save the recovery codes
 ```
 
-No Kubernetes, Temporal, Cloudflare or AWS service is involved. The core stack runs with every optional profile off. PostgreSQL runs with `fsync`, `full_page_writes` and `synchronous_commit` on, and nothing in the stack turns them off (a test fails if anything does). `postgres/init/00-roles.sh` creates the five NOLOGIN roles of `0001_foundation.sql` and one login per process kind (`pim_gate_login`, `pim_runtime_login`, `pim_live_login`, `pim_forge_login`, `pim_maintenance_login`), each a member of exactly its role, with the connection limit and the statement timeout that kind has in `DEFAULT_POOL_BUDGETS`, plus `pim_migrator`, the only role that creates objects (no login is superuser or `BYPASSRLS`); applications connect through PgBouncer in transaction mode, while the migrator and maintenance connect directly (advisory locks and long statements do not belong in transaction pooling). The proxy sets `X-Pim-Client-IP` and `X-Pim-Ingress-Secret` on every request, as the existing `celld` profile does.
+For a real hostname, run `init-env.sh https://pim.example.com` instead: `pim.sh` then uses `compose.yaml` alone and Caddy gets a certificate. `pim.sh` is `docker compose` with this directory's files (`compose.local.yaml` when the URL is `http://`, `compose.dev.yaml`, which mounts this checkout's sources, when `PIM_DEV=1`). A model: either connect one in Settings → Model (the ChatGPT plan sign-in, or a provider with an API key), or set `PIM_AI_GATEWAY_URL`, `PIM_AI_GATEWAY_KEY`, `PIM_AI_GATEWAY_MODELS` and `PIM_DEFAULT_MODEL` in `.env` for an OpenAI-compatible endpoint. Scale Runners with `pim.sh up -d --scale runner=3`; optional profiles are `canvas`, `local-computer`, `coding` and `observability`.
+
+`scripts/v2-compose/smoke.sh` builds the image and boots the stack from nothing with a stand-in model (`scripts/v2-compose/fake-model.mjs`), then claims the first account, chats with the majordomo, parks and approves a tool call, round-trips an object, backs up, writes, restores and chats again; CI's `compose` job runs it on every push.
+
+No Kubernetes, Temporal, Cloudflare or AWS service is involved. The core stack runs with every optional profile off. PostgreSQL runs with `fsync`, `full_page_writes` and `synchronous_commit` on, and nothing in the stack turns them off (a test fails if anything does). `postgres/init/00-roles.sh` creates the five NOLOGIN roles of `0001_foundation.sql` and one login per process kind (`pim_gate_login`, `pim_runtime_login`, `pim_live_login`, `pim_forge_login`, `pim_maintenance_login`), each a member of exactly its role, with the connection limit and the statement timeout that kind has in `DEFAULT_POOL_BUDGETS` (set on the role, since PgBouncer does not pass `statement_timeout` through), plus `pim_migrator`, the only role that creates objects (no login is superuser or `BYPASSRLS`); applications connect through PgBouncer in transaction mode, while the migrator and maintenance connect directly (advisory locks and long statements do not belong in transaction pooling). The proxy sets `X-Pim-Client-IP` and `X-Pim-Ingress-Secret` on every request, as the existing `celld` profile does.
+
+The Gate serves the web app (`web/dist`, built into the image) and answers the v1 web app's routes through `packages/v2-server/src/compat/`, which are tried before the Gate's own routes. What the web app asks for and v2 does not have yet answers as empty or 501, never with invented data: see the deferred list in `docs/architecture/v2-implementation-status.md`.
 
 ## A computer on the same machine
 
@@ -150,7 +159,9 @@ What the importer does, and what it refuses to:
 
 **Observed in the local rehearsal:** the unfenced v1 Worker served the same digest, and a schedule that had fallen due during the fence fired by itself after the unfence (so, locally, the alarms are recomputed: this answers the audit's open question 6 for `wrangler dev`, not for Cloudflare).
 
-**Not run against real Cloudflare, and not rehearsed here:** deploying the fence Worker to the production account (`--durable-objects-code-update-mode immediate`) and its effect on live alarms; real R2 (the local one is miniflare's); a passkey on another hostname (the rehearsal keeps `localhost`); native connectors' credentials (`APP_CREDENTIALS_KEY`), push subscriptions, ChatGPT-plan tokens, deployment-level providers, templates and bots (kept in the landing, not promoted); coding threads (the preview has no compute); a partially failed import (an altered snapshot is refused before anything is written, which `migration.test.ts` covers); stored files from before computers (promoted and tested on a landing row, since a v1 space cannot make them any more); the Compose stack as the destination.
+**Into the Compose stack.** The same rehearsal was run with the booted Compose stack as the destination: `rehearse-local.mjs v1 fence export --work <dir>`, then `scripts/v2-migrate/compose-import.sh <dir> localhost` (import with its audit, 290/290, and promotion, inside the stack's image with its own keys and SeaweedFS), then `verify-v2.mjs --public-url http://localhost:8088 --expect <dir>/v1-expectations.json --provider-host 0.0.0.0` (52/52; the imported provider's URL was pointed at the Docker gateway so the Runner container could reach the stand-in), then `rehearse-local.mjs rollback --public-url http://localhost:8088` (v1 served the same digest, and the schedule due during the fence fired by itself). Ada's v1 passkey signed in to the stack, and the web app showed her imported chats, fork and settings. In one of three verify runs the first message's model calls never reached the stand-in (`Connection error`, no connection seen) and the next run passed; that was the harness's Docker-to-host path, not yet explained.
+
+**Not run against real Cloudflare, and not rehearsed here:** deploying the fence Worker to the production account (`--durable-objects-code-update-mode immediate`) and its effect on live alarms; real R2 (the local one is miniflare's); a passkey on another hostname (the rehearsal keeps `localhost`); native connectors' credentials (`APP_CREDENTIALS_KEY`), push subscriptions, ChatGPT-plan tokens, deployment-level providers, templates and bots (kept in the landing, not promoted); coding threads (the preview has no compute); a partially failed import (an altered snapshot is refused before anything is written, which `migration.test.ts` covers); stored files from before computers (promoted and tested on a landing row, since a v1 space cannot make them any more).
 
 ### Live cutover runbook
 
@@ -159,7 +170,7 @@ What the importer does, and what it refuses to:
 3. **Back up the old side**: export (below) is the backup; also keep `APP_CREDENTIALS_KEY`, `cookie_key` and every Worker secret, sealed with `PIM_KEY_BACKUP_PASSPHRASE` as `run.mjs export` writes them.
 4. **Export** twice more than two minutes apart and compare `cf_agents_jobs` counts (nothing may be moving), then `FENCE_EXPORT_TOKEN=... run.mjs export --url <fence> --out <dir> --cutover-at <fence verified time>`.
 5. **Import and audit**: `run.mjs import ... --legacy-rp-id <host> --new-rp-id <host>`; the verdict must be PASS and no warning about a changed rp id. Read `cutover-report.md`.
-6. **Promote**: `PIM_DATABASE_URL=<schema owner> PIM_RP_ID=<host> PIM_CUTOVER_AT=<epoch ms> PIM_DEFAULT_MODEL=... PIM_LEGACY_OBJECTS_DIR=<importer objects dir> PIM_S3_*=... PIM_KEK_*=... node --import tsx packages/v2-server/src/main.ts promote`. Read its `skipped` list: it names what was not promoted and why.
+6. **Promote**: `PIM_DATABASE_URL=<schema owner> PIM_RP_ID=<host> PIM_CUTOVER_AT=<epoch ms> PIM_DEFAULT_MODEL=... PIM_LEGACY_OBJECTS_DIR=<importer objects dir> PIM_S3_*=... PIM_KEK_*=... node --import tsx packages/v2-server/src/main.ts promote`. Read its `skipped` list: it names what was not promoted and why. On Compose, steps 5 and 6 are one command, `scripts/v2-migrate/compose-import.sh <dir with snapshot/> <old hostname> [provider/model]`, which keeps the app stopped until both are done.
 7. **Verify on the stack before anyone is let in**: `verify-v2.mjs --public-url <stack> --expect <expectations> ...` needs a populated rehearsal's expectations file, so for the real data check by hand: the admin signs in with a passkey, chats and forks read, agents, skills, memories, goals, triggers (time triggers count from the activation; computer-bound ones are paused), notes, apps, the provider answers.
 8. **Thread adoption and reconciliation**: remote Amp threads are adopted by their remote id and never started again; every pending approval and cut-off tool call is a `needs_reconciliation` operation in `pim_ops.external_operations`: decide each by hand before enabling anything that could repeat it.
 9. **Activate**: start the Runners, lift the maintenance page, unsuspend nobody who was not suspended by the fence. From here there is **no** automatic rollback.
@@ -167,7 +178,7 @@ What the importer does, and what it refuses to:
 
 ## Backup and restore
 
-`scripts/v2-backup/run.mjs backup|restore|post-restore`. The tested engine is a **physical base backup through the low-level API** (`pg_backup_start`, copy, `pg_backup_stop`) with archived WAL, so a restore can stop at the end of the backup or at any chosen instant after it, plus every object with its SHA-256 and the key material's names and fingerprints. `scripts/v2-backup/compose-backup.sh` is a logical `pg_dump` alternative for Compose; it was **not run here** because the sandbox has no `pg_dump` and no Docker daemon. On Kubernetes, CloudNativePG's Barman backups and WAL archive are the equivalent and `ScheduledBackup` runs them daily.
+`scripts/v2-backup/run.mjs backup|restore|post-restore`. The tested engine is a **physical base backup through the low-level API** (`pg_backup_start`, copy, `pg_backup_stop`) with archived WAL, so a restore can stop at the end of the backup or at any chosen instant after it, plus every object with its SHA-256 and the key material's names and fingerprints. For Compose, `scripts/v2-backup/compose-backup.sh <dir>` takes a logical `pg_dump` (with owners and grants) and a copy of the bucket with SHA-256 sums, and `scripts/v2-backup/compose-restore.sh <dir> [restore-id]` stops the app, restores both, migrates, runs `migrator post-restore` (the safety pass below) and starts the app again; `scripts/v2-compose/smoke.sh` runs both on every CI push and checks that a message written after the backup is gone, the image is back and chat still answers. Keep `deploy/compose/.env` (it holds the key ring) in its own backup. On Kubernetes, CloudNativePG's Barman backups and WAL archive are the equivalent and `ScheduledBackup` runs them daily.
 
 **The restore hazard is real and the safety pass exists for it.** A restored database is older than the world. Operations it shows as pending may already have run after the backup; operations in flight may have finished or half-finished. Before any Runner starts, `post-restore` moves every `pending` and `in_flight` external operation, and every effect named in a journal of effects known to the outside world (`--known-effects`), to `needs_reconciliation`; holds unfinished tool tasks; turns every schedule whose time has passed into `recompute` with the missed time recorded; and marks the restore `reconciled`. Runners refuse to start until then. The database alone cannot know what happened after the backup, so keep an effects journal outside it (provider-side logs, or the failed database's last rows) and pass it in. The pass is idempotent.
 
@@ -304,12 +315,13 @@ Latencies in ms as p50/p95/p99, baseline → under load; "answer readable" is se
 - `kustomize build` and `kubeconform` schema validation of the Kubernetes manifests (Kubernetes 1.30, CloudNativePG, External Secrets, Prometheus Operator), and `loadProcessConfig` against the Compose and Kubernetes environments (`packages/v2-ops/test/deploy.test.ts`).
 - Real OS process startup and SIGTERM drain of every role through `node --import tsx src/main.ts <role>` (`packages/v2-server/test/entrypoint.test.ts`, `vertical-slice.test.ts`).
 - Export, import, audit and promotion of a synthetic snapshot, and the cutover rehearsal on real roles (`v2-ops/test/migration.test.ts`, `v2-server/test/migration-cutover.test.ts`).
+- `deploy/Dockerfile.v2` built and the Compose stack booted with Docker in an orb (PostgreSQL behind PgBouncer in the query path, NATS, SeaweedFS as the object store, Caddy): `scripts/v2-compose/smoke.sh` passes, and in a browser (Chrome with a virtual authenticator) the claim link, the first passkey, sign-out and passkey sign-in, the majordomo chat, live updates and an approval card all worked. With `--scale runner=2`, a chat whose Runner was killed with SIGKILL was answered by the other within 5 seconds.
+- `compose-backup.sh` and `compose-restore.sh` against that stack, and the v1 rehearsal into it (above).
 
 **Not executed, so unproven:**
 
-- `deploy/Dockerfile.v2` and `deploy/compose/compose.yaml` were never built or booted with `docker compose up`: this sandbox has no Docker daemon.
-- `scripts/v2-backup/compose-backup.sh` (the logical `pg_dump` script) was never run.
-- The S3 and SeaweedFS paths of backup and import: no S3 client is written for them; the tests use a directory-backed store (and `s3rver` for the application's objects).
+- A real Cloudflare export, a real hostname with TLS, and a real model provider account (the ChatGPT plan sign-in was tested against a stand-in of OpenAI's endpoints).
+- The `local-computer`, `coding`, `canvas` and `observability` profiles were not booted.
 - The Kubernetes manifests were never applied to a live cluster; CloudNativePG failover and Barman object-store archiving, OpenBao, gVisor isolation and PgBouncer in the live path were never run.
 - Real third-party browser sign-in, the vendor CLIs' interactive logins, and any load beyond the measurements above.
 
@@ -321,16 +333,18 @@ Latencies in ms as p50/p95/p99, baseline → under load; "answer readable" is se
 | Fence Worker: alarms consumed without side effects or row loss on Pim, CodingThread, CodingScheduler, Directory and HostOps; authenticated read-only export of every table, blob, kv entry, alarm, R2 and `OAUTH_KV`; exporter end to end | `test/fence.test.ts` in workerd with real SQLite Durable Objects | Run, passing |
 | Backup, mutate, restore (base only and point in time), safety pass, zero duplicate effects with a negative control | `test/backup.test.ts`, real PostgreSQL with WAL archiving | Run, passing |
 | Redaction, metrics, event-loop and pool signals | `test/observability.test.ts` | Run, passing |
-| Compose and Kubernetes configuration | `test/deploy.test.ts`; `kustomize build` and `kubeconform` against Kubernetes 1.30 and the CloudNativePG, External Secrets and Prometheus Operator schemas | Run, passing. **Not applied to a cluster; the Compose stack was never started**: this sandbox has no Docker daemon. |
+| Compose and Kubernetes configuration | `test/deploy.test.ts`; `kustomize build` and `kubeconform` against Kubernetes 1.30 and the CloudNativePG, External Secrets and Prometheus Operator schemas | Run, passing. **Not applied to a cluster.** |
+| Compose stack boots and serves | `scripts/v2-compose/smoke.sh` (CI job `compose`); browser run; Runner SIGKILL failover; v1 rehearsal into it with `verify-v2.mjs` 52/52 and rollback | Run, passing |
 | Benchmarks, reference writer | `bench-results/` | Run, numbers above |
 | Benchmarks, integrated stack, in one process (5, 50, 500, 1,000 active runs) | `packages/v2-server/bench-results/2026-11-17-integrated-<n>.json` | Run once each; every answer landed; throughput capped near 100 commits/s by the one event loop |
 | Benchmarks, integrated, separate OS processes (5, 50, 500, 1,000 active runs) | `packages/v2-server/bench-results/2026-11-17-integrated-5-50-500-1000.json` | Run once on one 4 vCPU machine. **Relative budget failed from 50 runs; absolute budget failed at 1,000 runs (451 ms); scale not accepted** |
-| `pg_dump` script, S3 and SeaweedFS paths, OpenBao, CloudNativePG failover and restore, gVisor isolation | — | **Not run.** The importer and backup tools use a directory-backed object store here; an S3 client is not written. |
+| `pg_dump` backup and restore on Compose, with SeaweedFS | `smoke.sh` | Run, passing |
+| OpenBao, CloudNativePG failover and restore, gVisor isolation | — | **Not run.** |
 
 ## Open items
 
 1. **Landing tables.** They live in `pim_ops` until the application and runtime workstreams define their own in `pim_app` and `pim_runtime`; then the importer's targets move and RLS policies (`owner_id = pim_current_owner_id()`) apply. The external-operation ledger and the Runner's obligations in [The role contract](#the-role-contract) are this workstream's proposal for the runtime workstream to accept.
 2. **Legacy table shapes.** The exporter dumps every table whatever its name, so it does not depend on them; the importer's typed promotion (accounts, Auth tables, pi tables, chats) and the quiescence rules read `pim_approvals`, `pim_trigger_*`, `cf_agents_jobs`, `coding_thread` and the pi tables by the names in the audited commit. The first rehearsal on a real export (above) corrected several of them; one on the production deployment, before the cutover, should still come first.
-3. **S3.** An S3-compatible `ObjectStore` implementation is needed for SeaweedFS (the interface is four methods).
+3. **S3.** The application, the promotion and the Compose backup scripts use SeaweedFS over S3; the physical-backup tool (`scripts/v2-backup/run.mjs`) and the importer's object directory still use a directory-backed store.
 4. **Rollback after a fence.** Observed locally (a schedule that fell due during the fence fired after the unfence); not observed on Cloudflare (audit open question 6).
 5. **Coding-thread pi stores** are kept row for row, not split: each has its own id space, so they cannot share the tenant's id sequence.

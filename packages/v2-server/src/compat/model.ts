@@ -15,6 +15,7 @@ import { toWebProvider } from "@pim/v2-app/web-providers";
 type Env = Record<string, string | undefined>;
 type ModelRef = { provider: string; id: string };
 const OWN = "own:";
+const SHARED = "shared:";
 
 const CATALOGS: Record<string, { name: string; models: () => readonly Model<Api>[] }> = {
 	anthropic: { name: "Anthropic", models: () => anthropicProvider().getModels() as never },
@@ -33,7 +34,10 @@ export function modelRoutes(env: Env): Route[] {
 
 	async function settings(app: any, p: any) {
 		const chatgpt = await app.chatgpt.status(p);
-		const providers = await app.providers.list(p);
+		const all = await app.providers.list(p);
+		// What an admin shares is everyone's, and is `shared:<id>` to the catalog whoever's row it is; an admin's own list does not repeat it.
+		const providers = all.filter((r: any) => r.config.shared !== true);
+		const shared = await app.providers.shared(p);
 		const choices: ReturnType<typeof describe>[] = [];
 		const add = (m: ReturnType<typeof describe>) => choices.some((c) => same(c, m)) || choices.push(m);
 		const fallback = parse(env.PIM_DEFAULT_MODEL);
@@ -44,6 +48,11 @@ export function modelRoutes(env: Env): Route[] {
 			const kind = row.config.builtin ?? row.kind;
 			if (row.hasKey && row.config.builtin && kind !== "openai") for (const m of CATALOGS[kind]?.models() ?? []) if (!row.config.chosen || row.config.chosen.includes(m.id)) add(describe(m));
 			if (row.kind === "openai_compatible" && Array.isArray(row.config.models)) for (const m of row.config.models) add({ provider: `${OWN}${row.id}`, id: m.id, name: m.name ?? m.id, images: m.images === true } as never);
+		}
+		for (const row of shared) {
+			const kind = row.config.builtin ?? row.kind;
+			if (row.hasKey && row.config.builtin && kind !== "openai") for (const m of CATALOGS[kind]?.models() ?? []) if (!row.config.chosen || row.config.chosen.includes(m.id)) add(describe(m));
+			if (row.kind === "openai_compatible" && Array.isArray(row.config.models)) for (const m of row.config.models) add({ provider: `${SHARED}${row.id}`, id: m.id, name: m.name ?? m.id, images: m.images === true } as never);
 		}
 		if (env.PIM_AI_GATEWAY_URL) for (const id of (env.PIM_AI_GATEWAY_MODELS ?? "").split(",").map((s) => s.trim()).filter(Boolean)) add({ provider: "gateway", id, name: id, images: false } as never);
 		const info = (r: ModelRef | null) => (r ? (choices.find((c) => same(c, r)) ?? null) : null);
@@ -59,7 +68,7 @@ export function modelRoutes(env: Env): Route[] {
 			utility: { model: info(utility), default: null, choices },
 			chatgpt: { ...chatgpt, error: null },
 			chatgptImages: { connected: false, email: null },
-			providers: providers.map((row: any) => ({ ...toWebProvider(row), provider: `${OWN}${row.id}` })),
+			providers: [...providers.map((row: any) => ({ ...toWebProvider(row), provider: `${OWN}${row.id}` })), ...shared.map((row: any) => ({ ...toWebProvider(row), shared: true, provider: `${SHARED}${row.id}` }))],
 		};
 	}
 

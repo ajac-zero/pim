@@ -36,6 +36,16 @@ export class Providers {
 		return this.db.owner(p.ownerId, async (tx) => (await tx.query("SELECT * FROM pim_app.providers ORDER BY id")).rows.map((r) => this.#row(r)));
 	}
 
+	/**
+	 * The providers an active admin shared with everyone (`config.shared`), without keys, in the order they were made. Everyone's catalog offers them beside their own;
+	 * the definer function (migration 0626) is what limits this to an admin's rows, so a member cannot share a provider by setting the flag on their own.
+	 */
+	async shared(p: Principal): Promise<(Provider & { owner: string })[]> {
+		await this.authz.enforce(p, "api:read");
+		const rows = (await this.db.anonymous(async (tx) => (await tx.query("SELECT pim_app.shared_providers(false) AS p")).rows[0].p)) as { id: string; owner: string; kind: string; config: Record<string, unknown>; hasKey: boolean }[];
+		return rows.map((r) => ({ ...this.#row({ id: r.id, kind: r.kind, config: r.config, secret: r.hasKey ? "set" : null, fallback_order: null }), owner: r.owner }));
+	}
+
 	async update(p: Principal, id: string, input: { name?: string; config?: Record<string, unknown>; apiKey?: string | null }): Promise<Provider> {
 		await this.authz.enforce(p, "api:write");
 		const sealed = input.apiKey ? await sealString(this.crypto, input.apiKey, `provider:${p.ownerId}/${id}`) : null;

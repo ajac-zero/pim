@@ -34,6 +34,7 @@ import { runtimeOutboxSource } from "./runtime-source.ts";
 import { computerRoutes } from "./computer-routes.ts";
 import { natsRelayBus } from "./relay-bus.ts";
 import { sweepApprovals, trimForgeOutbox } from "./sweeps.ts";
+import { webAssets } from "./web-assets.ts";
 
 export type Env = Record<string, string | undefined>;
 export type Hooks = {
@@ -99,6 +100,8 @@ export async function startGate(config: ProcessConfig, env: Env, host: Host, nat
 	const options = { publicUrl: config.publicUrl, ...(env.PIM_APPS_ORIGIN ? { appsOrigin: env.PIM_APPS_ORIGIN } : {}), routes: [...snapshotRoutes(db.pool), ...codingAdminRoutes(), ...forgeRoutes(coding), ...computerRoutes(env.PIM_COMPUTER_SOURCE ? { source: env.PIM_COMPUTER_SOURCE } : {})] };
 	const gate = createGate(app, options);
 	const listener = gate.listeners("request")[0] as (req: never, res: never) => void;
+	const web = webAssets(env.PIM_WEB_DIR);
+	if (web) host.handle(web);
 	host.handle((req, res) => (listener(req as never, res as never), true));
 	// The host owns the server's `upgrade` event and destroys a socket none of its handlers claims, so the Gate's sockets (a computer connecting, the desktop,
 	// the browser, notes, a hosted app's own) are claimed by path here rather than listened for on the server.

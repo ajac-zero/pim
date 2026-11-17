@@ -1,0 +1,9 @@
+**/node_modules
+**/.wrangler
+web/dist
+.git
+.amp
+.pim
+**/bench-results
+**/*.log
+deploy/compose/.env

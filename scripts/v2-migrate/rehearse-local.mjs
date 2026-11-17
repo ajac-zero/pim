@@ -14,6 +14,7 @@
 //   --database       database name (default pim_rehearsal)
 //   --work           working directory (default /tmp/pim-rehearsal): v1 state, snapshot, objects, reports, logs, expectations
 //   --public-url     verify (and only verify) an existing stack, such as the Docker Compose one, instead of starting a local one; add --ingress-secret if its proxy needs it
+//   --provider-host  the host the stand-in providers and MCP server are addressed by in v1's data (default 127.0.0.1; the Docker gateway, 172.18.0.1, for a Compose destination)
 //   --probe-seconds  a schedule that falls due while the fence is up (default 100); the rollback shows whether v1 fires it after being unfenced
 //   --keep           leave the processes running at the end
 // Needs: PIM_NATS_BIN (or nats-server on the PATH), and the node_modules of this checkout (wrangler, tsx, s3rver). Nothing here touches Cloudflare, a live host or any cloud.
@@ -36,6 +37,7 @@ const { positionals, values } = parseArgs({
 		"public-url": { type: "string" },
 		"ingress-secret": { type: "string", default: "" },
 		"probe-seconds": { type: "string", default: "100" },
+		"provider-host": { type: "string", default: "127.0.0.1" },
 		"v1-port": { type: "string", default: "8791" },
 		"fence-port": { type: "string", default: "8792" },
 		keep: { type: "boolean", default: false },
@@ -166,7 +168,7 @@ async function phaseV1() {
 	rmSync(stateDir(), { recursive: true, force: true });
 	wrangler("v1", v1Config(), values["v1-port"]);
 	await waitFor(`${V1}/health`, "the v1 preview");
-	run("populate", "node", ["scripts/v2-migrate/populate-v1.mjs", "--base", V1, "--expect", expectFile, "--probe-seconds", values["probe-seconds"]]);
+	run("populate", "node", ["scripts/v2-migrate/populate-v1.mjs", "--base", V1, "--expect", expectFile, "--probe-seconds", values["probe-seconds"], "--provider-host", values["provider-host"]]);
 	state.populatedAt = Date.now();
 	state.digestBefore = await digestV1();
 	save();

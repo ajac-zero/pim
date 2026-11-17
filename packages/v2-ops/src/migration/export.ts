@@ -29,9 +29,18 @@ export class FenceExporter {
 	}
 
 	async #get<T>(path: string): Promise<T> {
-		const response = await (this.#o.fetch ?? ((r) => fetch(r)))(new Request(new URL(`/fence/v1/${path}`, this.#o.baseUrl), { headers: { authorization: `Bearer ${this.#o.token}` } }));
-		if (!response.ok) throw new Error(`Export ${path} answered ${response.status}: ${(await response.text()).slice(0, 200)}`);
-		return (await response.json()) as T;
+		// Every export read is idempotent: a dropped connection or a 5xx is tried again, a few times, before the export gives up.
+		for (let attempt = 1; ; attempt++) {
+			try {
+				const response = await (this.#o.fetch ?? ((r) => fetch(r)))(new Request(new URL(`/fence/v1/${path}`, this.#o.baseUrl), { headers: { authorization: `Bearer ${this.#o.token}` } }));
+				if (response.status >= 500 && response.status !== 503 && attempt < 5) throw new Error(`Export ${path} answered ${response.status}`);
+				if (!response.ok) throw Object.assign(new Error(`Export ${path} answered ${response.status}: ${(await response.text()).slice(0, 200)}`), { final: true });
+				return (await response.json()) as T;
+			} catch (error) {
+				if ((error as { final?: boolean }).final || attempt >= 5) throw error;
+				await new Promise((r) => setTimeout(r, 500 * attempt));
+			}
+		}
 	}
 
 	/** Dumps one Durable Object completely: every table row, every key-value entry and its pending alarm. */

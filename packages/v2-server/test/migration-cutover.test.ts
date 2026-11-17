@@ -23,7 +23,7 @@ import { MemoryObjects } from "@pim/v2-forge/ports";
 import { ForgeScheduler } from "@pim/v2-forge/scheduler";
 import { ForgeStore } from "@pim/v2-forge/store";
 import { ForgeWorker } from "@pim/v2-forge/worker";
-import { promoteToLive } from "../src/migration-bridge.ts";
+import { chatUuid, promoteToLive } from "../src/migration-bridge.ts";
 import type { Process } from "../src/main.ts";
 import { waitFor } from "../../v2-runtime/test/support/rig.ts";
 import { Authenticator } from "./support/authenticator.ts";
@@ -207,6 +207,17 @@ real("a cutover rehearsal", () => {
 			return s.messages.some((m) => m.role === "assistant" && m.parts.some((p) => p.text === "Noted.")) && s.messages.some((m) => m.parts.some((p) => p.text === "anyone there after the cut?")) ? s : undefined;
 		}, 60_000);
 		expect(plain.messages.at(-1)!.role).toBe("assistant");
+
+		// A chat in the home partition, which a real space's first chat and its forks share: the relay must not try to make that partition again as a family (a real rehearsal found it did).
+		const home = (await d.stack.admin.query("SELECT c.public_id FROM pim_ops.chats c JOIN pim_ops.conversation_directory x ON x.owner_id = c.owner_id AND x.conversation_id = c.conversation_id JOIN pim_ops.partitions p ON p.owner_id = x.owner_id AND p.partition_id = x.partition_id WHERE c.owner_id = $1 AND p.home AND c.deleted_at_ms IS NULL LIMIT 1", [ADA])).rows[0]?.public_id as string | undefined;
+		if (home) {
+			const chat = chatUuid(home);
+			expect((await web.call("POST", `/api/sessions/${chat}/messages`, { commandId: "after-cutover-home", text: "anyone home?" })).status).toBe(202);
+			await waitFor("the answer in a chat of the home partition", async () => {
+				const s = (await web.call("GET", `/api/snapshot/chat/${chat}?limit=200`)).json as { messages: { role: string; parts: { text?: string }[] }[] };
+				return s.messages.some((m) => m.parts.some((p) => p.text === "anyone home?")) && s.messages.at(-1)!.role === "assistant" ? s : undefined;
+			}, 60_000);
+		}
 	}, 120_000);
 
 	it("adopts an imported Amp thread in Forge without starting it again, and leaves a cut-off CLI thread idle", async () => {

@@ -62,7 +62,9 @@ export class CommandRelay {
 		const partition = PartitionId.parse(row.partition_id);
 		const chat = PublicChatId.parse(row.public_chat_id);
 		const { directory, inbox, pool } = this.#deps;
-		await directory.createPartition(owner, { partitionId: partition, kind: "family" });
+		// A chat's partition is made on its first command, as a family; one that already exists (an imported home partition, which holds a person's first chat) is left as it is.
+		const known = await this.#deps.db.read(owner, "SELECT 1 FROM pim_runtime.partitions WHERE owner_id = $1 AND partition_id = $2", [owner, partition]);
+		if (!known.rowCount) await directory.createPartition(owner, { partitionId: partition, kind: "family" });
 		const route = await directory.routeChat(owner, chat);
 		if (!route) {
 			// The conversation does not exist yet: ask for it, and look again at the next pass.

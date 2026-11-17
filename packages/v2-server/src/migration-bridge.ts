@@ -507,6 +507,9 @@ async function promoteDomain(pool: Pool, owner: string, options: PromoteOptions,
 			const rev = revisions.filter((r) => r.trigger_id === t.id).sort((a, b) => Number(b.revision) - Number(a.revision))[0];
 			const spec = parseJson(rev?.spec, null);
 			if (!spec?.source) continue;
+			// A legacy trigger names its chat by the numeric session id; the chat is a UUID here, and a firing addressed to "1" would reach nothing.
+			if (spec.originChatId !== undefined) spec.originChatId = chatOf.get(String(spec.originChatId)) ?? spec.originChatId;
+			if (spec.destination?.chatId !== undefined) spec.destination = { ...spec.destination, chatId: chatOf.get(String(spec.destination.chatId)) ?? spec.destination.chatId };
 			const due = dueWork.get(String(t.id));
 			const computer = ["poll", "stream", "process", "file"].includes(spec.source.kind);
 			const ended = due && (due.state === "done" || due.state === "dropped");

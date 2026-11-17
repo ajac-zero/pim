@@ -7,8 +7,9 @@ import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import { writeFileSync } from "node:fs";
 import { parseArgs } from "node:util";
+import { Passkey } from "./passkey.mjs";
 
-const { values } = parseArgs({ options: { base: { type: "string", default: "http://localhost:8787" }, expect: { type: "string", default: "v1-expectations.json" } } });
+const { values } = parseArgs({ options: { base: { type: "string", default: "http://localhost:8787" }, expect: { type: "string", default: "v1-expectations.json" }, "probe-seconds": { type: "string", default: "0" } } });
 const BASE = values.base;
 const log = (...a) => console.log("[populate]", ...a);
 
@@ -19,7 +20,7 @@ class Client {
 	}
 	async signIn() {
 		const r = await fetch(`${BASE}/__dev/sign-in/${this.name}?returnTo=/`, { redirect: "manual" });
-		this.cookie = r.headers.getSetCookie().map((c) => c.split(";")[0]).join("; ");
+		this.cookie = r.headers.getSetCookie().map((c) => c.split(";")[0]).filter((c) => !c.endsWith("=")).join("; ");
 		if (!this.cookie) throw new Error(`sign-in of ${this.name} gave no cookie (${r.status})`);
 		return this;
 	}
@@ -34,6 +35,13 @@ class Client {
 		}
 		if (!r.ok) throw new Error(`${method} ${path} -> ${r.status} ${text.slice(0, 300)}`);
 		return json;
+	}
+	/** A call to the sign-in Worker's own routes (`/auth/...`), which are not under /api; returns the response and keeps its cookies. */
+	async auth(path, body) {
+		const r = await fetch(`${BASE}/auth${path}`, { method: "POST", headers: { cookie: this.cookie, origin: BASE, "content-type": "application/json" }, body: JSON.stringify(body ?? {}) });
+		const text = await r.text();
+		if (!r.ok) throw new Error(`POST /auth${path} -> ${r.status} ${text.slice(0, 200)}`);
+		return { json: text ? JSON.parse(text) : {}, setCookie: r.headers.getSetCookie().map((c) => c.split(";")[0]).join("; ") };
 	}
 	get = (p) => this.call("GET", p);
 	post = (p, b = {}) => this.call("POST", p, b);
@@ -135,7 +143,7 @@ await ada.tool(root, "schedule_task", { instruction: "Water the plants", label: 
 expect.triggers.push({ owner: "ada", label: "Weekly summary", kind: "time" }, { owner: "ada", label: "Plants", kind: "time" });
 
 await ada.tool(root, "note_create", { title: "Packing list", content: "# Packing\n\n- passport\n- charger\n" });
-expect.notes.push({ owner: "ada", title: "Packing list", text: "passport" });
+expect.notes.push({ owner: "ada", id: (await ada.get("/artifacts")).artifacts.find((a) => a.title === "Packing list").id, title: "Packing list", text: "passport" });
 await ada.tool(root, "app_create", { title: "Tip calculator", kind: "html", content: "<!doctype html><title>tips</title><h1>Tip calculator v1</h1>" });
 const app = (await ada.get("/artifacts")).artifacts.find((a) => a.title === "Tip calculator");
 await ada.tool(root, "app_update", { id: app.id, base_version: 1, content: "<!doctype html><title>tips</title><h1>Tip calculator v2</h1>" });
@@ -147,7 +155,7 @@ await ada.say(root, [{ type: "text", text: "Here is a picture" }, { type: "image
 expect.files.push({ owner: "ada", kind: "chat-image", sha256: createHash("sha256").update(Buffer.from(PNG, "base64")).digest("hex") });
 
 const added = await ada.post("/providers", { name: "Rehearsal provider", url: providerUrl, key: "rehearsal-provider-key-0001", models: ["rehearsal-model"] });
-expect.providers.push({ owner: "ada", name: "Rehearsal provider", key: "rehearsal-provider-key-0001", id: (added.provider ?? added).id });
+expect.providers.push({ owner: "ada", name: "Rehearsal provider", key: "rehearsal-provider-key-0001", id: (added.provider ?? added).id, url: providerUrl });
 
 await ada.put("/profile", { displayName: "Ada L.", bio: "Rehearsal admin" });
 const circle = await ada.post("/circles", { name: "Family" });
@@ -159,6 +167,24 @@ const midId = (mid.session ?? mid).id;
 await ada.post(`/sessions/${midId}/messages`, { content: `/tool http_request ${JSON.stringify({ method: "GET", url: "https://example.com" })}`, wait: false });
 await new Promise((r) => setTimeout(r, 1500));
 expect.chats.push({ owner: "ada", id: midId, role: "mid-tool", pendingApproval: true });
+
+// A schedule that falls due while the fence is up: whether the old Worker fires it after an unfence is what the rollback rehearsal observes.
+if (Number(values["probe-seconds"]) > 0) {
+	await ada.tool(root, "schedule_task", { instruction: "Fence probe", label: "Fence probe", delay_seconds: Number(values["probe-seconds"]), new_chat: true });
+	expect.probe = { owner: "ada", label: "Fence probe", dueAt: Date.now() + Number(values["probe-seconds"]) * 1000 };
+}
+
+// A passkey whose private key the rehearsal keeps, and an API token whose secret it keeps: the new stack must accept both. (A preview sign-in's own key is gone with the Worker.)
+const options = await ada.auth("/passkeys/options", {});
+const challengeCookie = options.setCookie;
+const key = Passkey.make();
+const registered = await fetch(`${BASE}/auth/passkeys`, { method: "POST", headers: { cookie: `${ada.cookie}; ${challengeCookie}`, origin: BASE, "content-type": "application/json" }, body: JSON.stringify(key.create(options.json, BASE)) });
+if (!registered.ok) throw new Error(`registering the rehearsal passkey: ${registered.status} ${await registered.text()}`);
+expect.passkey = { owner: "ada", ...key.save(), rpId: new URL(BASE).hostname };
+const token = (await ada.auth("/tokens", { name: "rehearsal" })).json;
+expect.token = { owner: "ada", name: "rehearsal", token: token.token ?? token.secret };
+const bobToken = (await bob.auth("/tokens", { name: "rehearsal" })).json;
+expect.tokens = { ada: expect.token.token, bob: bobToken.token ?? bobToken.secret };
 
 writeFileSync(values.expect, JSON.stringify(expect, null, 2));
 log(`wrote ${values.expect}`);

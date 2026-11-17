@@ -17,6 +17,7 @@ import { bridgeRoutes } from "./app-bridge.ts";
 import { notificationRoutes } from "./notifications.ts";
 import { connectorScreens } from "./connectors.ts";
 import { chatgptImagesRoutes } from "./chatgpt-images.ts";
+import { guestRoutes } from "./guests.ts";
 
 /**
  * The files screen has two stores: the paired computer's folder (`computer.ts`) and the objects an agent saves under /workspace without one, such as the images it draws
@@ -47,6 +48,8 @@ function filesOverBoth(computer: Route[], objects: Route[]): Route[] {
 }
 
 export const webCompatRoutes: Route[] = [
+	// Circles, visits and a guest's bot first: they replace the application's own answers to the same paths, which the web app does not read.
+	...guestRoutes(),
 	...notificationRoutes(process.env),
 	// Connectors come first: their approve and deny add "always approve" to the plain decision the boot routes make.
 	...connectorScreens(),

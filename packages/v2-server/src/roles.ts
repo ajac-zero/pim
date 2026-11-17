@@ -45,6 +45,7 @@ import { sweepApprovals, trimForgeOutbox } from "./sweeps.ts";
 import { webAssets } from "./web-assets.ts";
 import { poolRoutes } from "./compat/admin.ts";
 import { webCompatRoutes } from "./compat/index.ts";
+import { gateBefore, limitGuestMessages } from "./limits.ts";
 
 export type Env = Record<string, string | undefined>;
 export type Hooks = {
@@ -105,6 +106,7 @@ export async function startGate(config: ProcessConfig, env: Env, host: Host, nat
 	// A computer paired to another process (the `relay` container, another Gate) is reached over NATS.
 	if (nats) app.relay.useBus(natsRelayBus(nats));
 	deliverApprovalDecisions(app);
+	limitGuestMessages(app);
 	const secure = config.publicUrl.startsWith("https:");
 	const forge = assembleForge(db.pool as never, objects, env, crypto, { scoped: true });
 	mirrorCodingGrants(app, forge.authz as never);
@@ -113,7 +115,7 @@ export async function startGate(config: ProcessConfig, env: Env, host: Host, nat
 	const coding = forgeHttp(forge, { authenticate, crypto: app.crypto });
 	const options = { publicUrl: config.publicUrl, ...(env.PIM_APPS_ORIGIN ? { appsOrigin: env.PIM_APPS_ORIGIN } : {}), routes: [...snapshotRoutes(db.pool), ...codingAdminRoutes(), ...poolRoutes(coding), ...forgeRoutes(coding)],
 		// The web app's v1 API over v2's services (packages/v2-server/src/compat/), tried before the built-in routes so its shapes win.
-		first: [...webCompatRoutes] };
+		first: [...webCompatRoutes], before: gateBefore(app, env) };
 	const gate = createGate(app, options);
 	const listener = gate.listeners("request")[0] as (req: never, res: never) => void;
 	const web = webAssets(env.PIM_WEB_DIR);

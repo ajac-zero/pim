@@ -6,10 +6,12 @@ import { Conversations } from "./conversations.ts";
 import { type Connectors as ConnectorsType, Connectors, type CodeExchanger, type ToolFetcher } from "./connectors.ts";
 import { KeyringCrypto } from "./crypto.ts";
 import { type Db } from "./db.ts";
+import { Guests } from "./guests.ts";
 import { Identity } from "./identity.ts";
 import { McpOAuth } from "./mcp.ts";
 import { Memories } from "./memory.ts";
 import { Providers } from "./providers.ts";
+import { RateLimits } from "./ratelimit.ts";
 import { Sharing, type TranscriptSource } from "./sharing.ts";
 import { Triggers } from "./triggers.ts";
 import { Usage } from "./usage.ts";
@@ -44,6 +46,8 @@ export class App {
 	readonly triggers: Triggers;
 	readonly apps: Apps;
 	readonly sharing: Sharing;
+	readonly guests: Guests;
+	readonly limits: RateLimits;
 	readonly crypto: EnvelopeCrypto;
 	constructor(readonly db: Db, store: ObjectStore, opts: { hideSuspended?: boolean; providers?: Partial<Record<ProviderId, ProviderSettings>>; crypto?: EnvelopeCrypto; appKey?: string; fetchTools?: ToolFetcher; exchange?: CodeExchanger; transcripts?: TranscriptSource; chatgpt?: ChatGPTOptions; mcpReplyWaitMs?: number; allowHttpConnectors?: boolean } = {}) {
 		this.identity = new Identity(db);
@@ -68,5 +72,7 @@ export class App {
 		this.connectors = new Connectors(db, this.crypto, this.triggers, this.signin, { ...(opts.fetchTools ? { fetchTools: opts.fetchTools } : {}), ...(opts.exchange ? { exchange: opts.exchange } : {}), ...(opts.allowHttpConnectors ? { allowHttp: true } : {}) });
 		this.apps = new Apps(db, this.signin, { hideSuspended: opts.hideSuspended ?? false });
 		this.sharing = new Sharing(db, this.conversations, this.agents, opts.transcripts);
+		this.guests = new Guests(db, this.agents);
+		this.limits = new RateLimits(db);
 	}
 }

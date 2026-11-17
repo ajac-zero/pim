@@ -22,9 +22,11 @@ export async function sweepApprovals(app: App, pool: Pool, now = new Date()): Pr
 	let delivered = 0;
 	for (const owner of owners) {
 		await app.approvals.sweep(owner, now);
-		const timedOut = await app.db.owner(owner, async (tx) => (await tx.query("SELECT id, public_chat_id, args, state FROM pim_app.approvals WHERE state IN ('timed_out_denied', 'timed_out_approved') AND args ? 'taskId' AND public_chat_id IS NOT NULL")).rows);
+		const timedOut = await app.db.owner(owner, async (tx) => (await tx.query("SELECT id, public_chat_id, args, state FROM pim_app.approvals WHERE state IN ('timed_out_denied', 'timed_out_approved') AND args ? 'taskId' AND (public_chat_id IS NOT NULL OR args ? 'guestChat')")).rows);
 		for (const a of timedOut) {
-			const admitted = await app.conversations.admit({ kind: "user", ownerId: owner as never, role: "member", sessionId: "approval-timeout" }, { commandId: `approval:${a.id}`, kind: "approval_decision", chatId: a.public_chat_id, payload: { taskId: a.args.taskId, approved: a.state === "timed_out_approved", approvalId: a.id, timedOut: true } });
+			// A guest's approval parks a task in the guest's own space, so its timeout is delivered there.
+			const guest = a.args.guestOwner as string | undefined;
+			const admitted = await app.conversations.admit({ kind: "user", ownerId: (guest ?? owner) as never, role: guest ? "guest" : "member", sessionId: "approval-timeout" }, { commandId: `approval:${a.id}`, kind: "approval_decision", chatId: guest ? a.args.guestChat : a.public_chat_id, payload: { taskId: a.args.taskId, approved: a.state === "timed_out_approved", approvalId: a.id, timedOut: true } });
 			if (!admitted.duplicate) delivered++;
 		}
 	}

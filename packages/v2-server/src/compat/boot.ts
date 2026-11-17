@@ -12,6 +12,7 @@ import type { Agent as V2Agent } from "@pim/v2-app/agents";
 import { BadRequestError, ForbiddenError, NotFoundError } from "@pim/v2-app/errors";
 import { fromAnotherSite, ok, route, sessionCookieName, setCookie, type Route } from "@pim/v2-app/http";
 import { newId } from "@pim/v2-app/ids";
+import { clientAddress } from "../limits.ts";
 import { PimThemes } from "@pim/shared/themes";
 import { pimThemes } from "@pim/shared/theme-data/index";
 import { INTRODUCTION } from "@pim/shared/transcript";
@@ -150,7 +151,7 @@ async function readSettings(app: App, ownerId: string) {
 const STATUS: Record<string, "pending" | "approved" | "denied"> = { waiting: "pending", approved: "approved", timed_out_approved: "approved", denied: "denied", timed_out_denied: "denied" };
 export const webApproval = (r: any) => {
 	// The runtime's bookkeeping (task, call, policy resource) is not what the person reads.
-	const { taskId: _task, callId, resource: _resource, review, explicit: _explicit, ...args } = (r.args ?? {}) as Record<string, unknown>;
+	const { taskId: _task, callId, resource: _resource, review, explicit: _explicit, requestedBy, guestOwner: _g, guestChat: _c, ...args } = (r.args ?? {}) as Record<string, unknown>;
 	const reviewed = review as { status?: string; note?: string } | undefined;
 	const brief = typeof args.summary === "string" ? args.summary : Object.entries(args).slice(0, 3).map(([k, v]) => `${k}: ${typeof v === "string" ? v : JSON.stringify(v)}`.slice(0, 120)).join(", ");
 	return {
@@ -169,7 +170,7 @@ export const webApproval = (r: any) => {
 		expiresAt: ms(r.expires_at),
 		onTimeout: r.timeout_policy,
 		decidedBy: r.state.startsWith("timed_out") ? "timeout" : r.decided_by === null ? null : r.decided_by === "majordomo" ? "majordomo" : r.via_standing_grant ? "always" : "user",
-		requestedBy: null,
+		requestedBy: requestedBy ?? null,
 		// While the majordomo has it the person is not asked; once it hands it back, they see what it said.
 		review: r.state === "waiting" && (reviewed?.status === "reviewing" || reviewed?.status === "escalated") ? { status: reviewed.status, note: reviewed.note ?? null } : null,
 	};
@@ -183,7 +184,10 @@ export const bootRoutes: Route[] = [
 	route("POST", "/auth/register", async ({ app, json, req, secure }) => {
 		if (fromAnotherSite(req)) throw new ForbiddenError("register", "csrf");
 		const b = await json();
-		const account = await app.identity.register({ username: String(b.username ?? ""), invite: b.invite, bootstrap: b.bootstrap ?? b.claim, address: req.socket.remoteAddress });
+		// Through a bot's link anyone may join as its guest (the bot must still be live); the address is the proxy's header when the deployment trusts one.
+		const bot = typeof b.bot === "string" && b.bot ? await app.guests.liveBot(b.bot) : null;
+		const account = await app.identity.register({ username: String(b.username ?? ""), invite: b.invite, bootstrap: b.bootstrap ?? b.claim, address: clientAddress(req, process.env), ...(bot ? { guestOf: { botId: bot.id, host: bot.host } } : {}) });
+		if (bot) await app.guests.enroll(account.ownerId, bot.id);
 		const session = () => app.identity.createSession(account.ownerId, { userAgent: req.headers["user-agent"] });
 		const recoveryCodes = await app.signin.newRecoveryCodes(account.ownerId);
 		const setup = await app.signin.issueSetupCode(account.ownerId);

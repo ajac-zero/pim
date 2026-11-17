@@ -4,10 +4,11 @@
  * principal, the Authorizer's `admin:*` actions, and the caller's row-level security scope.
  */
 import type { Route } from "@pim/v2-app/http";
+import { adminDirectoryRoutes } from "./admin-directory.ts";
 import { artifactRoutes } from "./admin-apps.ts";
 import { galleryRoutes } from "./admin-gallery.ts";
 import { screenRoutes } from "./admin-screens.ts";
 
 export { poolRoutes } from "./admin-screens.ts";
 
-export const adminCompatRoutes: Route[] = [...artifactRoutes(), ...galleryRoutes(process.env), ...screenRoutes(process.env)];
+export const adminCompatRoutes: Route[] = [...adminDirectoryRoutes(), ...artifactRoutes(), ...galleryRoutes(process.env), ...screenRoutes(process.env)];

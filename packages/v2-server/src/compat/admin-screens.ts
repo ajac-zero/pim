@@ -4,8 +4,9 @@
  * (`admin:*` in the Authorizer), and an account's status changes go through `Identity`, whose last-admin guard is the database's own.
  */
 import type { App } from "@pim/v2-app/app";
-import { BadRequestError, NotFoundError } from "@pim/v2-app/errors";
+import { BadRequestError, NotFoundError, RefusedError } from "@pim/v2-app/errors";
 import { route, type Reply, type Route } from "@pim/v2-app/http";
+import { toServiceInput } from "@pim/v2-app/web-providers";
 import { configuredProviders, PROVIDER_IDS, providerName, providerSecrets } from "@pim/v2-app/oauth";
 import type { Principal } from "@pim/v2-contracts/identity";
 import type { IncomingMessage } from "node:http";
@@ -39,13 +40,15 @@ const defaultAgentOf = async (app: App) => {
 const PLAIN_VARIABLES = ["PIM_PUBLIC_URL", "PIM_APPS_ORIGIN", "PIM_CONTENT_ORIGIN", "PIM_DEFAULT_MODEL", "PIM_AI_GATEWAY_URL", "PIM_AI_GATEWAY_MODELS"];
 
 const slug = (text: string) => text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40);
-const PROVIDER_KINDS = ["anthropic", "openai", "openai_compatible", "google", "workers_ai", "bedrock", "custom"];
 
 export function screenRoutes(env: Env): Route[] {
 	const member = (r: Record<string, unknown>) => ({ ownerId: r.owner_id, username: r.username, role: r.role, status: r.status, createdAt: ms(r.created_at as Date), activatedAt: ms(r.activated_at as Date | null), statusReason: r.status_reason ?? null });
 	const status = (to: "active" | "suspended") => async ({ app, principal, params }: { app: App; principal: () => Promise<Principal>; params: string[] }) => {
 		const p = await principal();
-		await app.identity.setStatus(p, await ownerOfUsername(app, params[0]!), to, to === "suspended" ? "suspended by an admin" : "");
+		const target = await ownerOfUsername(app, params[0]!);
+		// Not yourself; when you are the only admin the database's own guard answers with the last-admin refusal.
+		if (to === "suspended" && target === p.ownerId && (await app.db.anonymous(async (tx) => (await tx.query("SELECT count(*)::int AS n FROM pim_app.admin_roster WHERE owner_id <> $1", [target])).rows[0].n)) > 0) throw new RefusedError("You can't suspend your own account.", "self");
+		await app.identity.setStatus(p, target, to, to === "suspended" ? "suspended by an admin" : "");
 		return ok({});
 	};
 
@@ -53,12 +56,6 @@ export function screenRoutes(env: Env): Route[] {
 
 	return [
 		// ---- accounts ----
-		route("GET", "/api/admin/accounts", async ({ app, principal, url }) => {
-			await admin(app, await principal(), "admin:accounts");
-			const limit = Math.min(Math.max(Number(url.searchParams.get("limit") ?? 100) || 100, 1), 1000);
-			const rows = await app.db.anonymous(async (tx) => (await tx.query("SELECT owner_id, username, role, status, created_at, activated_at, status_reason FROM pim_app.accounts WHERE status <> 'deleted' ORDER BY created_at LIMIT $1", [limit])).rows);
-			return ok({ accounts: rows.map(member) });
-		}),
 		route("POST", "/api/admin/accounts/:username/suspend", status("suspended")),
 		route("POST", "/api/admin/accounts/:username/unsuspend", status("active")),
 		route("POST", "/api/admin/accounts/:username/setup-link", async ({ app, principal, params, origin }) => {
@@ -113,27 +110,22 @@ export function screenRoutes(env: Env): Route[] {
 		route("POST", "/api/admin/providers", async ({ app, principal, json }) => {
 			const p = await principal();
 			await admin(app, p, "admin:providers");
-			const b = await json();
-			const kind = b.api === "anthropic-messages" ? "anthropic" : PROVIDER_KINDS.includes(b.builtin) ? b.builtin : "openai_compatible";
-			const created = await app.providers.create(p, { kind, name: String(b.name ?? b.builtin ?? kind), config: { url: b.url ?? "", chosen: b.models ?? null, structuredOutput: !!b.structuredOutput, ...(b.api ? { api: b.api } : {}), ...(b.builtin ? { builtin: b.builtin } : {}), ...(b.overrides ? { overrides: b.overrides } : {}), shared: true }, ...(b.key ? { apiKey: String(b.key) } : {}) });
+			const input = await toServiceInput(await json());
+			const created = await app.providers.create(p, { kind: input.kind, ...(input.name ? { name: input.name } : {}), ...(input.apiKey ? { apiKey: input.apiKey } : {}), config: { ...input.config, shared: true } });
 			return ok({ provider: saved(created) }, 201);
 		}),
 		route("PUT", "/api/admin/providers/:id", async ({ app, principal, params, json }) => {
 			const p = await principal();
 			await admin(app, p, "admin:providers");
-			const b = await json();
-			const config: Record<string, unknown> = {};
-			if ("url" in b) config.url = b.url;
-			if ("models" in b) config.chosen = b.models;
-			if ("structuredOutput" in b) config.structuredOutput = !!b.structuredOutput;
-			if ("api" in b) config.api = b.api;
-			if ("overrides" in b) config.overrides = b.overrides;
-			const updated = await app.providers.update(p, params[0]!, { ...(typeof b.name === "string" ? { name: b.name } : {}), config, ...("key" in b ? { apiKey: b.key ? String(b.key) : null } : {}) });
-			return ok({ provider: saved(updated) });
+			const existing = (await app.providers.list(p)).find((r) => r.id === params[0] && r.config.shared === true);
+			if (!existing) throw new NotFoundError("No such shared provider");
+			const input = await toServiceInput(await json(), existing);
+			return ok({ provider: saved(await app.providers.update(p, params[0]!, input)) });
 		}),
 		route("DELETE", "/api/admin/providers/:id", async ({ app, principal, params }) => {
 			const p = await principal();
 			await admin(app, p, "admin:providers");
+			if (!(await app.providers.list(p)).some((r) => r.id === params[0] && r.config.shared === true)) throw new NotFoundError("No such shared provider");
 			await app.providers.remove(p, params[0]!);
 			return deleted();
 		}),
@@ -165,13 +157,6 @@ export function screenRoutes(env: Env): Route[] {
 			await setSetting(app, CUSTOM_APPS_KEY, list.filter((c) => c.id !== id));
 			return deleted();
 		}),
-		// This deployment has no built-in apps to switch.
-		route("GET", "/api/admin/builtin-apps", async ({ app, principal }) => (await admin(app, await principal(), "admin:apps"), ok({ apps: [] }))),
-		route("PUT", "/api/admin/builtin-apps/:id", async ({ app, principal }) => {
-			await admin(app, await principal(), "admin:apps");
-			throw new NotFoundError("No such built-in app");
-		}),
-
 		// ---- managed compute and the computer host: not part of this deployment yet ----
 		route("GET", "/api/admin/compute", async ({ app, principal }) => {
 			await admin(app, await principal(), "admin:compute");
@@ -189,8 +174,8 @@ export function screenRoutes(env: Env): Route[] {
 
 /** A provider as adding or changing it answers (`SavedProvider`): never its key. */
 function saved(p: { id: string; name: string; hasKey: boolean; config: Record<string, unknown> }) {
-	const c = p.config as { url?: string; chosen?: string[] | null; structuredOutput?: boolean; api?: string; builtin?: string; overrides?: Record<string, unknown> };
-	return { id: p.id, ...(c.builtin ? { builtin: c.builtin } : {}), name: p.name, url: c.url ?? "", hasKey: p.hasKey, chosen: c.chosen ?? null, models: [], ...(c.structuredOutput ? { structuredOutput: true } : {}), ...(c.api ? { api: c.api } : {}), ...(c.overrides ? { overrides: c.overrides } : {}) };
+	const c = p.config as { url?: string; baseUrl?: string; chosen?: string[] | null; structuredOutput?: boolean; api?: string; builtin?: string; overrides?: Record<string, unknown> };
+	return { id: p.id, ...(c.builtin ? { builtin: c.builtin } : {}), name: p.name, url: c.baseUrl ?? c.url ?? "", hasKey: p.hasKey, chosen: c.chosen ?? null, models: [], ...(c.structuredOutput ? { structuredOutput: true } : {}), ...(c.api ? { api: c.api } : {}), ...(c.overrides ? { overrides: c.overrides } : {}) };
 }
 
 /** The coding pools Forge keeps, in the web app's shape. They go before Forge's own `/api/admin/coding` routes, which answer in Forge's. */

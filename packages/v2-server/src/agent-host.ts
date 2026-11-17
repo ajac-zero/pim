@@ -188,12 +188,17 @@ export function createAgentHost(options: AgentHostOptions) {
 
 	/** The owner's providers: what the catalog offers, with their keys opened once, so a model call never waits on the application's database. */
 	async function buildModels(ownerId: string): Promise<Models> {
-		const rows = (await db.read<{ p: ProviderRow[] }>(ownerId, "SELECT pim_app.runner_providers($1) AS p", [ownerId]).catch(() => ({ rows: [{ p: [] as ProviderRow[] }] }))).rows[0]!.p;
+		const own = (await db.read<{ p: ProviderRow[] }>(ownerId, "SELECT pim_app.runner_providers($1) AS p", [ownerId]).catch(() => ({ rows: [{ p: [] as ProviderRow[] }] }))).rows[0]!.p;
+		// What an admin shared with everyone is in every catalog as `shared:<id>`, its key opened under the admin's owner id as it was sealed. An admin's own list leaves it out.
+		const sharedRows = (await db.read<{ p: (ProviderRow & { owner: string })[] }>(ownerId, "SELECT pim_app.shared_providers(true) AS p").catch(() => ({ rows: [{ p: [] as (ProviderRow & { owner: string })[] }] }))).rows[0]!.p;
+		const context = new Map<string, string>(sharedRows.map((r) => [`shared:${r.id}`, `provider:${r.owner}/${r.id}`]));
+		const rows: ProviderRow[] = [...own.filter((r) => r.config.shared !== true), ...sharedRows.map((r) => ({ id: `shared:${r.id}`, kind: r.kind, config: r.config, secret: r.secret }))];
 		const keys = new Map<string, string>();
 		for (const row of rows) {
 			if (!row.secret || !options.crypto) continue;
 			try {
-				keys.set(row.id, await openString(options.crypto, row.secret, row.shared ? `provider:_instance/${row.id.slice(SHARED.length)}` : `provider:${ownerId}/${row.id}`));
+				// An admin's shared provider is sealed under the admin; one promoted from v1's deployment under `_instance`; the owner's own under them.
+				keys.set(row.id, await openString(options.crypto, row.secret, context.get(row.id) ?? (row.shared ? `provider:_instance/${row.id.slice(SHARED.length)}` : `provider:${ownerId}/${row.id}`)));
 			} catch {
 				// A key sealed under a key this process does not hold stays unavailable, and the provider with it.
 			}

@@ -349,6 +349,16 @@ const inputCommand: CommandHandler = async (resident, command, context) => {
 	const conversation = await conversationOf(resident, command, context);
 	const content = (command.payload.content ?? command.payload.text) as Input | undefined;
 	if (content === undefined) throw new CommandRejected(`Command ${command.commandId} has no content`);
+	// The chat's model is read again before each message, so a model chosen for this chat alone (or the agent's, or Settings') is the next turn's.
+	if (command.kind === "user_message" && command.publicChatId !== undefined && resident.runner.chatAgent !== undefined) {
+		try {
+			const wanted = (await resident.runner.chatAgent(resident.ownerId, command.publicChatId)).model;
+			const current = (await conversation.agent(context)).model;
+			if (wanted != null && (wanted.provider !== current?.provider || wanted.modelId !== current?.modelId)) await conversation.configure({ model: wanted }, context);
+		} catch (error) {
+			resident.runner.report(error);
+		}
+	}
 	const whenBusy = command.payload.whenBusy as "steer" | "followUp" | "reject" | undefined;
 	await conversation.submit({ type: "input", content, requestId: command.piRequestId, ...(whenBusy === undefined ? {} : { whenBusy }) }, context);
 };

@@ -42,6 +42,8 @@ export type RunnerContext = {
 	memories: { id: string; scope: string; title: string }[];
 	contacts: { id: string; name: string; about: string }[];
 	fallbacks: ModelRef[];
+	/** The model the person chose for this chat alone (migration 0670); it comes before the agent's own. */
+	chat_model?: ModelRef | null;
 };
 
 export type AgentHostOptions = {
@@ -255,8 +257,8 @@ export function createAgentHost(options: AgentHostOptions) {
 	};
 	const chatAgent: NonNullable<RunnerOptions["chatAgent"]> = async (ownerId, chat) => {
 		const c = await readContext(ownerId, chat ?? null).catch(() => undefined);
-		const own = c?.agent ? [asModelRef(c.agent.config.model), ...((c.agent.config.fallbacks ?? []) as unknown[]).map(asModelRef)] : [];
-		return { model: await choose(ownerId, [...own, await chosenModel(ownerId), ...(c?.fallbacks ?? []).map(asModelRef)]) };
+		const own = c?.agent ? [asModelRef(c.chat_model), asModelRef(c.agent.config.model), ...((c.agent.config.fallbacks ?? []) as unknown[]).map(asModelRef)] : [];
+		return { model: await choose(ownerId, [...(c?.agent ? [] : [asModelRef(c?.chat_model)]), ...own, await chosenModel(ownerId), ...(c?.fallbacks ?? []).map(asModelRef)]) };
 	};
 
 	return { harnessOptions, homeRoot, chatAgent };

@@ -2,7 +2,9 @@
  * What a chat offers beside the model: the abilities extensions give, the widgets a chat shows, and the suggestions it starts from.
  */
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { CompactionEntry, CompactionTask, type ConversationId, defineExtension, type Extension, hook, InboxDoc, type TaskId } from "@earendil-works/pi-durable";
+import type { Message } from "@earendil-works/pi-ai";
+import { estimateContextTokens } from "@earendil-works/pi-ai/utils/estimate";
+import { CompactionEntry, CompactionTask, type ConversationId, DEFAULT_COMPACTION_POLICY, defineExtension, type Extension, hook, InboxDoc, type TaskId } from "@earendil-works/pi-durable";
 import { type PiModel, PiHarness } from "agents/harness/pi";
 import { digestHex } from "../auth/store";
 import { ASSISTANT_STARTERS } from "../extensions/assistant";
@@ -274,23 +276,66 @@ export class Abilities {
 	 * stays as it is, and a new chat that opens with its summary is the one the conversation goes on in:
 	 * the sidebar lists it in the place of the chat it carries on, which is archived. That happens once
 	 * the chat is at rest, so nothing it was still saying is left behind; until then it runs on.
-	 * A run that already overflowed is still compacted in place, to go on.
+	 * A run that already overflowed is still compacted in place, to go on, and so is a chat that
+	 * has reached its window while it waits: it is not let grow past what its model, and the
+	 * space's memory, can hold.
 	 */
 	continuationExtension() {
 		return defineExtension({
 			name: CONTINUATION_EXTENSION,
 			hooks: [
 				hook(CompactionTask, {
-					beforeCompact: async ({ reason }, api) => {
+					beforeCompact: async ({ reason, messages }, api) => {
 						const session = String(api.conversationId);
 						// Chats the person talks in alone; tasks', rooms' and visits' stay as they were.
 						if (reason === "manual" || this.host.hiddenSessions().has(session) || this.host.visits.bySession(session) || this.host.rooms.seats(session).length > 0) return undefined;
+						if (reason === "overflow") return undefined;
+						if (await this.#full(session)) {
+							// Summarized here, from as much of the chat as fits the model, so a chat that is already far too long is compacted too.
+							const summary = await this.#summarize(session, messages, "compact it");
+							return summary === "" ? undefined : { summary };
+						}
 						if (!this.host.store.isContinued(session)) this.#carryOn(session);
-						return reason === "overflow" ? undefined : { decline: true as const };
+						return { decline: true as const };
 					},
 				}),
 			],
 		});
+	}
+
+	/** Whether a chat already fills its window, so its next request would not fit: where pi compacts before the request instead of beside it. */
+	async #full(session: string): Promise<boolean> {
+		const chosen = this.host.sessionModel(session);
+		const model = this.host.modelCatalog().getModel(chosen.provider, chosen.id);
+		if (model === undefined) return false;
+		const { messages } = await (await this.host.harness.conversation(session)).context(BACKGROUND_CONTEXT);
+		// Pim compacts with pi's own policy.
+		return estimateContextTokens(messages).tokens > model.contextWindow - DEFAULT_COMPACTION_POLICY.reserveTokens;
+	}
+
+	/** A summary of a chat's messages by its own model, from the latest of them that fit its window; empty when it could not be written. */
+	async #summarize(session: string, messages: readonly Message[], purpose: string): Promise<string> {
+		const chosen = this.host.sessionModel(session);
+		const catalog = this.host.modelCatalog();
+		const model = catalog.getModel(chosen.provider, chosen.id);
+		if (model === undefined) {
+			console.warn(`summarizing chat ${session} to ${purpose} failed: model ${chosen.provider}/${chosen.id} is not available`);
+			return "";
+		}
+		const answer = await catalog.completeSimple(
+			model,
+			{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: [{ role: "user", content: summaryRequest(messages, Math.floor(model.contextWindow * 3)), timestamp: Date.now() }] },
+			{ maxTokens: Math.min(8_192, model.maxTokens > 0 ? model.maxTokens : 8_192), signal: AbortSignal.timeout(300_000) },
+		);
+		const summary =
+			answer.stopReason === "stop"
+				? answer.content
+						.flatMap((part) => (part.type === "text" ? [part.text] : []))
+						.join("\n")
+						.trim()
+				: "";
+		if (summary === "") console.warn(`summarizing chat ${session} to ${purpose} failed: ${answer.errorMessage ?? answer.stopReason}`);
+		return summary;
 	}
 
 	#carryOn(session: string): void {
@@ -328,29 +373,8 @@ export class Abilities {
 			const view = await (await harness.conversation(session)).context(BACKGROUND_CONTEXT);
 			const tail = view.entries.at(-1)?.id;
 			if (tail === undefined || view.messages.length === 0) return;
-			const chosen = this.host.sessionModel(session);
-			const catalog = this.host.modelCatalog();
-			const model = catalog.getModel(chosen.provider, chosen.id);
-			if (model === undefined) {
-				console.warn(`summarizing chat ${session} to carry it on failed: model ${chosen.provider}/${chosen.id} is not available`);
-				return;
-			}
-			const answer = await catalog.completeSimple(
-				model,
-				{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: [{ role: "user", content: summaryRequest(view.messages, Math.floor(model.contextWindow * 3)), timestamp: Date.now() }] },
-				{ maxTokens: Math.min(8_192, model.maxTokens > 0 ? model.maxTokens : 8_192), signal: AbortSignal.timeout(300_000) },
-			);
-			const summary =
-				answer.stopReason === "stop"
-					? answer.content
-							.flatMap((part) => (part.type === "text" ? [part.text] : []))
-							.join("\n")
-							.trim()
-					: "";
-			if (summary === "") {
-				console.warn(`summarizing chat ${session} to carry it on failed: ${answer.errorMessage ?? answer.stopReason}`);
-				return;
-			}
+			const summary = await this.#summarize(session, view.messages, "carry it on");
+			if (summary === "") return;
 			if (this.#done(session) || !(await this.#resting(session))) continue;
 			if ((await (await harness.conversation(session)).context(BACKGROUND_CONTEXT)).entries.at(-1)?.id !== tail) continue;
 			await this.#startContinuation(session, summary);

@@ -27,6 +27,26 @@ import { conversationText, type StructuredUtilityTask, type UtilityTask, withJso
 import { UsageMeter } from "../usage";
 import { type OwnerStatus, type AiEnv, UTILITY_MODEL_KEY, OWN_PROVIDERS_KEY, SHARED_PROVIDERS_KEY, sameModel, errorMessage } from "./shared";
 
+/**
+ * The most a chat holds before it is compacted or carried on, whatever its model's window. All of a
+ * space's chats live in its one Durable Object, whose memory holds a few chats of this size at once
+ * but not chats of a million tokens: those reset it again and again, cutting off every run in it.
+ */
+export const CHAT_CONTEXT_LIMIT = 200_000;
+
+/** The catalog with each model's window as far as `CHAT_CONTEXT_LIMIT`: what pi compacts against, and what a chat's summary is cut to. */
+function withChatContextLimit(models: Models): Models {
+	const limited = (model: Model<Api> | undefined) => (model && model.contextWindow > CHAT_CONTEXT_LIMIT ? { ...model, contextWindow: CHAT_CONTEXT_LIMIT } : model);
+	// `Models` keeps private state: everything else runs on the original.
+	return new Proxy(models, {
+		get(target, property) {
+			if (property === "getModel") return (provider: string, id: string) => limited(target.getModel(provider, id));
+			const value = Reflect.get(target, property, target);
+			return typeof value === "function" ? value.bind(target) : value;
+		},
+	});
+}
+
 /** What wakes the chats held on a subscription's usage limit once its cooldown ends (see ./provider-cooldowns.ts). */
 export const COOLDOWN_CALLBACK = "retryAfterCooldown";
 
@@ -211,12 +231,14 @@ export class SpaceModels {
 			this.#models = this.host.models();
 			this.#syncProviders();
 			this.#ownCatalog = this.host.images.resolving(this.host.usage.meter(this.#models));
-			this.host.catalogKept = failingOver(this.#ownCatalog, {
-				cooldowns: this.host.providerCooldowns,
-				subscription: (provider) => this.subscription(provider),
-				fallback: (provider, sessionId) => this.host.fallbackModel(provider, sessionId === undefined ? undefined : this.host.providerSessions.get(sessionId)),
-				cooled: (cooldown) => this.#cooled(cooldown),
-			});
+			this.host.catalogKept = withChatContextLimit(
+				failingOver(this.#ownCatalog, {
+					cooldowns: this.host.providerCooldowns,
+					subscription: (provider) => this.subscription(provider),
+					fallback: (provider, sessionId) => this.host.fallbackModel(provider, sessionId === undefined ? undefined : this.host.providerSessions.get(sessionId)),
+					cooled: (cooldown) => this.#cooled(cooldown),
+				}),
+			);
 		}
 		return this.host.catalogKept;
 	}

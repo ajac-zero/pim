@@ -46,8 +46,8 @@ class Inert extends DurableObject<Env> {
 		if (!known) throw new Error(`No such table: ${table}`);
 		const quoted = `"${table.replace(/"/g, '""')}"`;
 		const bounded = Math.max(1, Math.min(limit, 2000));
-		// Tables with a rowid are paged by it; WITHOUT ROWID tables (cf_agents_jobs) are small and paged by offset over their key.
-		const cursor = known.withoutRowid ? sql.exec(`SELECT * FROM ${quoted} ORDER BY ${known.pk.map((c) => `"${c}"`).join(", ")} LIMIT ? OFFSET ?`, bounded, after) : sql.exec(`SELECT rowid AS "__rowid", * FROM ${quoted} WHERE rowid > ? ORDER BY rowid LIMIT ?`, after, bounded);
+		// Tables with a rowid are paged by it, `after` being the first rowid still to read (a row can have rowid 0: optmem_log's first memory does); WITHOUT ROWID tables (cf_agents_jobs) are small and paged by offset over their key.
+		const cursor = known.withoutRowid ? sql.exec(`SELECT * FROM ${quoted} ORDER BY ${known.pk.map((c) => `"${c}"`).join(", ")} LIMIT ? OFFSET ?`, bounded, after) : sql.exec(`SELECT rowid AS "__rowid", * FROM ${quoted} WHERE rowid >= ? ORDER BY rowid LIMIT ?`, after, bounded);
 		const rows: Record<string, unknown>[] = [];
 		let last = after;
 		for (const row of cursor) {
@@ -58,7 +58,7 @@ class Inert extends DurableObject<Env> {
 			}
 			rows.push(out);
 		}
-		return { rows, next: known.withoutRowid ? after + rows.length : last, done: rows.length < bounded };
+		return { rows, next: known.withoutRowid ? after + rows.length : rows.length === 0 ? after : last + 1, done: rows.length < bounded };
 	}
 	async fenceKv(startAfter: string | undefined, limit: number) {
 		const entries = await this.ctx.storage.list({ limit, ...(startAfter === undefined ? {} : { startAfter }) });

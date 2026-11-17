@@ -62,14 +62,40 @@ export function parseCredential(stored: string): { bearer: string; bundle: OAuth
 	return { bearer: stored, bundle: null };
 }
 
-async function refresh(bundle: OAuthBundle, fetcher: typeof fetch, now: number): Promise<OAuthBundle | null> {
-	if (!bundle.refresh_token || !bundle.token_endpoint) return null;
+/**
+ * Where an MCP server's sign-in takes refresh tokens, found the way the MCP authorization spec says: the server's protected-resource metadata names its authorization server
+ * (the server's own origin when it names none), whose metadata names the token endpoint. A credential brought from another Pim holds tokens but not this, since that Pim dropped it once
+ * the sign-in finished.
+ */
+export async function discoverTokenEndpoint(serverUrl: string, transport: Transport): Promise<string | null> {
+	// What the server names is as untrusted as the server: a private address is refused unless the deployment allows them.
+	const reach = async (url: string) => (transport.allowPrivate ? new URL(url) : await transport.check(url));
+	const get = async (url: string): Promise<Record<string, unknown> | null> => {
+		const response = await reach(url).then((target) => transport.fetch(target, { headers: { accept: "application/json" }, signal: AbortSignal.timeout(10_000), redirect: "manual" })).catch(() => null);
+		return response?.ok ? ((await response.json().catch(() => null)) as Record<string, unknown> | null) : null;
+	};
+	const origin = new URL(serverUrl).origin;
+	const resource = await get(`${origin}/.well-known/oauth-protected-resource${new URL(serverUrl).pathname.replace(/\/$/, "")}`) ?? (await get(`${origin}/.well-known/oauth-protected-resource`));
+	const issuers = Array.isArray(resource?.authorization_servers) ? (resource.authorization_servers as unknown[]).filter((x): x is string => typeof x === "string") : [];
+	for (const issuer of issuers.length > 0 ? issuers : [origin]) {
+		const root = new URL(issuer);
+		const path = root.pathname.replace(/\/$/, "");
+		const metadata = (await get(`${root.origin}/.well-known/oauth-authorization-server${path}`)) ?? (await get(`${root.origin}/.well-known/openid-configuration${path}`));
+		if (typeof metadata?.token_endpoint === "string") return metadata.token_endpoint;
+	}
+	return null;
+}
+
+async function refresh(bundle: OAuthBundle, transport: Transport, now: number, serverUrl: string): Promise<OAuthBundle | null> {
+	if (!bundle.refresh_token) return null;
+	const tokenEndpoint = bundle.token_endpoint ?? (await discoverTokenEndpoint(serverUrl, transport));
+	if (!tokenEndpoint) return null;
 	const body = new URLSearchParams({ grant_type: "refresh_token", refresh_token: bundle.refresh_token, ...(bundle.client_id ? { client_id: bundle.client_id } : {}), ...(bundle.client_secret ? { client_secret: bundle.client_secret } : {}) });
-	const response = await fetcher(bundle.token_endpoint, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" }, body, signal: AbortSignal.timeout(15_000), redirect: "manual" });
+	const response = await transport.fetch(transport.allowPrivate ? new URL(tokenEndpoint) : await transport.check(tokenEndpoint), { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" }, body, signal: AbortSignal.timeout(15_000), redirect: "manual" });
 	if (!response.ok) return null;
 	const t = (await response.json().catch(() => null)) as { access_token?: string; refresh_token?: string; expires_in?: number } | null;
 	if (!t?.access_token) return null;
-	return { ...bundle, access_token: t.access_token, refresh_token: t.refresh_token ?? bundle.refresh_token, ...(t.expires_in ? { expires_at: now + t.expires_in * 1000 } : {}) };
+	return { ...bundle, token_endpoint: tokenEndpoint, access_token: t.access_token, refresh_token: t.refresh_token ?? bundle.refresh_token, ...(t.expires_in ? { expires_at: now + t.expires_in * 1000 } : {}) };
 }
 
 // ---- the MCP client (streamable HTTP) ----
@@ -199,7 +225,7 @@ export function connectorToolset(deps: ConnectorToolsDeps): { tools: ToolRegistr
 		if (!crypto) throw new Error("This Runner has no keys (PIM_KEK_<id> and PIM_KEK_CURRENT), so it cannot open a connector's credential.");
 		const { bearer, bundle } = parseCredential(await openString(crypto, c.credential, `connector:${ownerId}/${c.id}`));
 		if (bundle && (force || (bundle.expires_at !== undefined && bundle.expires_at <= deps.now() + 30_000))) {
-			const renewed = await refresh(bundle, deps.transport.fetch, deps.now()).catch(() => null);
+			const renewed = await refresh(bundle, deps.transport, deps.now(), c.url).catch(() => null);
 			if (renewed) {
 				const sealed = await sealString(crypto, JSON.stringify(renewed), `connector:${ownerId}/${c.id}`);
 				await runtime.read(ownerId, "SELECT pim_app.runner_set_connector_credential($1, $2, $3)", [ownerId, c.id, sealed]);

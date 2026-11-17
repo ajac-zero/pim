@@ -74,7 +74,7 @@ const asModelRef = (v: unknown): ModelRef | null => {
 };
 
 /** A pi-ai provider for an OpenAI-compatible endpoint: a gateway, a local server, or an owner's own. A server without a key is sent a placeholder. */
-function compatibleProvider(id: string, name: string, baseUrl: string, models: { id: string; name?: string; contextWindow?: number; maxTokens?: number; reasoning?: boolean; images?: boolean }[], key: () => string | undefined): Provider {
+export function compatibleProvider(id: string, name: string, baseUrl: string, models: { id: string; name?: string; contextWindow?: number; maxTokens?: number; reasoning?: boolean; images?: boolean }[], key: () => string | undefined): Provider {
 	return createProvider({
 		id,
 		name,

@@ -54,6 +54,10 @@ export type ThreadRow = {
 	cancelState: "none" | "requested" | "cancelled" | "uncertain";
 	archivedAt: Date | null;
 	computeTornDownAt: Date | null;
+	/** Epoch milliseconds. */
+	createdAt: number;
+	updatedAt: number;
+	lastSeenAt: number | null;
 };
 
 export const toThread = (r: Row): ThreadRow => ({
@@ -87,6 +91,9 @@ export const toThread = (r: Row): ThreadRow => ({
 	cancelState: r.cancel_state,
 	archivedAt: r.archived_at,
 	computeTornDownAt: r.compute_torn_down_at,
+	createdAt: new Date(r.created_at).getTime(),
+	updatedAt: new Date(r.updated_at).getTime(),
+	lastSeenAt: r.last_seen_at ? new Date(r.last_seen_at).getTime() : null,
 });
 
 export type EventInput = { kind: string; role?: string | null; data?: object; costUsd?: number; tokensIn?: number; tokensOut?: number; sourceCursor?: string | null };

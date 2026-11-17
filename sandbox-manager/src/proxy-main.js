@@ -7,7 +7,7 @@ if (!token) {
 }
 // Node, as a container's PID 1, would otherwise ignore SIGTERM until Docker kills it after the stop timeout.
 for (const sig of ['SIGTERM', 'SIGINT']) process.on(sig, () => process.exit(0))
-const { proxy, admin } = createProxy({ adminToken: token })
+const { proxy, admin } = createProxy({ adminToken: token, internal: (process.env.EGRESS_INTERNAL_HOSTS ?? '').split(',').map((h) => h.trim()).filter(Boolean) })
 proxy.listen(Number(process.env.PROXY_PORT ?? 3128), '0.0.0.0')
 admin.listen(Number(process.env.PROXY_ADMIN_PORT ?? 3129), '0.0.0.0')
 console.log('egress-proxy listening')

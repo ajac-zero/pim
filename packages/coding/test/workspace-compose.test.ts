@@ -295,7 +295,7 @@ describe("ComposeWorkspaceProvider", () => {
 
 	it("accepts https, and http only to loopback or private hosts", () => {
 		const make = (managerUrl: string) => () => new ComposeWorkspaceProvider({ managerUrl, token: TOKEN });
-		for (const ok of ["https://manager.example", "http://localhost:8080", "http://127.0.0.1", "http://[::1]:8080", "http://10.1.2.3", "http://172.20.0.5:8080", "http://192.168.1.9"]) expect(make(ok), ok).not.toThrow();
+		for (const ok of ["https://manager.example", "http://localhost:8080", "http://127.0.0.1", "http://[::1]:8080", "http://10.1.2.3", "http://172.20.0.5:8080", "http://192.168.1.9", "http://sandbox-manager:8080"]) expect(make(ok), ok).not.toThrow();
 		for (const bad of ["http://manager.example", "http://8.8.8.8", "http://172.32.0.1", "http://192.169.0.1", "ftp://127.0.0.1", "not a url", "https://user:pw@manager.example"]) expect(make(bad), bad).toThrow();
 	});
 

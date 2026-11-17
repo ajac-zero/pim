@@ -11,6 +11,8 @@ const people: Record<string, any> = {
 	ada: { actor: { ownerId: "ada", role: "member" }, via: "session" },
 	adaToken: { actor: { ownerId: "ada", role: "member" }, via: "token" },
 	eve: { actor: { ownerId: "eve", role: "member" }, via: "session" },
+	bob: { actor: { ownerId: "bob", role: "member" }, via: "session" },
+	zed: { actor: { ownerId: "zed", role: "member" }, via: "session" },
 	guest: { actor: { ownerId: "gus", role: "guest" }, via: "session" },
 	root: { actor: { ownerId: "root", role: "admin" }, via: "session" },
 	rootToken: { actor: { ownerId: "root", role: "admin" }, via: "token" },
@@ -115,6 +117,7 @@ describe("coding vault and Gitea routes", () => {
 	let gitea: GiteaConnection;
 	let now = Date.now();
 	const grants = { refresh: 0, failRefresh: false };
+	const connected: string[] = [];
 	const call = async (who: string | null, method: string, path: string, body?: object) => {
 		const res = await handler(new Request(`https://pim.example.test${path}`, { method, headers: { ...(who ? { "x-user": who } : {}), "content-type": "application/json" }, body: body ? JSON.stringify(body) : undefined }));
 		return { status: res!.status, text: await res!.text() };
@@ -143,8 +146,8 @@ describe("coding vault and Gitea routes", () => {
 		});
 		await new Promise<void>((r) => giteaServer.listen(0, "127.0.0.1", r));
 		gitea = new GiteaConnection(s.db, crypto, { baseUrl: `http://127.0.0.1:${(giteaServer.address() as AddressInfo).port}`, clientId: "cid", clientSecret: "csecret", redirectUri: "https://pim.example.test/api/coding/gitea/callback" }, fetch, () => now);
-		const login = { start: async (o: string, h: string) => ({ started: h, o }), status: async () => ({ state: "waiting" }), cancel: async () => ({}), submitCode: async (_o: string, c: string) => ({ got: c }) };
-		handler = compose(codingVault({ vault, authenticate, login }), codingGitea({ gitea, authenticate }));
+		const login = { start: async (o: string, h: string) => ({ started: h, o }), status: async () => ({ state: "waiting" }), cancel: async () => ({}), submitCode: async (_o: string, _h: string, c: string) => ({ got: c }) };
+		handler = compose(codingVault({ vault, authenticate, login, connected: async (o, h) => void connected.push(`${o}:${h}`) }), codingGitea({ gitea, authenticate }));
 	});
 	afterAll(async () => {
 		giteaServer.closeAllConnections();
@@ -210,13 +213,17 @@ describe("coding vault and Gitea routes", () => {
 		expect(url.searchParams.get("code_challenge_method")).toBe("S256");
 		expect(url.searchParams.get("client_id")).toBe("cid");
 		const state = url.searchParams.get("state")!;
-		expect((await call("root", "GET", "/api/coding/gitea/callback?code=good-code&state=bogus")).status).toBe(400);
-		expect((await call("root", "GET", `/api/coding/gitea/callback?code=bad-code&state=${state}`)).status).toBe(400);
+		// The browser is sent back to the settings, which say how it went.
+		const back = async (q: string) => (await handler(new Request(`https://pim.example.test/api/coding/gitea/callback?${q}`, { headers: { "x-user": "root" }, redirect: "manual" })))!.headers.get("location");
+		expect(await back("code=good-code&state=bogus")).toContain("gitea=failed");
+		expect(await back(`code=bad-code&state=${state}`)).toContain("gitea=failed");
 		// A failed exchange used the state up.
-		expect((await call("root", "GET", `/api/coding/gitea/callback?code=good-code&state=${state}`)).status).toBe(400);
+		expect(await back(`code=good-code&state=${state}`)).toContain("gitea=failed");
+		expect(await back("error=access_denied")).toContain("gitea=denied");
+		expect((await call("ada", "GET", "/api/coding/gitea/authorize")).status).toBe(403);
 		const state2 = new URL(jsonOf(await call("root", "POST", "/api/coding/gitea/connect")).url).searchParams.get("state")!;
-		expect(jsonOf(await call("root", "GET", `/api/coding/gitea/callback?code=good-code&state=${state2}`))).toMatchObject({ connected: true, login: "pim-bot" });
-		expect(jsonOf(await call("ada", "GET", "/api/coding/gitea/status"))).toMatchObject({ connected: true, login: "pim-bot" });
+		expect(await back(`code=good-code&state=${state2}`)).toContain("gitea=connected");
+		expect(jsonOf(await call("ada", "GET", "/api/coding/gitea/status"))).toEqual({ configured: true, connected: true, login: "pim-bot", needsReconnect: false });
 		const sealed = (await s.pool.query("select sealed from pim_forge.forge_gitea_connection")).rows[0].sealed as Buffer;
 		expect(sealed.toString()).not.toContain("at-1");
 		expect(await gitea.accessToken()).toBe("at-1");
@@ -228,6 +235,29 @@ describe("coding vault and Gitea routes", () => {
 		expect(await gitea.accessToken()).toBeNull();
 		expect(jsonOf(await call("ada", "GET", "/api/coding/gitea/status"))).toMatchObject({ connected: false, needsReconnect: true });
 		expect((await call("ada", "POST", "/api/coding/gitea/disconnect")).status).toBe(403);
-		expect(jsonOf(await call("root", "POST", "/api/coding/gitea/disconnect")).login).toBeNull();
+		expect(jsonOf(await call("root", "DELETE", "/api/coding/gitea/connection")).login).toBeNull();
+	});
+
+	it("answers the status of a Gitea that isn't configured as off, and refuses the rest", async () => {
+		const bare = compose(codingGitea({ gitea: null, authenticate }));
+		const ask = async (method: string, path: string) => (await bare(new Request(`https://pim.example.test${path}`, { method, headers: { "x-user": "root" } })))!;
+		expect(await (await ask("GET", "/api/coding/gitea/status")).json()).toEqual({ configured: false, connected: false, login: null, needsReconnect: false });
+		expect((await ask("GET", "/api/coding/gitea/authorize")).status).toBe(404);
+	});
+
+	it("says one harness's status the way the web app reads it, cancels a sign-in without disconnecting, and tells the threads that waited", async () => {
+		const key = "sgamp_abcdefghijklmnop1234567890";
+		await call("bob", "PUT", "/api/coding/vault/amp/api-key", { apiKey: key });
+		expect(connected).toContain("bob:amp");
+		const one = jsonOf(await call("bob", "GET", "/api/coding/vault/amp"));
+		expect(one).toEqual({ harness: "amp", connected: true, updatedAt: expect.any(Number), byteLength: null });
+		// Cancelling a sign-in is not disconnecting.
+		await call("bob", "DELETE", "/api/coding/vault/codex/login");
+		expect(jsonOf(await call("bob", "GET", "/api/coding/vault/amp")).connected).toBe(true);
+		expect((await call("bob", "POST", "/api/coding/vault/codex/login/code", { code: "bad\ncode" })).status).toBe(400);
+		expect((await call("bob", "POST", "/api/coding/vault/amp/login")).status).toBe(404);
+		expect(jsonOf(await call("bob", "DELETE", "/api/coding/vault/amp")).connected).toBe(false);
+		// Another person's own status is their own.
+		expect(jsonOf(await call("zed", "GET", "/api/coding/vault/amp")).connected).toBe(false);
 	});
 });

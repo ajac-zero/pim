@@ -176,6 +176,12 @@ real("the default agent host", () => {
 		// Its state reads back through the tool, as the owner's.
 		await say("how is it going?", toolUse(fauxToolCall("coding_status", { thread: threads[0].thread_id })));
 		expect((await results("coding_status")).at(-1)).toContain(threads[0].thread_id);
+		// Push, pull request and merge are gated by their own permissions: the grant above holds merge but not push or pull request, and this thread has no workspace to merge from.
+		const id = threads[0].thread_id;
+		await say("ship it", toolUse(fauxToolCall("coding_push", { thread: id }), fauxToolCall("coding_open_pull_request", { thread: id, title: "Fix" }), fauxToolCall("coding_merge", { thread: id })));
+		expect((await results("coding_push")).at(-1)).toMatch(/coding:push/);
+		expect((await results("coding_open_pull_request")).at(-1)).toMatch(/coding:pr/);
+		expect((await results("coding_merge")).at(-1)).toMatch(/workspace/);
 	}, 120_000);
 	it("manages agents, skills, schedules and triggers, and hands a task to another agent", async () => {
 		await say("set things up", toolUse(fauxToolCall("create_agent", { name: "Poet", instructions: "Answer in verse." }), fauxToolCall("write_skill", { name: "haiku", description: "Write haiku", body: "Five, seven, five.", files: { "ref.md": "# ref" } })));

@@ -205,6 +205,13 @@ real("Forge's worker role with the Gate and Maintenance", () => {
 		});
 		expect(transcript.map((m) => m.role)).toEqual(["user", "assistant", "tool", "assistant"]);
 		expect(transcript.at(-1)!.text).toBe("Built it.");
+		// The web app reads the same thread in its own shapes: an id, a repository object, a held slot, a creator, the whole transcript, and the list.
+		const page = (await web.call("GET", `/api/coding/threads/${id}`)).json;
+		expect(page).toMatchObject({ id, state: "idle", harness: "pi", repo: { url: REPO }, slot: "held", pool: "default", createdBy: { type: "person" }, spentUsd: expect.any(Number), createdAt: expect.any(Number) });
+		expect(page).not.toHaveProperty("gatewayNonce");
+		expect((await web.call("GET", `/api/coding/threads/${id}/transcript`)).json.messages.at(-1).parts).toEqual([{ type: "text", text: "Built it." }]);
+		expect((await web.call("GET", "/api/coding/threads")).json.threads).toEqual([expect.objectContaining({ id, repo: REPO, state: "idle", lastSeenAt: null })]);
+		expect((await web.call("POST", `/api/coding/threads/${id}/seen`)).json).toEqual({ seen: true });
 		// The same start again is the same thread, over HTTP.
 		expect((await web.call("POST", "/api/coding/threads", { operationId: "role-pi", task: "Build the project", repo: REPO, harness: "pi", chat: chatId })).json).toMatchObject({ threadId: id, created: false });
 		await waitFor("the wake in the chat", async () => ((await chatHeard()).some((t) => t.includes(`Coding thread ${id} completed`)) ? true : undefined), 60_000);

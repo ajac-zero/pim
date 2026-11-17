@@ -2,7 +2,7 @@ import { DEFAULT_RESTORE_MB_PER_S } from "../environment-cache";
 import { egressPolicy, resumeOrCreate, unsupportedEgress, unsupportedSuspend } from "./egress";
 // The Docker Compose backend: a WorkspaceProvider that talks over HTTP to the sandbox-manager (spikes/coding-sandbox-manager), which runs one gVisor container per session. This file holds no Docker knowledge, only the manager's routes and how its answers map onto the provider contract.
 //
-// The manager is reached with a bearer token. The token is only ever sent in the Authorization header of requests to the manager: it is never logged, and it is scrubbed from the message of any error this file throws. The manager's URL must be https, unless its host is a loopback or private address (localhost, 127.0.0.0/8, ::1, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, fc00::/7, fe80::/10), where the traffic does not cross the public internet; and it may not carry a username or password.
+// The manager is reached with a bearer token. The token is only ever sent in the Authorization header of requests to the manager: it is never logged, and it is scrubbed from the message of any error this file throws. The manager's URL must be https, unless its host is a loopback or private address (localhost, a name with no dot such as a Compose service's, 127.0.0.0/8, ::1, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, fc00::/7, fe80::/10), where the traffic does not cross the public internet; and it may not carry a username or password.
 //
 // Routes used are the manager's own (sandbox-manager/README.md). What is worth knowing:
 // - Exec uses `/exec/stream`, so output arrives as the command prints it; aborting drops the connection, which makes the manager kill the command.
@@ -109,6 +109,8 @@ const RESUME_BACKOFF_MS = [500, 1000, 2000, 5000];
 function isLocalHost(host: string): boolean {
 	const h = host.replace(/^\[|\]$/g, "").toLowerCase();
 	if (h === "localhost" || h.endsWith(".localhost") || h === "::1") return true;
+	// A name with no dot, such as Compose's `sandbox-manager`, resolves only through the container network's own DNS.
+	if (/^[a-z0-9-]+$/.test(h) && !/^\d+$/.test(h)) return true;
 	const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
 	if (v4) {
 		const [a, b] = [Number(v4[1]), Number(v4[2])];

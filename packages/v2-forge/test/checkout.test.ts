@@ -38,6 +38,8 @@ describe("the sandbox's checkout through the broker", () => {
 		expect(files.get("/workspace/.config/pim/git/helper.mjs")).toContain("credential");
 		const flat = cmds.map((c) => c.join(" "));
 		expect(flat.some((c) => c.startsWith("git clone --quiet https://pim.example.test/api/coding/git/acme/app.git /workspace/repo"))).toBe(true);
+		// Git only names the repository to the credential helper with useHttpPath, and the helper only answers for its own repository.
+		expect(flat).toContain("git config --global credential.https://pim.example.test/api/coding/git/acme/app.git.useHttpPath true");
 		expect(flat.some((c) => c.includes("checkout --quiet release"))).toBe(true);
 		expect(flat.some((c) => c.includes(`checkout --quiet -B ${t.branch}`))).toBe(true);
 		expect(flat.some((c) => c.includes("pimgit_"))).toBe(false);

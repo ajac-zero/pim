@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { Context } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT, withAbortSignal } from "@earendil-works/chord/context";
 import {
@@ -17,7 +18,7 @@ import { ExternalOperations } from "./external.ts";
 import { assertDurability, type DurabilityProfile } from "./durability.ts";
 import { type AmbiguousCommit, OwnershipLost } from "./errors.ts";
 import { type Lease, Steward, type StewardOptions } from "./ownership.ts";
-import { assessInspection, liveDueTimes } from "./quiescence.ts";
+import { assessInspection, liveDueTimes, sleepUntil } from "./quiescence.ts";
 import { type Command, type DurableSignal, PartitionInbox } from "./signals.ts";
 import { PgPiStorage, reconcileAmbiguousCommit, type AmbiguousOutcome } from "./storage.ts";
 
@@ -42,7 +43,9 @@ export type RunnerEvent =
 	| { type: "signal"; ownerId: string; partitionId: string; key: string; result: "resumed" | "requested" | "terminal" | "settled" }
 	| { type: "operation"; ownerId: string; partitionId: string; operationId: string; state: string }
 	| { type: "command"; ownerId: string; partitionId: string; commandId: string; kind: string }
-	| { type: "drained"; ownerId: string; partitionId: string; handedOff: boolean };
+	| { type: "drained"; ownerId: string; partitionId: string; handedOff: boolean }
+	/** The run watchdog stopped a chat whose run made no progress, or a stop that did not end the run recycled the partition (`recycled`). */
+	| { type: "stalled"; ownerId: string; partitionId: string; conversationId: number; recycled: boolean };
 
 export type RunnerOptions = {
 	readonly db: Db;
@@ -62,6 +65,13 @@ export type RunnerOptions = {
 	readonly idleUnloadMs?: number;
 	/** A sleep, retry or poll at least this far away does not hold a partition; default 60 s. */
 	readonly longWaitMs?: number;
+	/**
+	 * How long a run may go without any visible progress (no task changing state, no live-document change) before the run watchdog stops it; 0 turns the watchdog off.
+	 * A run parked for an approval, a retry or a sleep is not stalled. Default 10 minutes.
+	 */
+	readonly stallMs?: number;
+	/** How long a stop (the person's, or the watchdog's) waits for the run to end before the partition is recycled: closed and handed to the next claim, whose recovery finishes the abort. Default 10 s. */
+	readonly abortGraceMs?: number;
 	/** The commit durability the deployment promises; checked against the server when the Runner starts. Default `strict`. */
 	readonly durability?: DurabilityProfile;
 	/** Claim only this owner's partitions; unset claims any (a shared Runner pool). */
@@ -99,6 +109,8 @@ export class ResidentPartition {
 	/** A signal whose task was not yet suspended when `resumeTask` ran: settled once the task has been seen to wait and wake, or to end. */
 	readonly #awaiting = new Map<number, { signal: DurableSignal; seenWaiting: boolean }>();
 	#seq = 0;
+	#watch: { fingerprint: string; since: number } | undefined;
+	#watchedAt = 0;
 
 	constructor(runner: Runner, lease: Lease) {
 		this.runner = runner;
@@ -178,11 +190,65 @@ export class ResidentPartition {
 		if (this.#disposed || this.#faulted !== undefined) return;
 		try {
 			const worked = await this.#deliver();
+			if (!this.#disposed) await this.#guard();
 			if (worked || this.#disposed) return;
 			await this.#considerRelease();
 		} catch (error) {
 			if (error instanceof OwnershipLost || this.#disposed || this.#faulted !== undefined) return;
 			this.runner.report(error);
+		}
+	}
+
+	/**
+	 * Abort a conversation's run and wait for it to end, but not forever: a run that ignores its abort signal (a tool that never returns, a stream that stalled) would hold
+	 * the partition's commands behind it. The abort mark is durable, so when the run has not ended within the grace the partition is recycled: its Harness is closed, the lease
+	 * handed off, and the next claim's recovery runs the abort handlers of what was marked.
+	 */
+	async stopRun(conversation: Conversation, context: Context): Promise<void> {
+		const aborted = conversation.abort(context).then(() => true);
+		aborted.catch(() => {});
+		const grace = this.runner.abortGraceMs;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const ended = await Promise.race([aborted, new Promise<false>((resolve) => (timer = setTimeout(() => resolve(false), grace)))]);
+		clearTimeout(timer);
+		if (!ended) await this.recycle(Number(conversation.id));
+	}
+
+	/** Give the partition up while a run is stuck in it: nothing waits for the stuck work, and its writes are fenced once the next owner takes the partition. */
+	async recycle(conversationId: number): Promise<void> {
+		if (this.#disposed) return;
+		this.runner.emit({ type: "stalled", ownerId: this.ownerId, partitionId: this.partitionId, conversationId, recycled: true });
+		void this.dispose("recycled").catch(() => {});
+		await this.runner.steward.handOff(this.lease, "a stopped run did not end");
+	}
+
+	/** The run watchdog: a run whose tasks and live document have not changed for `stallMs` is stopped. */
+	async #guard(): Promise<void> {
+		const stallMs = this.runner.stallMs;
+		const now = this.runner.clock();
+		if (stallMs <= 0 || now - this.#watchedAt < Math.min(stallMs / 4, 5_000)) return;
+		this.#watchedAt = now;
+		const inspection = await this.#harness.inspect(this.context);
+		const running = inspection.tasks.filter((t) => ["running", "ready", "completing"].includes(t.state.kind) && !((sleepUntil(t.record.state.checkpoint) ?? 0) > now));
+		if (running.length === 0) {
+			this.#watch = undefined;
+			return;
+		}
+		const conversations = [...new Set(running.map((t) => t.record.conversationId as number))].sort((a, b) => a - b);
+		const parts: unknown[] = running.map((t) => [t.record.id, t.state.kind]);
+		for (const id of conversations) parts.push(await this.#harness.snapshot(LiveDoc, id as ConversationId, this.context));
+		const fingerprint = createHash("sha256").update(JSON.stringify(parts)).digest("hex");
+		if (this.#watch?.fingerprint !== fingerprint) {
+			this.#watch = { fingerprint, since: now };
+			return;
+		}
+		if (now - this.#watch.since < stallMs) return;
+		this.#watch = undefined;
+		for (const id of conversations) {
+			if (this.#disposed) return;
+			this.runner.emit({ type: "stalled", ownerId: this.ownerId, partitionId: this.partitionId, conversationId: id, recycled: false });
+			const conversation = await this.#harness.conversation(id as ConversationId, this.context);
+			if (conversation) await this.stopRun(conversation, this.context);
 		}
 	}
 
@@ -369,7 +435,7 @@ const signalCommand: CommandHandler = async (resident, command, context) => {
 };
 
 const abortCommand: CommandHandler = async (resident, command, context) => {
-	await (await conversationOf(resident, command, context)).abort(context);
+	await resident.stopRun(await conversationOf(resident, command, context), context);
 };
 
 const handoffCommand: CommandHandler = async (resident, command, context) => {
@@ -433,6 +499,8 @@ export class Runner {
 	readonly admission: ModelAdmission | undefined;
 	readonly commands: Readonly<Record<string, CommandHandler>>;
 	readonly longWaitMs: number;
+	readonly stallMs: number;
+	readonly abortGraceMs: number;
 	readonly idleUnloadMs: number;
 	readonly assessEveryMs: number;
 	readonly maxResident: number;
@@ -457,6 +525,8 @@ export class Runner {
 		this.admission = options.admission === undefined ? undefined : new ModelAdmission(options.admission);
 		this.commands = options.commands ?? {};
 		this.longWaitMs = options.longWaitMs ?? 60_000;
+		this.stallMs = options.stallMs ?? 600_000;
+		this.abortGraceMs = options.abortGraceMs ?? 10_000;
 		this.idleUnloadMs = options.idleUnloadMs ?? 30_000;
 		this.assessEveryMs = Math.max(50, Math.floor((options.pollMs ?? 500) * 2));
 		this.maxResident = options.maxResident ?? 64;

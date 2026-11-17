@@ -8,7 +8,7 @@ import { assessInspection } from "../src/quiescence.ts";
 import { createTestDatabase, type TestDatabase } from "./support/pg.ts";
 import { uniqueOwner } from "./support/partition.ts";
 import { command } from "./support/commands.ts";
-import { createRig, latch, readTranscript, textOf, waitFor } from "./support/rig.ts";
+import { createRig, fauxToolCall, latch, readTranscript, textOf, waitFor } from "./support/rig.ts";
 
 let database: TestDatabase;
 beforeAll(async () => {
@@ -265,5 +265,59 @@ describe("one person's active chats", () => {
 		const partitionsWithChats = await database.db.read(ownerId, "SELECT DISTINCT partition_id FROM pim_runtime.conversations WHERE owner_id = $1", [ownerId]);
 		expect(partitionsWithChats.rowCount).toBe(10); // the home's root and nine families, each a conversation in its own partition
 		await Promise.all([runnerA.stop(), runnerB.stop()]);
+	});
+});
+
+describe("run guard and watchdog", () => {
+	const hang = () => fauxAssistantMessage(fauxToolCall("hang", {}), { stopReason: "toolUse" });
+	const toolResults = async (ownerId: string, partitionId: string) => (await readTranscript(database.db, ownerId, partitionId, 1)).filter((e) => e.kind === "pi.tool-result");
+
+	it("a stop ends a run stuck in a tool that ignores its abort, and the chat answers the next message", async () => {
+		const ownerId = uniqueOwner();
+		const rig = createRig(database.db, ownerId);
+		const home = await new PartitionDirectory(database.db).createPartition(ownerId, { kind: "home" });
+		rig.faux.setResponses([hang(), fauxAssistantMessage("after the stop")]);
+		const runner = rig.runner({ idleUnloadMs: 60_000, abortGraceMs: 500 });
+		await runner.start();
+		await command(runner.inbox, ownerId, home, "m1", 1, { content: "go" });
+		await waitFor("the tool to hang", () => rig.state.hangs > 0 || undefined);
+		await command(runner.inbox, ownerId, home, "stop", 1, {}, "abort");
+		await waitFor("the stop to complete", async () => (await database.db.read(ownerId, "SELECT 1 FROM pim_runtime.command_inbox WHERE owner_id = $1 AND command_id = 'stop' AND done_at IS NOT NULL", [ownerId])).rowCount === 1 || undefined);
+		expect(rig.events.some((e) => e.type === "stalled" && e.recycled)).toBe(true);
+		// The next claim's recovery settles the aborted tool call; the chat is free again.
+		await waitFor("the tool call to be settled as aborted", async () => ((await toolResults(ownerId, home)).some((e) => JSON.stringify(e).includes("was aborted")) ? true : undefined));
+		await command(runner.inbox, ownerId, home, "m2", 1, { content: "again" });
+		await waitFor("the next message to be answered", async () => (await readTranscript(database.db, ownerId, home, 1)).some((e) => textOf(e) === "after the stop"));
+		expect(rig.state.hangs).toBe(1);
+		await runner.stop();
+	});
+
+	it("the watchdog stops a run that makes no progress, and leaves a run parked for a decision alone", async () => {
+		const ownerId = uniqueOwner();
+		const rig = createRig(database.db, ownerId);
+		const home = await new PartitionDirectory(database.db).createPartition(ownerId, { kind: "home" });
+		rig.faux.setResponses([fauxAssistantMessage(fauxToolCall("gate", {}), { stopReason: "toolUse" })]);
+		const runner = rig.runner({ idleUnloadMs: 60_000, stallMs: 600, abortGraceMs: 500 });
+		await runner.start();
+		await command(runner.inbox, ownerId, home, "m1", 1, { content: "ask" });
+		await waitFor("the gate to run", () => rig.state.gateRuns[0]);
+		await new Promise((resolve) => setTimeout(resolve, 2_500));
+		expect(rig.events.some((e) => e.type === "stalled")).toBe(false); // waiting on a person is not a stall
+		expect(await toolResults(ownerId, home)).toHaveLength(0);
+		await runner.stop();
+
+		const stuckOwner = uniqueOwner();
+		const stuck = createRig(database.db, stuckOwner);
+		const stuckHome = await new PartitionDirectory(database.db).createPartition(stuckOwner, { kind: "home" });
+		stuck.faux.setResponses([hang(), fauxAssistantMessage("recovered")]);
+		const second = stuck.runner({ idleUnloadMs: 60_000, stallMs: 600, abortGraceMs: 500 });
+		await second.start();
+		await command(second.inbox, stuckOwner, stuckHome, "m1", 1, { content: "go" });
+		await waitFor("the tool to hang", () => stuck.state.hangs > 0 || undefined);
+		await waitFor("the watchdog to stop the run", () => stuck.events.some((e) => e.type === "stalled") || undefined, 20_000);
+		await waitFor("the tool call to be settled as aborted", async () => ((await toolResults(stuckOwner, stuckHome)).some((e) => JSON.stringify(e).includes("was aborted")) ? true : undefined), 20_000);
+		await command(second.inbox, stuckOwner, stuckHome, "m2", 1, { content: "again" });
+		await waitFor("the chat to answer again", async () => (await readTranscript(database.db, stuckOwner, stuckHome, 1)).some((e) => textOf(e) === "recovered"));
+		await second.stop();
 	});
 });

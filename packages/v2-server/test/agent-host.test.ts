@@ -129,6 +129,8 @@ real("the default agent host", () => {
 		expect(prompts).toHaveLength(1);
 		const shown = await transcript();
 		expect(shown).toContain("<agent>");
+		// Every agent is told that only send_to_user reaches the person; without it models answer in plain text the chat never shows.
+		expect(shown).toMatch(/<agent>[\s\S]*only what you send with `send_to_user`/);
 		expect(shown).toContain("anibal");
 		expect(shown).toMatch(/<active_goals>[\s\S]*Run a 5k[\s\S]*Run 2k/);
 		expect(shown).toMatch(/<memory>[\s\S]*Tea/);

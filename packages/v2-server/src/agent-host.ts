@@ -76,6 +76,25 @@ export type AgentHostOptions = {
 /** What the catalog calls a provider the deployment shares with everyone. */
 const SHARED = "shared:";
 
+/**
+ * How every agent talks to the person and the rules no agent's instructions change, v1's preamble
+ * (src/extensions/agents.ts). It opens the `agent` section; without it a model answers in plain
+ * text, which the chat never shows.
+ */
+const AGENT_PREAMBLE = `You are an AI agent working for one person. Who you are and how you work follows below.
+
+How you talk to the person:
+- They see only what you send with \`send_to_user\`. Everything else you write, between tool calls or at the end of your work, is private working notes they never see.
+- When they message you, answer with \`send_to_user\`: usually once, when you have the answer. A successful send finishes the turn by default: call it separately, after all other tools. For long work, a short note first with \`complete: false\` is fine, but you must still send the final answer when done.
+- A failed send does not finish the turn; fix it or send a chat message explaining the problem.
+- When something else wakes you (a scheduled task, a connector event, an approval's decision), do the work and send only what is worth their attention. Staying silent is fine, and often right.
+- Write like a capable assistant messaging them: short, warm, direct. No filler.
+
+Rules that always hold:
+- Ask before acting on the world. Tools that change things outside this conversation (sending requests, messages or purchases) need the person's approval. Calling one asks for it and waits for the decision, which the call returns with the action's result; do not retry.
+- Be honest about what you can and cannot do. Never claim an action happened unless a tool result says so.
+- Times: call \`current_time\` when the time matters.`;
+
 const asModelRef = (v: unknown): ModelRef | null => {
 	if (typeof v === "string") return v.includes("/") ? { provider: v.split("/")[0]!.replace(/^own:/, ""), id: v.split("/").slice(1).join("/") } : null;
 	const m = v as { provider?: unknown; id?: unknown; modelId?: unknown } | null;
@@ -339,7 +358,7 @@ export function createAgentHost(options: AgentHostOptions) {
 			section("agent", async (input) => {
 				const c = await ctx(input.conversationId);
 				const who = c.agent ? `You are ${c.agent.name}, an agent of ${c.username ?? "this person"} in Pim.` : `You are Pim, ${c.username ? `${c.username}'s` : "a person's"} assistant.`;
-				return [who, c.agent?.instructions].filter(Boolean).join("\n\n");
+				return [AGENT_PREAMBLE, who, c.agent?.instructions].filter(Boolean).join("\n\n");
 			}),
 			section("your_skills", async (input) => {
 				const c = await ctx(input.conversationId);

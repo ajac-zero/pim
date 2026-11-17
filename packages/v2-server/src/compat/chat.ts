@@ -4,7 +4,6 @@
  * These routes are tried before the application's own, so where one answers a path that both do, the app's shape wins.
  */
 import { type Reply, type Route, route } from "@pim/v2-app/http";
-import type { Pool } from "pg";
 import { accountRoutes } from "./chat-account.ts";
 import { fileRoutes } from "./chat-files.ts";
 import { memoryRoutes } from "./chat-memory.ts";
@@ -31,13 +30,11 @@ function diagramPage(origin: string): Reply {
 	};
 }
 
-export function chatRoutes(pool: Pool): Route[] {
-	return [
-		...accountRoutes(),
-		...sessionRoutes(pool),
-		...memoryRoutes(),
-		...fileRoutes(),
-		...triggerRoutes(),
-		route("GET", "/api/diagram", async ({ origin }) => diagramPage(origin)),
-	];
-}
+export const chatRoutes: Route[] = [
+	...accountRoutes(),
+	...sessionRoutes(),
+	...memoryRoutes(),
+	...fileRoutes(),
+	...triggerRoutes(),
+	route("GET", "/api/diagram", async ({ origin }) => diagramPage(origin)),
+];

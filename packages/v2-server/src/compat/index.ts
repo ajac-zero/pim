@@ -5,7 +5,9 @@
  */
 import type { Route } from "@pim/v2-app/http";
 import { bootRoutes } from "./boot.ts";
+import { chatRoutes } from "./chat.ts";
 
 export const webCompatRoutes: Route[] = [
 	...bootRoutes,
+	...chatRoutes,
 ];

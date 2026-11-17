@@ -11,7 +11,6 @@ import { BadRequestError, CapabilityUnavailableError, ConflictError, NotFoundErr
 import { ok, type Route, route } from "@pim/v2-app/http";
 import type { Principal } from "@pim/v2-contracts/identity";
 import { transcriptPage } from "@pim/v2-live/projections/snapshots";
-import type { Pool } from "pg";
 
 const ms = (value: Date | string | null | undefined): number | null => (value ? new Date(value).getTime() : null);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -75,7 +74,7 @@ const taskView = (r: any) => ({
 const FAMILY = `WITH RECURSIVE family(chat) AS (
 	SELECT $1::uuid UNION SELECT t.task_chat FROM pim_app.tasks t JOIN family f ON t.started_by = f.chat WHERE t.task_chat IS NOT NULL)`;
 
-export function sessionRoutes(pool: Pool): Route[] {
+export function sessionRoutes(): Route[] {
 	const gone = () => {
 		throw new ConflictError("That message is no longer in the queue", "not_queued");
 	};
@@ -157,7 +156,7 @@ export function sessionRoutes(pool: Pool): Route[] {
 			await app.identity.authz.enforce(p, "api:read");
 			const row = (await app.db.owner(p.ownerId, async (tx) => (await tx.query(`${TASKS} WHERE t.task_id = $1 AND t.started_by = $2`, [params[1]!, chatId(params[0]!)])).rows))[0];
 			if (!row) throw new NotFoundError("No such task");
-			const messages = row.task_chat ? (await transcriptPage(pool, p.ownerId, row.task_chat as string)).messages : [];
+			const messages = row.task_chat ? (await transcriptPage(app.db.pool, p.ownerId, row.task_chat as string)).messages : [];
 			return ok({ ...taskView(row), messages });
 		}),
 		route("POST", "/api/sessions/:id/tasks/:task/cancel", async ({ app, principal, params }) => {

@@ -7,6 +7,7 @@ import { connect as connectApp } from "@pim/v2-app/db";
 import { createGate } from "@pim/v2-app/gate";
 import { MemoryObjectStore } from "@pim/v2-app/objects";
 import { adminCompatRoutes } from "../src/compat/admin.ts";
+import { hostRoutes } from "../src/hostops/routes.ts";
 import { createStack, type Stack } from "./support/stack.ts";
 
 describe("the web app's apps, gallery and admin routes", () => {
@@ -28,7 +29,7 @@ describe("the web app's apps, gallery and admin routes", () => {
 		await app.identity.setRegistrationOpen({ kind: "user", ownerId: ada.ownerId, role: "admin", sessionId: "s" }, true);
 		const bob = await app.identity.register({ username: "bob" });
 		for (const [name, a] of [["ada", ada], ["bob", bob]] as const) people[name] = { ownerId: a.ownerId, token: await app.identity.createSession(a.ownerId) };
-		server = createGate(app, { first: adminCompatRoutes });
+		server = createGate(app, { first: [...hostRoutes(), ...adminCompatRoutes] });
 		await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
 		base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
 	}, 120_000);
@@ -120,7 +121,8 @@ describe("the web app's apps, gallery and admin routes", () => {
 		expect((await call("bob", "GET", "/api/app-directory")).json.apps).toEqual([]);
 		expect((await call("ada", "GET", "/api/admin/compute")).json).toMatchObject({ providers: [], quota: { maxConcurrentWorkspaces: null } });
 		expect((await call("ada", "GET", "/api/admin/computer-host")).json).toMatchObject({ paired: false, connected: false });
-		expect((await call("ada", "POST", "/api/admin/computer-host")).status).toBe(501);
+		// Pairing it is the computer host's own tests (computer-host.test.ts): a member cannot.
+		expect((await call("bob", "POST", "/api/admin/computer-host")).status).toBe(403);
 		const sign = (await call("ada", "GET", "/api/admin/sign-in")).json.providers;
 		expect(sign.map((p: any) => p.id)).toEqual(["google", "github", "oidc"]);
 		const provider = (await call("ada", "POST", "/api/admin/providers", { name: "Local", url: "http://x/v1", key: "sk-secret" })).json.provider;

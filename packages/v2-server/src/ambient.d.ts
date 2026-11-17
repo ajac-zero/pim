@@ -2,8 +2,10 @@
 // Fetch types the Workers runtime declares). The v2 server runs on Node, whose own types cover the values; these stand in for the few names that only the Workers types declare,
 // so the package typechecks without them (and without their clashes with Node's).
 declare interface SqlStorage {
-	exec<T = any>(query: string, ...bindings: any[]): { toArray(): T[]; one(): T; [Symbol.iterator](): Iterator<T> };
+	exec<T = any>(query: string, ...bindings: any[]): { toArray(): T[]; one(): T; rowsWritten: number; [Symbol.iterator](): Iterator<T> };
 }
+declare type SqlStorageValue = ArrayBuffer | string | number | null;
+declare type RequestInfo = string | URL | Request;
 declare type BodyInit = NonNullable<RequestInit["body"]>;
 declare type CryptoKey = import("node:crypto").webcrypto.CryptoKey;
 declare type BufferSource = ArrayBufferView | ArrayBuffer;

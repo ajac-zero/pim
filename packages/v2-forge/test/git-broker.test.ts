@@ -91,6 +91,37 @@ describe("git broker over smart HTTP", () => {
 		expect(hostRef(`refs/heads/${t.branch}`)).toBeTruthy();
 	});
 
+	it("takes a fast-forward of the thread's branch but refuses a force push, leaving the branch and no staging refs behind", async () => {
+		const t = await thread();
+		const dir = sandbox();
+		const push = s.credentials.gitToken(t, { repo: "acme/app", scope: "push" });
+		expect((await git(dir, push, "clone", url(), "w")).status).toBe(0);
+		const w = join(dir, "w");
+		await git(w, null, "checkout", "-b", t.branch!);
+		const commit = async (file: string) => {
+			execFileSync("sh", ["-c", `echo ${file} > ${file}`], { cwd: w });
+			await git(w, null, "add", ".");
+			await git(w, null, "commit", "-m", file);
+			return (await git(w, null, "rev-parse", "HEAD")).stdout.trim();
+		};
+		await commit("one.txt");
+		expect((await git(w, push, "push", "origin", `HEAD:refs/heads/${t.branch}`)).status).toBe(0);
+		const two = await commit("two.txt");
+		const ff = await git(w, push, "push", "origin", `HEAD:refs/heads/${t.branch}`);
+		expect(ff.status, ff.stderr).toBe(0);
+		expect(hostRef(`refs/heads/${t.branch}`)).toBe(two);
+		expect((await s.store.get(t.threadId))!.lastPushedSha).toBe(two);
+		// Rewrite history and force it: refused, and the branch stays where it was.
+		await git(w, null, "reset", "--hard", "HEAD~2");
+		await commit("other.txt");
+		const forced = await git(w, push, "push", "--force", "origin", `HEAD:refs/heads/${t.branch}`);
+		expect(forced.status).not.toBe(0);
+		expect(forced.stderr).toMatch(/fast-forward|403|rejected/i);
+		expect(hostRef(`refs/heads/${t.branch}`)).toBe(two);
+		expect((await s.store.get(t.threadId))!.lastPushedSha).toBe(two);
+		expect(execFileSync("git", ["--git-dir", s.bare, "for-each-ref", "refs/heads/pim-staging"], { encoding: "utf8" }).trim()).toBe("");
+	});
+
 	it("checks the thread's state on every request: abort, archive and suspension cut a token off at once", async () => {
 		const dir = sandbox();
 		const ok = async (tok: string) => (await git(dir, tok, "ls-remote", url())).status === 0;

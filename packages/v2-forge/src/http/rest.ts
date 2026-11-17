@@ -7,7 +7,15 @@ import { type Db, type Row } from "../db";
 import { type ForgeStore } from "../store";
 import { type Authenticate, type Handler, guarded, json, match, notGuest, readJson } from "./common";
 
-export type RestDeps = { forge: Forge; scheduler: ForgeScheduler; store: ForgeStore; db: Db; authenticate: Authenticate };
+export type RestDeps = {
+	forge: Forge;
+	scheduler: ForgeScheduler;
+	store: ForgeStore;
+	db: Db;
+	authenticate: Authenticate;
+	/** Run each person's requests under their own row-level security scope, as the Gate's database role requires; pool changes then leave promotion to the worker. */
+	scoped?: boolean;
+};
 
 const num = (v: string | null) => (v === null || v === "" ? undefined : Number(v));
 const str = (v: unknown, what: string) => {
@@ -16,7 +24,6 @@ const str = (v: unknown, what: string) => {
 };
 
 export function codingRest(d: RestDeps): Handler {
-	const { forge } = d;
 	return async (req) => {
 		const url = new URL(req.url);
 		const path = url.pathname;
@@ -30,6 +37,7 @@ export function codingRest(d: RestDeps): Handler {
 				return pools(d, req, m.id, caller.actor.ownerId);
 			}
 			const { actor } = notGuest(caller);
+			const forge = d.scoped ? d.forge.scopedTo(actor.ownerId) : d.forge;
 			const get = req.method === "GET";
 			const post = req.method === "POST";
 			if ((m = match("/api/coding/threads", path))) {
@@ -115,7 +123,7 @@ async function pools(d: RestDeps, req: Request, id: string | undefined, admin: s
 		const existed = (await d.db.query("select 1 from pim_forge.forge_pools where pool_id = $1", [id])).rows.length > 0;
 		await d.scheduler.upsertPool({ poolId: id, provider: str(b.provider, "provider"), size: b.size, priority: Number.isInteger(b.priority) ? b.priority : 0, enabled: b.enabled !== false });
 		await audit(existed ? "pim.sandbox_pool_changed" : "pim.sandbox_pool_added", id);
-		await d.scheduler.promote(id);
+		if (!d.scoped) await d.scheduler.promote(id);
 		return json(200, { id });
 	}
 	if (req.method === "DELETE" && id) {

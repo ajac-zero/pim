@@ -79,3 +79,39 @@ export async function migrate(db: Db): Promise<string[]> {
 	}
 	return applied;
 }
+
+/**
+ * A `Db` whose every statement runs in a transaction that has first set `pim.owner_id` (with `set_config(…, true)`, so it ends with the transaction and is safe behind PgBouncer).
+ * It is what a process whose database role is subject to row-level security (the Gate's) uses for an owner's requests: the policies on `pim_forge` show it that owner's rows and no other's.
+ */
+export function scopedDb(db: Db, ownerId: string): Db {
+	const scope = async (c: Queryable) => void (await c.query("select set_config('pim.owner_id', $1, true)", [ownerId]));
+	return {
+		async query(text, values) {
+			const client = await db.connect();
+			try {
+				await client.query("begin");
+				await scope(client);
+				const r = await client.query(text, values);
+				await client.query("commit");
+				return r as never;
+			} catch (error) {
+				await client.query("rollback").catch(() => {});
+				throw error;
+			} finally {
+				client.release();
+			}
+		},
+		async connect() {
+			const client = await db.connect();
+			return {
+				query: async (text: string, values?: readonly unknown[]) => {
+					const r = await client.query(text, values);
+					if (text.trim().toLowerCase() === "begin") await scope(client);
+					return r;
+				},
+				release: () => client.release(),
+			} as never;
+		},
+	};
+}

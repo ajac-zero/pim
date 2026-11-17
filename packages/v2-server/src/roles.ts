@@ -13,11 +13,6 @@ import { S3ObjectStore } from "@pim/v2-app/objects";
 import { attachSockets } from "@pim/v2-app/sockets";
 import { runnerMayStart } from "@pim/v2-ops/backup/reconcile";
 import { createPimMetrics, instrumentPool, monitorEventLoop } from "@pim/v2-ops/observability/signals";
-import { codingRest } from "@pim/v2-forge/http/rest";
-import { compose } from "@pim/v2-forge/http/index";
-import { codingVault } from "@pim/v2-forge/http/vault";
-import { modelGateway } from "@pim/v2-forge/http/gateway";
-import { ForgeVault } from "@pim/v2-forge/vault";
 import { Projector } from "@pim/v2-live/projections/projector";
 import { LiveHub } from "@pim/v2-live/server/hub";
 import { LogStore } from "@pim/v2-live/server/log-store";
@@ -28,7 +23,7 @@ import { Runner, type RunnerOptions } from "@pim/v2-runtime/runner";
 import pg from "pg";
 import { CommandRelay } from "./command-relay.ts";
 import { deliverCosts } from "./deliveries.ts";
-import { assembleForge } from "./forge-assembly.ts";
+import { assembleForge, forgeHttp, startForgeLoops } from "./forge-assembly.ts";
 import { combineSources, forgeOutboxSource } from "./forge-source.ts";
 import { deliverForgeWakes } from "./forge-wakes.ts";
 import { codingAdminRoutes, forgeAuthenticator, forgeRoutes, projectedTranscripts, snapshotRoutes } from "./gate-extras.ts";
@@ -88,17 +83,11 @@ export async function startGate(config: ProcessConfig, env: Env, host: Host, nat
 	if (nats) publishRevocations(app, nats);
 	deliverApprovalDecisions(app);
 	const secure = config.publicUrl.startsWith("https:");
-	const forge = assembleForge(db.pool as never, objects, env);
+	const forge = assembleForge(db.pool as never, objects, env, crypto, { scoped: true });
 	mirrorCodingGrants(app, forge.authz as never);
 	const authenticate = forgeAuthenticator(app, secure);
-	// The rest of Forge's HTTP surface: a person's harness logins, sealed under the deployment's keys; and the model gateway, only where the deployment holds a provider key.
-	// The git broker and the Gitea connection need a git host and a Gitea configuration this process does not build: they are not mounted.
-	const gatewayKeys: Record<string, string | undefined> = { anthropic: env.PIM_CODING_ANTHROPIC_API_KEY, openai: env.PIM_CODING_OPENAI_API_KEY };
-	const coding = compose(
-		codingRest({ forge: forge.forge, scheduler: forge.scheduler, store: forge.store, db: forge.db, authenticate }),
-		codingVault({ vault: new ForgeVault(forge.db, app.crypto as never), authenticate }),
-		gatewayKeys.anthropic || gatewayKeys.openai ? modelGateway({ credentials: forge.credentials, store: forge.store, key: async (_thread, family) => (gatewayKeys[family] ? { apiKey: gatewayKeys[family]! } : null) }) : null,
-	);
+	// Forge's whole HTTP surface (the coding API, harness logins, the git broker, Gitea, the model gateway), each request under its owner's row-level security scope.
+	const coding = forgeHttp(forge, { authenticate, crypto: app.crypto });
 	const options = { publicUrl: config.publicUrl, ...(env.PIM_APPS_ORIGIN ? { appsOrigin: env.PIM_APPS_ORIGIN } : {}), routes: [...snapshotRoutes(db.pool), ...codingAdminRoutes(), ...forgeRoutes(coding)] };
 	const gate = createGate(app, options);
 	const listener = gate.listeners("request")[0] as (req: never, res: never) => void;
@@ -236,10 +225,16 @@ export async function startRunner(config: ProcessConfig, env: Env, host: Host, h
 export async function startForge(config: ProcessConfig, env: Env, host: Host, hooks: Hooks): Promise<Role> {
 	const forgePool = instrumentPool(pool(config, "forge"), metricsOf(host), "forge", "forge");
 	monitorEventLoop(metricsOf(host), "forge");
-	const parts = assembleForge(forgePool as never, s3Of(config, env), env);
+	const parts = assembleForge(forgePool as never, s3Of(config, env), env, keyringFromProcessEnv(env));
 	host.readiness(async () => (await forgePool.query("SELECT 1"), true));
-	void hooks;
-	return { name: "forge", close: () => forgePool.end() };
+	const stop = await startForgeLoops(parts, { databaseUrl: config.databaseUrl, pollMs: hooks.pollMs });
+	return {
+		name: "forge",
+		async close() {
+			await stop();
+			await forgePool.end();
+		},
+	};
 }
 
 /** Maintenance: what moves work between schemas that no single service may touch, with the grants only this role holds: Forge's wakes into the chats that started threads, and Forge's costs into the ledger. */
@@ -247,7 +242,7 @@ export async function startMaintenance(config: ProcessConfig, env: Env, host: Ho
 	const maint = instrumentPool(pool(config, "maintenance"), metricsOf(host), "maintenance", "maintenance");
 	monitorEventLoop(metricsOf(host), "maintenance");
 	const objects = s3Of(config, env);
-	const parts = assembleForge(maint as never, objects, env);
+	const parts = assembleForge(maint as never, objects, env, keyringFromProcessEnv(env));
 	const runtime = new RuntimeDb(maint);
 	const { PartitionInbox } = await import("@pim/v2-runtime/signals");
 	const inbox = new PartitionInbox(runtime);

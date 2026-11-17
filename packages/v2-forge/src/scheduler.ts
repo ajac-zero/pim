@@ -18,7 +18,7 @@ export class ForgeScheduler {
 	constructor(
 		private readonly db: Db,
 		private readonly store: ForgeStore,
-		private readonly clock: () => number = Date.now,
+		readonly clock: () => number = Date.now,
 	) {}
 
 	private at = (ms: number) => new Date(ms);
@@ -108,15 +108,24 @@ export class ForgeScheduler {
 		await q.query("insert into pim_forge.forge_compute_usage (owner_id, thread_id, provider, began_at, reason) values ($1,$2,$3,$4,'slot')", [ownerId, threadId, provider, at]);
 	}
 
+	/** Promotes in every pool: fills slots freed by a caller that couldn't, and expires overdue waiters (the 30-minute deadline). */
+	async sweep(): Promise<string[]> {
+		const pools = (await this.db.query<Row>("select pool_id from pim_forge.forge_pools")).rows.map((r) => r.pool_id as string);
+		const out: string[] = [];
+		for (const p of pools) out.push(...(await this.promote(p)));
+		return out;
+	}
+
 	/** Frees the thread's slot, ends its compute stretch and admits the next waiting threads. */
-	async release(threadId: string, reason = "released"): Promise<string[]> {
+	async release(threadId: string, reason = "released", o: { promote?: boolean } = {}): Promise<string[]> {
 		const poolId = await tx(this.db, async (q) => {
 			const slot = (await q.query<Row>("delete from pim_forge.forge_slots where thread_id = $1 returning pool_id", [threadId])).rows[0];
 			await q.query("delete from pim_forge.forge_queue where thread_id = $1", [threadId]);
 			await q.query("update pim_forge.forge_compute_usage set ended_at = $2, reason = $3 where thread_id = $1 and ended_at is null", [threadId, this.at(this.clock()), reason]);
 			return slot?.pool_id as string | undefined;
 		});
-		return poolId ? this.promote(poolId) : [];
+		// A caller that sees only one owner's rows (the Gate) leaves promotion to the worker's sweep, which sees them all.
+		return poolId && o.promote !== false ? this.promote(poolId) : [];
 	}
 
 	/** Expires overdue queue entries (requeue once, then fail), then fills free slots in FIFO order. Returns the threads that got a slot. */
@@ -168,6 +177,11 @@ export class ForgeScheduler {
 
 	async markBusy(threadId: string): Promise<void> {
 		await this.db.query("update pim_forge.forge_slots set idle_since = null where thread_id = $1", [threadId]);
+	}
+
+	/** Threads whose slot has been idle for the grace period, oldest first; the worker gives their sandboxes back (`ForgeWorker.reap`), which frees the slots. */
+	async idleCandidates(): Promise<string[]> {
+		return (await this.db.query<Row>("select thread_id from pim_forge.forge_slots where idle_since is not null and idle_since <= $1 order by idle_since", [this.at(this.clock() - IDLE_SLOT_GRACE_MS)])).rows.map((r) => r.thread_id as string);
 	}
 
 	/** Releases every slot idle for the grace period; the caller also tears down those workspaces. */

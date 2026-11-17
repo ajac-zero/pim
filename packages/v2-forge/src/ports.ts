@@ -92,6 +92,8 @@ export interface GitHost {
 	openPullRequest(repo: string, branch: string, base: string, title: string): Promise<{ url: string; number: number }>;
 	/** The diff of `branch` against the default branch as the host has it (for remote orbs); null when the branch is not on the host. */
 	remoteDiff(repo: string, branch: string): Promise<string | null>;
+	/** Whether `ancestor` is reachable from `descendant`, a commit the host already has: how the broker tells a fast-forward from a force. A host that can't say leaves this out, and the broker then takes only a branch's first push. */
+	isAncestor?(repoUrl: string, ancestor: string, descendant: string): Promise<boolean>;
 	/** Deletes a branch on the host; a separate explicit operation from archiving. */
 	deleteBranch(repo: string, branch: string): Promise<void>;
 	/** Whether the branch exists on the host. */

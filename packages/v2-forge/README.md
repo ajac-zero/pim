@@ -31,12 +31,17 @@ Forge depends on `@pim/v2-contracts`: `codingThreadId`, the `ForgeCompletionWake
 
 Portable `(req: Request) => Promise<Response | null>` handlers, composed with `compose`; the host supplies `authenticate` (Gate owns sessions and tokens). `rest.ts` (`/api/coding/threads*`, repo settings, `/api/admin/coding/pools`), `git-broker.ts` (smart HTTP in front of the git host), `gateway.ts` (`pimgw_` model gateway with budget, caps and usage charging), `vault.ts` (`/api/coding/vault/*`, `/api/coding/gitea/*`).
 
+## The worker, row-level security and the force-push rule
+
+- `ForgeWorker.dispatch` starts steps without waiting (a turn takes minutes; a lease is renewed while one runs), `reap` gives back a sandbox idle for two minutes (autosave, delete, free the slot; the next turn provisions again and restores from the bundle), and `ForgeScheduler.sweep` promotes waiters and expires the 30-minute deadlines. `packages/v2-server/src/forge-assembly.ts` assembles all of it from the environment and runs the loops (`startForgeLoops`: a poll, a `pg_notify('pim_forge_work')` wake, the stall check).
+- Migration `0406` turns on row-level security for `pim_gate` on the owner-keyed tables (`forge_threads`, `forge_vault`, `forge_repo_settings`) and on what hangs off a thread. A Gate request runs under `scopedDb(db, owner)` (`Forge.scopedTo`, `Credentials` with `scoped`, the handlers' `scope`), so a query that forgot its owner returns nothing. The worker and maintenance roles see every owner's rows. Grants, quotas and standing approvals are the admin's records and carry no owner policy.
+- The broker takes a branch's first push as it is and an update only as a fast-forward: the pack goes up under a staging ref, the host says whether the old tip leads to the new commit (`GitHost.isAncestor`), and only then does the branch move (an empty pack, guarded by the old tip) and the staging ref go. A force push, a delete, another branch and the default branch are refused.
+
 ## Not here
 
 - The vendor CLIs' own sign-in flow (`/login`): the routes call a `LoginFlows` port a deployment wires and answer 503 without it.
 - A pool-level environment build/snapshot (`/environment/rebuild`): the scheduler deduplicates builds, but nothing builds one yet.
 - The gateway's catalog prices: it takes a `price` function and defaults to the family's dearest.
 - A production `EnvelopeCrypto`, the `@pim/v2-contracts` Gate wiring and row-level security.
-- Force-push detection in the broker: a sandbox can only update its own branch, but a non-fast-forward of it reaches the host.
 
 Tests run against a real PostgreSQL (`embedded-postgres`, started once by `test/global-setup.ts`): `pnpm --filter @pim/v2-forge test`. The sandbox manager is the `@pim/coding` fake manager, vendor CLIs are its fixtures, Amp and Gitea are local `http.createServer` mocks, and the git host is `git http-backend`.

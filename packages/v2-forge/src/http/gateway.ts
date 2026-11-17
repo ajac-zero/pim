@@ -34,7 +34,7 @@ const ROUTES: Record<string, { family: GatewayFamily; path: string; charged: boo
 	"openai/v1/chat/completions": { family: "openai", path: "/v1/chat/completions", charged: true },
 };
 
-export type GatewayDeps = { credentials: Credentials; store: ForgeStore; key: GatewayKey; price?: GatewayPrice; fetch?: typeof fetch; now?: () => number; limits?: Partial<GatewayLimits> };
+export type GatewayDeps = { credentials: Credentials; store: ForgeStore; /** The store as one owner's requests see it (row-level security); the Gate's. */ scope?: (ownerId: string) => ForgeStore; key: GatewayKey; price?: GatewayPrice; fetch?: typeof fetch; now?: () => number; limits?: Partial<GatewayLimits> };
 
 /** What a call used, read from the provider's answer: a JSON body, or the events of a stream. */
 export function usageOf(text: string): { model: string | null; usage: TokenUsage | null } {
@@ -96,7 +96,8 @@ export function modelGateway(d: GatewayDeps): Handler {
 			if (e instanceof ForbiddenError) return /family/.test(e.reason) ? refuse(403, "forbidden", e.reason) : refuse(401, "invalid_token", "This gateway token isn't valid");
 			throw e;
 		}
-		const thread = (await d.store.get(who.threadId))!;
+		const store = d.scope?.(who.ownerId) ?? d.store;
+		const thread = (await store.get(who.threadId))!;
 		if (route.charged && thread.budgetUsd !== null && thread.spentUsd >= thread.budgetUsd) return refuse(402, "budget_exhausted", `This coding thread has spent its $${thread.budgetUsd} budget`);
 		if (Number(req.headers.get("content-length") ?? 0) > limits.maxBodyBytes) return refuse(413, "request_too_large", "The request is too big");
 		const gate = gates.get(thread.threadId) ?? { recent: [], inFlight: 0 };
@@ -144,7 +145,7 @@ export function modelGateway(d: GatewayDeps): Handler {
 				const usage = read.usage ?? { input: Math.ceil(body.length / 4), output: Math.ceil(copy.length / 4), cacheRead: 0, cacheWrite: 0 };
 				const model = read.model ?? "unknown";
 				const costUsd = await price(route.family, model, usage);
-				await d.store.locked(thread.threadId, (q) => d.store.appendEvent(q, thread.threadId, { kind: "model_call", costUsd, tokensIn: usage.input, tokensOut: usage.output, data: { via: "gateway", api: route.path, family: route.family, model, estimated: read.usage === null } })).catch(() => {});
+				await store.locked(thread.threadId, (q) => store.appendEvent(q, thread.threadId, { kind: "model_call", costUsd, tokensIn: usage.input, tokensOut: usage.output, data: { via: "gateway", api: route.path, family: route.family, model, estimated: read.usage === null } })).catch(() => {});
 			};
 			const tee = new TransformStream<Uint8Array, Uint8Array>({
 				transform(chunk, c) {

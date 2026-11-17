@@ -57,6 +57,10 @@ export class LocalGitHost implements GitHost {
 		return mergeBranch({ url: this.dir(repo) }, await this.defaultBranch(repo), branch);
 	}
 
+	async isAncestor(repo: string, ancestor: string, descendant: string): Promise<boolean> {
+		return run("git", ["--git-dir", this.dir(repo), "merge-base", "--is-ancestor", ancestor, descendant]).then(() => true, () => false);
+	}
+
 	async deleteBranch(repo: string, branch: string): Promise<void> {
 		await this.host(repo, "update-ref", "-d", `refs/heads/${branch}`);
 	}

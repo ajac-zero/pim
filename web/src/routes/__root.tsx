@@ -46,11 +46,19 @@ import { Toaster } from "~/components/ui/sonner";
 import { TooltipProvider } from "~/components/ui/tooltip";
 import { authSessionQuery } from "~/lib/auth";
 import { closeScreen } from "~/lib/computer-screen";
+import type { Session } from "~/lib/pim-api";
 import { pimClient } from "~/lib/pim-client";
 import { pushEnabled, pushSupported } from "~/lib/push";
 import { majordomoQuery } from "~/lib/queries";
 import { adoptOwner, wipeSavedQueries } from "~/lib/saved-queries";
+import {
+  onServerGeneration,
+  probeServer,
+  serverGeneration,
+} from "~/lib/server-capabilities";
 import { cn } from "~/lib/utils";
+import { fetchSidebar } from "~/lib/v2-link";
+import { sessionOf, upsertSession } from "~/lib/v2-view";
 
 export interface RouterContext {
   queryClient: QueryClient;
@@ -211,6 +219,7 @@ function SignedIn({
   useEffect(() => {
     if (!signedOut) return;
     pimClient.close();
+    pimClient.stopLive();
     closeScreen();
     void wipeSavedQueries(queryClient);
   }, [signedOut, queryClient]);
@@ -252,6 +261,16 @@ function usePimEvents() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const { sessionId } = useParams({ strict: false }) as { sessionId?: string };
+
+  // Which Pim this is decides whether chats come from the socket of each chat or from snapshots and the Live service; v2's sidebar follows it for as long as the app is open.
+  useEffect(() => {
+    void probeServer().then((generation) => {
+      if (generation === "v2") pimClient.followSidebar(true);
+    });
+    return onServerGeneration(() => {
+      if (serverGeneration() === "v2") pimClient.followSidebar(true);
+    });
+  }, []);
 
   useEffect(() => {
     pimClient.handlers = {
@@ -301,6 +320,20 @@ function usePimEvents() {
       onTasks: (session) => {
         queryClient.invalidateQueries({ queryKey: ["tasks", session] });
       },
+      // Pim v2: the sidebar is a snapshot kept current by the Live service's summaries, one chat's line at a time.
+      loadSidebar: async () => {
+        const { sessions, liveCursor } = await fetchSidebar();
+        queryClient.setQueryData(["sessions"], sessions);
+        return liveCursor;
+      },
+      onSidebarSummary: (row) =>
+        queryClient.setQueryData<Session[]>(["sessions"], (list) =>
+          upsertSession(list, sessionOf(row)),
+        ),
+      onCodingSummary: () =>
+        queryClient.invalidateQueries({ queryKey: ["coding", "threads"] }),
+      onUnauthorized: () =>
+        queryClient.invalidateQueries({ queryKey: ["auth", "session"] }),
       onComputer: () => {
         queryClient.invalidateQueries({ queryKey: ["computer"] });
         queryClient.invalidateQueries({ queryKey: ["files"] });

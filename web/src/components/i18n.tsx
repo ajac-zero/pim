@@ -136,6 +136,7 @@ const translations = {
     addAppTo: "Add to {agent}",
     scrollToMention: "Go to the message that mentions you",
     earlierMessages: "Show {count} earlier messages",
+    earlierMessagesMore: "Show earlier messages",
     suggestionHint: "Click to send. ⌘-click to edit first.",
     discover: "Discover",
     discoverDescription:
@@ -2201,6 +2202,7 @@ const translations = {
     addAppTo: "Añadir a {agent}",
     scrollToMention: "Ir al mensaje que te menciona",
     earlierMessages: "Mostrar {count} mensajes anteriores",
+    earlierMessagesMore: "Mostrar mensajes anteriores",
     suggestionHint: "Clic para enviar. ⌘-clic para editar antes.",
     discover: "Descubrir",
     discoverDescription:

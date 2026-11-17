@@ -16,6 +16,11 @@ import {
   type SessionView,
   type StreamState,
 } from "~/lib/pim-view";
+import {
+  onServerGeneration,
+  serverGeneration,
+} from "~/lib/server-capabilities";
+import { type V2Chat, type V2Handlers, V2Link } from "~/lib/v2-link";
 
 /**
  * The live connection to the session on screen. It lives outside React so
@@ -60,6 +65,8 @@ export type ClientState = {
   synced: boolean;
   /** The followed session's messages sent but not yet in the transcript, oldest first. */
   pending: readonly PendingSend[];
+  /** Pim v2 only: it holds older messages than the view has, and `loadEarlier` fetches the next page. */
+  earlier: boolean;
 };
 
 export type ClientHandlers = {
@@ -76,6 +83,13 @@ export type ClientHandlers = {
   /** Your computer was connected or removed, came online or went offline. */
   onComputer?: () => void;
   onSettings?: () => void;
+  /** Pim v2: reads the sidebar's snapshot into the lists, and says where to follow it from. */
+  loadSidebar?: V2Handlers["loadSidebar"];
+  /** Pim v2: a chat's line in the sidebar changed. */
+  onSidebarSummary?: V2Handlers["onSidebarSummary"];
+  onCodingSummary?: () => void;
+  /** Pim v2: access ended. */
+  onUnauthorized?: () => void;
 };
 
 /** A change to a file the app watches, as Pim reports it. */
@@ -143,8 +157,12 @@ export class PimClient {
     loaded: false,
     synced: false,
     pending: [],
+    earlier: false,
   };
   #stream: StreamState = EMPTY_STREAM;
+  /** Pim v2's link, once the server is known to be v2: HTTP snapshots and the Live service in place of the chat's own socket. */
+  #v2: V2Link | null = null;
+  #sidebarLive = false;
   /** The last stream state of chats followed before, by session. */
   #remembered = new Map<string, StreamState>();
   /** When each chat was last warmed. */
@@ -167,6 +185,105 @@ export class PimClient {
   #files = new Map<string, Set<(change: FileChange) => void>>();
   #canvas = new Set<(request: CanvasRequest) => void>();
   handlers: ClientHandlers = {};
+
+  constructor() {
+    // Learning the server is v2 while a chat is open: that chat moves to snapshots and the Live service.
+    onServerGeneration(() => {
+      if (serverGeneration() !== "v2") return;
+      this.#v2Link().followSidebar(this.#sidebarLive);
+      const session = this.#state.session;
+      if (session && !this.#v2Following) {
+        this.close();
+        this.open(session);
+      }
+    });
+  }
+
+  #v2Following = false;
+
+  #v2Link(): V2Link {
+    this.#v2 ??= new V2Link({
+      handlers: {
+        loadSidebar: () =>
+          this.handlers.loadSidebar?.() ?? Promise.resolve(null),
+        onSidebarSummary: (row) => this.handlers.onSidebarSummary?.(row),
+        onCodingSummary: () => this.handlers.onCodingSummary?.(),
+        onUnauthorized: () => this.handlers.onUnauthorized?.(),
+      },
+      onChat: (chat) => this.#chatArrived(chat),
+      onStatus: (status) =>
+        this.#set({
+          connection:
+            status === "live"
+              ? "open"
+              : status === "offline"
+                ? "closed"
+                : "connecting",
+        }),
+    });
+    return this.#v2;
+  }
+
+  /** Pim v2: the sidebar follows the live service for as long as the app is open. */
+  followSidebar(on: boolean) {
+    this.#sidebarLive = on;
+    if (serverGeneration() === "v2") this.#v2Link().followSidebar(on);
+  }
+
+  /** Pim v2: a chat's snapshot or a live update arrived: it shows at once, whatever the socket is doing. */
+  #chatArrived(chat: V2Chat) {
+    if (chat.session !== this.#state.session) return;
+    const before = this.#stream.view;
+    this.#stream = chat.stream;
+    this.#remember(chat.session, chat.stream);
+    this.#set({
+      view: chat.stream.view,
+      loaded: true,
+      synced: true,
+      earlier: chat.earlier,
+      pending: this.#placed(chat.session, before),
+    });
+    if (before.running !== chat.stream.view.running) {
+      this.handlers.onActivity?.(chat.session);
+    }
+  }
+
+  /** Signing out: the Live connection and what it followed go. */
+  stopLive() {
+    this.#sidebarLive = false;
+    this.#v2?.stop();
+    this.#v2 = null;
+    this.#v2Following = false;
+  }
+
+  /** Pim v2: fetches the next page of older messages. */
+  async loadEarlier() {
+    await this.#v2?.loadEarlier();
+  }
+
+  #openV2(session: string) {
+    if (this.#state.session === session && this.#v2Following) return;
+    if (this.#state.session) this.#warmed.delete(this.#state.session);
+    // Whatever chat socket there was is let go: this one is not a socket of its own.
+    if (this.#retry) clearTimeout(this.#retry);
+    this.#retry = null;
+    this.#drop();
+    const remembered = this.#remembered.get(session);
+    this.#stream = remembered ?? EMPTY_STREAM;
+    this.#v2Following = true;
+    const link = this.#v2Link();
+    this.#set({
+      session,
+      view: this.#stream.view,
+      loaded: remembered !== undefined,
+      synced: false,
+      earlier: false,
+      pending: this.#pending.get(session) ?? [],
+      connection: link.status === "live" ? "open" : "connecting",
+    });
+    link.followSidebar(this.#sidebarLive);
+    link.followChat(session);
+  }
 
   /**
    * Hears of changes to a file of yours, and of how it is as soon as the
@@ -233,6 +350,7 @@ export class PimClient {
   /** Follows `session`, dropping whatever was followed before. */
   open(session: string) {
     this.#listen();
+    if (serverGeneration() === "v2") return this.#openV2(session);
     if (this.#state.session === session && this.#socket) return;
     // The chat left behind starts to age: it can be warmed again at once.
     if (this.#state.session) this.#warmed.delete(this.#state.session);
@@ -287,6 +405,10 @@ export class PimClient {
     if (this.#retry) clearTimeout(this.#retry);
     this.#retry = null;
     this.#drop();
+    if (this.#v2Following) {
+      this.#v2Following = false;
+      this.#v2?.followChat(null);
+    }
     this.#set({ session: null, connection: "closed" });
   }
 

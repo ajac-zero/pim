@@ -69,7 +69,9 @@ export const coreRoutes: Route[] = [
 	route("POST", "/api/images", async ({ app, principal, bytes, req }) => ok(await app.objects.put(await principal(), { bytes: await bytes(), contentType: String(req.headers["content-type"] ?? ""), purpose: "image" }), 201)),
 	route("GET", "/api/images/*", async ({ app, req, params, maybePrincipal }) => {
 		const p = await maybePrincipal();
-		const served = await app.objects.serve(p, params[0]!, req.headers.range);
+		// A message imported from the legacy Worker names its image by a bare id (`/api/images/<uuid>`); the object lives under its owner, who is the one asking.
+		const key = params[0]!.includes("/") || !p ? params[0]! : `${p.ownerId}/${params[0]}`;
+		const served = await app.objects.serve(p, key, req.headers.range);
 		return { status: served.status, headers: served.headers, raw: served.body };
 	}),
 ];

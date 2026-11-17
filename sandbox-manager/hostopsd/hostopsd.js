@@ -8,7 +8,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createOps } from './ops.js'
 import { loadState, saveState } from './state.js'
-import { validateOp } from './validate.js'
+import { COMPOSE_SERVICES, SERVICES, validateOp } from './validate.js'
 
 export const VERSION = '1.0.0'
 const ENV_FILE = '/etc/hostopsd/env'
@@ -55,18 +55,28 @@ export function loadConfig(env = process.env) {
 	const local = ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)
 	if (url.protocol !== 'https:' && !(local && url.protocol === 'http:')) throw new Error('HOSTOPS_URL must be an https:// origin')
 	const checkout = path.resolve(need('PIM_CHECKOUT'))
+	// HOSTOPSD_STACK=compose looks after the Pim stack on Docker Compose (deploy/compose) instead of the sandbox manager's own stack.
+	const stack = e.HOSTOPSD_STACK === 'compose' ? 'compose' : 'sandbox-manager'
+	const composeDir = path.resolve(e.PIM_COMPOSE_DIR || path.join(checkout, 'deploy/compose'))
+	const composeEnv = stack === 'compose' ? (readEnvFile(path.join(composeDir, '.env')) ?? {}) : {}
 	const managerEnvFile = e.MANAGER_ENV_FILE || path.join(checkout, 'sandbox-manager/.env')
-	const managerEnv = readEnvFile(managerEnvFile) ?? {}
-	const managerToken = e.MANAGER_TOKEN || managerEnv.MANAGER_TOKEN
-	if (!managerToken) throw new Error(`MANAGER_TOKEN is not set and not in ${managerEnvFile}`)
+	const managerEnv = stack === 'compose' ? {} : (readEnvFile(managerEnvFile) ?? {})
+	// The stack on Compose has a sandbox manager only with its coding profile: set_slot_limit and the manager's health need its token.
+	const managerToken = e.MANAGER_TOKEN || managerEnv.MANAGER_TOKEN || (stack === 'compose' ? composeEnv.PIM_CODING_MANAGER_TOKEN : undefined)
+	if (!managerToken && stack !== 'compose') throw new Error(`MANAGER_TOKEN is not set and not in ${managerEnvFile}`)
 	const token = need('HOSTOPS_TOKEN')
 	const num = (k, d) => (e[k] ? Number(e[k]) : d)
 	return {
 		url: url.origin,
 		token,
 		checkout,
+		stack,
+		services: stack === 'compose' ? COMPOSE_SERVICES : SERVICES,
+		composeDir,
+		composeEnv,
+		pimDev: e.PIM_DEV === '1',
 		managerUrl: e.MANAGER_URL || 'http://127.0.0.1:8080',
-		managerToken,
+		managerToken: managerToken ?? '',
 		managerEnv,
 		stateFile: e.HOSTOPSD_STATE_FILE || '/var/lib/hostopsd/state.json',
 		path: e.PATH || '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
@@ -74,7 +84,7 @@ export function loadConfig(env = process.env) {
 		version: VERSION,
 		// Values replaced wherever they appear in anything reported to Pim: the credentials above, and
 		// the value of every secret-looking variable in the manager's environment and this daemon's.
-		secrets: [token, managerToken, ...Object.entries({ ...managerEnv, ...e }).filter(([k]) => /TOKEN|SECRET|PASSWORD|KEY/.test(k)).map(([, v]) => v)],
+		secrets: [token, managerToken, ...Object.entries({ ...managerEnv, ...composeEnv, ...e }).filter(([k]) => /TOKEN|SECRET|PASSWORD|KEY/.test(k)).map(([, v]) => v)],
 		waitMs: 25000,
 		healthTimeoutMs: num('HOSTOPSD_HEALTH_TIMEOUT_MS', 120000),
 		healthIntervalMs: num('HOSTOPSD_HEALTH_INTERVAL_MS', 2000),
@@ -190,7 +200,7 @@ export function createDaemon(cfg, { log = (m) => console.log(m) } = {}) {
 	}
 
 	async function handle(raw) {
-		const v = validateOp(raw)
+		const v = validateOp(raw, cfg.services)
 		if (!v.id) {
 			log(`poll: ignoring an op without a valid id: ${v.error}`)
 			return { waitMs: jitter(cfg.backoffMaxMs) }

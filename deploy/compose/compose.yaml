@@ -6,7 +6,7 @@
 #   docker compose --profile canvas up -d       # shared-notes canvas server (/api/notes/live)
 #   docker compose --profile computer up -d     # personal-computer relay and TURN (relay, coturn)
 #   docker compose --profile local-computer up -d  # pim-computer on this machine, paired like any other computer (docs/v2-operations.md "A computer on the same machine")
-#   docker compose --profile coding up -d       # sandbox-manager for coding workspaces
+#   docker compose --profile coding up -d       # sandbox manager, egress proxy and workspace image for coding
 #   docker compose --profile observability up -d  # Prometheus (with the alert rules) and Grafana (with the Pim dashboard) on 127.0.0.1:3000
 #
 # The core stack runs with every optional profile off: chat, agents, memory, apps and sharing work without a computer or a coding backend.
@@ -268,14 +268,58 @@ services:
     # when the host cannot reach its own public address (no hairpin NAT).
     extra_hosts: ["host.docker.internal:host-gateway", "${PIM_COMPUTER_HOST_ALIAS:-pim.invalid}:host-gateway"]
 
+  # The coding profile: a sandbox manager that gives each coding workspace (and each harness sign-in) one gVisor container, behind an egress proxy that lets a workspace reach only the
+  # hosts it is allowed, and a socket proxy that is the only service holding the Docker socket. The host needs Docker with gVisor registered as the `runsc` runtime; the manager refuses to start without it.
+  # Set PIM_CODING_MANAGER_URL=http://sandbox-manager:8080 in .env so the forge and gate roles use it. A workspace reaches Pim (its git broker) only through the egress proxy, which tunnels HTTPS to
+  # public hostnames, so PIM_PUBLIC_URL must be an https URL the proxy can reach (not http://localhost).
+  workspace-image:
+    build: { context: ../../workspace-agentd }
+    image: pim-workspace:local
+    profiles: [coding]
+    entrypoint: ["true"]
+    network_mode: none
+    restart: "no"
+
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy:0.3.0
+    profiles: [coding]
+    restart: unless-stopped
+    # Only the API groups the manager needs; EXEC stays off, because commands run through workspace-agentd.
+    environment: { CONTAINERS: "1", VOLUMES: "1", NETWORKS: "1", IMAGES: "1", INFO: "1", SYSTEM: "1", POST: "1" }
+    volumes: ["/var/run/docker.sock:/var/run/docker.sock:ro"]
+    networks: [control]
+
+  egress-proxy:
+    build: { context: ../../sandbox-manager, target: egress-proxy }
+    image: pim-egress-proxy:local
+    container_name: egress-proxy # the manager connects it to every workspace network by this name
+    profiles: [coding]
+    restart: unless-stopped
+    environment: { PROXY_ADMIN_TOKEN: "${PROXY_ADMIN_TOKEN:?}" }
+    networks: [control, outbound]
+
   sandbox-manager:
-    build: { context: ../../sandbox-manager }
+    build: { context: ../../sandbox-manager, target: manager }
+    image: pim-sandbox-manager:local
+    container_name: sandbox-manager # it attaches itself to each workspace network by this name
     restart: unless-stopped
     profiles: [coding]
-    # The sandbox manager starts coding workspaces on a Docker host. It is the only service with the Docker socket, and it is not on the data network.
-    environment: { MANAGER_TOKEN: "${PIM_CODING_MANAGER_TOKEN:?}", ALLOWED_IMAGES: "${PIM_ALLOWED_SANDBOX_IMAGES:-}" }
-    networks: [sandbox, internal]
-    volumes: ["/var/run/docker.sock:/var/run/docker.sock"]
+    depends_on:
+      docker-socket-proxy: { condition: service_started }
+      egress-proxy: { condition: service_started }
+      workspace-image: { condition: service_completed_successfully }
+    environment:
+      DOCKER_HOST: tcp://docker-socket-proxy:2375
+      MANAGER_TOKEN: "${PIM_CODING_MANAGER_TOKEN:?}"
+      PROXY_ADMIN_TOKEN: "${PROXY_ADMIN_TOKEN:?}"
+      ALLOWED_IMAGES: "${PIM_ALLOWED_SANDBOX_IMAGES:-pim-workspace:local}"
+      MANAGER_CONTAINER: sandbox-manager
+      EGRESS_PROXY_CONTAINER: egress-proxy
+      DOCKER_ROOT: /docker-root
+      DATA_DIR: /data
+    # statfs() runs inside this container, so it needs a directory on the same filesystem as Docker's data root.
+    volumes: ["${DOCKER_ROOT_HOST:-/var/lib/pim-sandbox}:/docker-root:ro", "manager-data:/data"]
+    networks: [control, internal]
 
   prometheus:
     image: prom/prometheus:v2.55.1
@@ -303,9 +347,11 @@ services:
 
 networks:
   edge: {}
-  # `internal` carries service-to-service traffic; only caddy is on `edge` and publishes ports. `sandbox` is where the sandbox manager's workspaces live: nothing there can reach PostgreSQL, NATS or object storage.
+  # `internal` carries service-to-service traffic; only caddy is on `edge` and publishes ports. Coding workspaces live on networks the sandbox manager makes, apart from these: nothing there can reach PostgreSQL, NATS or object storage.
   internal: {}
-  sandbox: {}
+  # `control` carries the manager's calls to the socket proxy and the egress proxy's admin port: no route out. `outbound` is the egress proxy's way to the internet.
+  control: { internal: true }
+  outbound: {}
   # pim-computer's own: it reaches the host (and so the stack's published ports) and the internet, and nothing inside the stack.
   computer: {}
 
@@ -317,3 +363,4 @@ volumes:
   caddy-config: {}
   prometheus-data: {}
   grafana-data: {}
+  manager-data: {}

@@ -26,7 +26,7 @@ api -X POST "$URL/auth/setup-link" >/dev/null
 sleep 1
 CLAIM="$("$C" logs gate 2>&1 | grep -o '#claim=[A-Za-z0-9_-]*' | tail -1 | cut -d= -f2)"
 [ -n "$CLAIM" ] || { echo "no claim link in the gate's log"; exit 1; }
-api -X POST "$URL/auth/register" -d "{\"username\":\"smoke$RANDOM\",\"bootstrap\":\"$CLAIM\"}" | grep -q '"account"' && echo "admin registered"
+api -X POST "$URL/auth/register" -d "{\"username\":\"smoke$RANDOM\",\"bootstrap\":\"$CLAIM\",\"session\":true}" | grep -q '"account"' && echo "admin registered"
 api "$URL/api/majordomo" | grep -q '"majordomo":true' && echo "majordomo ready"
 step "chat answered by a Runner"
 CHAT="$(api -X POST "$URL/api/sessions" -d '{"title":"smoke"}' | sed -E 's/.*"id":"([^"]+)".*/\1/')"

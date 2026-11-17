@@ -55,7 +55,7 @@ real("the default agent host", () => {
 		gate = await start(d, "gate", {}, { PIM_CODING_ALLOWED_REPOS: "acme/*" });
 		web = new Client(base(gate), d.ingressSecret);
 		const claim = await app.identity.issueClaim("bootstrap", null, 3_600_000);
-		const registered = await web.call("POST", "/auth/register", { username: "anibal", bootstrap: claim });
+		const registered = await web.call("POST", "/auth/register", { username: "anibal", bootstrap: claim, session: true });
 		expect(registered.status).toBe(201);
 		ownerId = registered.json.account.ownerId;
 		chatId = (await web.call("POST", "/api/sessions", { title: "Work" })).json.id;

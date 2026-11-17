@@ -63,7 +63,7 @@ real("an agent on a paired computer", () => {
 		gate = await start(d, "gate");
 		web = new Client(base(gate), d.ingressSecret);
 		const claim = await app.identity.issueClaim("bootstrap", null, 3_600_000);
-		const registered = await web.call("POST", "/auth/register", { username: "anibal", bootstrap: claim });
+		const registered = await web.call("POST", "/auth/register", { username: "anibal", bootstrap: claim, session: true });
 		expect(registered.status).toBe(201);
 		ownerId = registered.json.account.ownerId;
 		chatId = (await web.call("POST", "/api/sessions", { title: "Work" })).json.id;

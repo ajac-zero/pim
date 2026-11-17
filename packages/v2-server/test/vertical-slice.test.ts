@@ -114,7 +114,7 @@ real("the vertical slice", () => {
 
 	it("registers the first admin with a passkey and signs in with it", async () => {
 		const claim = await appForTools.identity.issueClaim("bootstrap", null, 3_600_000);
-		const registered = await web.call("POST", "/auth/register", { username: "anibal", bootstrap: claim });
+		const registered = await web.call("POST", "/auth/register", { username: "anibal", bootstrap: claim, session: true });
 		expect(registered.status).toBe(201);
 		ownerId = registered.json.account.ownerId;
 		const key = new Authenticator("ES256");

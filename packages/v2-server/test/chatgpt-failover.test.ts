@@ -114,7 +114,7 @@ real("Sign in with ChatGPT and provider failover", () => {
 		gate = await start(d, "gate", {}, env);
 		web = new Client(base(gate), d.ingressSecret);
 		const claim = await app.identity.issueClaim("bootstrap", null, 3_600_000);
-		const registered = await web.call("POST", "/auth/register", { username: "anibal", bootstrap: claim });
+		const registered = await web.call("POST", "/auth/register", { username: "anibal", bootstrap: claim, session: true });
 		expect(registered.status).toBe(201);
 		ownerId = registered.json.account.ownerId;
 		runner = await start(d, "runner", { pollMs: 40, providers: () => [faux.provider] }, { ...env, PIM_CHATGPT_BASE_URL: openai.issuer, PIM_PROVIDER_COOLDOWN_MS: "600000"});

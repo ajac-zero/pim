@@ -9,8 +9,8 @@
 import type { Principal } from "@pim/v2-contracts/identity";
 import type { App } from "@pim/v2-app/app";
 import type { Agent as V2Agent } from "@pim/v2-app/agents";
-import { BadRequestError, NotFoundError } from "@pim/v2-app/errors";
-import { ok, route, type Route } from "@pim/v2-app/http";
+import { BadRequestError, ForbiddenError, NotFoundError } from "@pim/v2-app/errors";
+import { fromAnotherSite, ok, route, sessionCookieName, setCookie, type Route } from "@pim/v2-app/http";
 import { newId } from "@pim/v2-app/ids";
 import { PimThemes } from "@pim/shared/themes";
 import { pimThemes } from "@pim/shared/theme-data/index";
@@ -173,6 +173,23 @@ export const approvalsOf = (app: App, ownerId: string, where = "", params: unkno
 	app.db.owner(ownerId, async (tx) => (await tx.query(`SELECT * FROM pim_app.approvals ${where} ORDER BY created_at DESC LIMIT 200`, params)).rows.map(webApproval));
 
 export const bootRoutes: Route[] = [
+	// Registration as the app expects it (v1's `Registered`): the account and its session, and with them the recovery codes it shows once and the
+	// setup code its first passkey is made with. Without them the app would go straight in, and the account would have no way back in.
+	route("POST", "/auth/register", async ({ app, json, req, secure }) => {
+		if (fromAnotherSite(req)) throw new ForbiddenError("register", "csrf");
+		const b = await json();
+		const account = await app.identity.register({ username: String(b.username ?? ""), invite: b.invite, bootstrap: b.bootstrap ?? b.claim, address: req.socket.remoteAddress });
+		const session = () => app.identity.createSession(account.ownerId, { userAgent: req.headers["user-agent"] });
+		const recoveryCodes = await app.signin.newRecoveryCodes(account.ownerId);
+		const setup = await app.signin.issueSetupCode(account.ownerId);
+		const name = typeof b.name === "string" && b.name.trim() && !/[\r\n]/.test(b.name) ? b.name.trim().slice(0, 80) : null;
+		if (name) await putSetting(app, account.ownerId, "your_name", name);
+		if (typeof b.timeZone === "string" && SETTINGS.timeZone!(b.timeZone)) await putSetting(app, account.ownerId, "settings.timeZone", b.timeZone);
+		// The app signs in with the passkey it makes next (or a recovery code); a session now would take it past the screen that shows the codes.
+		// A client without a browser (scripts, the Compose smoke test) asks for the session with `session: true`.
+		const body = { account, username: account.username, role: account.role, setup: setup.code, setupExpiresAt: setup.expiresAt.toISOString(), recoveryCodes };
+		return b.session === true ? ok(body, 201, { "set-cookie": setCookie(sessionCookieName(secure), await session(), 30 * 24 * 3600, secure) }) : ok(body, 201);
+	}),
 	// The account in v1's shape: usage today and for the last 30 days, from the cost ledger; v2 sets no per-person limits and meters no sandbox minutes here.
 	route("GET", "/api/account", async ({ app, principal }) => {
 		const p = await principal();

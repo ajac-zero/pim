@@ -169,7 +169,7 @@ real("Forge's worker role with the Gate and Maintenance", () => {
 
 	it("signs the admin in, grants coding, and a sandbox thread is unavailable (503) until the worker has a pool to run it on", async () => {
 		const claim = await appForTools.identity.issueClaim("bootstrap", null, 3_600_000);
-		const registered = await web.call("POST", "/auth/register", { username: "anibal", bootstrap: claim });
+		const registered = await web.call("POST", "/auth/register", { username: "anibal", bootstrap: claim, session: true });
 		ownerId = registered.json.account.ownerId;
 		const key = new Authenticator("ES256");
 		const options = await web.call("POST", "/auth/passkeys/options", {});

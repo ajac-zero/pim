@@ -105,6 +105,8 @@ real("Sign in with ChatGPT and provider failover", () => {
 
 	beforeAll(async () => {
 		openai = await fakeOpenAI();
+		// The model routes read the deployment's settings from the process environment, which the in-process Gate shares.
+		process.env.PIM_DEFAULT_MODEL = "faux/m";
 		const stack = await createStack();
 		d = { stack, nats: await startNats(), s3: await startS3(), gatePort: await freePort(), ingressSecret: "ingress" };
 		app = new App(connectApp(stack.url("gate"), 4), new MemoryObjectStore());

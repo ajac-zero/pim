@@ -20,12 +20,14 @@ export type GateOptions = {
 	appsOrigin?: string;
 	/** Extra routes, tried after the built-in ones. */
 	routes?: Route[];
+	/** Routes tried before the built-in ones: where the web app needs a path answered in the shape it was built for (the v1 API), they win. */
+	first?: Route[];
 };
 
 export const builtInRoutes: Route[] = [...hostedRoutes, ...chatgptRoutes, ...domainRoutes, ...coreRoutes, ...authRoutes];
 
 export function createGate(app: App, options: GateOptions = {}): Server {
-	const routes = [...builtInRoutes, ...(options.routes ?? [])];
+	const routes = [...(options.first ?? []), ...builtInRoutes, ...(options.routes ?? [])];
 	return createServer(async (req, res) => {
 		try {
 			await handle(app, routes, options, req, res);

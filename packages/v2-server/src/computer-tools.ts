@@ -14,6 +14,7 @@ import { posix } from "node:path";
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ToolRegistration } from "@earendil-works/pi-durable";
 import type { App } from "@pim/v2-app/app";
+import { sniffImage } from "@pim/v2-app/objects";
 import { acquireRemote, type Computer, type RelayBus, type RemoteComputer } from "@pim/v2-app/relay";
 import { CapabilityUnavailableError } from "@pim/v2-contracts/authz";
 import { OwnerId, PartitionId, type Principal } from "@pim/v2-contracts/identity";
@@ -31,6 +32,8 @@ const MAX_COMMAND_MS = 600_000;
 const COMMAND_OUTPUT_BYTES = 64_000;
 const DRIVER_CALL_MS = 120_000;
 const MAX_READ = 1_048_576;
+/** What `file_read` takes of a file: it shows 60,000 characters at most, and an answer this size passes a message bus left at NATS's default 1 MB limit. */
+const MAX_TEXT_READ = 524_288;
 const MAX_WRITE = 1_000_000;
 const MAX_RESULT_CHARS = 60_000;
 
@@ -212,9 +215,14 @@ export function computerTools(deps: ComputerToolDeps, kit: ComputerToolKit): Too
 		for (const path of paths) if (path !== undefined && filesPath(path) === null) return text(`${String(path)} is not one of the person's files. Use an absolute path under ${FILES_ROOT}.`, true);
 		return null;
 	};
-	const readFile = async (c: Computer, path: string): Promise<{ bytes: Buffer; size: number }> => {
-		const r = await c.call<{ data: string; size: number }>("read", { path, offset: 0, length: MAX_READ });
+	const readFile = async (c: Computer, path: string, length = MAX_READ): Promise<{ bytes: Buffer; size: number }> => {
+		const r = await c.call<{ data: string; size: number }>("read", { path, offset: 0, length });
 		return { bytes: Buffer.from(r.data, "base64"), size: r.size };
+	};
+	/** Where a path under /workspace is for a command in the shell, which has no /workspace: the files' folder is a real one on the computer. */
+	const whereIs = (c: Computer, path: string) => {
+		const root = c.info?.root;
+		return root ? `${path} is ${posix.join(root, path.slice(FILES_ROOT.length))} on the computer, which is $PIM_WORKSPACE${path.slice(FILES_ROOT.length)}.` : `${path} is under $PIM_WORKSPACE${path.slice(FILES_ROOT.length)}.`;
 	};
 	const conflictOf = (error: unknown): Result | null => {
 		const remote = (error as { remote?: Record<string, unknown> })?.remote;
@@ -233,8 +241,11 @@ export function computerTools(deps: ComputerToolDeps, kit: ComputerToolKit): Too
 			const { computer } = await use(api, "file_read");
 			const stat = await computer.call<{ isDirectory: boolean; sha256: string | null }>("stat", { path: a.path });
 			if (stat.isDirectory) return text(`${a.path} is a folder: list it with file_list.`, true);
-			const { bytes, size } = await readFile(computer, a.path);
-			if (bytes.subarray(0, 8192).includes(0)) return text(`${a.path} is a binary file (${size} bytes).`, true);
+			const { bytes, size } = await readFile(computer, a.path, MAX_TEXT_READ);
+			const image = sniffImage(bytes);
+			// As in v1, a picture is shown to the model; other binary files (a PDF, an archive) are for a program to open, so the model is told where that is.
+			if (image && size === bytes.length) return { content: [{ type: "image", data: bytes.toString("base64"), mimeType: image }, { type: "text", text: `${a.path} (${size} bytes)` }] };
+			if (bytes.subarray(0, 8192).includes(0)) return text(`${a.path} is a binary file (${size} bytes), not text. To open it with a program, use shell: ${whereIs(computer, a.path)}`, true);
 			const lines = bytes.toString("utf8").split("\n");
 			const from = (a.offset ?? 1) - 1;
 			const shown = lines.slice(from, from + (a.limit ?? 2000));
@@ -315,7 +326,7 @@ export function computerTools(deps: ComputerToolDeps, kit: ComputerToolKit): Too
 		}),
 		tool(
 			"shell",
-			`Run a command on the person's computer, in a bash login shell, as the user pim-computer runs as there. It starts in their files' folder, ${FILES_ROOT}; $PIM_WORKSPACE is that folder's path on the computer. A person approves each command first, unless they have said commands may go ahead.`,
+			`Run a command on the person's computer, in a bash login shell, as the user pim-computer runs as there. ${FILES_ROOT} exists only for the file tools: in the shell it is a real folder elsewhere, $PIM_WORKSPACE, where the shell starts, so ${FILES_ROOT}/uploads/a.pdf is $PIM_WORKSPACE/uploads/a.pdf there, or uploads/a.pdf from the start. A person approves each command first, unless they have said commands may go ahead.`,
 			Type.Object({ command: Type.String({ minLength: 1 }), cwd: Type.Optional(Type.String({ description: `A folder under ${FILES_ROOT}.` })), timeout_seconds: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_COMMAND_MS / 1000 })) }),
 			async (a, api) => {
 				const bad = confined(a.cwd);
@@ -333,6 +344,7 @@ export function computerTools(deps: ComputerToolDeps, kit: ComputerToolKit): Too
 						if (r.stdout) parts.push(`stdout:\n${r.stdout}`);
 						if (r.stderr) parts.push(`stderr:\n${r.stderr}`);
 						if (!r.stdout && !r.stderr) parts.push("(no output)");
+						if (r.exitCode !== 0 && String(a.command).includes(FILES_ROOT)) parts.push(`Note: ${FILES_ROOT} is not a folder in the shell. The files' folder is ${c.info?.root ?? "$PIM_WORKSPACE"} here: use it, or relative paths.`);
 						return { text: parts.join("\n") };
 					},
 				});

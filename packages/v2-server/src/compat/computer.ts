@@ -195,7 +195,7 @@ export function computerRoutes(options: { source?: string } = {}): Route[] {
 			if (stat.sha256 && etags(ctx.req.headers["if-none-match"]).some((t) => t === "*" || t === stat.sha256)) return { status: 304, headers: { etag: etag(stat.sha256), "x-file-sha256": stat.sha256 }, raw: "" };
 			const chunks: Buffer[] = [];
 			for (let offset = 0; offset < stat.size; ) {
-				const { data } = await computer.call<{ data: string }>("read", { path, offset, length: 1_048_576 }).catch(answer);
+				const { data } = await computer.call<{ data: string }>("read", { path, offset, length: 524_288 }).catch(answer);
 				const bytes = Buffer.from(data, "base64");
 				if (bytes.length === 0) break;
 				chunks.push(bytes);

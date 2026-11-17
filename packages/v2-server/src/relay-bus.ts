@@ -27,6 +27,15 @@ export function natsRelayBus(pulse: NatsPulse): RelayBus {
 	const nc = pulse.connection;
 	const encoder = new TextEncoder();
 	const subscriptions = new Set<{ unsubscribe(): void }>();
+	/**
+	 * An answer the server would refuse (NATS's `max_payload`) is never sent, so the caller would wait out its timeout. It gets an error that names the size at once instead.
+	 */
+	const fitted = (encoded: Uint8Array): Uint8Array => {
+		const max = nc.info?.max_payload ?? 1_048_576;
+		if (encoded.length <= max) return encoded;
+		const message = `The computer's answer is ${encoded.length} bytes, more than the ${max} bytes the message bus carries (max_payload in the NATS configuration). Ask for less at a time.`;
+		return encoder.encode(JSON.stringify({ ok: false, status: 413, message } satisfies RelayReply));
+	};
 	return {
 		serve(ownerId, handlers) {
 			const sub = nc.subscribe(relaySubjects.all(ownerId), {
@@ -36,7 +45,7 @@ export function natsRelayBus(pulse: NatsPulse): RelayBus {
 					try {
 						if (kind === "rpc") {
 							handlers.rpc(message.json<RelayRequest>()).then(
-								(reply) => message.respond(encoder.encode(JSON.stringify(reply))),
+								(reply) => message.respond(fitted(encoder.encode(JSON.stringify(reply)))),
 								(failed: Error) => message.respond(encoder.encode(JSON.stringify({ ok: false, status: 500, message: failed.message } satisfies RelayReply))),
 							);
 						} else if (kind === "stream") handlers.stream(message.json<RelayStreamMessage>());
@@ -53,7 +62,10 @@ export function natsRelayBus(pulse: NatsPulse): RelayBus {
 		},
 		async request(ownerId, request, timeoutMs) {
 			try {
-				const reply = await nc.request(relaySubjects.rpc(ownerId), encoder.encode(JSON.stringify(request)), { timeout: timeoutMs });
+				const encoded = encoder.encode(JSON.stringify(request));
+				const max = nc.info?.max_payload ?? 1_048_576;
+				if (encoded.length > max) return { ok: false, status: 413, message: `The request is ${encoded.length} bytes, more than the ${max} bytes the message bus carries (max_payload in the NATS configuration). Send less at a time.` };
+				const reply = await nc.request(relaySubjects.rpc(ownerId), encoded, { timeout: timeoutMs });
 				return reply.json<RelayReply>();
 			} catch (error) {
 				// Nobody subscribes to the owner's subject: no process holds a live socket.

@@ -18,6 +18,7 @@ import { computerTools } from "./computer-tools.ts";
 import type { ForgeParts } from "./forge-assembly.ts";
 import type { EnvelopeCrypto } from "@pim/v2-contracts/platform";
 import { connectorToolset, type Transport } from "./connector-tools.ts";
+import { readSkillFolder } from "./skill-sources.ts";
 
 export type ToolDeps = {
 	ownerId: string;
@@ -219,6 +220,37 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 			await (exists ? app.agents.updateSkill(call.p, a.name, { description: a.description, body: a.body, files: a.files }) : app.agents.createSkill(call.p, { name: a.name, description: a.description, body: a.body, files: a.files }));
 			return text(exists ? `Saved a new version of ${a.name}.` : `Created ${a.name}.`);
 		}),
+		tool("install_skill", "Install a skill from a GitHub folder (https://github.com/owner/repo/tree/ref/path, holding a SKILL.md and any files it uses). A person approves it first, with the files it holds listed; what is installed is exactly what they approved, at the commit the folder is at now.", Type.Object({ source: S({ minLength: 1 }), name: O(S()) }),
+			async (args, api) => {
+				const app = deps.app;
+				if (!app) return noApp();
+				const taskId = String(api.taskId);
+				try {
+					const folder = await readSkillFolder(deps.fetch, args.source);
+					const chat = await deps.chatOf(api.conversationId);
+					const p = await principalOf(app, chat);
+					const name = args.name ?? folder.name;
+					const signal = (await runtime.read<{ payload: { approved?: boolean } }>(ownerId, "SELECT payload FROM pim_runtime.durable_signals WHERE owner_id = $1 AND task_id = $2 AND kind = 'approval' ORDER BY signal_id DESC LIMIT 1", [ownerId, taskId])).rows[0];
+					if (signal && signal.payload.approved !== true) return text("A person did not approve this skill, so it was not installed.", true);
+					const filed = (await app.db.owner(ownerId, async (tx) => (await tx.query("SELECT id, args FROM pim_app.approvals WHERE tool = 'skill:install' AND args->>'taskId' = $1 LIMIT 1", [taskId])).rows[0])) as { id: string; args: { commit?: string; hashes?: Record<string, string> } } | undefined;
+					if (!signal && !filed) {
+						const names = Object.keys(folder.hashes);
+						const summary = `Install the skill ${name} from ${folder.source}: ${names.length} file${names.length === 1 ? "" : "s"} (${names.slice(0, 12).join(", ")}${names.length > 12 ? ", …" : ""})`;
+						const gate = await app.approvals.gate(p, { action: "skill:install", resource: { source: folder.source.replace(/\/tree\/.*$/, "") }, ...(chat ? { chatId: chat } : {}), args: { taskId, callId: api.callId, source: folder.source, commit: folder.commit, name, hashes: folder.hashes, summary }, timeoutMs: 24 * 3600_000, onTimeout: "deny", explicit: true });
+						if (gate.outcome === "waiting") return { content: [{ type: "text", text: "Waiting for a person's approval." }], control: { suspend: true } } as never;
+					} else if (!signal) {
+						return { content: [{ type: "text", text: "Waiting for a person's approval." }], control: { suspend: true } } as never;
+					}
+					// What was approved is what is installed: the folder read again must be the one the person was shown.
+					if (filed?.args.hashes && JSON.stringify(Object.entries(filed.args.hashes).sort()) !== JSON.stringify(Object.entries(folder.hashes).sort())) return text("The skill's files are not the ones that were approved, so it was not installed. Ask again to see them.", true);
+					const files = { ...folder.files, ".source": JSON.stringify({ source: folder.source, commit: folder.commit }) };
+					const exists = await app.agents.getSkill(p, name).then(() => true, () => false);
+					await (exists ? app.agents.updateSkill(p, name, { description: folder.description, body: folder.body, files }) : app.agents.createSkill(p, { name, description: folder.description, body: folder.body, files }));
+					return text(`${exists ? "Saved a new version of" : "Installed"} the skill ${name} from ${folder.source}.`);
+				} catch (error) {
+					return text(error instanceof Error ? error.message : String(error), true);
+				}
+			}, "safe"),
 		write("create_goal", "Start a goal, with the steps to reach it.", Type.Object({ title: S({ minLength: 1 }), steps: O(strings) }), async (app, call, a) => text(`Created goal ${await app.memories.createGoal(call.p, a.title, a.steps ?? [])}.`)),
 		write("update_goal", "Change a goal: its title, its status (active, done, dropped) or its steps; or tick a step off with complete_step (its position, from 0).", Type.Object({ id: S(), title: O(S()), status: O(Type.Union([Type.Literal("active"), Type.Literal("done"), Type.Literal("dropped")])), steps: O(strings), complete_step: O(Type.Integer({ minimum: 0 })) }), async (app, call, a) => {
 			if (a.title !== undefined || a.status !== undefined || a.steps !== undefined) await app.memories.updateGoal(call.p, a.id, { title: a.title, status: a.status, steps: a.steps });

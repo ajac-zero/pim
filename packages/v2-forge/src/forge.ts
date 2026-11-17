@@ -106,6 +106,20 @@ export class Forge {
 		});
 	}
 
+	/** A person connected `harness`: their threads that stopped for want of that login go on, as if they had continued them. */
+	async resumeAfterLogin(ownerId: string, harness: string): Promise<number> {
+		const waiting = (await this.c.db.query<Row>("select thread_id from pim_forge.forge_threads where owner_id = $1 and harness = $2 and state = 'waiting_input' and state_reason = 'login_required'", [ownerId, harness])).rows;
+		let resumed = 0;
+		for (const { thread_id } of waiting) {
+			await this.c.store.locked(thread_id, async (q, t) => {
+				if (t.state !== "waiting_input" || t.stateReason !== "login_required") return;
+				await this.c.store.setState(q, thread_id, "idle");
+				if (await this.c.store.enqueueInbox(q, thread_id, `login-${harness}-${Date.now()}`, "continue", { prompt: "Continue." })) resumed++;
+			});
+		}
+		return resumed;
+	}
+
 	/** Cancels a thread that hasn't started: queued or provisioning. A running turn is stopped with `abort`. */
 	async cancelQueued(actor: Actor, ref: string): Promise<void> {
 		const t = await this.own(actor, ref);

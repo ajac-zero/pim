@@ -5,7 +5,10 @@ const textOf = (m) => (typeof m?.content === "string" ? m.content : (m?.content 
 createServer(async (req, res) => {
 	let body = ""; for await (const c of req) body += c;
 	if (req.url.endsWith("/models")) return res.end(JSON.stringify({ data: [{ id: "fake-1", object: "model" }] }));
-	const msgs = (JSON.parse(body || "{}").messages) ?? [];
+	const parsed = JSON.parse(body || "{}");
+	const msgs = parsed.messages ?? [];
+	// A coding thread's pi has no send_to_user: it answers in text once a tool's result is in.
+	const chat = (parsed.tools ?? []).some((t) => t.function?.name === "send_to_user");
 	const last = msgs[msgs.length - 1] ?? {};
 	const lastUser = [...msgs].reverse().find((m) => m.role === "user");
 	const text = textOf(lastUser).trim();
@@ -22,6 +25,8 @@ createServer(async (req, res) => {
 	};
 	if (sent) send({ choices: [{ index: 0, delta: { content: "" }, finish_reason: "stop" }], usage: { prompt_tokens: 10, completion_tokens: 1, total_tokens: 11 } });
 	else if (m && last.role === "user") call(m[1], JSON.parse(m[2]));
+	else if (last.role === "tool" && !chat) send({ choices: [{ index: 0, delta: { role: "assistant", content: `Tool result: ${textOf(last).slice(0, 400)}` }, finish_reason: "stop" }], usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } });
+	else if (!chat) send({ choices: [{ index: 0, delta: { role: "assistant", content: `Echo: ${text}` }, finish_reason: "stop" }], usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } });
 	else if (last.role === "tool") call("send_to_user", { message: `Tool result: ${textOf(last).slice(0, 400)}` });
 	else call("send_to_user", { message: `Echo: ${text}` });
 	res.end("data: [DONE]\n\n");

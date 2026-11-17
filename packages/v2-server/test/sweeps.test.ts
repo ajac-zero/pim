@@ -3,7 +3,7 @@ import pg from "pg";
 import { App } from "@pim/v2-app/app";
 import { connect as connectApp } from "@pim/v2-app/db";
 import { MemoryObjectStore } from "@pim/v2-app/objects";
-import { sweepApprovals, sweepErasures, trimForgeOutbox } from "../src/sweeps.ts";
+import { sweepApprovals, sweepErasures, tickSchedules, tickTriggers, trimForgeOutbox } from "../src/sweeps.ts";
 import { createStack, type Stack } from "./support/stack.ts";
 
 describe("maintenance sweeps", () => {
@@ -92,5 +92,27 @@ describe("maintenance sweeps", () => {
 		expect(await rows(owner)).toBe(adaRows);
 		expect(await sweepErasures(maintenance, maintPool, store)).toEqual([]);
 		await objects.db.end();
+	});
+
+	it("fires a due schedule and a due time trigger once each, from the owners that have them, into chats of their own", async () => {
+		const ada = { kind: "user", ownerId: owner, role: "admin", sessionId: "s" } as never;
+		const agent = await gate.agents.create(ada, { name: "Clock" });
+		await gate.schedules.create(ada, { kind: "delay", spec: "1000", prompt: "stretch", target: "new_chat", agentId: agent.id });
+		const at = Date.now() + 2_000;
+		const trigger = await gate.triggers.create(ada, { spec: { version: 1, owningAgentId: agent.id, originChatId: "api", label: "Once", instruction: "say hi", source: { kind: "time", schedule: "once", at }, condition: null, destination: { type: "new_chat" }, delivery: {}, authorizationRef: null } });
+		await gate.triggers.setLifecycle(ada, trigger.id, "enabled");
+		// Before either is due nothing fires; the owner is found from the schedule's wakeup and from the trigger's own row.
+		expect(await tickSchedules(maintenance)).toBe(0);
+		expect(await tickTriggers(maintenance, maintPool)).toBe(0);
+		const later = new Date(Date.now() + 10_000);
+		expect(await tickSchedules(maintenance, later)).toBe(1);
+		expect(await tickTriggers(maintenance, maintPool, later)).toBe(1);
+		// A second pass fires nothing more, and each made a chat of kind trigger that waits in the command inbox for a Runner.
+		expect(await tickSchedules(maintenance, later)).toBe(0);
+		expect(await tickTriggers(maintenance, maintPool, later)).toBe(0);
+		const made = (await stack.admin.query("SELECT c.kind, a.kind AS command FROM pim_app.conversations c JOIN pim_app.accepted_commands a ON a.public_chat_id = c.public_chat_id WHERE c.owner_id = $1 AND c.kind = 'trigger' ORDER BY a.accepted_at", [owner])).rows;
+		expect(made).toEqual([{ kind: "trigger", command: "trigger_fire" }, { kind: "trigger", command: "trigger_fire" }]);
+		expect((await gate.triggers.runs(ada, trigger.id)).map((r) => r.phase)).toEqual(["fired"]);
+		expect((await gate.triggers.get(ada, trigger.id)).lifecycle).toBe("ended");
 	});
 });

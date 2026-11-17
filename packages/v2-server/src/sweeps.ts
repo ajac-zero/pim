@@ -111,3 +111,45 @@ export async function sweepErasures(app: App, pool: Pool, objects: ObjectStore, 
 	}
 	return done;
 }
+
+/**
+ * Fires the schedules that are due, owner by owner. `schedule_wakeups` holds each owner's next moment, so an owner with nothing due costs nothing.
+ * A failing owner does not hold up the others. Returns how many schedules fired.
+ */
+export async function tickSchedules(app: App, now = new Date()): Promise<number> {
+	let fired = 0;
+	for (const owner of await app.schedules.dueOwners(now)) {
+		try {
+			fired += (await app.schedules.tick(owner, now)).fired;
+		} catch (error) {
+			console.error("schedule tick", owner, error);
+		}
+	}
+	return fired;
+}
+
+/**
+ * Fires the time triggers that are due, for each owner who has one switched on. Which owners those are is read across owners (`pim.scope = 'all'`,
+ * migration 0623); what fires, and when, is the owner's own. Returns how many triggers fired.
+ */
+export async function tickTriggers(app: App, pool: Pool, now = new Date()): Promise<number> {
+	const client = await pool.connect();
+	let owners: string[];
+	try {
+		await client.query("BEGIN");
+		await client.query("SELECT set_config('pim.scope', 'all', true)");
+		owners = (await client.query("SELECT DISTINCT owner_id FROM pim_app.triggers WHERE lifecycle = 'enabled' AND source = 'time'")).rows.map((r) => r.owner_id as string);
+		await client.query("COMMIT");
+	} finally {
+		client.release();
+	}
+	let fired = 0;
+	for (const owner of owners) {
+		try {
+			fired += (await app.triggers.tickTime(owner, now)).fired;
+		} catch (error) {
+			console.error("trigger tick", owner, error);
+		}
+	}
+	return fired;
+}

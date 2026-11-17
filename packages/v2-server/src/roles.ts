@@ -35,7 +35,7 @@ import type { Host } from "./host.ts";
 import { AppLiveIdentity, deliverApprovalDecisions, LiveAuthorizer, mirrorCodingGrants, publishRevocations } from "./identity.ts";
 import { runtimeOutboxSource } from "./runtime-source.ts";
 import { natsRelayBus } from "./relay-bus.ts";
-import { sweepApprovals, sweepErasures, trimForgeOutbox } from "./sweeps.ts";
+import { sweepApprovals, sweepErasures, tickSchedules, tickTriggers, trimForgeOutbox } from "./sweeps.ts";
 import { webAssets } from "./web-assets.ts";
 import { poolRoutes } from "./compat/admin.ts";
 import { webCompatRoutes } from "./compat/index.ts";
@@ -294,10 +294,17 @@ export async function startMaintenance(config: ProcessConfig, env: Env, host: Ho
 	const { Usage } = await import("@pim/v2-app/usage");
 	const usage = new Usage(app);
 	let lastTrim = 0;
+	let lastTriggers = 0;
 	const { App } = await import("@pim/v2-app/app");
 	const sweeper = new App(app, objects, { env }).limitSpaces();
 	const pass = async () => {
 		await sweepApprovals(sweeper, maint).catch((e) => console.error("approval sweep", e));
+		// Schedules and time triggers fire from here: a schedule's due time is looked up every pass, the triggers' every few seconds.
+		await tickSchedules(sweeper).catch((e) => console.error("schedule sweep", e));
+		if (Date.now() - lastTriggers > 5_000) {
+			lastTriggers = Date.now();
+			await tickTriggers(sweeper, maint).catch((e) => console.error("trigger sweep", e));
+		}
 		if (Date.now() - lastTrim > 60_000) {
 			lastTrim = Date.now();
 			await sweepErasures(sweeper, maint, objects).catch((e) => console.error("erasure sweep", e));

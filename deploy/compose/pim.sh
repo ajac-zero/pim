@@ -5,5 +5,9 @@ set -eu
 cd "$(dirname "$0")"
 files="-f compose.yaml"
 grep -q '^PIM_PUBLIC_URL=http://' .env && files="$files -f compose.local.yaml"
-[ "${PIM_DEV:-}" = 1 ] && files="$files -f compose.dev.yaml"
+if [ "${PIM_DEV:-}" = 1 ]; then
+	# compose.dev.yaml mounts ../../web/dist; Docker would create a missing one empty and owned by root, and the Gate would serve 404 at /.
+	[ -f ../../web/dist/index.html ] || { echo "PIM_DEV=1 needs the built web app: run pnpm --filter pim-web build first" >&2; exit 1; }
+	files="$files -f compose.dev.yaml"
+fi
 exec docker compose $files "$@"

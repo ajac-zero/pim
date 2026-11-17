@@ -192,9 +192,12 @@ export function upsertSession(
   next: Session,
 ): Session[] {
   const others = (list ?? []).filter((s) => s.id !== next.id);
-  // A live row does not carry the chat's own model; it keeps the one the list had.
-  const model = next.model ?? list?.find((s) => s.id === next.id)?.model;
-  return [...others, model ? { ...next, model } : next].sort(
-    (a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0),
-  );
+  // A live row does not carry the chat's agent or own model; it keeps the ones the list had.
+  const before = list?.find((s) => s.id === next.id);
+  const model = next.model ?? before?.model;
+  const agent = next.agent ?? before?.agent;
+  return [
+    ...others,
+    { ...next, ...(model ? { model } : {}), ...(agent ? { agent } : {}) },
+  ].sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
 }

@@ -35,19 +35,32 @@ export function snapshotRoutes(pool: Pool): Route[] {
 				const p = await principal();
 				await app.identity.authz.enforce(p, "api:read");
 				const page = await sidebarPage(pool, p.ownerId, { after: url.searchParams.get("after"), ...(limit(url) === undefined ? {} : { limit: limit(url)! }) });
-				// What the person renamed or deleted is kept on the chat itself; the projection learns of it only from the runtime.
-				const kept = new Map((await app.db.owner(p.ownerId, async (tx) => (await tx.query("SELECT public_chat_id::text AS id, title, deleted_at, model FROM pim_app.conversations WHERE public_chat_id::text = ANY($1)", [page.sessions.map((s) => s.chatId)])).rows)).map((r) => [r.id as string, r]));
+				// What the person renamed or deleted is kept on the chat itself; the projection learns of it only from the runtime. The chat's agent (its
+				// majordomo when it has none of its own), its own model and when it began are in the application's table too, and ride in the row's summary,
+				// where the app reads them from.
+				const chats = (where: string, params: unknown[]) =>
+					app.db.owner(p.ownerId, async (tx) => (await tx.query(
+						`SELECT c.public_chat_id::text AS id, c.title, c.deleted_at, c.model, c.created_at, c.updated_at, c.response_at, a.id AS agent_id, a.name AS agent_name
+						 FROM pim_app.conversations c LEFT JOIN pim_app.agents a ON a.id = coalesce(c.agent_id, (SELECT value #>> '{}' FROM pim_app.owner_settings WHERE key = 'majordomo')) AND a.deleted_at IS NULL
+						 WHERE ${where}`, params)).rows);
+				const summaryOf = (r: any, own: unknown) => ({
+					...(own as Record<string, unknown> | null),
+					createdAt: new Date(r.created_at).getTime(),
+					...(r.response_at ? { responseAt: new Date(r.response_at).getTime() } : {}),
+					...(r.agent_id ? { agent: { id: r.agent_id, name: r.agent_name } } : {}),
+					...(r.model ? { model: chosenModel(r.model) } : {}),
+				});
+				const kept = new Map((await chats("c.public_chat_id::text = ANY($1)", [page.sessions.map((s) => s.chatId)])).map((r) => [r.id as string, r]));
 				const sessions = page.sessions.filter((s) => !kept.get(s.chatId)?.deleted_at).map((s) => {
 					const row = kept.get(s.chatId);
-					// A model chosen for this chat alone rides in the row's summary, where the app reads the chat's model from.
-					return { ...s, title: row?.title ?? s.title, ...(row?.model ? { summary: { ...(s.summary as Record<string, unknown> | null), model: chosenModel(row.model) } } : {}) };
+					return { ...s, title: row?.title ?? s.title, ...(row ? { summary: summaryOf(row, s.summary) } : {}) };
 				});
 				// The projection learns of a chat only when the Runner first commits to it, a moment after the chat is made. Until then a new chat
 				// (the majordomo's welcome chat, right after the first passkey) is listed from the application's own table, so the page opening it finds it.
 				if (!url.searchParams.has("after")) {
 					const known = new Set(sessions.map((s) => s.chatId));
-					const fresh = await app.db.owner(p.ownerId, async (tx) => (await tx.query("SELECT public_chat_id::text AS id, title, updated_at, model FROM pim_app.conversations WHERE deleted_at IS NULL AND archived_at IS NULL AND kind IN ('normal','group') AND created_at > now() - interval '10 minutes' ORDER BY updated_at DESC LIMIT 20")).rows);
-					for (const r of fresh) if (!known.has(r.id) && !kept.has(r.id)) sessions.unshift({ chatId: r.id, title: r.title, busy: true, unread: false, stalled: false, updatedAt: new Date(r.updated_at).getTime(), summary: r.model ? { model: chosenModel(r.model) } : null } as (typeof sessions)[number]);
+					const fresh = await chats("c.deleted_at IS NULL AND c.archived_at IS NULL AND c.kind IN ('normal','group') AND c.created_at > now() - interval '10 minutes' ORDER BY c.updated_at DESC LIMIT 20", []);
+					for (const r of fresh) if (!known.has(r.id) && !kept.has(r.id)) sessions.unshift({ chatId: r.id, title: r.title, busy: true, unread: false, stalled: false, updatedAt: new Date(r.updated_at).getTime(), summary: summaryOf(r, null) } as (typeof sessions)[number]);
 				}
 				// A chat with no title is named by the utility model once its first answer is in (nothing happens with no utility model); one attempt a
 				// minute per chat, and only one chat per request, so the sidebar is never held for long.

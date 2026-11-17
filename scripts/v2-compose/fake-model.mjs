@@ -5,7 +5,14 @@ const textOf = (m) => (typeof m?.content === "string" ? m.content : (m?.content 
 createServer(async (req, res) => {
 	let body = ""; for await (const c of req) body += c;
 	if (req.url.endsWith("/models")) return res.end(JSON.stringify({ data: [{ id: "fake-1", object: "model" }] }));
-	const msgs = (JSON.parse(body || "{}").messages) ?? [];
+	const parsed = JSON.parse(body || "{}");
+	const msgs = parsed.messages ?? [];
+	// A side job of the utility model (a title, a summary, ...) asks for one plain answer, not a stream.
+	if (parsed.stream === false) {
+		const system = textOf(msgs[0]);
+		const content = system.includes("name chats") ? "Fake Utility Title" : system.includes("improve messages") ? "Improved: " + textOf(msgs[1]) : system.includes("suggest") ? '{"messages":["Plan my week","Summarize this chat"]}' : "- Summary from the utility model";
+		return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ id: "c1", object: "chat.completion", model: parsed.model, choices: [{ index: 0, message: { role: "assistant", content }, finish_reason: "stop" }] }));
+	}
 	const last = msgs[msgs.length - 1] ?? {};
 	const lastUser = [...msgs].reverse().find((m) => m.role === "user");
 	const text = textOf(lastUser).trim();
@@ -13,7 +20,7 @@ createServer(async (req, res) => {
 	// What tool calls the assistant made since the last user message.
 	const since = msgs.slice(msgs.lastIndexOf(lastUser) + 1);
 	const sent = since.some((x) => x.role === "assistant" && (x.tool_calls ?? []).some((c) => c.function?.name === "send_to_user"));
-	console.log(new Date().toISOString(), last.role, JSON.stringify(text).slice(0, 80), sent ? "(done)" : "");
+	console.log(new Date().toISOString(), parsed.model, last.role, JSON.stringify(text).slice(0, 80), sent ? "(done)" : "");
 	res.writeHead(200, { "content-type": "text/event-stream" });
 	const send = (o) => res.write(`data: ${JSON.stringify({ id: "c1", object: "chat.completion.chunk", created: 0, model: "fake-1", ...o })}\n\n`);
 	const call = (name, args) => {

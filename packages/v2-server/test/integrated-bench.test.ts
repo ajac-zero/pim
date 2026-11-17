@@ -102,7 +102,7 @@ async function runProfile(n: number) {
 		try {
 			pgPid = Number(readFileSync(`${(await stack.admin.query("SHOW data_directory")).rows[0].data_directory}/postmaster.pid`, "utf8").split("\n")[0]);
 		} catch {}
-		const gate = await spawnChild("gate", "gate", { ...envFor(d, "gate"), PIM_POOL_FOREGROUND_MAX: "30" });
+		const gate = await spawnChild("gate", "gate", { ...envFor(d, "gate"), PIM_POOL_FOREGROUND_MAX: "30", PIM_RATE_API: "1000000" });
 		const live = await spawnChild("live", "live", { ...envFor(d, "live"), PIM_POOL_FOREGROUND_MAX: "30", BENCH_POLL_MS: POLL_MS });
 		for (let i = 0; i < runners; i++) children.push(await spawnChild(`runner-${i + 1}`, "runner", { ...envFor(d, "runner", { PIM_RUNNER_HOLDER_ID: `bench-${i + 1}`, PIM_POOL_RUNTIME_MAX: "10" }), BENCH_POLL_MS: POLL_MS, BENCH_REPLY_CHARS: String(REPLY_CHARS), BENCH_TOKENS_PER_SECOND: String(TOKENS_PER_SECOND) }));
 		children.unshift(gate, live);

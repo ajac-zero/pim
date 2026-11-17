@@ -9,3 +9,6 @@
 services:
   caddy:
     ports: !override ["127.0.0.1:8088:8088"]
+    # The `local-computer` profile's pim-computer reaches Caddy as http://caddy:8088 on its own network: the published port is bound to 127.0.0.1, which a container cannot reach through the host's address.
+    # That puts the container where any browser is, at the public edge, and nothing else of the stack.
+    networks: !override [internal, edge, computer]

@@ -73,7 +73,7 @@ function sha256(text: string): string {
  * another form.
  */
 export function triggersBinding(token: string): Binding | null {
-	const owner = /^pimc_(o_[0-9a-z]{26})_[\w-]+$/.exec(token)?.[1];
+	const owner = /^pimc_(o_[0-9a-z]{24,26})_[\w-]+$/.exec(token)?.[1];
 	if (!owner) return null;
 	return { space: owner, runtimeId: `rt_${sha256(`${PROTOCOL}/runtime\n${sha256(token)}`).slice(0, 32)}` };
 }

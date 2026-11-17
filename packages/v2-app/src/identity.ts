@@ -216,7 +216,8 @@ export class Identity {
 
 	/** Issues a computer, host or MCP bearer. `reissueFrom` revokes the old one in the same step so a rotated secret never leaves two live. */
 	async issueConsumer(ownerId: string, kind: ConsumerKind, opts: { label?: string; scopes?: string[]; metadata?: object; reissueFrom?: string; expiresAt?: Date } = {}): Promise<{ id: string; token: string }> {
-		const token = `${CONSUMER_PREFIX[kind]}${secret()}`;
+		// A computer's token names its owner, `pimc_<owner>_<secret>`, because the triggers runtime on the computer binds to that space from its token alone.
+		const token = `${CONSUMER_PREFIX[kind]}${kind === "computer" ? `${ownerId}_` : ""}${secret()}`;
 		const id = newId("tc");
 		await this.db.owner(ownerId, async (tx) => {
 			if (opts.reissueFrom) await tx.query("UPDATE pim_app.token_consumers SET revoked_at = coalesce(revoked_at, now()) WHERE id = $1", [opts.reissueFrom]);

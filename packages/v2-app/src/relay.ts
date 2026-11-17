@@ -20,6 +20,12 @@ export const OUTDATED = 4410;
 /** The protocol revision of the Relay's calls (pim-computer's `PROTOCOL_VERSION`); a computer that says less is older. */
 export const PROTOCOL_VERSION = 2;
 const FILE_CALL_MS = 30_000;
+/** How every message of the triggers runtime on a computer begins, both ways (computer/triggers-host.ts): the Relay hands them to the space's side of it, not to its own reading of the connection. */
+export const TRIGGERS_ENVELOPE = '{"type":"triggers","frame":';
+/** The space's side of the triggers runtime a computer carries (the Gate gives the Relay one): started on each connection a computer makes. */
+export interface ComputerTriggersHost {
+	open(connection: { readonly ownerId: string; readonly computerId: string; sendRaw(text: string): void }, token: string): { receive(raw: string): void; close(): void };
+}
 const OUTDATED_RETRY_MS = 10 * 60_000;
 const MAX_WATCHED_PATHS = 200;
 
@@ -101,6 +107,8 @@ export class ComputerConnection implements Computer {
 	readonly #appSockets = new Map<number, (data: Uint8Array | string | null) => void>();
 	#serial: Promise<unknown> = Promise.resolve();
 	#closed = false;
+	/** The space's side of the triggers runtime on this computer (`ComputerTriggers`), once the Relay is given one. */
+	triggers: { receive(raw: string): void; close(): void } | null = null;
 
 	constructor(
 		readonly ownerId: string,
@@ -135,6 +143,8 @@ export class ComputerConnection implements Computer {
 			if (raw.byteLength > 4) this.#screens.get(new DataView(raw.buffer, raw.byteOffset, raw.byteLength).getUint32(0))?.(raw.slice(4));
 			return;
 		}
+		// Triggers frames come first, before anything else reads the message: their `hello` is not the computer's own.
+		if (raw.startsWith(TRIGGERS_ENVELOPE)) return this.triggers?.receive(raw);
 		let m: { type?: unknown; id?: unknown; result?: unknown; error?: { message?: unknown; code?: unknown }; channel?: unknown; data?: unknown; event?: unknown; path?: unknown };
 		try {
 			m = JSON.parse(raw);
@@ -187,9 +197,15 @@ export class ComputerConnection implements Computer {
 		}
 	}
 
+	/** Sends a message as it is, for protocols that carry their own framing over this connection. */
+	sendRaw(text: string): void {
+		this.socket.send(text);
+	}
+
 	/** The socket closed: calls waiting on it fail now rather than at their timeouts. */
 	closed(): void {
 		this.#closed = true;
+		this.triggers?.close();
 		for (const [id, p] of this.#pending) {
 			clearTimeout(p.timer);
 			p.reject(new ComputerError(503, "The computer disconnected before it answered."));
@@ -508,6 +524,8 @@ export class Relay {
 	readonly #askedToUpdate = new Map<string, number>();
 	readonly #states = new Map<string, { watching: Map<string, number>; listeners: Set<(event: FileEvent) => void> }>();
 	#bus: RelayBus | null = null;
+	/** Set by the Gate, so a computer's triggers frames have somewhere to go. */
+	computerTriggers: ComputerTriggersHost | null = null;
 	/** Names this process on the bus, so it hears its own notices as its own. */
 	#holder = newId("relay");
 	/** The owners whose computer this process holds, with what it does on the bus for them while it does. */
@@ -578,6 +596,7 @@ export class Relay {
 			this.#maybeAskUpdate(c);
 			void this.db.owner(p.ownerId, (tx) => tx.query("UPDATE pim_app.computers SET protocol = $2, last_seen_at = now() WHERE id = $1", [computerId, Math.min(c.protocol, 2)])).catch(() => undefined);
 		});
+		conn.triggers = this.computerTriggers?.open(conn, token) ?? null;
 		const previous = this.#links.get(p.ownerId);
 		this.#links.set(p.ownerId, conn);
 		previous?.close(REPLACED, "Another computer connected with this token");

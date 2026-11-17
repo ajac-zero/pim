@@ -5,14 +5,14 @@
  *   GET /api/computer/displays             the per-thread desktops on it, and POST .../displays/control to take one over
  *   GET / DELETE /api/browser?session=     whether its browser exists, and closing a chat's window
  *   GET / HEAD / PUT /api/files(/content)  the person's files on it, and DELETE /api/files
- *   GET /install.sh, GET /pim-computer.ts  what installs and updates `pim-computer` on a machine, public like the Worker's
+ *   GET /install.sh, GET /pim-computer.ts  what installs and updates `pim-computer` on a machine, public like the Worker's, and the triggers runtime's modules it loads beside it
  *
  * The files are the computer's: nothing here keeps a copy. Every call goes to the paired `pim-computer` through the Relay (in this process, or over the bus to the one
  * that holds its socket); with none connected they answer 503 `capability_unavailable`, and nothing else in Pim is affected. A guest has no computer.
  */
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { posix } from "node:path";
+import { dirname, join, posix } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type Computer, ComputerError } from "@pim/v2-app/relay";
 import { BadRequestError, ConflictError, NotFoundError, PimError } from "@pim/v2-app/errors";
@@ -76,7 +76,12 @@ async function withBrowser<T>(computer: Computer, thread: string | null, use: (s
 		}
 	};
 	try {
-		return (await open(thread ?? undefined))?.value ?? null;
+		const own = await open(thread ?? undefined);
+		if (own || !thread) return own?.value ?? null;
+		// A chat that hasn't leased a browser of its own shows the shared one when the computer has no displays at all (displayd is not there), as the agent's tools do.
+		const shown = await computer.call<{ displays: unknown[]; queue: unknown[] }>("displays_list", {}).catch(() => null);
+		const none = !shown || (shown.displays.length === 0 && shown.queue.length === 0);
+		return none ? ((await open(undefined))?.value ?? null) : null;
 	} catch (error) {
 		// A computer without displayd has one browser, which the chats share.
 		if (thread && /no display allocated|displayd is not reachable/.test((error as Error).message)) return (await open(undefined))?.value ?? null;
@@ -89,6 +94,9 @@ const pageOf = async (send: (method: string, params?: object, sessionId?: string
 	const { targetInfos } = (await send("Target.getTargets")) as { targetInfos: { type: string; targetId: string; url: string; title: string }[] };
 	return targetInfos.find((t) => t.type === "page") ?? null;
 };
+
+/** The triggers runtime's modules, which `pim-computer` fetches from its Pim as it starts (`TRIGGERS_MODULES` in computer/pim-computer.ts), because an installed computer has only that one file. */
+const TRIGGERS_MODULES = ["triggers-host.ts", "triggers-runtime.ts", "triggers-adapters/index.ts", "triggers-adapters/managed.ts", "triggers-adapters/poll.ts", "triggers-adapters/process.ts", "triggers-adapters/stream.ts"];
 
 export function computerRoutes(options: { source?: string } = {}): Route[] {
 	const source = options.source ?? process.env.PIM_COMPUTER_SOURCE ?? fileURLToPath(new URL("../../../../computer/pim-computer.ts", import.meta.url));
@@ -258,5 +266,6 @@ export function computerRoutes(options: { source?: string } = {}): Route[] {
 		// Public, as the Worker's were: a machine that has no session fetches them before it has paired, and again to update itself.
 		route("GET", "/install.sh", async ({ origin }) => ({ status: 200, headers: { "content-type": "text/x-shellscript; charset=utf-8", "cache-control": "no-cache" }, raw: installScript(origin) })),
 		route("GET", "/pim-computer.ts", async () => ({ status: 200, headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-cache" }, raw: await readFile(source).catch(() => { throw new NotFoundError("This deployment does not carry pim-computer.ts (set PIM_COMPUTER_SOURCE)"); }) })),
+		...TRIGGERS_MODULES.map((file) => route("GET", `/${file}`, async () => ({ status: 200, headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-cache" }, raw: await readFile(join(dirname(source), file)).catch(() => { throw new NotFoundError(`This deployment does not carry ${file}`); }) }))),
 	];
 }

@@ -52,7 +52,7 @@ real("an agent on a paired computer", () => {
 	};
 	const connected = (online: boolean) => waitFor(`the computer to be ${online ? "online" : "offline"}`, async () => ((await web.call("GET", "/api/computer")).json.state === (online ? "online" : "offline") ? true : undefined), 30_000);
 	const startDaemon = (...extra: string[]) => {
-		daemon = spawn(process.execPath, [COMPUTER, "--url", `http://127.0.0.1:${d.gatePort}`, "--token", token, "--root", root, ...extra], { stdio: "ignore", env: { ...process.env, HOME: home } });
+		daemon = spawn(process.execPath, [COMPUTER, "--url", `http://127.0.0.1:${d.gatePort}`, "--token", token, "--root", root, ...extra], { stdio: process.env.PIM_TEST_DAEMON_LOG ? "inherit" : "ignore", env: { ...process.env, HOME: home } });
 	};
 
 	beforeAll(async () => {
@@ -154,6 +154,81 @@ real("an agent on a paired computer", () => {
 		expect((await results("shell")).at(-1)).toMatch(/Unavailable/);
 		expect((await d.stack.admin.query("SELECT count(*)::int AS n FROM pim_app.approvals WHERE state = 'waiting'")).rows[0].n).toBe(0);
 	}, 180_000);
+
+	it("looks at the desktop of a computer with a Cua desktop and no displayd, and waits for a person before acting on it", async () => {
+		const asked: { name: string; arguments: Record<string, unknown> }[] = [];
+		const spacesd = createServer((req, res) => {
+			let body = "";
+			req.on("data", (chunk) => (body += chunk));
+			req.on("end", () => {
+				const m = JSON.parse(body || "{}") as { id?: number; method?: string; params?: { name: string; arguments: Record<string, unknown> } };
+				if (m.method === "initialize") return void res.writeHead(200, { "content-type": "application/json", "mcp-session-id": "s1" }).end(JSON.stringify({ jsonrpc: "2.0", id: m.id, result: { protocolVersion: "2025-06-18", capabilities: {}, serverInfo: { name: "cua", version: "0" } } }));
+				if (m.id === undefined) return void res.writeHead(202).end();
+				asked.push(m.params!);
+				res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ jsonrpc: "2.0", id: m.id, result: { content: [{ type: "text", text: `${m.params!.name} done` }] } }));
+			});
+		});
+		await new Promise<void>((resolve) => spacesd.listen(0, "127.0.0.1", resolve));
+		const tokenFile = join(home, "spacesd-token");
+		writeFileSync(tokenFile, "t0ken");
+		process.env.PIM_SPACESD_TOKEN_FILE = tokenFile;
+		try {
+			daemon?.kill("SIGKILL");
+			startDaemon("--spacesd", `http://127.0.0.1:${(spacesd.address() as { port: number }).port}`);
+			await connected(true);
+			// Looking runs at once, on the one desktop the chats share.
+			await (await ask("look", toolUse(fauxToolCall("desktop_look", {}))))();
+			expect((await results("desktop_look")).at(-1)).toContain("get_desktop_state done");
+			// Acting is filed first and does nothing until it is approved.
+			const end = await ask("click", toolUse(fauxToolCall("desktop_act", { action: "click", pid: 7, x: 5, y: 6 })));
+			const approval = await waitFor("the approval to be filed", async () => (await d.stack.admin.query("SELECT id, tool FROM pim_app.approvals WHERE state = 'waiting'")).rows[0], 60_000);
+			expect(approval.tool).toBe("computer:desktop");
+			expect(asked.map((a) => a.name)).toEqual(["get_desktop_state"]);
+			expect((await web.call("POST", `/api/approvals/${approval.id}/decision`, { approve: true })).status).toBe(200);
+			await end();
+			expect(asked.map((a) => a.name)).toEqual(["get_desktop_state", "click"]);
+			expect(asked[1]!.arguments).toMatchObject({ pid: 7, x: 5, y: 6 });
+		} finally {
+			delete process.env.PIM_SPACESD_TOKEN_FILE;
+			daemon?.kill("SIGKILL");
+			await connected(false);
+			spacesd.close();
+		}
+	}, 240_000);
+
+	it("runs a stream trigger on the computer only under a grant for exactly that source, and hands what it saw to the chat", async () => {
+		daemon?.kill("SIGKILL");
+		await connected(false);
+		startDaemon();
+		await connected(true);
+		const computerId = "";
+		const agentId = (await web.call("POST", "/api/agents", { name: "Watcher" })).json.id as string;
+		const made = (await web.call("POST", "/api/triggers", { label: "Watch", instruction: "Tell me what the stream saw.", agentId, source: { kind: "stream", command: "echo '{\"m\":0}'; echo '{\"n\":1}'; sleep 300" }, condition: { when: { op: "exists", path: ["n"] } }, destination: { type: "existing_chat", chatId } })).json;
+		expect(made).toMatchObject({ lifecycle: "draft", capability: { status: "available", delivers: true }, grant: { required: true, state: "missing" } });
+		const resume = (revision: number) => web.call("POST", `/api/triggers/${made.id}/resume`, {}, { "if-match": `"${revision}"` });
+		// Without a grant nothing is enabled, and nothing runs on the computer.
+		expect((await resume(made.revision)).status).toBeGreaterThanOrEqual(400);
+		const grant = await web.call("POST", `/api/triggers/${made.id}/computer-grant`, { computerId });
+		expect(grant.status, JSON.stringify(grant.json)).toBe(200);
+		const granted = (await web.call("GET", `/api/triggers/${made.id}`)).json;
+		expect(granted.grant.state).toBe("current");
+		faux.setResponses([fauxAssistantMessage("It saw n=1.")] as never);
+		expect((await resume(granted.revision)).json.lifecycle).toBe("enabled");
+		const fired = () => d.stack.admin.query("SELECT detail FROM pim_app.trigger_runs WHERE trigger_id = $1 AND phase = 'fired'", [made.id]);
+		const run = await waitFor("the stream's matching line to reach the chat", async () => (await fired()).rows[0], 90_000);
+		// What it says is why it fired, never what was observed.
+		expect(run.detail).toMatchObject({ source: "stream" });
+		expect(JSON.stringify(run.detail)).not.toContain('"n"');
+		// The line that doesn't match the condition fired nothing: one run in all.
+		expect((await fired()).rowCount).toBe(1);
+		// Changing what runs makes the grant stale: it is not run again until it is granted anew.
+		const changed = (await web.call("PATCH", `/api/triggers/${made.id}`, { source: { kind: "stream", command: "echo '{\"n\":2}'; sleep 300" } }, { "if-match": `"${(await web.call("GET", `/api/triggers/${made.id}`)).json.revision}"` })).json;
+		expect(changed.grant.state).toBe("not_current");
+		const stale = await d.stack.admin.query("SELECT 1 FROM pim_app.trigger_computer_grants WHERE trigger_id = $1 AND config_hash IS NOT NULL", [made.id]);
+		expect(stale.rowCount).toBe(1);
+		daemon?.kill("SIGKILL");
+		await connected(false);
+	}, 240_000);
 
 	it.skipIf(!CHROME)("opens pages and clicks links freely, but sending a form waits for a person (the real daemon's Chrome)", async () => {
 		const posts: string[] = [];

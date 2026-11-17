@@ -298,7 +298,8 @@ describe("the desktop and the browser, relayed", () => {
 				answer({});
 				c.ws.send(JSON.stringify({ type: "cdp", channel: 77, data: JSON.stringify({ sessionId: "S1", method: "Page.screencastFrame", params: { data: "JPEGDATA", sessionId: 5, metadata: { deviceWidth: 800, deviceHeight: 600 } } }) }));
 				c.ws.send(JSON.stringify({ type: "cdp", channel: 77, data: JSON.stringify({ sessionId: "S1", method: "Page.frameNavigated", params: { frame: { url: "https://example.com/" } } }) }));
-			} else answer({});
+			} else if (cdp.method === "Page.getNavigationHistory") answer({ currentIndex: 1, entries: [{ id: 7 }, { id: 8 }] });
+			else answer({});
 		});
 		const viewer = await wsOpen("/api/browser/live?session=chat1", { cookie: u.cookie });
 		const got: any[] = [];
@@ -312,8 +313,41 @@ describe("the desktop and the browser, relayed", () => {
 		expect(sent.find((s) => s.method === "Input.dispatchMouseEvent")).toMatchObject({ sessionId: "S1", params: { type: "mousePressed", x: 10, y: 20, button: "left", clickCount: 1 } });
 		viewer.send(JSON.stringify({ type: "key", event: "keyDown", key: "a", code: "KeyA", text: "a", keyCode: 65 }));
 		await until(() => sent.some((s) => s.method === "Input.dispatchKeyEvent"));
+		// What the browser screen sends besides the pointer and keys: typed text, an address, and back, forward and reload.
+		viewer.send(JSON.stringify({ type: "text", text: "hello" }));
+		viewer.send(JSON.stringify({ type: "navigate", url: "https://example.org/" }));
+		viewer.send(JSON.stringify({ type: "reload" }));
+		await until(() => sent.some((s) => s.method === "Page.reload"));
+		expect(sent.find((s) => s.method === "Input.insertText")).toMatchObject({ sessionId: "S1", params: { text: "hello" } });
+		expect(sent.find((s) => s.method === "Page.navigate")).toMatchObject({ sessionId: "S1", params: { url: "https://example.org/" } });
+		viewer.send(JSON.stringify({ type: "back" }));
+		await until(() => sent.some((s) => s.method === "Page.navigateToHistoryEntry"));
+		expect(sent.find((s) => s.method === "Page.navigateToHistoryEntry")!.params).toEqual({ entryId: 7 });
 		viewer.close();
 		await until(() => c.calls.some((x) => x.op === "browser_disconnect"));
+	});
+
+	it("takes over the shared browser when the computer has no displayd to give the chat one", async () => {
+		const u = await mk("rl-browser-shared");
+		const { c } = await pairAndConnect(u);
+		c.handlers.set("browser_connect", (args: any) => {
+			if (args.thread) throw Object.assign(new Error("no display allocated: displayd is not reachable on this computer"), { code: "ENODISPLAY" });
+			return { channel: 78 };
+		});
+		c.handlers.set("browser_disconnect", () => ({}));
+		c.ws.on("message", (data) => {
+			const m = JSON.parse(data.toString());
+			if (m.type !== "cdp") return;
+			const cdp = JSON.parse(m.data);
+			const answer = (result: unknown) => c.ws.send(JSON.stringify({ type: "cdp", channel: 78, data: JSON.stringify({ id: cdp.id, result }) }));
+			if (cdp.method === "Target.getTargets") answer({ targetInfos: [{ type: "page", targetId: "T1" }] });
+			else if (cdp.method === "Target.attachToTarget") answer({ sessionId: "S1" });
+			else answer({});
+		});
+		const viewer = await wsOpen("/api/browser/live?session=chat1", { cookie: u.cookie });
+		await until(() => c.calls.filter((x) => x.op === "browser_connect").length === 2);
+		expect(c.calls.filter((x) => x.op === "browser_connect").map((x) => x.args)).toEqual([{ thread: "chat1" }, {}]);
+		viewer.close();
 	});
 });
 

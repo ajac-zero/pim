@@ -13,6 +13,7 @@ import { KeyringCrypto } from "@pim/v2-app/crypto";
 import { connect as connectApp } from "@pim/v2-app/db";
 import { createGate } from "@pim/v2-app/gate";
 import { S3ObjectStore } from "@pim/v2-app/objects";
+import { ComputerTriggers } from "./computer-triggers.ts";
 import { attachSockets, BROWSER_LIVE, COMPUTER_CONNECT, COMPUTER_SCREEN, NOTES_LIVE } from "@pim/v2-app/sockets";
 import { runnerMayStart } from "@pim/v2-ops/backup/reconcile";
 import { createPimMetrics, instrumentPool, monitorEventLoop } from "@pim/v2-ops/observability/signals";
@@ -107,6 +108,8 @@ export async function startGate(config: ProcessConfig, env: Env, host: Host, nat
 	if (nats) app.relay.useBus(natsRelayBus(nats));
 	deliverApprovalDecisions(app);
 	limitGuestMessages(app);
+	// What the triggers runtime on a person's computer says over its connection is answered here, in the process that holds the socket.
+	app.relay.computerTriggers = new ComputerTriggers(app);
 	const secure = config.publicUrl.startsWith("https:");
 	const forge = assembleForge(db.pool as never, objects, env, crypto, { scoped: true });
 	mirrorCodingGrants(app, forge.authz as never);

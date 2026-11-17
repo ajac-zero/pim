@@ -180,6 +180,12 @@ export class Triggers {
 		return n;
 	}
 
+	/** One occurrence of a trigger whose source is observed elsewhere (a computer's runtime), handed to its chat once per `occurrence`; false when it was already handed over. */
+	async fireOccurrence(ownerId: string, triggerId: string, occurrence: string, detail: object): Promise<boolean> {
+		const row = await this.db.owner(ownerId, async (tx) => load(tx, triggerId));
+		return this.#fire(ownerId, row, occurrence, detail);
+	}
+
 	async #run(ownerId: string, triggerId: string, id: string, phase: string, commandId: string | null, detail: object) {
 		await this.db.owner(ownerId, (tx) => tx.query("INSERT INTO pim_app.trigger_runs (id, owner_id, trigger_id, phase, command_id, detail) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING", [id, ownerId, triggerId, phase, commandId, JSON.stringify(detail)]));
 	}

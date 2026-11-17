@@ -38,7 +38,7 @@ export class Connectors {
 		private readonly crypto: EnvelopeCrypto,
 		private readonly triggers: Triggers,
 		private readonly signin: SignIn,
-		private readonly opts: { fetchTools?: ToolFetcher; exchange?: CodeExchanger } = {},
+		private readonly opts: { fetchTools?: ToolFetcher; exchange?: CodeExchanger; /** A deployment that lets connectors live at private addresses (a homelab) may reach a server over plain http. */ allowHttp?: boolean } = {},
 		private readonly authz = new Authorizer(db),
 	) {}
 
@@ -53,7 +53,7 @@ export class Connectors {
 		if (!input.name?.trim()) throw new BadRequestError("A connector needs a name");
 		if (input.kind === "custom_mcp") {
 			if (p.kind !== "user" && p.kind !== "token") throw new RefusedError("Only a person adds a custom connector.", "session-only");
-			if (!/^https:\/\//.test(input.url ?? "") && !/^http:\/\/(localhost|127\.0\.0\.1)/.test(input.url ?? "")) throw new BadRequestError("A custom connector's url is https");
+			if (!/^https:\/\//.test(input.url ?? "") && !/^http:\/\/(localhost|127\.0\.0\.1)/.test(input.url ?? "") && !(this.opts.allowHttp && /^http:\/\//.test(input.url ?? ""))) throw new BadRequestError("A custom connector's url is https");
 		}
 		const id = newId("cn");
 		const eventSecret = secret();

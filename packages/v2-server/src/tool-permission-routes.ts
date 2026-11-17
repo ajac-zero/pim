@@ -22,7 +22,7 @@ async function person(app: App, p: Principal, write: boolean): Promise<void> {
 export function permissionRoutes(): Route[] {
 	const rows = async (app: App, ownerId: string) =>
 		app.db.owner(ownerId, async (tx) => ({
-			connectors: (await tx.query("SELECT id, kind, name, url, status, credential, enabled_tools, approval, discovered_tools FROM pim_app.connectors WHERE url IS NOT NULL ORDER BY created_at")).rows.map((r) => ({ id: r.id as string, kind: r.kind as string, name: r.name as string, url: r.url as string, status: r.status as string, credential: r.credential as string | null, enabledTools: r.enabled_tools as string[], approval: r.approval as Approval, discovered: r.discovered_tools as (McpTool)[] })),
+			connectors: (await tx.query("SELECT id, kind, name, url, status, credential, enabled_tools, approval, discovered_tools FROM pim_app.connectors WHERE url IS NOT NULL OR kind = 'native' ORDER BY created_at")).rows.map((r) => ({ id: r.id as string, kind: r.kind as string, name: r.name as string, url: r.url as string, status: r.status as string, credential: r.credential as string | null, enabledTools: r.enabled_tools as string[], approval: r.approval as Approval, discovered: r.discovered_tools as (McpTool)[] })),
 			permissions: (await tx.query("SELECT audience, app, tool, permission FROM pim_app.tool_permissions")).rows as PermissionRow[],
 		}));
 	const info = (c: ConnectorRow & { discovered: McpTool[] }, tool: McpTool, permissions: PermissionRow[], agentId?: string) => {

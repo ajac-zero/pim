@@ -18,6 +18,7 @@ import { computerTools } from "./computer-tools.ts";
 import type { ForgeParts } from "./forge-assembly.ts";
 import type { EnvelopeCrypto } from "@pim/v2-contracts/platform";
 import { connectorToolset, type Transport } from "./connector-tools.ts";
+import { watchTools } from "./watch-tools.ts";
 
 export type ToolDeps = {
 	ownerId: string;
@@ -353,6 +354,8 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 	const transport: Transport = { fetch: deps.fetch, allowPrivate: deps.allowPrivateConnectors === true, check: publicUrl };
 	const connectors = connectorToolset({ ownerId, partitionId, runtime, app: deps.app, crypto: deps.crypto, transport, ops, owner, now: deps.now, chatOf: deps.chatOf, principalOf });
 	tools.push(...connectors.tools);
+	// Watches: events of a connected server, delivered to the chat that asked.
+	tools.push(...watchTools({ ownerId, watch: () => (deps.app && deps.crypto ? { app: deps.app, crypto: deps.crypto, transport, publicUrl: process.env.PIM_PUBLIC_URL, now: deps.now } : undefined), chatOf: deps.chatOf, principalOf: (chat) => (deps.app ? principalOf(deps.app, chat) : Promise.resolve(undefined)) }));
 
 	return defineExtension({ name: "pim", tools, sections: [...sections, ...connectors.sections] });
 }

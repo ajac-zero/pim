@@ -34,6 +34,8 @@ export function envFor(d: Deployment, role: "gate" | "live" | "runner" | "forge"
 		PIM_HTTP_PORT: role === "gate" ? String(d.gatePort) : "0",
 		PIM_METRICS_PORT: "0",
 		PIM_DRAIN_WINDOW_SECONDS: "1",
+		// One test person polls the Gate far faster than a person does; the API rate limit has its own test (limits-providers.test.ts).
+		PIM_RATE_API: "1000000",
 		...extra,
 	};
 }

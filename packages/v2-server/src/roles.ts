@@ -31,6 +31,7 @@ import { codingAdminRoutes, forgeAuthenticator, forgeRoutes, projectedTranscript
 import type { Host } from "./host.ts";
 import { AppLiveIdentity, deliverApprovalDecisions, LiveAuthorizer, mirrorCodingGrants, publishRevocations } from "./identity.ts";
 import { runtimeOutboxSource } from "./runtime-source.ts";
+import { computerRoutes } from "./computer-routes.ts";
 import { natsRelayBus } from "./relay-bus.ts";
 import { sweepApprovals, trimForgeOutbox } from "./sweeps.ts";
 
@@ -95,7 +96,7 @@ export async function startGate(config: ProcessConfig, env: Env, host: Host, nat
 	const authenticate = forgeAuthenticator(app, secure);
 	// Forge's whole HTTP surface (the coding API, harness logins, the git broker, Gitea, the model gateway), each request under its owner's row-level security scope.
 	const coding = forgeHttp(forge, { authenticate, crypto: app.crypto });
-	const options = { publicUrl: config.publicUrl, ...(env.PIM_APPS_ORIGIN ? { appsOrigin: env.PIM_APPS_ORIGIN } : {}), routes: [...snapshotRoutes(db.pool), ...codingAdminRoutes(), ...forgeRoutes(coding)] };
+	const options = { publicUrl: config.publicUrl, ...(env.PIM_APPS_ORIGIN ? { appsOrigin: env.PIM_APPS_ORIGIN } : {}), routes: [...snapshotRoutes(db.pool), ...codingAdminRoutes(), ...forgeRoutes(coding), ...computerRoutes(env.PIM_COMPUTER_SOURCE ? { source: env.PIM_COMPUTER_SOURCE } : {})] };
 	const gate = createGate(app, options);
 	const listener = gate.listeners("request")[0] as (req: never, res: never) => void;
 	host.handle((req, res) => (listener(req as never, res as never), true));
@@ -199,7 +200,10 @@ export async function startRunner(config: ProcessConfig, env: Env, host: Host, h
 	const objects = appDb || forgePool ? s3Of(config, env) : undefined;
 	const app = appDb && objects ? new App(appDb, objects, { ...(crypto ? { crypto } : {}), ...(env.PIM_APP_SECRET_KEY ? { appKey: env.PIM_APP_SECRET_KEY } : {}) }) : undefined;
 	const forge = forgePool && objects ? assembleForge(forgePool as never, objects, env) : undefined;
-	const host_ = hooks.harnessOptions ? undefined : createAgentHost({ db, env, crypto, app, forge, providers: hooks.providers, fetch: hooks.fetch });
+	// The computer's tools reach a paired computer over the Relay's bus (NATS). The connection is made when an agent first uses one, so a Runner that never does needs no NATS.
+	let relayPulse: Promise<NatsPulse> | undefined;
+	const relayBus = async () => natsRelayBus(await (relayPulse ??= NatsPulse.connect(config.natsUrl)));
+	const host_ = hooks.harnessOptions ? undefined : createAgentHost({ db, env, crypto, app, forge, relay: relayBus, providers: hooks.providers, fetch: hooks.fetch });
 	const runner = new Runner({
 		db,
 		harnessOptions: hooks.harnessOptions ?? host_!.harnessOptions,
@@ -243,6 +247,7 @@ export async function startRunner(config: ProcessConfig, env: Env, host: Host, h
 			await runtimePool.end();
 			await appDb?.end();
 			await forgePool?.end();
+			await (await relayPulse?.catch(() => undefined))?.close();
 		},
 	};
 }

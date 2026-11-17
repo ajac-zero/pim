@@ -37,6 +37,8 @@ import { randomBytes, randomUUID } from "node:crypto";
 export type PromoteOptions = {
 	/** The relying party id of the new deployment: a passkey works only under the hostname it was made for. */
 	rpId: string;
+	/** The old deployment's relying party id, when it differs: a promoted passkey stays marked with the host it was made for, which is not this one, so it is never offered here. */
+	legacyRpId?: string;
 	/** When the legacy deployment stopped; tasks that were mid-effect then are orphaned. */
 	cutoverAt: number;
 	/**
@@ -49,6 +51,8 @@ export type PromoteOptions = {
 	activatedAt?: number;
 	/** What re-seals the secrets the landing holds: the ops envelopes are opened with `ops`, and sealed again under the application's own keys with `app`. Without it connectors and providers are promoted without credentials, to be connected again. */
 	crypto?: { ops: OpsCrypto; app: KeyringCrypto };
+	/** The deployment's environment: a native connector's credential is promoted with the provider's token endpoint and the deployment's OAuth client (`GOOGLE_GMAIL_CLIENT_ID`/`_SECRET`, `GOOGLE_DRIVE_*`, `SPOTIFY_*`, `PIM_GOOGLE_TOKEN_URL`, `PIM_SPOTIFY_TOKEN_URL`), so it can be renewed. */
+	env?: Record<string, string | undefined>;
 	/** Where the legacy objects' bytes are: skills' files, apps' files and media. Without it those rows are reported as skipped, not promoted empty. */
 	objects?: { get(bucket: string, key: string): Promise<Uint8Array | null>; put?(key: string, bytes: Uint8Array, contentType: string | null): Promise<void> };
 };
@@ -83,7 +87,7 @@ async function asOwner<T>(pool: Pool, owner: string, fn: (c: PoolClient) => Prom
 }
 
 /** Accounts, credentials and tokens. Hashes and public keys only: no secret is ever opened here. */
-async function promoteIdentity(pool: Pool, owner: string, rpId: string): Promise<void> {
+async function promoteIdentity(pool: Pool, owner: string, rpId: string, legacyRpId?: string): Promise<void> {
 	await asOwner(pool, owner, async (c) => {
 		const t = (await c.query("SELECT * FROM pim_ops.tenants WHERE owner_id = $1", [owner])).rows[0];
 		await c.query(
@@ -94,7 +98,7 @@ async function promoteIdentity(pool: Pool, owner: string, rpId: string): Promise
 		for (const k of (await c.query("SELECT * FROM pim_ops.passkeys WHERE owner_id = $1", [owner])).rows) {
 			await c.query(
 				"INSERT INTO pim_app.passkeys (credential_id, owner_id, user_handle, rp_id, spki, algorithm, name, created_at, last_used_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT DO NOTHING",
-				[k.id, owner, userHandle(owner), rpId, k.spki, k.algorithm, k.name, ts(k.created_at_ms), ts(k.last_used_at_ms)],
+				[k.id, owner, userHandle(owner), legacyRpId ?? rpId, k.spki, k.algorithm, k.name, ts(k.created_at_ms), ts(k.last_used_at_ms)],
 			);
 		}
 		for (const i of (await c.query("SELECT * FROM pim_ops.identities WHERE owner_id = $1", [owner])).rows) {
@@ -412,8 +416,24 @@ async function promoteDomain(pool: Pool, owner: string, options: PromoteOptions,
 		const key = plain ? (parseJson(plain, {}) as { apiKey?: string }).apiKey : undefined;
 		if (key) providerSecrets.set(String(c.provider), await sealed(key, `provider:${owner}/pv_legacy_${slug(String(c.provider))}`));
 	}
-	// A native connector's sign-in (Gmail, Drive, Spotify) has no consumer in this deployment yet: its credential stays where the import sealed it (`pim_ops.secret_envelopes`),
-	// never in clear and not copied into the application's tables, so connecting it again, or a later native connector, can start from it.
+	// A native connector's sign-in (Gmail, Drive, Spotify) `{accessToken, refreshToken, expiresAt, scope, files?}` becomes the bundle v2's native connectors keep
+	// (`{access_token, refresh_token, expires_at, token_endpoint, client_id, client_secret, scope, files?}`), with the provider's token endpoint and the deployment's client,
+	// sealed under `connector:<owner>/<id>`. Without the client in the environment the tokens still work until they expire, and the report says so.
+	const env = options.env ?? {};
+	const NATIVE: Record<string, { ref: string; token: string; id?: string; secret?: string }> = {
+		gmail: { ref: "google/gmail", token: env.PIM_GOOGLE_TOKEN_URL ?? "https://oauth2.googleapis.com/token", ...(env.GOOGLE_GMAIL_CLIENT_ID ? { id: env.GOOGLE_GMAIL_CLIENT_ID } : {}), ...(env.GOOGLE_GMAIL_CLIENT_SECRET ? { secret: env.GOOGLE_GMAIL_CLIENT_SECRET } : {}) },
+		"google-drive": { ref: "google/drive", token: env.PIM_GOOGLE_TOKEN_URL ?? "https://oauth2.googleapis.com/token", ...(env.GOOGLE_DRIVE_CLIENT_ID ? { id: env.GOOGLE_DRIVE_CLIENT_ID } : {}), ...(env.GOOGLE_DRIVE_CLIENT_SECRET ? { secret: env.GOOGLE_DRIVE_CLIENT_SECRET } : {}) },
+		spotify: { ref: "spotify/spotify", token: env.PIM_SPOTIFY_TOKEN_URL ?? "https://accounts.spotify.com/api/token", ...(env.SPOTIFY_CLIENT_ID ? { id: env.SPOTIFY_CLIENT_ID } : {}), ...(env.SPOTIFY_CLIENT_SECRET ? { secret: env.SPOTIFY_CLIENT_SECRET } : {}) },
+	};
+	const nativeSecrets = new Map<string, string>();
+	for (const k of connections) {
+		const def = NATIVE[String(k.app)];
+		const plain = def ? await secret(k.credential, "connector-credential") : null;
+		const v1 = plain ? (parseJson(plain, null) as { accessToken?: string; refreshToken?: string; expiresAt?: number; scope?: string; files?: unknown } | null) : null;
+		if (!def || !v1?.accessToken) continue;
+		const bundle = { access_token: v1.accessToken, ...(v1.refreshToken ? { refresh_token: v1.refreshToken } : {}), ...(v1.expiresAt ? { expires_at: v1.expiresAt } : {}), token_endpoint: def.token, ...(def.id ? { client_id: def.id } : {}), ...(def.secret ? { client_secret: def.secret } : {}), ...(v1.scope ? { scope: v1.scope } : {}), ...(v1.files ? { files: v1.files } : {}) };
+		nativeSecrets.set(String(k.id), await sealed(JSON.stringify(bundle), `connector:${owner}/${k.id}`));
+	}
 	// A connected MCP server (the `agents` library's `cf_agents_mcp_servers`, with its OAuth tokens in the space's key-value store) has one: the Runner's connector tools.
 	// The tokens' key is `/<client name>/<server id>/<client id>/token`, the registered client's `.../client_info/`; the sign-in's discovery state is dropped once tokens are saved, so
 	// the token endpoint a refresh needs is found again from the server's address when the Runner first has to refresh.
@@ -546,14 +566,16 @@ async function promoteDomain(pool: Pool, owner: string, options: PromoteOptions,
 			if (!providerSecrets.has(String(p.provider))) d.skipped.push(`provider ${p.provider}: no credential promoted (${options.crypto ? "its secret could not be opened" : "no keys were given"})`);
 		}
 		for (const k of connections) {
-			const native = ["gmail", "google", "google-drive", "spotify"].includes(String(k.app));
+			const def = NATIVE[String(k.app)];
+			const credential = nativeSecrets.get(String(k.id)) ?? null;
 			const eventSecret = options.crypto ? await sealed(randomBytes(32).toString("base64url"), `connector-events:${owner}/${k.id}`) : null;
 			const r = await c.query(
-				"INSERT INTO pim_app.connectors (id, owner_id, kind, name, credential, event_key, event_secret, status, created_at) VALUES ($1,$2,$3,$4,NULL,$5,$6,'auth_required',$7) ON CONFLICT DO NOTHING",
-				[k.id, owner, native ? "native" : "builtin", k.name ?? k.app, randomBytes(12).toString("base64url"), eventSecret, ms(k.created_at)],
+				"INSERT INTO pim_app.connectors (id, owner_id, kind, name, app_ref, credential, event_key, event_secret, status, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT DO NOTHING",
+				[k.id, owner, def ? "native" : "builtin", k.name ?? k.app, def?.ref ?? null, credential, randomBytes(12).toString("base64url"), eventSecret, credential ? "connected" : "auth_required", ms(k.created_at)],
 			);
 			bump(d, "connectors", r.rowCount ?? 0);
-			d.skipped.push(`connector ${k.id} (${k.app}): connected again by its owner; its sign-in stays sealed in the landing, since this deployment has no ${native ? "native" : "built-in"} connector that could use it`);
+			if (!credential) d.skipped.push(`connector ${k.id} (${k.app}): connected again by its owner (${def ? "it held no credential that could be opened" : "this deployment has no connector for it"}); any sign-in stays sealed in the landing`);
+			else if (!def!.id) d.skipped.push(`connector ${k.id} (${k.app}): promoted with its tokens, but this deployment's environment has no OAuth client for it, so it cannot be renewed once its access token expires`);
 		}
 		// Connected MCP servers: the server's address and, when the person had signed in, its tokens sealed under the application's keys. The server's tools are discovered again and
 		// switched on by the person (the old Pim did not keep the list), except the choices carried below.
@@ -771,7 +793,7 @@ export async function promoteToLive(pool: Pool, options: PromoteOptions): Promis
 	const shared = (await sharedProviders(pool, options)).flatMap((p) => (p.runnable ? [p.id] : []));
 	const report: PromoteReport = { owners: [], chats: 0, messages: 0, forgeThreads: 0, orphanedTasks: 0, clearedRuns: 0, remappedModels: 0, domain: {}, skipped: [] };
 	// Every account exists before any space is promoted: a circle names members who may sort after its owner.
-	for (const owner of owners) await promoteIdentity(pool, owner, options.rpId);
+	for (const owner of owners) await promoteIdentity(pool, owner, options.rpId, options.legacyRpId);
 	for (const owner of owners) {
 		const has = (await runtime.read(owner, "SELECT 1 FROM pim_runtime.partitions WHERE owner_id = $1 LIMIT 1", [owner])).rowCount;
 		const hasPi = (await pool.query("SELECT 1 FROM pim_ops.pi_conversations WHERE owner_id = $1 LIMIT 1", [owner])).rowCount;

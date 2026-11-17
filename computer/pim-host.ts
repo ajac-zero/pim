@@ -28,6 +28,13 @@
  * Or run it yourself, with ./pim-computer.ts beside it for the commands:
  *
  *   PIM_URL=https://pim.example.com PIM_HOST_TOKEN=pimh_… node pim-host.ts
+ *
+ * Where there is no Cua (a server, or Pim on Docker Compose), `--backend docker` keeps each computer as a container of the Pim image instead, running pim-computer as
+ * the unprivileged `node` user with a read-only root and a volume for its files, on a network of its own, with the Docker on this machine. It dials out to the Pim as any
+ * computer does and has none of the stack's credentials, so it is outside the control plane; this program, which holds the Docker access, runs on the host, never in the stack.
+ * A container is not a sandbox for arbitrary code: what an agent runs there runs on this machine's kernel, with network access.
+ *
+ *   PIM_URL=http://localhost:8088 PIM_COMPUTER_URL=http://host.docker.internal:8088 PIM_HOST_TOKEN=pimh_… node pim-host.ts --backend docker --image pim:v2-local
  */
 
 import { constants, realpathSync } from "node:fs";
@@ -71,6 +78,10 @@ export type Options = {
 	readonly memory: string;
 	/** The `cua` command. */
 	readonly cua: string;
+	/** What keeps the computers: Cua's sandboxes, or containers of the Pim image through `docker`. */
+	readonly backend: "cua" | "docker";
+	/** The `docker` command, for the docker backend. */
+	readonly docker: string;
 	readonly intervalMs: number;
 };
 
@@ -78,9 +89,14 @@ const log = (line: string) => console.log(`${new Date().toISOString()} ${line}`)
 
 /** Runs `cua` with `args`, and `input` on its standard input; what it said, and how it exited. */
 async function cua(options: Options, args: string[], input?: string): Promise<{ code: number; stdout: string; stderr: string }> {
+	return runProgram(options.cua, args, input);
+}
+
+/** Runs `file` with `args`, and `input` on its standard input; what it said, and how it exited. */
+async function runProgram(file: string, args: string[], input?: string): Promise<{ code: number; stdout: string; stderr: string }> {
 	const { spawn } = await import("node:child_process");
 	return new Promise((resolve) => {
-		const child = spawn(options.cua, args, { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, CUA_TELEMETRY: process.env.CUA_TELEMETRY ?? "0" } });
+		const child = spawn(file, args, { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, CUA_TELEMETRY: process.env.CUA_TELEMETRY ?? "0" } });
 		let stdout = "";
 		let stderr = "";
 		child.stdout.on("data", (chunk: Buffer) => {
@@ -91,6 +107,8 @@ async function cua(options: Options, args: string[], input?: string): Promise<{ 
 		});
 		child.on("error", (error) => resolve({ code: -1, stdout, stderr: error.message }));
 		child.on("close", (code) => resolve({ code: code ?? -1, stdout, stderr }));
+		// A program that exits without reading its standard input (docker, for any command but the one given an env file) is not a failure of ours.
+		child.stdin.on("error", () => undefined);
 		child.stdin.end(input ?? "");
 	});
 }
@@ -103,6 +121,7 @@ function failed(what: string, run: { code: number; stderr: string; stdout: strin
 
 /** The computers this program keeps, and whether each runs. */
 async function machines(options: Options): Promise<Machine[]> {
+	if (options.backend === "docker") return dockerMachines(options);
 	const run = await cua(options, ["sb", "ls", "--local", "--json", "--no-size"]);
 	if (run.code !== 0) throw failed("Listing the computers", run);
 	const listed = JSON.parse(run.stdout || "[]") as { name?: string; state?: string; status?: string }[];
@@ -177,6 +196,7 @@ async function setUp(options: Options, name: string, token: string | null): Prom
 
 /** Makes a space's computer, or sets the one it has up again with a new token. */
 async function create(options: Options, name: string, token: string): Promise<void> {
+	if (options.backend === "docker") return dockerCreate(options, name, token);
 	let existing = (await machines(options)).find((machine) => machine.name === name);
 	if (existing && !existing.running && !existing.missing && !(await start(options, name))) existing = { ...existing, missing: true };
 	if (existing?.missing) {
@@ -198,6 +218,7 @@ async function create(options: Options, name: string, token: string): Promise<vo
 
 /** Starts a computer that stopped; false when Cua lists it but has no such computer to start (it exits 3, not found). */
 async function start(options: Options, name: string): Promise<boolean> {
+	if (options.backend === "docker") return dockerStart(options, name);
 	log(`Starting ${name}, which stopped.`);
 	const resumed = await cua(options, ["sb", "resume", name]);
 	if (resumed.code === 0) return true;
@@ -209,9 +230,71 @@ async function start(options: Options, name: string): Promise<boolean> {
 
 /** Removes a space's computer, with everything on it; one that's gone already is removed. */
 async function remove(options: Options, name: string): Promise<void> {
+	if (options.backend === "docker") return dockerRemove(options, name);
 	const run = await cua(options, ["sb", "rm", name, "--force"]);
 	// 3: no such sandbox.
 	if (run.code !== 0 && run.code !== 3) throw failed(`Removing ${name}`, run);
+	log(`${name} is removed.`);
+}
+
+// ---- the docker backend: each computer is a container of the Pim image ----
+
+/** The network the containers join: a bridge of its own, which none of the Pim stack's networks is. */
+const DOCKER_NETWORK = "pim-computers";
+const docker = (options: Options, args: string[], input?: string) => runProgram(options.docker, args, input);
+
+/** The containers this program keeps, and whether each runs. */
+async function dockerMachines(options: Options): Promise<Machine[]> {
+	const run = await docker(options, ["ps", "-a", "--filter", "label=pim.computer-host=1", "--format", "{{json .}}"]);
+	if (run.code !== 0) throw failed("Listing the computers", run);
+	return run.stdout
+		.split("\n")
+		.filter((line) => line.trim())
+		.map((line) => JSON.parse(line) as { Names?: string; State?: string })
+		.filter((container) => typeof container.Names === "string" && container.Names.startsWith(PREFIX))
+		.map((container) => ({ name: container.Names!, running: container.State === "running", missing: false }));
+}
+
+/** Makes a person's computer, or makes it again with a new token: its files (a volume) stay, its container is replaced. */
+async function dockerCreate(options: Options, name: string, token: string): Promise<void> {
+	if (!options.image) throw new Error("Give the Pim image the computers run, with --image (PIM_HOST_IMAGE).");
+	await docker(options, ["network", "create", DOCKER_NETWORK]); // fails when it exists, which is fine
+	const gone = await docker(options, ["rm", "-f", name]);
+	if (gone.code !== 0 && !/No such container/i.test(gone.stderr)) throw failed(`Replacing ${name}`, gone);
+	log(`Making ${name} from ${options.image}.`);
+	// The token goes in on standard input, so it is on no command line.
+	const env = ["PIM_URL", "PIM_COMPUTER_TOKEN", "PIM_COMPUTER_ROOT", "HOME"];
+	const values = [options.computerUrl, token, "/workspace", "/home/node"];
+	const run = await docker(
+		options,
+		[
+			"run", "-d", "--name", name, "--hostname", name, "--label", "pim.computer-host=1", "--restart", "unless-stopped",
+			"--network", DOCKER_NETWORK, "--add-host", "host.docker.internal:host-gateway",
+			"--read-only", "--tmpfs", "/tmp", "--tmpfs", "/home/node:uid=1000,gid=1000", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true", "--user", "node",
+			"--cpus", String(options.cpu), "--memory", options.memory.replace(/GB?$/i, "g").replace(/MB?$/i, "m"), "--pids-limit", "1024",
+			"-v", `${name}-files:/workspace`, "--env-file", "/dev/stdin", "--workdir", "/workspace",
+			"--entrypoint", "node", options.image, "/app/computer/pim-computer.ts",
+		],
+		env.map((key, i) => `${key}=${values[i]}\n`).join(""),
+	);
+	if (run.code !== 0) throw failed(`Making ${name}`, run);
+	log(`${name} is running.`);
+}
+
+async function dockerStart(options: Options, name: string): Promise<boolean> {
+	log(`Starting ${name}, which stopped.`);
+	const run = await docker(options, ["start", name]);
+	if (run.code !== 0 && /No such container/i.test(run.stderr)) return false;
+	if (run.code !== 0) throw failed(`Starting ${name}`, run);
+	return true;
+}
+
+/** Removes a person's computer with everything on it: the container and its files. One that is gone already is removed. */
+async function dockerRemove(options: Options, name: string): Promise<void> {
+	const gone = await docker(options, ["rm", "-f", name]);
+	if (gone.code !== 0 && !/No such container/i.test(gone.stderr)) throw failed(`Removing ${name}`, gone);
+	const volume = await docker(options, ["volume", "rm", "-f", `${name}-files`]);
+	if (volume.code !== 0) throw failed(`Removing ${name}'s files`, volume);
 	log(`${name} is removed.`);
 }
 
@@ -222,6 +305,8 @@ async function keepRunning(options: Options, everyone: boolean): Promise<void> {
 		if (machine.missing) continue;
 		try {
 			if (!machine.running && !(await start(options, machine.name))) continue;
+			// A container is pim-computer itself, which Docker keeps running.
+			if (options.backend === "docker") continue;
 			// A running one is set up again only where pim-computer has gone, as after something stopped it.
 			if (machine.running && !everyone && (await cua(options, ["sb", "exec", machine.name, "--", "pgrep -f '[p]im-computer.ts' >/dev/null"])).code !== 1) continue;
 			await setUp(options, machine.name, null);
@@ -260,7 +345,7 @@ export async function serve(options: Options): Promise<never> {
 			const reporting = results.splice(0);
 			// The computers it keeps, for the admin to see, once a minute.
 			let known: Machine[] | undefined;
-			if (Date.now() - lastListed > 60_000) {
+			if (Date.now() - lastListed > Number(process.env.PIM_HOST_LIST_MS ?? 60_000)) {
 				lastListed = Date.now();
 				known = await machines(options).catch((error: Error) => {
 					log(error.message);
@@ -329,17 +414,20 @@ async function checkToken(url: string, token: string): Promise<string | null> {
 /** Settings as the options and environment give them, with their defaults. */
 function readOptions(values: Record<string, string | boolean | undefined>, env: Record<string, string | undefined>, token: string): Options {
 	const url = (values.url as string | undefined) ?? env.PIM_URL ?? "";
-	const kind = (values.kind as string | undefined) ?? env.PIM_HOST_KIND ?? "vm";
+	const backend = ((values.backend as string | undefined) ?? env.PIM_HOST_BACKEND ?? "cua") === "docker" ? "docker" : "cua";
+	const kind = backend === "docker" ? "container" : ((values.kind as string | undefined) ?? env.PIM_HOST_KIND ?? "vm");
 	return {
 		url,
 		token,
 		computerUrl: (values["computer-url"] as string | undefined) ?? env.PIM_COMPUTER_URL ?? url,
-		image: (values.image as string | undefined) ?? env.PIM_HOST_IMAGE ?? defaultImage(kind),
+		image: (values.image as string | undefined) ?? env.PIM_HOST_IMAGE ?? (backend === "docker" ? "" : defaultImage(kind)),
 		kind,
 		cpu: Number((values.cpu as string | undefined) ?? env.PIM_HOST_CPU ?? 4),
 		memory: (values.memory as string | undefined) ?? env.PIM_HOST_MEMORY ?? "8GB",
 		cua: (values.cua as string | undefined) ?? env.PIM_CUA ?? "cua",
-		intervalMs: 5_000,
+		backend,
+		docker: (values.docker as string | undefined) ?? env.PIM_DOCKER ?? "docker",
+		intervalMs: Number(env.PIM_HOST_INTERVAL_MS ?? 5_000),
 	};
 }
 
@@ -378,53 +466,63 @@ async function install(values: Record<string, string | boolean | undefined>): Pr
 	// VMs where this machine can run them, and containers where it can't, unless --kind says which.
 	// On a Mac, VMs run with Apple's Hypervisor.framework, which Cua's runtime check covers.
 	const kvm = process.platform === "linux" ? await fs.stat("/dev/kvm").catch(() => null) : null;
-	const kind = (values.kind as string | undefined) ?? (process.platform === "linux" && !kvm ? "container" : "vm");
+	const dockerBackend = ((values.backend as string | undefined) ?? process.env.PIM_HOST_BACKEND) === "docker";
+	const kind = dockerBackend ? "container" : ((values.kind as string | undefined) ?? (process.platform === "linux" && !kvm ? "container" : "vm"));
 	const options = readOptions({ ...values, kind }, process.env, token);
 	if (!options.url) throw new Error("Give your Pim's address with --url.");
-	if (kind === "vm" && process.platform === "linux") {
-		if (!kvm) throw new Error("This machine has no KVM (/dev/kvm), which VMs need: use a bare-metal machine, or a cloud VM with nested virtualization turned on. Or leave out --kind vm, for containers.");
-		if (!(await fs.access("/dev/kvm", constants.R_OK | constants.W_OK).then(() => true, () => false))) {
-			throw new Error(`You can't use KVM yet: add yourself to its group (sudo usermod -aG kvm ${os.userInfo().username}), sign in again, and run this again. Or make the computers containers: --kind container`);
+	let cuaPath: string | null = null;
+	if (options.backend === "docker") {
+		if (!options.image) throw new Error("Give the Pim image the computers run, with --image.");
+		const version = await docker(options, ["version", "--format", "{{.Server.Version}}"]);
+		if (version.code !== 0) throw failed("Reaching Docker", version);
+		say(`Docker ${version.stdout.trim()}: the computers are containers of ${options.image}, each with a volume for its files.`);
+	} else {
+		if (kind === "vm" && process.platform === "linux") {
+			if (!kvm) throw new Error("This machine has no KVM (/dev/kvm), which VMs need: use a bare-metal machine, or a cloud VM with nested virtualization turned on. Or leave out --kind vm, for containers.");
+			if (!(await fs.access("/dev/kvm", constants.R_OK | constants.W_OK).then(() => true, () => false))) {
+				throw new Error(`You can't use KVM yet: add yourself to its group (sudo usermod -aG kvm ${os.userInfo().username}), sign in again, and run this again. Or make the computers containers: --kind container`);
+			}
+			say("KVM: yes, so the computers are VMs.");
 		}
-		say("KVM: yes, so the computers are VMs.");
-	}
-	if (kind === "container") {
-		say(
-			values.kind
-				? "The computers are containers."
-				: "This machine has no KVM (/dev/kvm), so the computers are containers, which share this machine's kernel and can't run Docker inside. For VMs, use a machine with KVM: bare metal, or a cloud VM with nested virtualization.",
-		);
-	}
+		if (kind === "container") {
+			say(
+				values.kind
+					? "The computers are containers."
+					: "This machine has no KVM (/dev/kvm), so the computers are containers, which share this machine's kernel and can't run Docker inside. For VMs, use a machine with KVM: bare metal, or a cloud VM with nested virtualization.",
+			);
+		}
 
-	let cuaPath = await findCua(options.cua);
-	if (!cuaPath && options.cua === "cua") {
-		say("Installing Cua's command…");
-		const { spawnSync } = await import("node:child_process");
-		spawnSync("sh", ["-c", CUA_INSTALL], { stdio: ["ignore", "inherit", "inherit"] });
-		cuaPath = await findCua("cua");
-	}
-	if (!cuaPath) throw new Error(`Cua's command isn't there (${options.cua}). Install it: ${CUA_INSTALL}`);
-	const located = { ...options, cua: cuaPath };
-	say(`Cua: ${(await cua(located, ["--version"])).stdout.trim()}.`);
+		cuaPath = await findCua(options.cua);
+		if (!cuaPath && options.cua === "cua") {
+			say("Installing Cua's command…");
+			const { spawnSync } = await import("node:child_process");
+			spawnSync("sh", ["-c", CUA_INSTALL], { stdio: ["ignore", "inherit", "inherit"] });
+			cuaPath = await findCua("cua");
+		}
+		if (!cuaPath) throw new Error(`Cua's command isn't there (${options.cua}). Install it: ${CUA_INSTALL}`);
+		const located = { ...options, cua: cuaPath };
+		say(`Cua: ${(await cua(located, ["--version"])).stdout.trim()}.`);
 
-	// Cua's runtime for this kind of computer, which `cua runtime setup` provisions where it can (with sudo, asking for no password).
-	const runtime = RUNTIMES[options.kind];
-	if (runtime) {
-		type Backend = { backend: string; ready: boolean; provisionable: boolean; detail: string; missing: string[] };
-		const doctor = async () => {
-			const run = await cua(located, ["runtime", "doctor", "--json"]);
-			return ((JSON.parse(run.stdout || "{}") as { backends?: Backend[] }).backends ?? []).find((backend) => backend.backend === runtime);
-		};
-		let backend = await doctor();
-		if (backend && !backend.ready && backend.provisionable) {
-			say(`Setting up Cua's ${runtime} runtime…`);
-			await cua(located, ["runtime", "setup", runtime]);
-			backend = await doctor();
+		// Cua's runtime for this kind of computer, which `cua runtime setup` provisions where it can (with sudo, asking for no password).
+		const runtime = RUNTIMES[options.kind];
+		if (runtime) {
+			type Backend = { backend: string; ready: boolean; provisionable: boolean; detail: string; missing: string[] };
+			const doctor = async () => {
+				const run = await cua(located, ["runtime", "doctor", "--json"]);
+				return ((JSON.parse(run.stdout || "{}") as { backends?: Backend[] }).backends ?? []).find((backend) => backend.backend === runtime);
+			};
+			let backend = await doctor();
+			if (backend && !backend.ready && backend.provisionable) {
+				say(`Setting up Cua's ${runtime} runtime…`);
+				await cua(located, ["runtime", "setup", runtime]);
+				backend = await doctor();
+			}
+			if (backend && !backend.ready) {
+				throw new Error(`Cua's ${runtime} runtime isn't ready: ${backend.detail}${backend.missing.length ? ` (missing: ${backend.missing.join(", ")})` : ""}. Run \`cua runtime setup ${runtime}\`, which uses sudo, then run this again.`);
+			}
+			say(`Cua's ${runtime} runtime: ready.`);
 		}
-		if (backend && !backend.ready) {
-			throw new Error(`Cua's ${runtime} runtime isn't ready: ${backend.detail}${backend.missing.length ? ` (missing: ${backend.missing.join(", ")})` : ""}. Run \`cua runtime setup ${runtime}\`, which uses sudo, then run this again.`);
-		}
-		say(`Cua's ${runtime} runtime: ready.`);
+
 	}
 
 	const problem = await checkToken(options.url, token);
@@ -443,11 +541,13 @@ async function install(values: Record<string, string | boolean | undefined>): Pr
 		["PIM_HOST_TOKEN_FILE", tokenFile],
 		// Cua finds QEMU and the rest on the PATH of whoever installed it (Homebrew's, on a Mac), not the service manager's short one.
 		["PATH", process.env.PATH],
-		["PIM_CUA", cuaPath],
+		["PIM_CUA", cuaPath ?? undefined],
 		["PIM_COMPUTER_URL", values["computer-url"] as string | undefined],
 		["PIM_HOST_IMAGE", values.image as string | undefined],
 		// The kind it chose stays, so a machine that gains or loses KVM keeps making the same kind.
 		["PIM_HOST_KIND", kind],
+		["PIM_HOST_BACKEND", options.backend === "docker" ? "docker" : undefined],
+		["PIM_DOCKER", values.docker as string | undefined],
 		["PIM_HOST_CPU", values.cpu as string | undefined],
 		["PIM_HOST_MEMORY", values.memory as string | undefined],
 	];
@@ -550,7 +650,11 @@ Options, for install or running it (or the environment variables in brackets):
                             for containers ${defaultImage("container")}
   --cpu <count>             Each computer's vCPUs (PIM_HOST_CPU; 4)
   --memory <size>           Each computer's memory (PIM_HOST_MEMORY; 8GB)
-  --cua <path>              Cua's command (PIM_CUA; cua)`;
+  --cua <path>              Cua's command (PIM_CUA; cua)
+  --backend <backend>       cua (the default), or docker, which keeps each computer as a container of the Pim image (PIM_HOST_BACKEND);
+                            --image is then that image, as pim:v2-local, and --computer-url the Pim's address as a container reaches it
+                            (http://host.docker.internal:8088 for a Pim on this machine)
+  --docker <path>           Docker's command (PIM_DOCKER; docker)`;
 
 async function main(): Promise<void> {
 	const { parseArgs } = await import("node:util");
@@ -565,6 +669,8 @@ async function main(): Promise<void> {
 			cpu: { type: "string" },
 			memory: { type: "string" },
 			cua: { type: "string" },
+			backend: { type: "string" },
+			docker: { type: "string" },
 			help: { type: "boolean" },
 		},
 	});
@@ -600,9 +706,13 @@ async function main(): Promise<void> {
 		console.log(USAGE);
 		process.exit(values.help ? 0 : 1);
 	}
-	const version = await cua(options, ["--version"]);
+	const version = options.backend === "docker" ? await docker(options, ["version", "--format", "Docker {{.Server.Version}}"]) : await cua(options, ["--version"]);
 	if (version.code !== 0) {
-		console.error(`Cua's cua command isn't there (${options.cua}). Install it: ${CUA_INSTALL}`);
+		console.error(options.backend === "docker" ? `Docker isn't reachable (${options.docker}): ${(version.stderr || version.stdout).trim().slice(0, 300)}` : `Cua's cua command isn't there (${options.cua}). Install it: ${CUA_INSTALL}`);
+		process.exit(1);
+	}
+	if (options.backend === "docker" && !options.image) {
+		console.error("Give the Pim image the computers run, with --image (PIM_HOST_IMAGE).");
 		process.exit(1);
 	}
 	log(`Keeping computers for ${options.url}, made from ${options.image} with ${version.stdout.trim()}.`);

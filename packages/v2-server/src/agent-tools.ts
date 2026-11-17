@@ -32,6 +32,8 @@ export type ToolDeps = {
 	/** The deployment's keys, which open a connector's sealed credential; and whether a connector may live at a private address. */
 	crypto?: EnvelopeCrypto | undefined;
 	allowPrivateConnectors?: boolean | undefined;
+	/** The longest a tool may run before its call ends with an error instead of holding the chat; default 10 minutes. */
+	toolTimeoutMs?: number | undefined;
 	/** The public id of the chat that a pi conversation is. */
 	chatOf(conversationId: number | string): Promise<string | null>;
 };
@@ -85,6 +87,29 @@ async function readBody(response: Response): Promise<string> {
 
 const REDACT = /^(authorization|cookie|x-api-key|proxy-authorization)$/i;
 const redactHeaders = (headers: Record<string, string> | undefined) => Object.fromEntries(Object.entries(headers ?? {}).map(([k, v]) => [k, REDACT.test(k) ? "[redacted]" : v]));
+
+/**
+ * Makes a tool stoppable: its call ends when the chat is stopped (the abort signal) even if the tool's own work ignores it, and with an error after `timeoutMs` instead of
+ * never, so a hung connection or process cannot leave a chat busy for ever. The work itself is not cancelled, only abandoned; a tool that can cancel it still should.
+ */
+export function stoppable(tool: ToolRegistration, timeoutMs = 600_000): ToolRegistration {
+	const execute = (tool as any).execute as (args: any, api: any, context: any) => Promise<Result>;
+	return {
+		...(tool as object),
+		execute: (args: any, api: any, context: any) =>
+			new Promise<Result>((resolve, reject) => {
+				const signal: AbortSignal | undefined = context?.abortSignal;
+				const stop = () => reject(signal?.reason ?? new Error("The call was stopped"));
+				if (signal?.aborted) return stop();
+				const timer = setTimeout(() => resolve(text(`${(tool as any).name} did not finish within ${Math.round(timeoutMs / 60_000)} minutes and was stopped.`, true)), timeoutMs);
+				signal?.addEventListener("abort", stop, { once: true });
+				execute(args, api, context).then(resolve, reject).finally(() => {
+					clearTimeout(timer);
+					signal?.removeEventListener("abort", stop);
+				});
+			}),
+	} as ToolRegistration;
+}
 
 export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 	const { ownerId, partitionId, runtime } = deps;
@@ -354,5 +379,5 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 	const connectors = connectorToolset({ ownerId, partitionId, runtime, app: deps.app, crypto: deps.crypto, transport, ops, owner, now: deps.now, chatOf: deps.chatOf, principalOf });
 	tools.push(...connectors.tools);
 
-	return defineExtension({ name: "pim", tools, sections: [...sections, ...connectors.sections] });
+	return defineExtension({ name: "pim", tools: tools.map((t) => stoppable(t, deps.toolTimeoutMs)), sections: [...sections, ...connectors.sections] });
 }

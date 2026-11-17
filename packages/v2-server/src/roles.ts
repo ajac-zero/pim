@@ -215,15 +215,19 @@ export async function startRunner(config: ProcessConfig, env: Env, host: Host, h
 	// The computer's tools reach a paired computer over the Relay's bus (NATS). The connection is made when an agent first uses one, so a Runner that never does needs no NATS.
 	let relayPulse: Promise<NatsPulse> | undefined;
 	const relayBus = async () => natsRelayBus(await (relayPulse ??= NatsPulse.connect(config.natsUrl)));
-	const host_ = hooks.harnessOptions ? undefined : createAgentHost({ db, env, crypto, app, forge, relay: relayBus, providers: hooks.providers, fetch: hooks.fetch, ...(chatgptFromEnv(env) ? { chatgpt: { ...chatgptFromEnv(env), ...(env.PIM_CHATGPT_BASE_URL ? { baseUrl: env.PIM_CHATGPT_BASE_URL } : {}) } } : {}), ...(env.PIM_PROVIDER_COOLDOWN_MS ? { cooldowns: { transientMs: Number(env.PIM_PROVIDER_COOLDOWN_MS) } } : {}) });
+	const host_ = hooks.harnessOptions ? undefined : createAgentHost({ db, env, crypto, app, forge, relay: relayBus, providers: hooks.providers, fetch: hooks.fetch, ...(chatgptFromEnv(env) ? { chatgpt: { ...chatgptFromEnv(env), ...(env.PIM_CHATGPT_BASE_URL ? { baseUrl: env.PIM_CHATGPT_BASE_URL } : {}) } } : {}), ...(env.PIM_PROVIDER_COOLDOWN_MS ? { cooldowns: { transientMs: Number(env.PIM_PROVIDER_COOLDOWN_MS) } } : {}), stallMs: { ...(env.PIM_MODEL_STALL_MS ? { stream: Number(env.PIM_MODEL_STALL_MS) } : {}), ...(env.PIM_TOOL_TIMEOUT_MS ? { tool: Number(env.PIM_TOOL_TIMEOUT_MS) } : {}) } });
 	const runner = new Runner({
 		db,
 		harnessOptions: hooks.harnessOptions ?? host_!.harnessOptions,
 		...(hooks.homeRoot ?? host_?.homeRoot ? { homeRoot: (hooks.homeRoot ?? host_!.homeRoot)! } : {}),
 		...(hooks.chatAgent ?? host_?.chatAgent ? { chatAgent: (hooks.chatAgent ?? host_!.chatAgent)! } : {}),
 		steward: { holderId },
+		// The run watchdog and how long a stop waits before recycling the partition (`PIM_RUN_STALL_MS`, 0 turns the watchdog off; `PIM_STOP_GRACE_MS`).
+		...(env.PIM_RUN_STALL_MS ? { stallMs: Number(env.PIM_RUN_STALL_MS) } : {}),
+		...(env.PIM_STOP_GRACE_MS ? { abortGraceMs: Number(env.PIM_STOP_GRACE_MS) } : {}),
 		...(hooks.pollMs ? { pollMs: hooks.pollMs } : {}),
 		onEvent: (e) => {
+			if (e.type === "stalled") console.error("runner", `stopped a stalled run in chat ${e.conversationId} of ${e.ownerId}${e.recycled ? " and recycled its partition" : ""}`);
 			if (e.type === "fenced") metrics.fencingRejects.inc({ service: "runner", kind: "lease" });
 			if (e.type === "released" || e.type === "drained") metrics.ownershipTransfers.inc({ service: "runner", reason: e.type === "drained" ? "drained" : "released" });
 		},

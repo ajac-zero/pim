@@ -60,6 +60,8 @@ export type AgentHostOptions = {
 	chatgpt?: ChatGPTRunnerOptions | undefined;
 	/** How long a failed model is skipped. */
 	cooldowns?: { transientMs?: number; authMs?: number } | undefined;
+	/** How long a model stream may stay silent before it is cut off, and how long a tool may run before its call ends with an error. */
+	stallMs?: { stream?: number; tool?: number } | undefined;
 	fetch?: typeof fetch | undefined;
 	now?: (() => number) | undefined;
 };
@@ -127,7 +129,7 @@ export function createAgentHost(options: AgentHostOptions) {
 	const { db, env } = options;
 	const now = options.now ?? Date.now;
 	const modelsByOwner = new Map<string, Models>();
-	const failover = createFailover({ now, cooldowns: options.cooldowns });
+	const failover = createFailover({ now, cooldowns: options.cooldowns, stallMs: options.stallMs?.stream });
 	const chatgptOptions: ChatGPTRunnerOptions = options.chatgpt ?? {};
 	/** The reads of one request's sections share one query; the next request reads again, so what an agent just saved is in its next prompt. */
 	const contexts = new Map<string, Promise<RunnerContext>>();
@@ -217,7 +219,7 @@ export function createAgentHost(options: AgentHostOptions) {
 				.catch(() => {});
 		});
 		const registry = createRegistry();
-		const deps: ToolDeps = { ownerId, partitionId: partition.partitionId, runtime: db, app: options.app, forge: options.forge, relay: options.relay, fetch: options.fetch ?? fetch, now, crypto: options.crypto, allowPrivateConnectors: env.PIM_CONNECTOR_ALLOW_PRIVATE === "1", chatOf: (conversationId) => publicChatId(ownerId, conversationId) };
+		const deps: ToolDeps = { ownerId, partitionId: partition.partitionId, runtime: db, app: options.app, forge: options.forge, relay: options.relay, fetch: options.fetch ?? fetch, now, toolTimeoutMs: options.stallMs?.tool, crypto: options.crypto, allowPrivateConnectors: env.PIM_CONNECTOR_ALLOW_PRIVATE === "1", chatOf: (conversationId) => publicChatId(ownerId, conversationId) };
 		const ctx = (conversationId: number | string) => publicChatId(ownerId, conversationId).then((chat) => readContext(ownerId, chat));
 		registry.install(pimExtension(deps, [
 			section("agent", async (input) => {

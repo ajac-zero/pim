@@ -99,10 +99,14 @@ real("a cutover rehearsal", () => {
 		const docRecord = { id: 9_000_000, kind: "pi.live", scope: { kind: "conversation", conversationId: Number(cut.conversation_id) }, history: "latest", fork: "initial", createdAt: 1 };
 		await stack.admin.query("INSERT INTO pim_ops.pi_documents (owner_id, id, partition_id, kind, family, key_value, scope_kind, scope_owner_id, created_at, record) VALUES ($1,9000000,$2,'pi.live',0,'','conversation',$3,1,$4)", [ADA, cut.partition_id, cut.conversation_id, JSON.stringify(docRecord)]);
 		await stack.admin.query("INSERT INTO pim_ops.pi_document_revisions (owner_id, document_id, seq, kind, version, content) VALUES ($1,9000000,1,'base',1,$2)", [ADA, JSON.stringify(live)]);
-		// The fixture's own pi.agent document of that chat is a stub without pi's document semantics; the promotion's default agent stands in for it.
-		await stack.admin.query("DELETE FROM pim_ops.pi_document_revisions WHERE owner_id = $1 AND document_id IN (SELECT id FROM pim_ops.pi_documents WHERE owner_id = $1 AND kind = 'pi.agent' AND scope_owner_id = $2)", [ADA, cut.conversation_id]);
-		await stack.admin.query("DELETE FROM pim_ops.pi_documents WHERE owner_id = $1 AND kind = 'pi.agent' AND scope_owner_id = $2", [ADA, cut.conversation_id]);
+		// The fixture's own pi.agent documents of that chat and of the home chat are stubs without pi's document semantics; the promotion's default agent stands in for them.
+		await stack.admin.query("DELETE FROM pim_ops.pi_document_revisions WHERE owner_id = $1 AND document_id IN (SELECT id FROM pim_ops.pi_documents WHERE owner_id = $1 AND kind = 'pi.agent' AND scope_owner_id IN ($2, 1))", [ADA, cut.conversation_id]);
+		await stack.admin.query("DELETE FROM pim_ops.pi_documents WHERE owner_id = $1 AND kind = 'pi.agent' AND scope_owner_id IN ($2, 1)", [ADA, cut.conversation_id]);
+		// A conversation last run on the old deployment's model (Workers AI), a provider the new one does not have: pi would answer every new message with "Model ... is not available".
+		await stack.admin.query("UPDATE pim_ops.pi_document_revisions SET content = '{\"model\":{\"provider\":\"workers-ai\",\"modelId\":\"@cf/llama\"}}'::jsonb WHERE owner_id = $1 AND document_id = (SELECT max(id) FROM pim_ops.pi_documents WHERE owner_id = $1 AND kind = 'pi.agent' AND scope_owner_id NOT IN (1, $2))", [ADA, cut.conversation_id]);
 		await legacyDomain(stack.admin, objects, cut.conversation_id);
+		// The first conversation (the home partition's) is a chat of its own in a real space; the synthetic snapshot links it to none.
+		await stack.admin.query("INSERT INTO pim_ops.chats (owner_id, public_id, conversation_id, title, created_at_ms, updated_at_ms) VALUES ($1, 'home-chat', 1, 'Home', 1, 1) ON CONFLICT DO NOTHING", [ADA]);
 		// The synthetic passkeys' keys are random bytes; Ada's is replaced by a real one so the test can sign in with it.
 		await stack.admin.query("UPDATE pim_ops.passkeys SET id = $1, spki = $2, algorithm = -7 WHERE owner_id = $3 AND id = (SELECT min(id) FROM pim_ops.passkeys WHERE owner_id = $3)", [key.id, key.spki, ADA]);
 	}, 180_000);
@@ -120,6 +124,8 @@ real("a cutover rehearsal", () => {
 		expect(report.messages).toBeGreaterThan(0);
 		expect(report.orphanedTasks).toBeGreaterThan(0);
 		expect(report.clearedRuns).toBe(1);
+		expect(report.remappedModels).toBeGreaterThan(0);
+		expect(await Number((await d.stack.admin.query("SELECT count(*) n FROM pim_runtime.document_revisions WHERE content::text LIKE '%workers-ai%'")).rows[0].n)).toBe(0);
 		const count = async (sql: string) => Number((await d.stack.admin.query(sql)).rows[0].n);
 		const before = [await count("SELECT count(*) n FROM pim_app.accounts"), await count("SELECT count(*) n FROM pim_app.conversations"), await count("SELECT count(*) n FROM pim_runtime.entries"), await count("SELECT count(*) n FROM pim_projection.chat_transcript_projection"), await count("SELECT count(*) n FROM pim_forge.forge_threads")];
 		expect(before.every((n) => n > 0)).toBe(true);

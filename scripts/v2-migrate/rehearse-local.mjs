@@ -244,7 +244,7 @@ async function phaseImport() {
 	const model = values["default-model"] ?? (expect?.providers?.[0] ? `${expect.providers[0].id}/rehearsal-model` : "");
 	const promoted = run("promote", "node", ["--import", "tsx", "src/main.ts", "promote"], { cwd: server, env: { ...env, PIM_RP_ID: "localhost", PIM_CUTOVER_AT: String(manifest.cutoverAt), PIM_LEGACY_OBJECTS_DIR: join(WORK, "objects"), ...(model ? { PIM_DEFAULT_MODEL: model } : {}) } });
 	const report = JSON.parse(promoted.split("\n").find((l) => l.includes("pim.promote")));
-	console.log(`  promoted: ${JSON.stringify({ chats: report.chats, messages: report.messages, orphanedTasks: report.orphanedTasks, clearedRuns: report.clearedRuns, ...report.domain })}`);
+	console.log(`  promoted: ${JSON.stringify({ chats: report.chats, messages: report.messages, orphanedTasks: report.orphanedTasks, clearedRuns: report.clearedRuns, remappedModels: report.remappedModels, ...report.domain })}`);
 	if (report.skipped.length) console.log(`  skipped (reported, never faked): ${report.skipped.join("; ")}`);
 	state.promote = report;
 	state.databaseUrl = owner;

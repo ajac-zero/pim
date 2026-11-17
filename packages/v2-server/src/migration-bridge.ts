@@ -53,7 +53,7 @@ export type PromoteOptions = {
 };
 
 /** `domain` counts what was promoted per kind; `skipped` says what was left in the landing and why. */
-export type PromoteReport = { owners: string[]; chats: number; messages: number; forgeThreads: number; orphanedTasks: number; clearedRuns: number; domain: Record<string, number>; skipped: string[] };
+export type PromoteReport = { owners: string[]; chats: number; messages: number; forgeThreads: number; orphanedTasks: number; clearedRuns: number; remappedModels: number; domain: Record<string, number>; skipped: string[] };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 /** A chat's public id as a UUID: the legacy id when it is one, else one derived from it, the same every time. */
@@ -116,7 +116,7 @@ async function promoteIdentity(pool: Pool, owner: string, rpId: string): Promise
 }
 
 /** The landing's pi tables as the runtime's `LegacySpace`. A task that was running a tool at the cutover (held for reconciliation) ends as orphaned: it is never replayed. */
-async function legacySpace(pool: Pool, owner: string, cutoverAt: number, defaultAgent?: PromoteOptions["defaultAgent"]): Promise<{ space: LegacySpace; orphaned: number; clearedRuns: number }> {
+async function legacySpace(pool: Pool, owner: string, cutoverAt: number, defaultAgent?: PromoteOptions["defaultAgent"], usable: ReadonlySet<string> = new Set()): Promise<{ space: LegacySpace; orphaned: number; clearedRuns: number; remappedModels: number }> {
 	const q = async (sql: string) => (await pool.query(sql, [owner])).rows;
 	const conversations = (await q("SELECT record FROM pim_ops.pi_conversations WHERE owner_id = $1 ORDER BY id")).map((r) => r.record as ConversationRecord);
 	const entries = (await q("SELECT record, commit_seq FROM pim_ops.pi_entries WHERE owner_id = $1 ORDER BY id")).map((r) => ({ record: r.record as EntryRecord, commitSeq: Number(r.commit_seq) }));
@@ -165,7 +165,21 @@ async function legacySpace(pool: Pool, owner: string, cutoverAt: number, default
 		}
 	}
 	const clearedRuns = clearOrphanedRuns(documents, orphanedIn);
-	return { clearedRuns, space: { conversations, entries, tasks: tasks as never, submissions, documents, metadata: { nextId: Math.max(next, ...documents.map((x) => x.record.id + 1)), nextSeq: Math.max(nextSeq, ...documents.map((x) => x.record.createdAt + 1)) } }, orphaned };
+	// A conversation's `pi.agent` document names the model it was last run on, and a legacy one names the old deployment's (Workers AI, the preview stand-in): a provider this deployment does not have. pi would
+	// fail every new message with "Model ... is not available", so each such revision names the deployment's default model instead. A model of a provider the deployment has stays.
+	let remappedModels = 0;
+	if (defaultAgent) {
+		for (const doc of documents) {
+			if (doc.record.kind !== "pi.agent") continue;
+			doc.revisions = doc.revisions.map((rev) => {
+				const model = (rev.content as { model?: { provider?: string } } | null)?.model;
+				if (!model?.provider || usable.has(model.provider)) return rev;
+				remappedModels++;
+				return { ...rev, content: { ...(rev.content as object), model: defaultAgent } };
+			});
+		}
+	}
+	return { clearedRuns, remappedModels, space: { conversations, entries, tasks: tasks as never, submissions, documents, metadata: { nextId: Math.max(next, ...documents.map((x) => x.record.id + 1)), nextSeq: Math.max(nextSeq, ...documents.map((x) => x.record.createdAt + 1)) } }, orphaned };
 }
 
 /**
@@ -198,6 +212,19 @@ function clearOrphanedRuns(documents: { record: DocumentRecord; revisions: { seq
 		cleared++;
 	}
 	return cleared;
+}
+
+/** The ids of the custom model providers a space had (its models are still named by them, and the promotion keeps those ids). */
+async function ownProviderIds(pool: Pool, owner: string, options: PromoteOptions): Promise<string[]> {
+	const meta = (await pool.query("SELECT row FROM pim_ops.legacy_rows WHERE owner_id = $1 AND table_name = 'pim_meta' AND pk = 'own_providers'", [owner])).rows[0]?.row as { value?: { $secret?: string } } | undefined;
+	const name = meta?.value?.$secret;
+	const found = name ? (await pool.query("SELECT envelope FROM pim_ops.secret_envelopes WHERE owner_id = $1 AND name = $2", [owner, name])).rows[0] : undefined;
+	if (!found || !options.crypto) return [];
+	try {
+		return (parseJson(options.crypto.ops.open(found.envelope, [owner, name!, "meta"]).toString(), []) as { id: string }[]).map((p) => p.id);
+	} catch {
+		return [];
+	}
 }
 
 /** The application's chat directory and a baseline projection of what the runtime now holds. */
@@ -596,14 +623,16 @@ async function promoteDomain(pool: Pool, owner: string, options: PromoteOptions,
 export async function promoteToLive(pool: Pool, options: PromoteOptions): Promise<PromoteReport> {
 	const runtime = new RuntimeDb(pool);
 	const owners = (await pool.query("SELECT owner_id FROM pim_ops.tenants WHERE owner_id <> '_deployment' ORDER BY owner_id")).rows.map((r) => r.owner_id as string);
-	const report: PromoteReport = { owners: [], chats: 0, messages: 0, forgeThreads: 0, orphanedTasks: 0, clearedRuns: 0, domain: {}, skipped: [] };
+	const report: PromoteReport = { owners: [], chats: 0, messages: 0, forgeThreads: 0, orphanedTasks: 0, clearedRuns: 0, remappedModels: 0, domain: {}, skipped: [] };
 	// Every account exists before any space is promoted: a circle names members who may sort after its owner.
 	for (const owner of owners) await promoteIdentity(pool, owner, options.rpId);
 	for (const owner of owners) {
 		const has = (await runtime.read(owner, "SELECT 1 FROM pim_runtime.partitions WHERE owner_id = $1 LIMIT 1", [owner])).rowCount;
 		const hasPi = (await pool.query("SELECT 1 FROM pim_ops.pi_conversations WHERE owner_id = $1 LIMIT 1", [owner])).rowCount;
 		if (!has && hasPi) {
-			const { space, orphaned, clearedRuns } = await legacySpace(pool, owner, options.cutoverAt, options.defaultAgent);
+			const own = await ownProviderIds(pool, owner, options);
+			const { space, orphaned, clearedRuns, remappedModels } = await legacySpace(pool, owner, options.cutoverAt, options.defaultAgent, new Set(["anthropic", "openai", "google", "gateway", ...own]));
+			report.remappedModels += remappedModels;
 			const publicChatIds = new Map((await pool.query("SELECT conversation_id, public_id FROM pim_ops.chats WHERE owner_id = $1", [owner])).rows.map((r) => [Number(r.conversation_id), chatUuid(r.public_id)]));
 			await importLegacySpace(runtime, owner, space, { publicChatIds });
 			report.orphanedTasks += orphaned;

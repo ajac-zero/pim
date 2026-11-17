@@ -86,6 +86,29 @@ async function asOwner<T>(pool: Pool, owner: string, fn: (c: PoolClient) => Prom
 	}
 }
 
+/**
+ * An agent's uploaded icon: v1 kept it as a row of `pim_agent_icons` (agent, type, data); v2 keeps it as a public image object under the owner whose key the agent's
+ * `icon_key` names. Written for each agent that exists here and has no icon yet, so it can be run again and never replaces an icon the person has uploaded since.
+ * v1 kept no profile picture (a profile is a name and a bio), so there is none to carry.
+ */
+export async function promoteAgentIcons(pool: Pool, owner: string, put: (key: string, bytes: Uint8Array, contentType: string) => Promise<void>, d: Domain): Promise<void> {
+	for (const row of await legacyRows(pool, owner, "pim_agent_icons")) {
+		const b64 = row.data && typeof row.data === "object" ? (row.data as { $b64?: unknown }).$b64 : undefined;
+		if (typeof b64 !== "string" || typeof row.agent !== "string") continue;
+		const bytes = Buffer.from(b64, "base64");
+		const type = typeof row.type === "string" && /^image\//.test(row.type) ? row.type : bytes[0] === 0xff ? "image/jpeg" : "image/png";
+		const key = `${owner}/agent-icons/${row.agent}`;
+		const done = await asOwner(pool, owner, async (c) => {
+			if (!(await c.query("SELECT 1 FROM pim_app.agents WHERE id = $1 AND icon_key IS NULL AND deleted_at IS NULL", [row.agent])).rowCount) return false;
+			await put(key, bytes, type);
+			await c.query("INSERT INTO pim_app.objects (key, owner_id, purpose, content_type, size, sha256, acl) VALUES ($1,$2,'image',$3,$4,$5,'public') ON CONFLICT (key) DO UPDATE SET content_type = $3, size = $4, sha256 = $5, acl = 'public', deleted_at = NULL", [key, owner, type, bytes.length, createHash("sha256").update(bytes).digest("hex")]);
+			await c.query("UPDATE pim_app.agents SET icon_key = $2, updated_at = now() WHERE id = $1", [row.agent, key]);
+			return true;
+		});
+		bump(d, "agent icons", done ? 1 : 0);
+	}
+}
+
 /** Accounts, credentials and tokens. Hashes and public keys only: no secret is ever opened here. */
 async function promoteIdentity(pool: Pool, owner: string, rpId: string, legacyRpId?: string): Promise<void> {
 	await asOwner(pool, owner, async (c) => {
@@ -826,6 +849,10 @@ export async function promoteToLive(pool: Pool, options: PromoteOptions): Promis
 		}
 		const domain: Domain = { counts: report.domain, skipped: report.skipped };
 		await promoteDomain(pool, owner, options, domain, new Set(["anthropic", "openai", "google", "gateway", ...(await ownProviderIds(pool, owner, options)), ...shared.map((id) => `shared:${id}`)]));
+		if (options.objects?.put) {
+			const put = options.objects.put;
+			await promoteAgentIcons(pool, owner, (key, bytes, type) => put(key, bytes, type), domain);
+		}
 		report.forgeThreads += await promoteForge(pool, owner);
 		report.owners.push(owner);
 	}

@@ -3,14 +3,15 @@
  * ```ui block of one of its messages holds, and renaming or deleting it. Everything is read and written as the signed-in owner, through the
  * application's tables, so row-level security decides what a person can reach.
  *
- * Not here, because they need something this Pim does not run yet: the utility-model side jobs (suggestions, a regenerated title, an improved
- * prompt) and changing the queue behind a running turn, which lives in the runtime's inbox, not in the application's tables.
+ * The utility model's side jobs (a title, a summary, an improved prompt, suggestions) are in ./utility.ts and are off until one is chosen. Not here:
+ * changing the queue behind a running turn, which lives in the runtime's inbox, not in the application's tables.
  */
 import type { App } from "@pim/v2-app/app";
 import { BadRequestError, CapabilityUnavailableError, ConflictError, NotFoundError } from "@pim/v2-app/errors";
 import { ok, type Route, route } from "@pim/v2-app/http";
 import type { Principal } from "@pim/v2-contracts/identity";
 import { transcriptPage } from "@pim/v2-live/projections/snapshots";
+import { chatConversation, IMPROVE_PROMPT, runUtility, SUGGEST_PROMPTS, suggestionsIn, SUMMARIZE_CHAT, titleChat } from "./utility.ts";
 
 const ms = (value: Date | string | null | undefined): number | null => (value ? new Date(value).getTime() : null);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -74,7 +75,10 @@ const taskView = (r: any) => ({
 const FAMILY = `WITH RECURSIVE family(chat) AS (
 	SELECT $1::uuid UNION SELECT t.task_chat FROM pim_app.tasks t JOIN family f ON t.started_by = f.chat WHERE t.task_chat IS NOT NULL)`;
 
-export function sessionRoutes(): Route[] {
+/** How long each chat's conversation was when its summary was last written, so a summary is written again only when more has been said. */
+const summarized = new Map<string, number>();
+
+export function sessionRoutes(env: Record<string, string | undefined> = process.env): Route[] {
 	const gone = () => {
 		throw new ConflictError("That message is no longer in the queue", "not_queued");
 	};
@@ -126,22 +130,49 @@ export function sessionRoutes(): Route[] {
 			const models = rows.map((r) => ({ provider: r.provider as string, model: r.model as string, input: Number(r.input), output: Number(r.output), cacheRead: 0, cacheWrite: 0, cost: Number(r.cost) / 1e6 }));
 			return ok({ total: models.reduce((sum, m) => sum + m.cost, 0), models });
 		}),
+		// The summary is written by the utility model once the chat has something in it, and again only when more has been said since.
 		route("GET", "/api/sessions/:id/summary", async ({ app, principal, params }) => {
 			const p = await principal();
 			await app.identity.authz.enforce(p, "api:read");
 			const id = chatId(params[0]!);
-			const row = await app.db.owner(p.ownerId, async (tx) => (await tx.query("SELECT summary FROM pim_app.conversations WHERE public_chat_id = $1 AND deleted_at IS NULL", [id])).rows[0]);
+			const row = await app.db.owner(p.ownerId, async (tx) => (await tx.query("SELECT summary, summary_of FROM pim_app.conversations WHERE public_chat_id = $1 AND deleted_at IS NULL", [id])).rows[0]);
 			if (!row) throw new NotFoundError("No such chat");
-			return ok({ summary: (row.summary as string | null) ?? null });
+			// A chat that carries another on keeps what its summary said of that one.
+			if (row.summary_of) return ok({ summary: (row.summary as string | null) ?? null });
+			const conversation = await chatConversation(app, p, id, 12000);
+			if (conversation === "" || summarized.get(id) === conversation.length) return ok({ summary: (row.summary as string | null) ?? null });
+			const written = await runUtility(app, env, p, SUMMARIZE_CHAT, conversation).catch((error) => (console.warn("the chat's summary failed", error), null));
+			if (written === null) return ok({ summary: (row.summary as string | null) ?? null });
+			summarized.set(id, conversation.length);
+			await app.db.owner(p.ownerId, (tx) => tx.query("UPDATE pim_app.conversations SET summary = $2 WHERE public_chat_id = $1", [id, written]));
+			return ok({ summary: written });
 		}),
-		// The utility model's side jobs: none is configured, so there are no suggestions, and a title or an improved prompt cannot be made.
-		route("GET", "/api/sessions/:id/suggestions", async ({ app, principal, params }) => {
+		// With no utility model there are no suggestions, and a title or an improved prompt cannot be made.
+		route("GET", "/api/sessions/:id/suggestions", async ({ app, principal, params, url }) => {
 			const p = await principal();
-			await sessionView(app, p, chatId(params[0]!));
-			return ok({ suggestions: [] });
+			const id = chatId(params[0]!);
+			await sessionView(app, p, id);
+			const conversation = await chatConversation(app, p, id);
+			if (conversation === "") return ok({ suggestions: [] });
+			const answer = await runUtility(app, env, p, SUGGEST_PROMPTS, `${conversation}\n\nLanguage: ${url.searchParams.get("locale") ?? "en"}`).catch(() => null);
+			return ok({ suggestions: answer === null ? [] : suggestionsIn(answer) });
 		}),
-		route("POST", "/api/sessions/:id/title", async ({ principal }) => (await principal(), needsModel("title"))),
-		route("POST", "/api/prompts/improve", async ({ principal }) => (await principal(), needsModel("prompt improvement"))),
+		route("POST", "/api/sessions/:id/title", async ({ app, principal, params }) => {
+			const p = await principal();
+			await app.identity.authz.enforce(p, "api:write");
+			const id = chatId(params[0]!);
+			await sessionView(app, p, id);
+			if ((await titleChat(app, env, p, id).catch((error) => (console.warn("the chat's title failed", error), null))) === null) needsModel("title");
+			return ok(await sessionView(app, p, id));
+		}),
+		route("POST", "/api/prompts/improve", async ({ app, principal, json }) => {
+			const p = await principal();
+			await app.identity.authz.enforce(p, "api:write");
+			const text = String((await json()).text ?? "").trim();
+			if (text === "" || text.length > 20_000) throw new BadRequestError("text is 1 to 20000 characters");
+			const improved = await runUtility(app, env, p, IMPROVE_PROMPT, text).catch((error) => (console.warn("improving a prompt failed", error), null));
+			return improved === null ? needsModel("prompt improvement") : ok({ text: improved });
+		}),
 
 		// ---- tasks ----
 		route("GET", "/api/sessions/:id/tasks", async ({ app, principal, params }) => {

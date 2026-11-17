@@ -15,7 +15,7 @@ import { readFile } from "node:fs/promises";
 import { posix } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type Computer, ComputerError } from "@pim/v2-app/relay";
-import { BadRequestError, ConflictError, NotFoundError } from "@pim/v2-app/errors";
+import { BadRequestError, ConflictError, NotFoundError, PimError } from "@pim/v2-app/errors";
 import { ok, type Reply, type Route, route } from "@pim/v2-app/http";
 import { filesPath, FILES_ROOT } from "./computer-tools.ts";
 import { installScript } from "./computer-install-script.ts";
@@ -46,6 +46,49 @@ function answer(error: unknown): never {
 
 const etag = (sha256: string) => `"${sha256}"`;
 const etags = (header: string | string[] | undefined) => (typeof header === "string" ? header.split(",").map((t) => t.trim().replace(/^W\//, "").replace(/^"|"$/g, "")).filter(Boolean) : []);
+
+/**
+ * A short DevTools conversation with the computer's browser (its chat's, or the shared one where the computer has no per-chat displays): `use` gets `send`, which answers
+ * the command's result, and the connection is closed after. Reading is never starting: `browser_status` says first whether the browser is running.
+ */
+async function withBrowser<T>(computer: Computer, thread: string | null, use: (send: (method: string, params?: object, sessionId?: string) => Promise<any>) => Promise<T>): Promise<T | null> {
+	const open = async (t: string | undefined) => {
+		const status = await computer.call<{ available: boolean; running: boolean }>("browser_status", t ? { thread: t } : {});
+		if (!status.running) return null;
+		let nextId = 0;
+		const waiting = new Map<number, (message: { result?: unknown; error?: { message: string } }) => void>();
+		const link = await computer.openBrowser((raw) => {
+			if (raw === null) return;
+			const m = JSON.parse(raw) as { id?: number; result?: unknown; error?: { message: string } };
+			if (m.id !== undefined) waiting.get(m.id)?.(m), waiting.delete(m.id);
+		}, t);
+		const send = (method: string, params: object = {}, sessionId?: string) =>
+			new Promise<any>((resolve, reject) => {
+				const id = ++nextId;
+				const timer = setTimeout(() => (waiting.delete(id), reject(new Error(`The browser did not answer ${method}`))), 15_000);
+				waiting.set(id, (m) => (clearTimeout(timer), m.error ? reject(new Error(m.error.message)) : resolve(m.result)));
+				link.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
+			});
+		try {
+			return { value: await use(send) };
+		} finally {
+			link.close();
+		}
+	};
+	try {
+		return (await open(thread ?? undefined))?.value ?? null;
+	} catch (error) {
+		// A computer without displayd has one browser, which the chats share.
+		if (thread && /no display allocated|displayd is not reachable/.test((error as Error).message)) return (await open(undefined))?.value ?? null;
+		throw error;
+	}
+}
+
+/** The page the browser shows, and a picture of it. */
+const pageOf = async (send: (method: string, params?: object, sessionId?: string) => Promise<any>) => {
+	const { targetInfos } = (await send("Target.getTargets")) as { targetInfos: { type: string; targetId: string; url: string; title: string }[] };
+	return targetInfos.find((t) => t.type === "page") ?? null;
+};
 
 export function computerRoutes(options: { source?: string } = {}): Route[] {
 	const source = options.source ?? fileURLToPath(new URL("../../../computer/pim-computer.ts", import.meta.url));
@@ -105,12 +148,36 @@ export function computerRoutes(options: { source?: string } = {}): Route[] {
 			if (b.mode !== "user" && b.mode !== "agent") throw new BadRequestError("mode must be 'user' or 'agent'");
 			return ok(await computer.call("display_control", { thread: b.thread, mode: b.mode }), 200, noStore);
 		}),
+		// The computer host (pim-host), which keeps a managed computer for every person, is not part of this deployment yet: the admin sees that none is paired, and cannot pair one.
+		route("GET", "/api/admin/computer-host", async (ctx) => {
+			await ctx.app.identity.authz.enforce(await ctx.principal(), "admin:settings");
+			return ok({ paired: false, pairedAt: null, seenAt: null, connected: false, image: null, kind: null, version: null, machines: 0, running: 0, pending: 0 }, 200, noStore);
+		}),
+		route("POST", "/api/admin/computer-host", async (ctx) => {
+			await ctx.app.identity.authz.enforce(await ctx.principal(), "admin:settings");
+			throw new PimError(501, "not_implemented", "Managed computers (pim-host) are not part of this deployment yet; people connect their own computer, which can run beside this stack (docs/v2-operations.md).");
+		}),
+		route("DELETE", "/api/admin/computer-host", async (ctx) => {
+			await ctx.app.identity.authz.enforce(await ctx.principal(), "admin:settings");
+			return ok({ paired: false, pairedAt: null, seenAt: null, connected: false, image: null, kind: null, version: null, machines: 0, running: 0, pending: 0 }, 200, noStore);
+		}),
 		route("GET", "/api/browser", async (ctx) => {
 			const p = await ctx.principal();
 			await ctx.app.identity.authz.enforce(p, "computer:use");
 			const computer = await ctx.app.relay.acquire(p.ownerId, "browser").catch(() => null);
-			// The page a window shows is read by the Runner's browser, which holds the DevTools connection; the Gate says only whether there is a browser.
-			return ok({ available: computer?.info?.browser != null, page: null }, 200, noStore);
+			const shown = computer ? await withBrowser(computer, ctx.url.searchParams.get("session"), pageOf).catch(() => null) : null;
+			return ok({ available: computer?.info?.browser != null, page: shown ? { url: shown.url, title: shown.title } : null }, 200, noStore);
+		}),
+		route("GET", "/api/browser/screenshot", async (ctx) => {
+			const { computer } = await withComputer(ctx, "browser");
+			const png = await withBrowser(computer, ctx.url.searchParams.get("session"), async (send) => {
+				const page = await pageOf(send);
+				if (!page) return null;
+				const { sessionId } = await send("Target.attachToTarget", { targetId: page.targetId, flatten: true });
+				return Buffer.from((await send("Page.captureScreenshot", { format: "png" }, sessionId)).data as string, "base64");
+			});
+			if (!png) throw new NotFoundError("The browser is closed");
+			return { status: 200, headers: { "content-type": "image/png", "cache-control": "no-store, private", "x-content-type-options": "nosniff" }, raw: png };
 		}),
 		route("DELETE", "/api/browser", async (ctx) => {
 			const { computer } = await withComputer(ctx, "browser");

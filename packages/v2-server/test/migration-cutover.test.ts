@@ -1,6 +1,7 @@
 // A cutover rehearsal on the real stack: a legacy export (the ops package's synthetic snapshot) is imported into the landing schema, audited, promoted into the
 // live schemas, and then real gate, live and runner processes serve it: an imported passkey signs in, imported forked chats read over the snapshot API,
 // a new message in an imported chat runs on a Runner, and Forge adopts an imported Amp thread without starting it again.
+import { createHash } from "node:crypto";
 import type { Pool } from "pg";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -39,7 +40,12 @@ async function legacyDomain(admin: Pool, objects: FsObjectStore, conversation: s
 	const legacy = (await admin.query("SELECT legacy_id FROM pim_ops.owner_map WHERE owner_id = $1", [ADA])).rows[0].legacy_id as string;
 	await objects.put("BLOBS", `${legacy}/skills/${sha}`, Buffer.from("# reference\n"));
 	const at = FIXTURE_CUTOVER_AT - 86_400_000;
+	// A file kept in the space before files moved to computers: a row of `pim_stored_files`, its bytes in the BLOBS bucket at `<owner>/files/<id>` (B4.11).
+	const bytes = Buffer.from("%PDF");
+	await objects.put("BLOBS", `${legacy}/files/f1`, bytes);
+	await admin.query("INSERT INTO pim_ops.objects (bucket, key, owner_id, size_bytes, sha256, content_type) VALUES ('BLOBS', $1, $2, 4, $3, 'application/pdf')", [`${legacy}/files/f1`, ADA, createHash("sha256").update(bytes).digest("hex")]);
 	const rows: [string, string, unknown][] = [
+		["pim_stored_files", "notes/old.pdf", { path: "notes/old.pdf", id: "f1", type: "application/pdf", bytes: 4, updated_at: at }],
 		["pim_agents", "ag_poet", { id: "ag_poet", name: "Poet", instructions: "Answer in verse.", model: "faux/m", fallbacks: "[]", skills: "[\"Haiku\"]", apps: "[]", contacts: "[]", role: null, description: "", is_default: 0, symbol: "P", color: "blue", created_at: at }],
 		["pim_skills", "Haiku", { name: "Haiku", created_at: at }],
 		["pim_skill_versions", "Haiku:1", { name: "Haiku", version: 1, description: "Write haiku", instructions: "Five, seven, five.", created_at: at }],
@@ -151,6 +157,10 @@ real("a cutover rehearsal", () => {
 		expect(JSON.parse(await openString(appKeys, plan.secret, `chatgpt:${ADA}`))).toMatchObject({ type: "oauth", access: "chatgpt-access-example", refresh: "chatgpt-refresh-example", clientId: "client-example" });
 		expect(await as("SELECT 1 FROM pim_app.providers WHERE owner_id = $1 AND kind = 'openai'", [ADA])).toHaveLength(0);
 		for (const p of await as<{ id: string; secret: string | null }>("SELECT id, secret FROM pim_app.providers WHERE owner_id = $1 AND secret IS NOT NULL", [ADA])) expect((await openString(appKeys, p.secret!, `provider:${ADA}/${p.id}`)).length).toBeGreaterThan(0);
+		// A file from before files moved to computers: its bytes are an object under the new owner, and its path is kept in an index, since an object key has no room for it.
+		expect(Buffer.from(copied.get(`${ADA}/files/f1`)!).toString()).toBe("%PDF");
+		expect((await as("SELECT value FROM pim_app.owner_settings WHERE owner_id = $1 AND key = 'legacy_files'", [ADA]))[0]).toMatchObject({ value: [{ path: "notes/old.pdf", key: `${ADA}/files/f1`, type: "application/pdf", bytes: 4 }] });
+		expect(await count(`SELECT count(*) n FROM pim_app.objects WHERE key = '${ADA}/files/f1' AND purpose = 'file'`)).toBe(1);
 		// Nothing that was due while the fence stood comes back: a time trigger counts from the activation.
 		const stale = await count(`SELECT count(*) n FROM pim_app.triggers WHERE owner_id = '${ADA}' AND source = 'time' AND watermark < ${ACTIVATED_AT}`);
 		expect(stale).toBe(0);

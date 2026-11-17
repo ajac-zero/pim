@@ -50,6 +50,9 @@ class Session {
 		}
 	}
 }
+// The account answers in the old app's flat shape on newer builds and wrapped on older ones; the memory list as `entries` (text) or `memories` (body).
+const accountOf = (response) => response.json?.account ?? response.json;
+const memoriesOf = (response) => (response.json?.entries ?? response.json?.memories ?? []).map((m) => m.text ?? m.body);
 const text = (message) => (message.parts ?? []).filter((p) => p.type === "text").map((p) => p.text).join("");
 const sha = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
@@ -63,14 +66,14 @@ const bob = new Session(expect.tokens.bob);
 	const options = await anon.post("/auth/sign-in/options");
 	const signed = options.status === 200 ? await anon.post("/auth/sign-in", key.get(options.json, BASE, Buffer.from(expect.accounts.ada.ownerId).toString("base64url"))) : options;
 	check("the passkey made on the old Pim signs in on the new one", signed.status === 200, `${signed.status} ${signed.raw.toString().slice(0, 200)}`);
-	const me = await anon.get("/api/account");
-	check("that session is Ada, the admin, with her old owner id", me.json?.account?.ownerId === expect.accounts.ada.ownerId && me.json.account.role === "admin" && me.json.account.username === "ada", JSON.stringify(me.json));
+	const me = accountOf(await anon.get("/api/account"));
+	check("that session is Ada, the admin, with her old owner id", me?.ownerId === expect.accounts.ada.ownerId && me.role === "admin" && me.username === "ada", JSON.stringify(me)?.slice(0, 200));
 }
 for (const [name, session] of [["ada", ada], ["bob", bob]]) {
-	const me = (await session.get("/api/account")).json?.account;
+	const me = accountOf(await session.get("/api/account"));
 	check(`the old API token of ${name} still works and names ${name}`, me?.username === name && me.ownerId === expect.accounts[name].ownerId, JSON.stringify(me));
 }
-check("bob is a member, not an admin", (await bob.get("/api/account")).json?.account?.role === expect.accounts.bob.role);
+check("bob is a member, not an admin", accountOf(await bob.get("/api/account"))?.role === expect.accounts.bob.role);
 
 // ---- chats, history and forks ----
 const adaChats = new Map(((await ada.get("/api/sessions")).json?.sessions ?? []).map((c) => [c.id, c]));
@@ -115,9 +118,9 @@ for (const k of expect.skills) {
 	check(`skill ${k.name} keeps its first version`, v1.status === 200, v1.status);
 }
 {
-	const memories = new Set(((await ada.get("/api/memory/log")).json?.memories ?? []).map((m) => m.body));
+	const memories = new Set(memoriesOf(await ada.get("/api/memory/log")));
 	for (const m of expect.memories.filter((x) => x.owner === "ada")) check(`memory "${m.text}" is ada's`, memories.has(m.text));
-	const bobs = new Set(((await bob.get("/api/memory/log")).json?.memories ?? []).map((m) => m.body));
+	const bobs = new Set(memoriesOf(await bob.get("/api/memory/log")));
 	check("bob has his memory and none of ada's", expect.memories.filter((x) => x.owner === "bob").every((m) => bobs.has(m.text)) && !expect.memories.filter((x) => x.owner === "ada").some((m) => bobs.has(m.text)));
 }
 for (const g of expect.goals) {

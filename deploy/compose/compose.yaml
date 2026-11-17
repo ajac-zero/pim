@@ -59,6 +59,7 @@ services:
       PIM_DOMAIN: ${PIM_DOMAIN:?set PIM_DOMAIN in .env}
       PIM_CONTENT_DOMAIN: ${PIM_CONTENT_DOMAIN:-content.invalid}
       PIM_APPS_DOMAIN: ${PIM_APPS_DOMAIN:-apps.invalid}
+      PIM_APPS_SITE: ${PIM_APPS_SITE:-*.${PIM_APPS_DOMAIN:-apps.invalid}}
       PIM_ACME_EMAIL: ${PIM_ACME_EMAIL:-}
       PIM_INGRESS_SECRET: ${PIM_INGRESS_SECRET:?}
     volumes:
@@ -149,7 +150,7 @@ services:
     image: chrislusf/seaweedfs:3.80
     restart: "no"
     # Creates the bucket through SeaweedFS's own shell; idempotent (an existing bucket is left alone).
-    entrypoint: ["/bin/sh", "-c", "echo \"s3.bucket.create -name $$BUCKET\" | weed shell -master=seaweedfs:9333 || true; echo s3.bucket.list | weed shell -master=seaweedfs:9333 | grep -q \"$$BUCKET\""]
+    entrypoint: ["/bin/sh", "-c", "echo \"s3.bucket.create -name $$BUCKET\" | weed shell -master=seaweedfs:9333 -filer=seaweedfs:8888 || true; echo s3.bucket.list | weed shell -master=seaweedfs:9333 -filer=seaweedfs:8888 | grep -q \"$$BUCKET\""]
     environment:
       BUCKET: ${PIM_S3_BUCKET:-pim-objects}
     networks: [internal]
@@ -174,7 +175,8 @@ services:
     environment: { <<: *pim-env, PIM_ROLE: gate, PIM_HTTP_PORT: "8080", PIM_DATABASE_URL: "postgres://pim_gate_login:${PIM_GATE_DB_PASSWORD:?}@pgbouncer:6432/pim" }
     depends_on: *pim-deps
     healthcheck: &http-health
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:${PIM_HTTP_PORT_CHECK:-8080}/healthz"]
+      # The image is node:*-slim, which has no wget or curl.
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/healthz').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
       interval: 10s
       timeout: 3s
       retries: 6

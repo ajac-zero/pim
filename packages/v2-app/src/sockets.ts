@@ -68,7 +68,7 @@ export function attachSockets(server: Server, app: App, options: GateOptions = {
 				const host = (req.headers.host ?? "").split(":")[0] ?? "";
 				if (hostedPath || (appsHost && host.endsWith(`.${appsHost}`))) {
 					const target = await authorizeAppSocket(app, req, url, hostedPath, appsHost ? host.slice(0, -(appsHost.length + 1)) : null);
-					app.relay.require(target.ownerId, "hosted app backend");
+					await app.relay.acquire(target.ownerId, "hosted app backend");
 					wss.handleUpgrade(req, socket, head, (ws) => void proxyAppSocket(app, target, ws));
 					return;
 				}
@@ -77,8 +77,9 @@ export function attachSockets(server: Server, app: App, options: GateOptions = {
 				const { bearer } = bearerOf(req, url, secure);
 				const p = await app.identity.authenticate(bearer);
 				await app.identity.authz.enforce(p, "api:read");
-				if (url.pathname === COMPUTER_SCREEN) app.relay.require(p.ownerId, "desktop_screen"); // before upgrading: no computer is a clean refusal
-				if (url.pathname === BROWSER_LIVE) app.relay.require(p.ownerId, "browser_live");
+				// Before upgrading: no computer, in this process or any other, is a clean refusal.
+				if (url.pathname === COMPUTER_SCREEN) await app.relay.acquire(p.ownerId, "desktop_screen");
+				if (url.pathname === BROWSER_LIVE) await app.relay.acquire(p.ownerId, "browser_live");
 				wss.handleUpgrade(req, socket, head, (ws) => {
 					if (url.pathname === COMPUTER_SCREEN) void viewScreen(app, p, ws, url);
 					else if (url.pathname === BROWSER_LIVE) void viewBrowser(app, p, ws, url);
@@ -113,7 +114,7 @@ async function authorizeAppSocket(app: App, req: IncomingMessage, url: URL, byTo
 
 async function proxyAppSocket(app: App, target: AppTarget, ws: WebSocket): Promise<void> {
 	try {
-		const backend = await app.relay.require(target.ownerId, "hosted app backend").openAppSocket(target.appId, target.path, target.headers, (data) => {
+		const backend = await (await app.relay.acquire(target.ownerId, "hosted app backend")).openAppSocket(target.appId, target.path, target.headers, (data) => {
 			if (data === null) return ws.close(1001, "The app closed the connection");
 			if (ws.readyState === WebSocket.OPEN) ws.send(data, { binary: typeof data !== "string" });
 		});
@@ -150,7 +151,7 @@ async function attachComputer(app: App, token: string, ws: WebSocket): Promise<v
 
 /** The app showing the computer's desktop: a stream opens on a channel of its own, what it says goes to the viewer as it is, and what the viewer sends goes to the stream. */
 async function viewScreen(app: App, p: Principal, ws: WebSocket, url: URL): Promise<void> {
-	const conn = app.relay.require(p.ownerId, "desktop_screen");
+	const conn = await app.relay.acquire(p.ownerId, "desktop_screen");
 	const channel = (Math.floor(Math.random() * 0xfffffffe) + 1) >>> 0;
 	const display = url.searchParams.get("display") || undefined;
 	try {
@@ -188,7 +189,7 @@ async function viewScreen(app: App, p: Principal, ws: WebSocket, url: URL): Prom
  * and keyboard as DevTools input. The Relay speaks DevTools itself over the computer's `cdp` channel, so no Runner or Harness is in this path.
  */
 async function viewBrowser(app: App, p: Principal, ws: WebSocket, url: URL): Promise<void> {
-	const conn = app.relay.require(p.ownerId, "browser_live");
+	const conn = await app.relay.acquire(p.ownerId, "browser_live");
 	const thread = url.searchParams.get("session") || undefined;
 	let nextId = 0;
 	let sessionId: string | undefined;

@@ -33,13 +33,68 @@ export class ComputerError extends PimError {
 export type ComputerInfo = { agent: string; hostname: string; platform: string; arch: string; user: string; root: string; browser: string | null; screen: boolean; desktop: boolean; protocol: number; connectedAt: number };
 export type FileEvent = { event: "file_changed"; path: string; [key: string]: unknown } | { event: "watch_error"; path: string; code: string | null };
 
+/** What a caller needs of a paired computer, wherever its socket is held: in this process (`ComputerConnection`) or in another one, over the bus (`RemoteComputer`). */
+export interface Computer {
+	readonly info: ComputerInfo | null;
+	readonly protocol: number;
+	call<T = unknown>(op: string, args?: Record<string, unknown>, timeoutMs?: number): Promise<T>;
+	watch(path: string): Promise<unknown>;
+	unwatch(path: string): Promise<boolean>;
+	onFileEvent(listener: (event: FileEvent) => void): () => void;
+	openScreen(channel: number, handler: (data: string | Uint8Array | null) => void, display?: string): Promise<void>;
+	screenInput(channel: number, data: string): void;
+	closeScreen(channel: number): void;
+	openBrowser(handler: (data: string | null) => void, thread?: string): Promise<{ send(data: string): void; close(): void }>;
+	openAppSocket(appId: string, path: string, headers: Record<string, string>, handler: (data: Uint8Array | string | null) => void): Promise<{ send(data: Uint8Array | string): void; close(): void }>;
+	ping(): Promise<number | null>;
+}
+
+/**
+ * The calls one process makes of another that holds a computer's socket. `pim.v2.relay.<owner>.rpc` is request/reply; `pim.v2.relay.<owner>.stream`
+ * carries the frames of open streams and the notices of the owner's relay. Only a process that holds the owner's live socket answers, so no answer is
+ * "no computer is connected".
+ */
+export type RelayRequest =
+	| { op: "info" }
+	| { op: "call"; name: string; args: Record<string, unknown>; timeoutMs?: number }
+	| { op: "watch" | "unwatch"; path: string }
+	| { op: "screen_open"; id: string; channel: number; display?: string }
+	| { op: "browser_open"; id: string; thread?: string }
+	| { op: "appws_open"; id: string; appId: string; path: string; headers: Record<string, string> };
+export type RelayReply = { ok: true; result?: unknown } | { ok: false; unavailable?: boolean; status?: number; message: string; remote?: { code?: string; [key: string]: unknown } };
+export type RelayStreamMessage =
+	/** A replica accepted the owner's computer: any older connection held elsewhere is closed (REPLACED). */
+	| { k: "connected"; holder: string; at: number }
+	| { k: "file_event"; event: FileEvent }
+	/** A frame of stream `id`: `down` from the computer to the viewer, `up` the other way. Binary frames are base64. */
+	| { k: "data"; id: string; dir: "up" | "down"; binary: boolean; data: string }
+	| { k: "end"; id: string; dir: "up" | "down" };
+
+/** The bus between processes. `@pim/v2-server`'s `relay-bus.ts` is the NATS implementation; this package knows nothing of NATS. */
+export interface RelayBus {
+	/** Answers the owner's rpc and hears its stream, for as long as the caller holds the owner's live computer socket. */
+	serve(ownerId: string, handlers: { rpc(request: RelayRequest): Promise<RelayReply>; stream(message: RelayStreamMessage): void }): () => void;
+	/** Asks whichever process serves the owner. Rejects with `RelayNobody` when none does. */
+	request(ownerId: string, request: RelayRequest, timeoutMs: number): Promise<RelayReply>;
+	publish(ownerId: string, message: RelayStreamMessage): void;
+	subscribe(ownerId: string, handler: (message: RelayStreamMessage) => void): () => void;
+}
+
+/** No process holds a live computer socket for the owner. */
+export class RelayNobody extends Error {
+	constructor() {
+		super("No process holds the computer's connection");
+	}
+}
+
 /**
  * One connected `pim-computer`. It speaks the `pim-computer` wire protocol: JSON text frames `hello` (what it is, and which protocol revision),
  * `call`/`reply` (the Relay's calls and its answers), `event` (file changes and watcher failures), `screen` and `cdp` streams on numbered
  * channels, and binary frames whose first four bytes are a screen channel. Protocol 1 (a computer that does not say its version) and 2 both connect.
  */
-export class ComputerConnection {
+export class ComputerConnection implements Computer {
 	info: ComputerInfo | null = null;
+	readonly connectedAt = Date.now();
 	readonly #pending = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
 	readonly #screens = new Map<number, (data: string | Uint8Array | null) => void>();
 	readonly #cdp = new Map<number, (data: string | null) => void>();
@@ -275,6 +330,170 @@ export class ComputerConnection {
 	}
 }
 
+const b64 = (data: Uint8Array) => Buffer.from(data).toString("base64");
+
+/** A reply that says no: its failure, as the caller of a local connection would have seen it. */
+function failure(reply: Extract<RelayReply, { ok: false }>, capability: string): Error {
+	return reply.unavailable ? new CapabilityUnavailableError(capability, "it needs a paired personal computer, and none is connected") : new ComputerError(reply.status ?? 502, reply.message, reply.remote);
+}
+
+/**
+ * A computer whose socket another process holds: every call is a request on the bus, and every stream is frames on it. It looks like a local
+ * connection to its caller. What the owning process cannot do for it (the socket went away between the check and the call) comes back as
+ * `CapabilityUnavailableError`, the same as no computer at all.
+ */
+export class RemoteComputer implements Computer {
+	readonly protocol: number;
+	readonly #streams = new Map<string, (message: RelayStreamMessage) => void>();
+	readonly #channels = new Map<number, string>();
+	readonly #files = new Set<(event: FileEvent) => void>();
+	#listening: (() => void) | null = null;
+
+	constructor(
+		private readonly bus: RelayBus,
+		readonly ownerId: string,
+		readonly info: ComputerInfo | null,
+		private readonly capability: string,
+	) {
+		this.protocol = info?.protocol ?? PROTOCOL_VERSION;
+	}
+
+	/** One subscription to the owner's stream subject serves every stream and file listener this object has. */
+	#listen(): void {
+		if (this.#listening) return;
+		this.#listening = this.bus.subscribe(this.ownerId, (m) => {
+			if (m.k === "file_event") for (const l of [...this.#files]) l(m.event);
+			else if (m.k === "data" || m.k === "end") if (m.dir === "down") this.#streams.get(m.id)?.(m);
+		});
+	}
+
+	#maybeUnlisten(): void {
+		if (this.#streams.size === 0 && this.#files.size === 0) {
+			this.#listening?.();
+			this.#listening = null;
+		}
+	}
+
+	async #ask(request: RelayRequest, timeoutMs: number): Promise<RelayReply & { ok: true }> {
+		let reply: RelayReply;
+		try {
+			reply = await this.bus.request(this.ownerId, request, timeoutMs);
+		} catch (error) {
+			if (error instanceof RelayNobody) throw new CapabilityUnavailableError(this.capability, "it needs a paired personal computer, and none is connected");
+			throw new ComputerError(504, `The computer didn't answer within ${Math.round(timeoutMs / 1000)} seconds.`);
+		}
+		if (!reply.ok) throw failure(reply, this.capability);
+		return reply;
+	}
+
+	async call<T = unknown>(op: string, args: Record<string, unknown> = {}, timeoutMs = FILE_CALL_MS): Promise<T> {
+		// The owning process times the call itself; the request outlasts it, so its answer is the computer's timeout rather than ours.
+		return (await this.#ask({ op: "call", name: op, args, timeoutMs }, timeoutMs + 3_000)).result as T;
+	}
+
+	async watch(path: string): Promise<unknown> {
+		return (await this.#ask({ op: "watch", path }, FILE_CALL_MS + 3_000)).result;
+	}
+
+	async unwatch(path: string): Promise<boolean> {
+		return (await this.#ask({ op: "unwatch", path }, FILE_CALL_MS + 3_000)).result === true;
+	}
+
+	onFileEvent(listener: (event: FileEvent) => void): () => void {
+		this.#files.add(listener);
+		this.#listen();
+		return () => {
+			this.#files.delete(listener);
+			this.#maybeUnlisten();
+		};
+	}
+
+	/** Registers stream `id` before it is opened, so no frame the computer sends first is lost; undone when the open fails. */
+	async #open(id: string, request: RelayRequest, handler: (m: RelayStreamMessage) => void, timeoutMs: number): Promise<void> {
+		this.#streams.set(id, handler);
+		this.#listen();
+		try {
+			await this.#ask(request, timeoutMs);
+		} catch (error) {
+			this.#streams.delete(id);
+			this.#maybeUnlisten();
+			throw error;
+		}
+	}
+
+	#end(id: string): void {
+		if (!this.#streams.delete(id)) return;
+		this.bus.publish(this.ownerId, { k: "end", id, dir: "up" });
+		this.#maybeUnlisten();
+	}
+
+	async openScreen(channel: number, handler: (data: string | Uint8Array | null) => void, display?: string): Promise<void> {
+		const id = newId("rs");
+		await this.#open(id, { op: "screen_open", id, channel, ...(display ? { display } : {}) }, (m) => this.#down(id, m, handler), 30_000 + 3_000);
+		this.#channels.set(channel, id);
+	}
+
+	screenInput(channel: number, data: string): void {
+		const id = this.#channels.get(channel);
+		if (id) this.bus.publish(this.ownerId, { k: "data", id, dir: "up", binary: false, data });
+	}
+
+	closeScreen(channel: number): void {
+		const id = this.#channels.get(channel);
+		this.#channels.delete(channel);
+		if (id) this.#end(id);
+	}
+
+	#down(id: string, m: RelayStreamMessage, handler: (data: string | Uint8Array | null) => void): void {
+		if (m.k === "end") {
+			this.#streams.delete(id);
+			this.#maybeUnlisten();
+			handler(null);
+		} else if (m.k === "data") handler(m.binary ? new Uint8Array(Buffer.from(m.data, "base64")) : m.data);
+	}
+
+	async openBrowser(handler: (data: string | null) => void, thread?: string): Promise<{ send(data: string): void; close(): void }> {
+		const id = newId("rb");
+		await this.#open(id, { op: "browser_open", id, ...(thread ? { thread } : {}) }, (m) => this.#down(id, m, (d) => handler(d === null ? null : String(d))), 120_000 + 3_000);
+		return { send: (data) => this.#streams.has(id) && this.bus.publish(this.ownerId, { k: "data", id, dir: "up", binary: false, data }), close: () => this.#end(id) };
+	}
+
+	async openAppSocket(appId: string, path: string, headers: Record<string, string>, handler: (data: Uint8Array | string | null) => void): Promise<{ send(data: Uint8Array | string): void; close(): void }> {
+		const id = newId("ra");
+		await this.#open(id, { op: "appws_open", id, appId, path, headers }, (m) => this.#down(id, m, handler), FILE_CALL_MS + 3_000);
+		return {
+			send: (data) => this.#streams.has(id) && this.bus.publish(this.ownerId, { k: "data", id, dir: "up", binary: typeof data !== "string", data: typeof data === "string" ? data : b64(data) }),
+			close: () => this.#end(id),
+		};
+	}
+
+	async ping(): Promise<number | null> {
+		const start = Date.now();
+		try {
+			await this.call("ping", {}, 5_000);
+			return Date.now() - start;
+		} catch {
+			return null;
+		}
+	}
+}
+
+/**
+ * The owner's computer as seen from a process that may not hold its socket (a Runner calling `file_*` or `shell`, a Gate relaying a hosted app): asks
+ * the bus who does. No process holding a live `pimc_` connection is `CapabilityUnavailableError`, cleanly, as is a bus that is not configured.
+ */
+export async function acquireRemote(bus: RelayBus | null, ownerId: string, capability: string): Promise<RemoteComputer> {
+	if (!bus) throw new CapabilityUnavailableError(capability, "it needs a paired personal computer, and none is connected");
+	let reply: RelayReply;
+	try {
+		reply = await bus.request(ownerId, { op: "info" }, 2_000);
+	} catch {
+		throw new CapabilityUnavailableError(capability, "it needs a paired personal computer, and none is connected");
+	}
+	if (!reply.ok) throw failure(reply, capability);
+	return new RemoteComputer(bus, ownerId, (reply.result as ComputerInfo | null) ?? null, capability);
+}
+
 export type AppHttpRequest = { method: string; path: string; headers: Record<string, string>; body?: Uint8Array };
 export type AppHttpResponse = { status: number; headers: Record<string, string>; body: Uint8Array };
 
@@ -288,6 +507,13 @@ export class Relay {
 	readonly #links = new Map<string, ComputerConnection>();
 	readonly #askedToUpdate = new Map<string, number>();
 	readonly #states = new Map<string, { watching: Map<string, number>; listeners: Set<(event: FileEvent) => void> }>();
+	#bus: RelayBus | null = null;
+	/** Names this process on the bus, so it hears its own notices as its own. */
+	#holder = newId("relay");
+	/** The owners whose computer this process holds, with what it does on the bus for them while it does. */
+	readonly #serving = new Map<string, { stop: () => void; unfile: () => void }>();
+	/** The streams other processes opened on computers this process holds: frames from the viewer go to `up`, and `close` ends them. */
+	readonly #hosted = new Map<string, { up(data: string | Uint8Array): void; close(): void }>();
 
 	#state(ownerId: string) {
 		let s = this.#states.get(ownerId);
@@ -330,7 +556,7 @@ export class Relay {
 	async status(p: Principal) {
 		await this.authz.enforce(p, "api:read");
 		const row = await this.db.owner(p.ownerId, async (tx) => (await tx.query("SELECT id, name, protocol, last_seen_at FROM pim_app.computers WHERE revoked_at IS NULL")).rows[0]);
-		const link = this.#links.get(p.ownerId);
+		const link: Computer | null = !row ? null : (this.#links.get(p.ownerId) ?? (await this.acquire(p.ownerId, "status").catch(() => null)));
 		return { state: !row ? ("none" as const) : link ? ("online" as const) : ("offline" as const), computer: row ? { id: row.id as string, name: row.name as string, lastSeenAt: row.last_seen_at as Date | null, info: link?.info ?? null } : null };
 	}
 
@@ -355,19 +581,118 @@ export class Relay {
 		const previous = this.#links.get(p.ownerId);
 		this.#links.set(p.ownerId, conn);
 		previous?.close(REPLACED, "Another computer connected with this token");
+		this.#serve(p.ownerId, conn);
 		return conn;
 	}
 
 	/** The socket closed. A replaced connection does not remove its successor. */
 	disconnected(conn: ComputerConnection): void {
 		conn.closed();
-		if (this.#links.get(conn.ownerId) === conn) this.#links.delete(conn.ownerId);
+		if (this.#links.get(conn.ownerId) === conn) this.#unlink(conn.ownerId);
 	}
 
 	disconnect(ownerId: string, code = 1000, reason = "Unpaired"): void {
 		const link = this.#links.get(ownerId);
-		this.#links.delete(ownerId);
+		this.#unlink(ownerId);
 		link?.close(code, reason);
+	}
+
+	#unlink(ownerId: string): void {
+		this.#links.delete(ownerId);
+		const serving = this.#serving.get(ownerId);
+		this.#serving.delete(ownerId);
+		serving?.stop();
+		serving?.unfile();
+	}
+
+	// ---- across processes ----
+
+	/**
+	 * Lets other processes reach computers this one holds: the Gate serving `/hosted/*` or a Runner calling `file_*` and `shell` asks on the bus,
+	 * and the one process that holds the owner's socket answers. Without a bus, a computer is reachable only from the process that holds it.
+	 */
+	useBus(bus: RelayBus): void {
+		this.#bus = bus;
+	}
+
+	/** This process holds the owner's computer: it answers for it on the bus until it does not, and tells the others, so a connection one of them holds for the owner is closed. */
+	#serve(ownerId: string, conn: ComputerConnection): void {
+		const bus = this.#bus;
+		if (!bus) return;
+		if (!this.#serving.has(ownerId)) {
+			const forward = (event: FileEvent) => bus.publish(ownerId, { k: "file_event", event });
+			this.#state(ownerId).listeners.add(forward);
+			const stop = bus.serve(ownerId, { rpc: (request) => this.#answer(ownerId, request), stream: (message) => this.#heard(ownerId, message) });
+			this.#serving.set(ownerId, { stop, unfile: () => this.#state(ownerId).listeners.delete(forward) });
+		}
+		bus.publish(ownerId, { k: "connected", holder: this.#holder, at: conn.connectedAt });
+	}
+
+	/** Another process accepted the owner's computer: the older of the two connections is the stale one, and closes. */
+	#heard(ownerId: string, m: RelayStreamMessage): void {
+		if (m.k === "connected") {
+			const link = this.#links.get(ownerId);
+			if (m.holder === this.#holder || !link) return;
+			if (link.connectedAt < m.at || (link.connectedAt === m.at && this.#holder < m.holder)) {
+				this.#unlink(ownerId);
+				link.close(REPLACED, "Another computer connected with this token");
+			}
+			return;
+		}
+		if (m.k === "data" && m.dir === "up") this.#hosted.get(m.id)?.up(m.binary ? new Uint8Array(Buffer.from(m.data, "base64")) : m.data);
+		else if (m.k === "end" && m.dir === "up") this.#hosted.get(m.id)?.close();
+	}
+
+	/** One request from another process, run on the computer this one holds. */
+	async #answer(ownerId: string, request: RelayRequest): Promise<RelayReply> {
+		const link = this.#links.get(ownerId);
+		if (!link) return { ok: false, unavailable: true, message: "No computer is connected here" };
+		const bus = this.#bus!;
+		const down = (id: string, data: string | Uint8Array | null) => {
+			if (data === null) {
+				this.#hosted.delete(id);
+				bus.publish(ownerId, { k: "end", id, dir: "down" });
+			} else bus.publish(ownerId, { k: "data", id, dir: "down", binary: typeof data !== "string", data: typeof data === "string" ? data : b64(data) });
+		};
+		try {
+			switch (request.op) {
+				case "info":
+					return { ok: true, result: link.info };
+				case "call":
+					return { ok: true, result: await link.call(request.name, request.args, request.timeoutMs) };
+				case "watch":
+					return { ok: true, result: await link.watch(request.path) };
+				case "unwatch":
+					return { ok: true, result: await link.unwatch(request.path) };
+				case "screen_open":
+					await link.openScreen(request.channel, (data) => down(request.id, data), request.display);
+					this.#hosted.set(request.id, { up: (data) => link.screenInput(request.channel, String(data)), close: () => (this.#hosted.delete(request.id), link.closeScreen(request.channel)) });
+					return { ok: true };
+				case "browser_open": {
+					const transport = await link.openBrowser((data) => down(request.id, data), request.thread);
+					this.#hosted.set(request.id, { up: (data) => transport.send(String(data)), close: () => (this.#hosted.delete(request.id), transport.close()) });
+					return { ok: true };
+				}
+				case "appws_open": {
+					const transport = await link.openAppSocket(request.appId, request.path, request.headers, (data) => down(request.id, data));
+					this.#hosted.set(request.id, { up: (data) => transport.send(data), close: () => (this.#hosted.delete(request.id), transport.close()) });
+					return { ok: true };
+				}
+			}
+		} catch (error) {
+			if (error instanceof ComputerError) return { ok: false, status: error.status, message: error.message, ...(error.remote ? { remote: error.remote } : {}) };
+			return { ok: false, status: 500, message: (error as Error).message };
+		}
+	}
+
+	/**
+	 * The owner's computer for a tool that needs one, wherever its socket is: this process's own, else the process that holds it, over the bus.
+	 * `CapabilityUnavailableError` when no process holds a live connection.
+	 */
+	async acquire(ownerId: string, capability: string): Promise<Computer> {
+		const link = this.#links.get(ownerId);
+		if (link) return link;
+		return acquireRemote(this.#bus, ownerId, capability);
 	}
 
 	/** A computer that speaks an older protocol is asked to update itself (once in ten minutes), when it is idle; one that cannot stays connected on the older protocol. */
@@ -405,7 +730,7 @@ export class Relay {
 	/** A call on the computer for `p`, after the owner is checked alive. */
 	async call<T = unknown>(p: Principal, capability: string, op: string, args: Record<string, unknown> = {}, timeoutMs?: number): Promise<T> {
 		await this.authz.enforce(p, "computer:use");
-		return this.require(p.ownerId, capability).call<T>(op, args, timeoutMs);
+		return (await this.acquire(p.ownerId, capability)).call<T>(op, args, timeoutMs);
 	}
 
 	// ---- apps with a backend ----
@@ -422,7 +747,7 @@ export class Relay {
 	async deployApp(p: Principal, app: { id: string; version: number; files: Record<string, string>; manifest: { backend: { command: string; install?: string }; access: string } }): Promise<unknown> {
 		const decision = await this.authz.authorize({ principal: p, ownerId: p.ownerId, action: "app:deploy", resource: { app: app.id, access: app.manifest.access } });
 		if (decision.outcome === "approval_required" && p.kind !== "user") throw new ApprovalRequiredError("app:deploy", decision.approvalKey);
-		const link = this.require(p.ownerId, "app_deploy");
+		const link = await this.acquire(p.ownerId, "app_deploy");
 		return link.call("app_start", { id: app.id, version: app.version, files: app.files, backend: app.manifest.backend, env: { PIM_APP_ID: app.id, PIM_APP_SECRET: this.appSecret(p.ownerId, app.id) } }, 15 * 60_000);
 	}
 
@@ -441,7 +766,7 @@ export class Relay {
 	async appHttp(ownerId: string, appId: string, request: AppHttpRequest): Promise<AppHttpResponse> {
 		await this.authz.requireLive(ownerId, "hosted:run");
 		if ((request.body?.length ?? 0) > 1_048_576) throw new PimError(413, "too_large", "A request to an app is at most 1 MiB");
-		const link = this.require(ownerId, "hosted app backend");
+		const link = await this.acquire(ownerId, "hosted app backend");
 		const r = await link.call<{ status: number; headers: Record<string, string>; body: string }>("app_http", { id: appId, method: request.method, path: request.path, headers: request.headers, ...(request.body ? { body: Buffer.from(request.body).toString("base64") } : {}) }, 60_000);
 		const body = new Uint8Array(Buffer.from(r.body ?? "", "base64"));
 		if (body.length > 4_194_304) throw new PimError(502, "too_large", "The app's response was over 4 MiB");

@@ -10,7 +10,7 @@ import { KeyringCrypto } from "@pim/v2-app/crypto";
 import { connect as connectApp } from "@pim/v2-app/db";
 import { createGate } from "@pim/v2-app/gate";
 import { S3ObjectStore } from "@pim/v2-app/objects";
-import { attachSockets } from "@pim/v2-app/sockets";
+import { attachSockets, BROWSER_LIVE, COMPUTER_CONNECT, COMPUTER_SCREEN, NOTES_LIVE } from "@pim/v2-app/sockets";
 import { runnerMayStart } from "@pim/v2-ops/backup/reconcile";
 import { createPimMetrics, instrumentPool, monitorEventLoop } from "@pim/v2-ops/observability/signals";
 import { codingRest } from "@pim/v2-forge/http/rest";
@@ -35,6 +35,7 @@ import { codingAdminRoutes, forgeAuthenticator, forgeRoutes, projectedTranscript
 import type { Host } from "./host.ts";
 import { AppLiveIdentity, deliverApprovalDecisions, LiveAuthorizer, mirrorCodingGrants, publishRevocations } from "./identity.ts";
 import { runtimeOutboxSource } from "./runtime-source.ts";
+import { natsRelayBus } from "./relay-bus.ts";
 import { sweepApprovals, trimForgeOutbox } from "./sweeps.ts";
 
 export type Env = Record<string, string | undefined>;
@@ -86,6 +87,8 @@ export async function startGate(config: ProcessConfig, env: Env, host: Host, nat
 	const crypto = keyringFromProcessEnv(env);
 	const app = new App(db, objects, { ...(crypto ? { crypto } : {}), ...(env.PIM_APP_SECRET_KEY ? { appKey: env.PIM_APP_SECRET_KEY } : {}), transcripts: projectedTranscripts(db.pool) });
 	if (nats) publishRevocations(app, nats);
+	// A computer paired to another process (the `relay` container, another Gate) is reached over NATS.
+	if (nats) app.relay.useBus(natsRelayBus(nats));
 	deliverApprovalDecisions(app);
 	const secure = config.publicUrl.startsWith("https:");
 	const forge = assembleForge(db.pool as never, objects, env);
@@ -103,7 +106,15 @@ export async function startGate(config: ProcessConfig, env: Env, host: Host, nat
 	const gate = createGate(app, options);
 	const listener = gate.listeners("request")[0] as (req: never, res: never) => void;
 	host.handle((req, res) => (listener(req as never, res as never), true));
-	const sockets = attachSockets(host.server, app, options);
+	// The host owns the server's `upgrade` event and destroys a socket none of its handlers claims, so the Gate's sockets (a computer connecting, the desktop,
+	// the browser, notes, a hosted app's own) are claimed by path here rather than listened for on the server.
+	const appsHost = env.PIM_APPS_ORIGIN ? new URL(env.PIM_APPS_ORIGIN).hostname : null;
+	const gatePath = (req: { url?: string; headers: { host?: string } }) => {
+		const path = (req.url ?? "/").split("?")[0] ?? "/";
+		return [COMPUTER_CONNECT, COMPUTER_SCREEN, BROWSER_LIVE, NOTES_LIVE].includes(path) || path.startsWith("/hosted/") || (appsHost !== null && (req.headers.host ?? "").split(":")[0]!.endsWith(`.${appsHost}`));
+	};
+	const gateServer = { on: (_event: "upgrade", listener: (...args: never[]) => void) => host.upgrade((req, socket, head) => (gatePath(req) ? (listener(req as never, socket as never, head as never), true) : false)) };
+	const sockets = attachSockets(gateServer as never, app, options);
 	host.readiness(async () => (await db.anonymous((tx) => tx.query("SELECT 1")), true));
 	const stopLoop = monitorEventLoop(metrics, "gate");
 	return {

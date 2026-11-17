@@ -66,6 +66,8 @@ const TypeArgs = Type.Object({ ref: Ref, text: Type.String({ maxLength: 2_000, d
 const UploadArgs = Type.Object({ ref: Ref, paths: Type.Array(Type.String({ pattern: "^/workspace/" }), { minItems: 1, maxItems: 10, description: "Files in the person's files, as /workspace/report.pdf." }) });
 
 const DESKTOP_ABOUT = "The person's computer has a desktop they can watch from Computer in the app while you work. Use desktop_look to see it, desktop_read to read a window's accessibility tree, desktop_act to act in its apps. For web pages use the browser tools.";
+/** What a computer without displayd answers a chat's call for a display of its own. */
+const NO_DISPLAYD = /no display allocated|displayd is not reachable/;
 const sessionOf = (chat: string) => `pim-${chat.replace(/[^\w-]/g, "").slice(0, 24)}`;
 const Pid = Type.Integer({ description: "The app's process, as desktop_look or desktop_read shows it." });
 const DesktopAct = Type.Object({
@@ -340,9 +342,19 @@ export function computerTools(deps: ComputerToolDeps, kit: ComputerToolKit): Too
 
 	// ---- the desktop ----
 
+	// A computer with displayd gives each chat a desktop of its own; one without it (a Cua desktop, as on a managed computer) has one, which every chat shares.
+	const callDriver = async (c: RemoteComputer, tool: string, args: Record<string, unknown>, thread: string) => {
+		const arguments_ = { ...args, session: sessionOf(thread) };
+		try {
+			return mcpResult(await c.call<Mcp>("driver", { tool, arguments: arguments_, thread }, DRIVER_CALL_MS));
+		} catch (error) {
+			if (!NO_DISPLAYD.test(error instanceof Error ? error.message : String(error))) throw error;
+			return mcpResult(await c.call<Mcp>("driver", { tool, arguments: arguments_ }, DRIVER_CALL_MS));
+		}
+	};
 	const driver = async (api: any, toolName: string, args: Record<string, unknown>) => {
 		const { computer, thread } = await use(api, "desktop");
-		return mcpResult(await computer.call<Mcp>("driver", { tool: toolName, arguments: { ...args, session: sessionOf(thread) }, thread }, DRIVER_CALL_MS));
+		return callDriver(computer, toolName, args, thread);
 	};
 	tools.push(
 		tool("desktop_look", `See the person's computer's desktop: a screenshot, with its windows, each with its app's pid and window_id. ${DESKTOP_ABOUT}`, Type.Object({}), (_a, api) => driver(api, "get_desktop_state", {})),
@@ -355,7 +367,7 @@ export function computerTools(deps: ComputerToolDeps, kit: ComputerToolKit): Too
 				tool: "desktop_act",
 				args: { action, summary: summarizeDesktop(a) },
 				run: async (c) => {
-					const r = mcpResult(await c.call<Mcp>("driver", { tool: action, arguments: { ...rest, ...(foreground ? { delivery_mode: "foreground" } : {}), session: sessionOf(thread) }, thread }, DRIVER_CALL_MS));
+					const r = await callDriver(c, action, { ...rest, ...(foreground ? { delivery_mode: "foreground" } : {}) }, thread);
 					return { text: mcpText(r), isError: r.isError === true, content: r.content };
 				},
 			});
@@ -371,7 +383,6 @@ export function computerTools(deps: ComputerToolDeps, kit: ComputerToolKit): Too
 	// Each chat's browser is on a display of its own where the computer runs displayd. A computer without it (a laptop, a plain server) has one browser, the primary, which the chats
 	// share, each in a window of its own; that is remembered once the computer has said so.
 	let sharedBrowser = false;
-	const NO_DISPLAYD = /no display allocated|displayd is not reachable/;
 	const perThread = async <T>(thread: string | undefined, run: (thread: string | undefined) => Promise<T>): Promise<T> => {
 		if (!thread || sharedBrowser) return run(undefined);
 		try {

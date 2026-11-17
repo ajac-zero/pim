@@ -155,6 +155,47 @@ real("an agent on a paired computer", () => {
 		expect((await d.stack.admin.query("SELECT count(*)::int AS n FROM pim_app.approvals WHERE state = 'waiting'")).rows[0].n).toBe(0);
 	}, 180_000);
 
+	it("looks at the desktop of a computer with a Cua desktop and no displayd, and waits for a person before acting on it", async () => {
+		const asked: { name: string; arguments: Record<string, unknown> }[] = [];
+		const spacesd = createServer((req, res) => {
+			let body = "";
+			req.on("data", (chunk) => (body += chunk));
+			req.on("end", () => {
+				const m = JSON.parse(body || "{}") as { id?: number; method?: string; params?: { name: string; arguments: Record<string, unknown> } };
+				if (m.method === "initialize") return void res.writeHead(200, { "content-type": "application/json", "mcp-session-id": "s1" }).end(JSON.stringify({ jsonrpc: "2.0", id: m.id, result: { protocolVersion: "2025-06-18", capabilities: {}, serverInfo: { name: "cua", version: "0" } } }));
+				if (m.id === undefined) return void res.writeHead(202).end();
+				asked.push(m.params!);
+				res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ jsonrpc: "2.0", id: m.id, result: { content: [{ type: "text", text: `${m.params!.name} done` }] } }));
+			});
+		});
+		await new Promise<void>((resolve) => spacesd.listen(0, "127.0.0.1", resolve));
+		const tokenFile = join(home, "spacesd-token");
+		writeFileSync(tokenFile, "t0ken");
+		process.env.PIM_SPACESD_TOKEN_FILE = tokenFile;
+		try {
+			daemon?.kill("SIGKILL");
+			startDaemon("--spacesd", `http://127.0.0.1:${(spacesd.address() as { port: number }).port}`);
+			await connected(true);
+			// Looking runs at once, on the one desktop the chats share.
+			await (await ask("look", toolUse(fauxToolCall("desktop_look", {}))))();
+			expect((await results("desktop_look")).at(-1)).toContain("get_desktop_state done");
+			// Acting is filed first and does nothing until it is approved.
+			const end = await ask("click", toolUse(fauxToolCall("desktop_act", { action: "click", pid: 7, x: 5, y: 6 })));
+			const approval = await waitFor("the approval to be filed", async () => (await d.stack.admin.query("SELECT id, tool FROM pim_app.approvals WHERE state = 'waiting'")).rows[0], 60_000);
+			expect(approval.tool).toBe("computer:desktop");
+			expect(asked.map((a) => a.name)).toEqual(["get_desktop_state"]);
+			expect((await web.call("POST", `/api/approvals/${approval.id}/decision`, { approve: true })).status).toBe(200);
+			await end();
+			expect(asked.map((a) => a.name)).toEqual(["get_desktop_state", "click"]);
+			expect(asked[1]!.arguments).toMatchObject({ pid: 7, x: 5, y: 6 });
+		} finally {
+			delete process.env.PIM_SPACESD_TOKEN_FILE;
+			daemon?.kill("SIGKILL");
+			await connected(false);
+			spacesd.close();
+		}
+	}, 240_000);
+
 	it.skipIf(!CHROME)("opens pages and clicks links freely, but sending a form waits for a person (the real daemon's Chrome)", async () => {
 		const posts: string[] = [];
 		const site = createServer((req, res) => {

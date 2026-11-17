@@ -821,7 +821,7 @@ export function ModelOrderList({
     <>
       <ol className="divide-y overflow-hidden rounded-xl border empty:hidden">
         {models.map((model, index) => {
-          const name = modelName(model.name);
+          const name = modelName(model.name, model.id);
           const move = (to: number) => {
             const next = [...models];
             next.splice(to, 0, ...next.splice(index, 1));

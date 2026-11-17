@@ -47,6 +47,7 @@ async function legacyDomain(admin: Pool, objects: FsObjectStore, conversation: s
 	const rows: [string, string, unknown][] = [
 		["pim_stored_files", "notes/old.pdf", { path: "notes/old.pdf", id: "f1", type: "application/pdf", bytes: 4, updated_at: at }],
 		["pim_agents", "ag_poet", { id: "ag_poet", name: "Poet", instructions: "Answer in verse.", model: "faux/m", fallbacks: "[]", skills: "[\"Haiku\"]", apps: "[]", contacts: "[]", role: null, description: "", is_default: 0, symbol: "P", color: "blue", created_at: at }],
+		["pim_agent_icons", "icon1", { agent: "ag_poet", type: "image/png", data: { $b64: PNG.toString("base64") }, updated_at: at }],
 		["pim_skills", "Haiku", { name: "Haiku", created_at: at }],
 		["pim_skill_versions", "Haiku:1", { name: "Haiku", version: 1, description: "Write haiku", instructions: "Five, seven, five.", created_at: at }],
 		["pim_skill_files", "Haiku:1:ref.md", { name: "Haiku", version: 1, path: "ref.md", sha256: sha }],
@@ -60,6 +61,8 @@ async function legacyDomain(admin: Pool, objects: FsObjectStore, conversation: s
 	for (const [table, pk, row] of rows) await admin.query("INSERT INTO pim_ops.legacy_rows (owner_id, source, table_name, pk, row) VALUES ($1,'Pim',$2,$3,$4)", [ADA, table, pk, JSON.stringify(row)]);
 }
 const ADA = "o_own_ada";
+/** A real one-pixel PNG: the icon object is sniffed as an image when served. */
+const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==", "base64");
 
 real("a cutover rehearsal", () => {
 	let d: Deployment;
@@ -179,6 +182,11 @@ expect(await as("SELECT kind, app_ref, status FROM pim_app.connectors WHERE owne
 		expect(Buffer.from(copied.get(`${ADA}/files/f1`)!).toString()).toBe("%PDF");
 		expect((await as("SELECT value FROM pim_app.owner_settings WHERE owner_id = $1 AND key = 'legacy_files'", [ADA]))[0]).toMatchObject({ value: [{ path: "notes/old.pdf", key: `${ADA}/files/f1`, type: "application/pdf", bytes: 4 }] });
 		expect(await count(`SELECT count(*) n FROM pim_app.objects WHERE key = '${ADA}/files/f1' AND purpose = 'file'`)).toBe(1);
+		// The agent's uploaded icon is a public image object under the person, which the agent's icon_key names; a second promotion leaves it and any icon uploaded since alone.
+		expect(await as("SELECT icon_key FROM pim_app.agents WHERE owner_id = $1 AND id = 'ag_poet'", [ADA])).toEqual([{ icon_key: `${ADA}/agent-icons/ag_poet` }]);
+		expect(Buffer.from(copied.get(`${ADA}/agent-icons/ag_poet`)!).equals(PNG)).toBe(true);
+		expect(await count(`SELECT count(*) n FROM pim_app.objects WHERE key = '${ADA}/agent-icons/ag_poet' AND purpose = 'image' AND acl = 'public'`)).toBe(1);
+		expect(report.domain["agent icons"]).toBe(1);
 		// Nothing that was due while the fence stood comes back: a time trigger counts from the activation.
 		const stale = await count(`SELECT count(*) n FROM pim_app.triggers WHERE owner_id = '${ADA}' AND source = 'time' AND watermark < ${ACTIVATED_AT}`);
 		expect(stale).toBe(0);

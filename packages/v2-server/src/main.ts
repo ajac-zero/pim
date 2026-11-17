@@ -11,7 +11,7 @@ import pg from "pg";
 import { createHost, type Host } from "./host.ts";
 import { migrateAll } from "./migrate.ts";
 import { markRestored, postRestoreSafetyPass, runnerMayStart } from "@pim/v2-ops/backup/reconcile";
-import { promoteToLive } from "./migration-bridge.ts";
+import { promoteAgentIcons, promoteToLive } from "./migration-bridge.ts";
 import { S3ObjectStore } from "@pim/v2-app/objects";
 import { cryptoFromEnv } from "@pim/v2-ops/cli/common";
 import { FsObjectStore } from "@pim/v2-ops/migration/objects";
@@ -55,6 +55,24 @@ export async function promoteCommand(env: Env) {
 			...(crypto ? { crypto } : {}),
 			...(legacy ? { objects: { get: (bucket: string, key: string) => legacy.get(bucket, key), ...(live ? { put: async (key: string, bytes: Uint8Array, contentType: string | null) => void (await live.put(key, bytes, { contentType: contentType ?? "application/octet-stream" })) } : {}) } } : {}),
 		});
+	} finally {
+		await pool.end();
+	}
+}
+
+/**
+ * `backfill-icons`: carries v1's uploaded agent icons into a database that was promoted before the promotion did. Reads `PIM_DATABASE_URL` and `PIM_S3_*`; safe to run again.
+ */
+export async function backfillIconsCommand(env: Env) {
+	if (!env.PIM_DATABASE_URL || !env.PIM_S3_ENDPOINT || !env.PIM_S3_BUCKET) throw new Error("PIM_DATABASE_URL, PIM_S3_ENDPOINT and PIM_S3_BUCKET are required to backfill icons");
+	const live = new S3ObjectStore(env.PIM_S3_BUCKET, { endpoint: env.PIM_S3_ENDPOINT, region: env.PIM_S3_REGION ?? "us-east-1", ...(env.PIM_S3_ACCESS_KEY && env.PIM_S3_SECRET_KEY ? { credentials: { accessKeyId: env.PIM_S3_ACCESS_KEY, secretAccessKey: env.PIM_S3_SECRET_KEY } } : {}) });
+	const pool = new pg.Pool({ connectionString: env.PIM_DATABASE_URL, max: 2 });
+	const domain = { counts: {} as Record<string, number>, skipped: [] as string[] };
+	try {
+		for (const r of (await pool.query("SELECT DISTINCT owner_id FROM pim_ops.legacy_rows WHERE table_name = 'pim_agent_icons' ORDER BY owner_id")).rows) {
+			await promoteAgentIcons(pool, r.owner_id as string, async (key, bytes, contentType) => void (await live.put(key, bytes, { contentType })), domain);
+		}
+		return domain;
 	} finally {
 		await pool.end();
 	}
@@ -108,6 +126,10 @@ export async function main(argv = process.argv.slice(2), env: Env = process.env)
 	if (!command) throw new Error("Name a role: migrate, " + PROCESS_ROLES.join(", "));
 	if (command === "promote") {
 		console.log(JSON.stringify({ event: "pim.promote", ...(await promoteCommand(env)) }));
+		return;
+	}
+	if (command === "backfill-icons") {
+		console.log(JSON.stringify({ event: "pim.backfill_icons", ...(await backfillIconsCommand(env)) }));
 		return;
 	}
 	if (command === "post-restore") {

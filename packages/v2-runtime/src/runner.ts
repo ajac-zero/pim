@@ -47,6 +47,9 @@ export type RunnerEvent =
 	/** The run watchdog stopped a chat whose run made no progress, or a stop that did not end the run recycled the partition (`recycled`). */
 	| { type: "stalled"; ownerId: string; partitionId: string; conversationId: number; recycled: boolean };
 
+export type ChatAgent = NonNullable<Parameters<Harness["createConversation"]>[0]["agent"]> & { readonly explicit?: boolean };
+const withoutExplicit = ({ explicit: _explicit, ...agent }: ChatAgent) => agent;
+
 export type RunnerOptions = {
 	readonly db: Db;
 	readonly steward?: Partial<Omit<StewardOptions, "db">> & { holderId: string };
@@ -55,7 +58,8 @@ export type RunnerOptions = {
 	/** The agent and init for the home partition's root conversation; called only for the home partition. */
 	readonly homeRoot?: (ownerId: string) => Parameters<Harness["root"]>[1] | Promise<Parameters<Harness["root"]>[1]>;
 	/** The agent a conversation made by the built-in `create_conversation` command starts with; `publicChatId` names the chat when the command carries one. */
-	readonly chatAgent?: (ownerId: string, publicChatId?: string) => NonNullable<Parameters<Harness["createConversation"]>[0]["agent"]> | Promise<NonNullable<Parameters<Harness["createConversation"]>[0]["agent"]>>;
+	/** A chat's agent. `explicit: false` says its model is only the deployment's default standing in, so it starts a new chat but never replaces the model an existing chat already runs on. */
+	readonly chatAgent?: (ownerId: string, publicChatId?: string) => ChatAgent | Promise<ChatAgent>;
 	/** Handlers that replace or add to the built-in ones for the contract's command kinds. */
 	readonly commands?: Readonly<Record<string, CommandHandler>>;
 	readonly admission?: AdmissionOptions;
@@ -439,7 +443,8 @@ const inputCommand: CommandHandler = async (resident, command, context) => {
 	// The chat's model is read again before each message, so a model chosen for this chat alone (or the agent's, or Settings') is the next turn's.
 	if (command.kind === "user_message" && command.publicChatId !== undefined && resident.runner.chatAgent !== undefined) {
 		try {
-			const wanted = (await resident.runner.chatAgent(resident.ownerId, command.publicChatId)).model;
+			const chosen = await resident.runner.chatAgent(resident.ownerId, command.publicChatId);
+			const wanted = chosen.explicit === false ? undefined : chosen.model;
 			const current = (await conversation.agent(context)).model;
 			if (wanted != null && (wanted.provider !== current?.provider || wanted.modelId !== current?.modelId)) await conversation.configure({ model: wanted }, context);
 		} catch (error) {
@@ -496,7 +501,7 @@ const createConversationCommand: CommandHandler = async (resident, command, cont
 	const conversation =
 		existing.items[0] !== undefined
 			? await resident.harness.conversation(existing.items[0].id, context)
-			: await resident.harness.createConversation({ ownership: { kind: "ownerless" }, ...(resident.runner.chatAgent === undefined ? {} : { agent: await resident.runner.chatAgent(resident.ownerId, command.publicChatId) }) }, context);
+			: await resident.harness.createConversation({ ownership: { kind: "ownerless" }, ...(resident.runner.chatAgent === undefined ? {} : { agent: withoutExplicit(await resident.runner.chatAgent(resident.ownerId, command.publicChatId)) }) }, context);
 	if (conversation === undefined) throw new CommandRejected("The new conversation cannot be found");
 	const first = command.payload.firstInput as Input | null | undefined;
 	if (first !== undefined && first !== null) await conversation.submit({ type: "input", content: first, requestId: `${command.commandId}:first` }, context);

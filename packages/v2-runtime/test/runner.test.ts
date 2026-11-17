@@ -276,7 +276,7 @@ describe("a chat's model", () => {
 		const chosen = { model: { provider: "faux", modelId: "m" } };
 		const runner = rig.runner({ chatAgent: () => chosen });
 		const answeredBy = async (): Promise<string[]> => (await readTranscript(database.db, ownerId, home, 1)).flatMap((e) => (e.kind === "pi.assistant" ? (e.model ?? []).map((m) => (m as { model?: string }).model ?? "") : []));
-		rig.faux.setResponses([fauxAssistantMessage("one"), fauxAssistantMessage("two"), fauxAssistantMessage("three")]);
+		rig.faux.setResponses([fauxAssistantMessage("one"), fauxAssistantMessage("two"), fauxAssistantMessage("three"), fauxAssistantMessage("four")]);
 		await runner.start();
 		await hello(runner, ownerId, home, "first");
 		await waitFor("the first answer", async () => ((await answeredBy()).length === 1 ? true : undefined));
@@ -285,7 +285,11 @@ describe("a chat's model", () => {
 		await waitFor("the second answer", async () => ((await answeredBy()).length === 2 ? true : undefined));
 		await hello(runner, ownerId, home, "third");
 		await waitFor("the third answer", async () => ((await answeredBy()).length === 3 ? true : undefined));
-		expect(await answeredBy()).toEqual(["m", "m2", "m2"]);
+		// Only the deployment's default standing in (nothing named a model) never replaces the model the chat runs on, as for a chat imported from v1.
+		Object.assign(chosen, { model: { provider: "faux", modelId: "m" }, explicit: false });
+		await hello(runner, ownerId, home, "fourth");
+		await waitFor("the fourth answer", async () => ((await answeredBy()).length === 4 ? true : undefined));
+		expect(await answeredBy()).toEqual(["m", "m2", "m2", "m2"]);
 		await runner.stop();
 	});
 });

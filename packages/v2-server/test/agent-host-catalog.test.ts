@@ -21,7 +21,7 @@ describe("the agent host's model catalog", () => {
 		expect(models.getModel("pv_a", "m")?.baseUrl).toBe("http://127.0.0.1:1/v1");
 		url = "http://172.18.0.1:9/v1";
 		// The next message in the chat sets its model, and sees the provider as it is now.
-		expect(await host.chatAgent("o_ada", null as never)).toEqual({ model: expect.objectContaining({ provider: "pv_a" }) });
+		expect(await host.chatAgent("o_ada", null as never)).toMatchObject({ model: expect.objectContaining({ provider: "pv_a" }) });
 		expect(models.getModel("pv_a", "m")?.baseUrl).toBe("http://172.18.0.1:9/v1");
 	});
 });

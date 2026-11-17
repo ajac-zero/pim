@@ -241,15 +241,18 @@ export function createAgentHost(options: AgentHostOptions) {
 	}
 
 	/** The first of these models the catalog can run (its provider is configured); when none can, the first one, which then fails with what is missing. */
-	async function choose(ownerId: string, candidates: (ModelRef | null)[]): Promise<{ provider: string; modelId: string }> {
-		const wanted = [...candidates, asModelRef(env.PIM_DEFAULT_MODEL)].filter((m): m is ModelRef => m !== null);
+	async function choose(ownerId: string, candidates: (ModelRef | null)[]): Promise<{ provider: string; modelId: string; explicit: boolean }> {
+		const named = candidates.filter((m): m is ModelRef => m !== null);
+		const wanted = [...named, asModelRef(env.PIM_DEFAULT_MODEL)].filter((m): m is ModelRef => m !== null);
 		const models = catalogs.has(ownerId) ? await refreshCatalog(ownerId).catch(() => catalogs.get(ownerId)!.through) : undefined;
 		const available = models ? await models.getAvailable().catch(() => []) : [];
 		const found = wanted.find((w) => available.some((a) => a.provider === w.provider && a.id === w.id)) ?? (wanted.length === 0 ? available[0] : undefined);
 		const chain = wanted.filter((w, i) => wanted.findIndex((x) => x.provider === w.provider && x.id === w.id) === i);
 		const pick = found ? { provider: found.provider, id: found.id } : (wanted[0] ?? { provider: "anthropic", id: "claude-sonnet-4-5" });
 		failover.setChain(ownerId, pick, chain);
-		return { provider: pick.provider, modelId: pick.id };
+		// Explicit when the chat, its agent, the person's Settings or their fallbacks named it, rather than the deployment's default standing in for none of them.
+		const explicit = found !== undefined && named.some((w) => w.provider === found.provider && w.id === found.id);
+		return { provider: pick.provider, modelId: pick.id, explicit };
 	}
 
 	/** Where an owner's images are drawn: their ChatGPT images sign-in, and the endpoints `PIM_IMAGE_MODEL` can name. `PIM_IMAGE_MODEL=off` has no `generate_image`. */
@@ -317,12 +320,14 @@ export function createAgentHost(options: AgentHostOptions) {
 
 	const homeRoot: NonNullable<RunnerOptions["homeRoot"]> = async (ownerId) => {
 		const c = await readContext(ownerId, null).catch(() => undefined);
-		return { agent: { model: await choose(ownerId, [await chosenModel(ownerId), ...(c?.fallbacks ?? []).map(asModelRef)]) } };
+		const { explicit: _explicit, ...model } = await choose(ownerId, [await chosenModel(ownerId), ...(c?.fallbacks ?? []).map(asModelRef)]);
+		return { agent: { model } };
 	};
 	const chatAgent: NonNullable<RunnerOptions["chatAgent"]> = async (ownerId, chat) => {
 		const c = await readContext(ownerId, chat ?? null).catch(() => undefined);
 		const own = c?.agent ? [asModelRef(c.chat_model), asModelRef(c.agent.config.model), ...((c.agent.config.fallbacks ?? []) as unknown[]).map(asModelRef)] : [];
-		return { model: await choose(ownerId, [...(c?.agent ? [] : [asModelRef(c?.chat_model)]), ...own, await chosenModel(ownerId), ...(c?.fallbacks ?? []).map(asModelRef)]) };
+		const { explicit, ...model } = await choose(ownerId, [...(c?.agent ? [] : [asModelRef(c?.chat_model)]), ...own, await chosenModel(ownerId), ...(c?.fallbacks ?? []).map(asModelRef)]);
+		return { model, explicit };
 	};
 
 	/** One model call as an owner's own models, for what is not a chat turn (an approval review): the same catalog, failover and ledger, no tools. */

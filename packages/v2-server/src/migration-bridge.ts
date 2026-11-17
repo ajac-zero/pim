@@ -355,7 +355,7 @@ async function legacyRows(pool: Pool, owner: string, table: string): Promise<Rec
  * `pim_app`. Every insert is `ON CONFLICT DO NOTHING`, so it can be run again. A row that refers to something that is not in the new deployment (a member who never joined, an
  * app without its files) is skipped and said so, never promoted half.
  */
-async function promoteDomain(pool: Pool, owner: string, options: PromoteOptions, d: Domain): Promise<void> {
+async function promoteDomain(pool: Pool, owner: string, options: PromoteOptions, d: Domain, usable: ReadonlySet<string> = new Set()): Promise<void> {
 	const legacyId = (await pool.query("SELECT legacy_id FROM pim_ops.owner_map WHERE owner_id = $1", [owner])).rows[0]?.legacy_id as string | undefined;
 	const owners = new Map((await pool.query("SELECT legacy_id, owner_id FROM pim_ops.owner_map")).rows.map((r) => [r.legacy_id as string, r.owner_id as string]));
 	const rows = (table: string) => legacyRows(pool, owner, table);
@@ -508,7 +508,9 @@ async function promoteDomain(pool: Pool, owner: string, options: PromoteOptions,
 		// Agents, and which chat each one answers.
 		for (const a of agents) {
 			const model = parseJson(a.model, typeof a.model === "string" ? a.model : null);
-			const ref = typeof model === "string" ? (model.includes("/") ? { provider: model.split("/")[0], id: model.split("/").slice(1).join("/") } : null) : model;
+			const named = typeof model === "string" ? (model.includes("/") ? { provider: model.split("/")[0], id: model.split("/").slice(1).join("/") } : null) : model;
+			// The same as a chat's `pi.agent` above: a model of a provider this deployment lacks names the default instead, since a Runner chooses each turn's model from the agent's.
+			const ref = named?.provider && !usable.has(named.provider) && !(named.provider.startsWith("own:") && usable.has(named.provider.slice(4))) && options.defaultAgent ? { provider: options.defaultAgent.provider, id: options.defaultAgent.modelId } : named?.provider?.startsWith("own:") && usable.has(named.provider.slice(4)) ? { ...named, provider: named.provider.slice(4) } : named;
 			const config = { ...(ref ? { model: ref } : {}), fallbacks: parseJson(a.fallbacks, []), skills: parseJson(a.skills, []), apps: parseJson(a.apps, []), contacts: parseJson(a.contacts, []), delegates: [], legacy: { role: a.role ?? null, description: a.description ?? "", isDefault: a.is_default === 1 } };
 			const r = await c.query("INSERT INTO pim_app.agents (id, owner_id, name, instructions, config, emoji, color, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT DO NOTHING", [a.id, owner, a.name, a.instructions ?? "", JSON.stringify(config), a.symbol ?? null, a.color ?? null, ms(a.created_at)]);
 			bump(d, "agents", r.rowCount ?? 0);
@@ -810,7 +812,7 @@ export async function promoteToLive(pool: Pool, options: PromoteOptions): Promis
 			report.messages += c.messages;
 		}
 		const domain: Domain = { counts: report.domain, skipped: report.skipped };
-		await promoteDomain(pool, owner, options, domain);
+		await promoteDomain(pool, owner, options, domain, new Set(["anthropic", "openai", "google", "gateway", ...(await ownProviderIds(pool, owner, options)), ...shared.map((id) => `shared:${id}`)]));
 		report.forgeThreads += await promoteForge(pool, owner);
 		report.owners.push(owner);
 	}

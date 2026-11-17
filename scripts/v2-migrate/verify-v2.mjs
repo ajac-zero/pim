@@ -51,6 +51,7 @@ class Session {
 		}
 	}
 }
+// A circle's members are owner ids on older builds and {ownerId, username, addedAt} in the web app's shape.
 // The account answers in the old app's flat shape on newer builds and wrapped on older ones; the memory list as `entries` (text) or `memories` (body).
 const accountOf = (response) => response.json?.account ?? response.json;
 const memoriesOf = (response) => (response.json?.entries ?? response.json?.memories ?? []).map((m) => m.text ?? m.body);
@@ -223,7 +224,7 @@ for (const p of expect.providers) {
 		check("the MCP server is not bob's", !((await bob.get("/api/connectors")).json?.connectors ?? []).some((c) => c.id === expect.mcp.id));
 	}
 }
-check("the circle Family has bob in it", ((await ada.get("/api/circles")).json?.circles ?? []).some((c) => c.name === "Family" && c.members.includes(expect.accounts.bob.ownerId)));
+check("the circle Family has bob in it", ((await ada.get("/api/circles")).json?.circles ?? []).some((c) => c.name === "Family" && c.members.some((m) => (m?.ownerId ?? m) === expect.accounts.bob.ownerId)));
 check("the profile is kept", (await ada.get("/api/profile")).json?.displayName === "Ada L.");
 
 // ---- a new message in an imported chat, answered by the imported provider with its imported key ----

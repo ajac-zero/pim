@@ -12,10 +12,12 @@ import { connectorRoutes } from "../connector-routes.ts";
 import { chatRoutes } from "./chat.ts";
 import { bridgeRoutes } from "./app-bridge.ts";
 import { notificationRoutes } from "./notifications.ts";
+import { connectorScreens } from "./connectors.ts";
 
 export const webCompatRoutes: Route[] = [
 	...notificationRoutes(process.env),
 	// Connectors come first: their approve and deny add "always approve" to the plain decision the boot routes make.
+	...connectorScreens(),
 	...connectorRoutes(),
 	...bootRoutes,
 	// Model settings first: /api/providers/built-in is answered by both, and the model work's answer is the one the provider forms use.

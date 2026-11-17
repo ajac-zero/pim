@@ -2,7 +2,7 @@ import type { Principal } from "@pim/v2-contracts/identity";
 import { type ExternalOperationRecord, type ExternalOperationState, operationSettled } from "@pim/v2-contracts/runtime-seam";
 import { ConflictError, NotFoundError } from "./errors.ts";
 import { Authorizer } from "./authz.ts";
-import type { Db } from "./db.ts";
+import type { Db, Tx } from "./db.ts";
 import { newId } from "./ids.ts";
 
 /**
@@ -87,6 +87,16 @@ export class Operations {
 	}
 }
 
+export const AUTO_APPROVE_MS = 30_000;
+export type ApprovalPolicy = "majordomo" | "auto" | "explicit";
+
+/** The person's approval policy: what they chose in Settings, else the deployment's (`PIM_APPROVAL_POLICY`), else `explicit`. */
+export async function approvalPolicyOf(tx: Tx, env: Record<string, string | undefined> = process.env): Promise<ApprovalPolicy> {
+	const chosen = (await tx.query("SELECT value FROM pim_app.owner_settings WHERE key = 'settings.approvalPolicy'")).rows[0]?.value;
+	const policy = chosen ?? env.PIM_APPROVAL_POLICY;
+	return policy === "auto" || policy === "majordomo" ? policy : "explicit";
+}
+
 /** Human approvals. A standing approval (an auditable record) stands in for the person; without one a gated call files an approval and waits. */
 export class Approvals {
 	constructor(private readonly db: Db, private readonly authz = new Authorizer(db)) {}
@@ -97,9 +107,12 @@ export class Approvals {
 		if (decision.outcome === "allow") return { outcome: "allowed", ...(decision.viaStandingApproval ? { viaStandingApproval: decision.viaStandingApproval } : {}) };
 		const id = newId("ap");
 		const now = input.now ?? new Date();
-		await this.db.owner(p.ownerId, (tx) =>
-			tx.query("INSERT INTO pim_app.approvals (id, owner_id, public_chat_id, tool, args, timeout_policy, expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7)", [id, p.ownerId, input.chatId ?? null, input.action, JSON.stringify({ ...input.args, resource: input.resource ?? {} }), input.onTimeout ?? "deny", input.timeoutMs ? new Date(now.getTime() + input.timeoutMs) : null]),
-		);
+		await this.db.owner(p.ownerId, async (tx) => {
+			// A person who chose `auto` has every approval approved after AUTO_APPROVE_MS, so autonomous jobs never stall; the others wait for them.
+			const auto = input.timeoutMs === undefined && (await approvalPolicyOf(tx)) === "auto";
+			const timeoutMs = auto ? AUTO_APPROVE_MS : input.timeoutMs;
+			await tx.query("INSERT INTO pim_app.approvals (id, owner_id, public_chat_id, tool, args, timeout_policy, expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7)", [id, p.ownerId, input.chatId ?? null, input.action, JSON.stringify({ ...input.args, resource: input.resource ?? {} }), auto ? "approve" : (input.onTimeout ?? "deny"), timeoutMs ? new Date(now.getTime() + timeoutMs) : null]);
+		});
 		return { outcome: "waiting", approvalId: id };
 	}
 

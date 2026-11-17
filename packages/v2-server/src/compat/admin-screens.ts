@@ -99,7 +99,7 @@ export function screenRoutes(env: Env): Route[] {
 			await admin(app, await principal(), "admin:settings");
 			const open = (await app.db.anonymous(async (tx) => (await tx.query("SELECT value FROM pim_app.instance_settings WHERE key = 'registration_open'")).rows[0]))?.value === true;
 			const limits = deploymentLimits(env);
-			const settings = { registration: open ? "open" : "invite", maxAccounts: null, registrationsPerAddress: 5, approvalPolicy: "explicit", timeZone: env.TZ ?? "UTC", model: env.PIM_DEFAULT_MODEL ?? "", models: gatewayModels(env), utilityModel: null, memoryModel: null, memoryLines: 0, imageModel: null, limits, publicUrl: env.PIM_PUBLIC_URL ?? origin, contentOrigin: appsOrigin ?? env.PIM_CONTENT_ORIGIN ?? null, emailFrom: null };
+			const settings = { registration: open ? "open" : "invite", maxAccounts: null, registrationsPerAddress: 5, approvalPolicy: env.PIM_APPROVAL_POLICY === "auto" || env.PIM_APPROVAL_POLICY === "majordomo" ? env.PIM_APPROVAL_POLICY : "explicit", timeZone: env.PIM_TIME_ZONE ?? env.TZ ?? "UTC", model: env.PIM_DEFAULT_MODEL ?? "", models: gatewayModels(env), utilityModel: null, memoryModel: null, memoryLines: 0, imageModel: null, limits, publicUrl: env.PIM_PUBLIC_URL ?? origin, contentOrigin: appsOrigin ?? env.PIM_CONTENT_ORIGIN ?? null, emailFrom: null };
 			const secrets = PROVIDER_IDS.flatMap((id) => providerSecrets(id));
 			const variables = [...PLAIN_VARIABLES.map((name) => ({ name, value: env[name]?.trim() || null, problem: null })), ...secrets.map((name) => ({ name, value: env[name]?.trim() ? "(set)" : null, problem: null }))];
 			return ok({ settings, variables });

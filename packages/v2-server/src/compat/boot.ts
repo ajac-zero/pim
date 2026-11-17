@@ -13,6 +13,8 @@ import { BadRequestError, ForbiddenError, NotFoundError } from "@pim/v2-app/erro
 import { usageReport, computeReport } from "./usage.ts";
 import { fromAnotherSite, ok, route, sessionCookieName, setCookie, type Route } from "@pim/v2-app/http";
 import { newId } from "@pim/v2-app/ids";
+import { AUTO_APPROVE_MS } from "@pim/v2-app/operations";
+import { LOCALES } from "@pim/shared/locales";
 import { PimThemes } from "@pim/shared/themes";
 import { pimThemes } from "@pim/shared/theme-data/index";
 import { INTRODUCTION } from "@pim/shared/transcript";
@@ -136,13 +138,14 @@ const SETTINGS: Record<string, (v: unknown) => boolean> = {
 	deviceAlerts: (v) => ["important", "all"].includes(v as string),
 	colorMode: (v) => ["light", "dark", "system"].includes(v as string),
 	colorTheme: (v) => themeIds.includes(v as string),
-	locale: (v) => ["en", "es"].includes(v as string),
-	approvalTimeoutSeconds: (v) => v === null || (typeof v === "number" && v >= 0),
+	locale: (v) => (LOCALES as readonly string[]).includes(v as string),
 };
 async function readSettings(app: App, ownerId: string) {
 	const rows = await app.db.owner(ownerId, async (tx) => (await tx.query("SELECT key, value FROM pim_app.owner_settings WHERE key LIKE 'settings.%'")).rows);
 	const own = Object.fromEntries(rows.map((r) => [r.key.slice("settings.".length), r.value]).filter(([k]) => k in SETTINGS));
-	return { timeZone: process.env.PIM_TIME_ZONE ?? "UTC", approvalPolicy: process.env.PIM_APPROVAL_POLICY ?? "explicit", deviceAlerts: "important", approvalTimeoutSeconds: null, ...own };
+	const settings = { timeZone: process.env.PIM_TIME_ZONE ?? "UTC", approvalPolicy: process.env.PIM_APPROVAL_POLICY ?? "explicit", deviceAlerts: "important", ...own } as { approvalPolicy: string };
+	// How long an approval waits before it is approved: only `auto` has an answer, and it is not a setting of its own.
+	return { ...settings, approvalTimeoutSeconds: settings.approvalPolicy === "auto" ? AUTO_APPROVE_MS / 1000 : null };
 }
 
 // ---- approvals ----

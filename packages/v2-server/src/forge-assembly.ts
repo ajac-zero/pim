@@ -9,6 +9,7 @@
  * `startForgeLoops` runs what keeps threads moving. `forgeHttp` is Forge's HTTP surface for the Gate.
  */
 import { compatibleProvider } from "./agent-host.ts";
+import { webCodingShapes } from "./compat/coding.ts";
 import { createModels } from "@earendil-works/pi-ai";
 import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
@@ -186,13 +187,15 @@ export function forgeHttp(parts: ForgeParts, o: { authenticate: Authenticate; cr
 	const resume = async (owner: string, harness: string) => void (await parts.forge.scopedTo(owner).resumeAfterLogin(owner, harness));
 	// Harness sign-ins run in a short-lived sandbox of the manager, so they are offered where there is one.
 	const login = new HarnessLogins({ provider: parts.workspaces, image: parts.env.PIM_CODING_IMAGE ?? "pim-workspace:local", vault, onConnected: resume });
-	return compose(
+	const inner = compose(
 		codingRest({ forge: parts.forge, scheduler: parts.scheduler, store: parts.store, db, authenticate: o.authenticate, scoped: true }),
 		codingVault({ vault, authenticate: o.authenticate, login, connected: resume }),
 		gitBroker({ credentials: parts.credentials, store: parts.store, scope, git: parts.git, upstream: parts.gitUpstream }),
 		codingGitea({ gitea: parts.gitea, authenticate: o.authenticate }),
 		gatewayKeys.anthropic || gatewayKeys.openai ? modelGateway({ credentials: parts.credentials, store: parts.store, scope, key: async (_thread, family) => (gatewayKeys[family] ? { apiKey: gatewayKeys[family]! } : null) }) : null,
 	);
+	// The web app reads threads in v1's shapes.
+	return webCodingShapes({ forge: parts.forge, authenticate: o.authenticate, inner });
 }
 
 export type ForgeLoopOptions = { databaseUrl: string; pollMs?: number; stallMs?: number; onError?: (what: string, error: unknown) => void };

@@ -217,6 +217,11 @@ export class Forge {
 		return pageTranscript(await this.messages(t.threadId), want);
 	}
 
+	/** The thread's whole transcript, for a page that shows it. */
+	async transcriptMessages(actor: Actor, ref: string): Promise<TranscriptMessage[]> {
+		return this.messages((await this.own(actor, ref)).threadId);
+	}
+
 	/**
 	 * One message whole, by the id `transcriptPage` gave it, paged by lines (`offset` from 1, `limit` up to 2000) as coding_transcript_output reads it.
 	 * Without an id it is the thread's last assistant message.

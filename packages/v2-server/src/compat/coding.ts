@@ -1,0 +1,143 @@
+/**
+ * The coding threads API in the shapes the web app reads (`web/src/lib/coding.ts`, as v1's Worker answered them), over Forge's own handler. Forge's REST speaks its stored rows
+ * (`threadId`, `status`, a `repo` string); the page wants a thread view with `id`, a `repo` object, a `slot` and an `environment`. Every route here reshapes what Forge answers and
+ * leaves the rest of `/api/coding/**` (harness logins, the git broker, Gitea, the model gateway) to the inner handler. Not served: the live `events` stream (the page stops
+ * following it and reads the transcript again when it regains focus) and an environment build, which Forge has no counterpart for.
+ */
+import type { Forge } from "@pim/v2-forge/forge";
+import { json, type Authenticate, type Handler } from "@pim/v2-forge/http/common";
+import type { ThreadRow } from "@pim/v2-forge/store";
+
+const NO_ENVIRONMENT = { state: "none", key: null, source: null, builtAt: null, restoredFromKey: null, provisionMs: null, restoreMs: null, setupMs: null, snapshotMs: null, snapshotBytes: null, snapshotKept: null, readyFrom: null, preparedAt: null, rebuildRequested: false, toolchains: [], dependencies: [], testCommands: [], notes: [], services: [], cachePaths: [] };
+const NO_REBUILD = { error: "This deployment keeps no environment snapshots to rebuild", code: "conflict" };
+
+const creator = (t: ThreadRow) => (t.createdBy === t.ownerId || !t.chatId ? { type: "person" } : { type: "agent", agent: t.createdBy, chat: t.chatId });
+
+/** A thread as the page's list reads it. */
+function summary(t: ThreadRow) {
+	return {
+		id: t.threadId,
+		url: `/coding/${t.threadId}`,
+		repo: t.repo,
+		ref: t.ref ?? "",
+		branch: t.branch ?? "",
+		task: t.task,
+		state: t.state,
+		stateReason: t.stateReason,
+		queue: null,
+		createdBy: creator(t),
+		parent: null,
+		chat: t.chatId,
+		harness: t.harness,
+		spentUsd: t.spentUsd,
+		budgetUsd: t.budgetUsd,
+		createdAt: t.createdAt,
+		updatedAt: t.updatedAt,
+		// Forge's own names for the same, for a caller of the API.
+		threadId: t.threadId,
+		status: t.state,
+		unread: t.lastSeenAt === null || t.updatedAt > t.lastSeenAt,
+		lastTurnEndedAt: null,
+		lastSeenAt: t.lastSeenAt,
+	};
+}
+
+/** A thread as its page reads it. */
+function view(t: ThreadRow) {
+	// Forge's own fields stay (a caller of the API reads `workspaceRef` and `lastPushedSha`), but the nonce that signs the thread's grants is never sent.
+	const { gatewayNonce: _nonce, leaseHolder: _holder, ...raw } = t;
+	const pool = t.placement?.pool ?? "";
+	const provider = t.workspaceRef?.provider ?? t.placement?.provider ?? "";
+	return {
+		...raw,
+		...summary(t),
+		threadId: t.threadId,
+		status: t.state,
+		stateDetail: t.stateDetail,
+		repo: { url: t.repo, ref: t.ref ?? "", branch: t.branch ?? "", baseSha: t.baseSha },
+		profile: t.profile ?? { providerId: "", model: "" },
+		resolvedProfile: t.profile?.model ? { provider: t.profile.providerId, model: t.profile.model, source: "explicit" } : null,
+		workspaceProvider: provider,
+		provider,
+		pool,
+		placementReason: "priority",
+		placement: t.placement ? { kind: "priority", pool, provider, priority: 0, skipped: [] } : null,
+		providerKind: t.harness === "amp" ? "agent-hosted" : "workspace",
+		orb: t.orb ?? null,
+		cost: t.spentUsd,
+		slot: t.workspaceRef && !t.computeTornDownAt ? "held" : t.state === "queued" ? "queued" : "none",
+		currentOperation: t.state === "running" ? t.startOperation : null,
+		inbox: 0,
+		checkpoint: null,
+		parentThread: null,
+		environment: NO_ENVIRONMENT,
+	};
+}
+
+export function webCodingShapes(d: { forge: Forge; authenticate: Authenticate; inner: Handler }): Handler {
+	return async (req) => {
+		const url = new URL(req.url);
+		const path = url.pathname;
+		if (!path.startsWith("/api/coding/threads") && !path.startsWith("/api/coding/repos/")) return d.inner(req);
+		const caller = await d.authenticate(req);
+		// Whoever isn't signed in, or is a guest, is told so by the inner handler.
+		if (!caller || caller.actor.role === "guest") return d.inner(req);
+		const { actor } = caller;
+		const forge = d.forge.scopedTo(actor.ownerId);
+		const thread = async (id: string) => view(await forge.status(actor, id));
+		let m: RegExpExecArray | null;
+
+		if (path === "/api/coding/threads" && req.method === "GET") {
+			const listed = await forge.list(actor, { archived: url.searchParams.get("archived") === "1" });
+			return json(200, { threads: await Promise.all(listed.map(async (t) => summary(await forge.status(actor, t.threadId)))) });
+		}
+		if (path === "/api/coding/threads" && req.method === "POST") {
+			const made = await d.inner(req);
+			if (!made || made.status >= 300) return made;
+			const started = (await made.json()) as { threadId: string };
+			return json(made.status, { ...started, ...(await thread(started.threadId)) });
+		}
+		if ((m = /^\/api\/coding\/threads\/([^/]+)$/.exec(path)) && req.method === "GET") return d.inner(new Request(req.url, req)).then(async (r) => (r && r.status === 200 ? json(200, await thread(m![1]!)) : r));
+		if ((m = /^\/api\/coding\/threads\/([^/]+)\/environment\/rebuild$/.exec(path)) && req.method === "POST") return json(409, NO_REBUILD);
+		if ((m = /^\/api\/coding\/threads\/([^/]+)\/([a-z-]+)$/.exec(path))) {
+			const id = m[1]!;
+			switch (`${req.method} ${m[2]}`) {
+				case "GET transcript":
+					// `text` is the words alone, as Forge's own transcript pages give them.
+					return json(200, { messages: (await forge.transcriptMessages(actor, id)).map((x) => ({ ...x, text: x.parts.flatMap((p) => (p.type === "text" ? [p.text] : [])).join("\n") })) });
+				case "GET diff": {
+					const r = await d.inner(req);
+					if (!r || r.status !== 200) return r;
+					return json(200, { since: null, head: null, diff: ((await r.json()) as { diff: string }).diff, truncated: false });
+				}
+				case "GET tests": {
+					const r = await d.inner(req);
+					if (!r || r.status !== 200) return r;
+					const { runs } = (await r.json()) as { runs: { seq: number; command: string; exit_code: number | null; output: string; at: string }[] };
+					return json(200, { runs: runs.map((x) => ({ seq: x.seq, command: x.command, exitCode: x.exit_code, timedOut: false, startedAt: new Date(x.at).getTime(), durationMs: 0, summary: null, output: x.output })) });
+				}
+				case "GET events":
+					return json(404, { error: "The live stream isn't served by this deployment", code: "not_found" });
+				case "POST seen": {
+					const r = await d.inner(req);
+					return r && r.status < 300 ? json(200, { seen: true }) : r;
+				}
+				case "POST steer":
+				case "POST continue":
+				case "POST abort":
+				case "POST cancel":
+				case "POST archive": {
+					const r = await d.inner(req);
+					return r && r.status < 300 ? json(r.status, { ...((await r.json()) as object), ...(await thread(id)) }) : r;
+				}
+			}
+		}
+		if (/^\/api\/coding\/repos\//.test(path)) {
+			const r = await d.inner(req);
+			if (!r || r.status !== 200) return r;
+			const s = (await r.json()) as { repo: string; setupScript: string; updatedAt: number | null };
+			return json(200, { repo: s.repo, setupScript: s.setupScript === "" ? null : s.setupScript, updatedAt: s.updatedAt });
+		}
+		return d.inner(req);
+	};
+}

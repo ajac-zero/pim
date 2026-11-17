@@ -125,7 +125,8 @@ export class ConnectorService {
 		const found = hasCredential ? { open: true as const } : await probe(this.transport, url);
 		if (found.open) return { state: "ready" as const, ...(await this.#discoverAll(p.ownerId, id)) };
 		const server = await discover(this.transport, url, found);
-		const redirectUri = `${origin}/mcp/callback/${p.ownerId}`;
+		// A client the admin registered by hand has one address registered, so it uses the same one a native connector does; a client Pim registers names its own.
+		const redirectUri = typeof client === "object" ? `${origin}${NATIVE_CALLBACK}` : `${origin}/mcp/callback/${p.ownerId}`;
 		let registered: { client_id: string; client_secret?: string };
 		if (typeof client === "object") registered = { client_id: this.env[client.id]!, client_secret: this.env[client.secret]! };
 		else if (client === "metadata-document") registered = { client_id: `${origin}/mcp/client/${p.ownerId}` };

@@ -13,8 +13,7 @@ WORKDIR /app
 COPY pnpm-lock.yaml pnpm-workspace.yaml package.json ./
 COPY patches ./patches
 COPY packages ./packages
-# pim-computer, which the Gate serves at /pim-computer.ts (machines update themselves from it) and the `local-computer` Compose profile runs.
-COPY computer/pim-computer.ts ./computer/pim-computer.ts
+# The web build reads the computer's sources (web/vite.config.ts).
 COPY web ./web
 COPY computer ./computer
 COPY displayd ./displayd
@@ -36,6 +35,8 @@ ENV NODE_ENV=production
 WORKDIR /app/packages/v2-server
 COPY --from=build /app /app
 COPY --from=web /app/web/dist /app/web/dist
+# pim-computer and its triggers runtime: the Gate serves them (/pim-computer.ts, /triggers-host.ts, ...; machines update themselves from them) and the `local-computer` Compose profile runs it.
+COPY computer /app/computer
 ENV PIM_WEB_DIR=/app/web/dist
 # The roles listen on PIM_HTTP_PORT (8080) and PIM_METRICS_PORT (9464); the filesystem is read-only in both deployments, and /tmp is a tmpfs.
 USER node

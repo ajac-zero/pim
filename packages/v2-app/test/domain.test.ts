@@ -190,14 +190,14 @@ describe("durable tool operations and approvals", () => {
 		const waits = await f.app.approvals.gate(agent, { action: "coding:push", resource, now });
 		await setPolicy("auto");
 		const auto = await f.app.approvals.gate(agent, { action: "coding:push", resource, now });
-		// A caller's own timeout is its own: auto fills in only for those that named none.
-		const own = await f.app.approvals.gate(agent, { action: "coding:push", resource, timeoutMs: 600_000, now });
+		// Under auto, even a caller that would have waited ten minutes, and would have denied, gets the policy: approved after 30 seconds.
+		const own = await f.app.approvals.gate(agent, { action: "coding:push", resource, timeoutMs: 600_000, onTimeout: "deny", now });
 		if (waits.outcome !== "waiting" || auto.outcome !== "waiting" || own.outcome !== "waiting") throw new Error("expected waiting approvals");
 		expect(await f.app.approvals.sweep(owner(), new Date(now.getTime() + 29_000))).toEqual({ denied: 0, approved: 0 });
-		expect(await f.app.approvals.sweep(owner(), new Date(now.getTime() + 31_000))).toEqual({ denied: 0, approved: 1 });
+		expect(await f.app.approvals.sweep(owner(), new Date(now.getTime() + 31_000))).toEqual({ denied: 0, approved: 2 });
 		expect(await f.app.approvals.state(owner(), auto.approvalId)).toBe("timed_out_approved");
-		expect(await f.app.approvals.state(owner(), waits.approvalId)).toBe("waiting");
-		expect(await f.app.approvals.state(owner(), own.approvalId)).toBe("waiting");
+		expect(await f.app.approvals.state(owner(), own.approvalId)).toBe("timed_out_approved");
+		expect(await f.app.approvals.state(owner(), waits.approvalId)).toBe("waiting"); // filed before the person chose auto
 		await setPolicy("explicit");
 	});
 

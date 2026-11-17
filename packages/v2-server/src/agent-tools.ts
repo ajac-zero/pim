@@ -87,6 +87,12 @@ async function readBody(response: Response): Promise<string> {
 const REDACT = /^(authorization|cookie|x-api-key|proxy-authorization)$/i;
 const redactHeaders = (headers: Record<string, string> | undefined) => Object.fromEntries(Object.entries(headers ?? {}).map(([k, v]) => [k, REDACT.test(k) ? "[redacted]" : v]));
 
+/** The person's time zone (Settings), else the deployment's `PIM_TIME_ZONE`, else UTC. */
+export async function timeZoneOf(runtime: RuntimeDb, ownerId: string): Promise<string> {
+	const chosen = await runtime.read<{ z: string | null }>(ownerId, "SELECT pim_app.runner_time_zone($1) AS z", [ownerId]).then((r) => r.rows[0]?.z ?? null, () => null);
+	return chosen ?? process.env.PIM_TIME_ZONE ?? "UTC";
+}
+
 export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 	const { ownerId, partitionId, runtime } = deps;
 	const owner = OwnerId.parse(ownerId);
@@ -170,7 +176,11 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 			},
 			"safe",
 		),
-		tool("current_time", "The current date and time, in UTC.", Type.Object({}), async () => text(new Date(deps.now()).toISOString()), "safe"),
+		tool("current_time", "The current date and time, in UTC and in the user's time zone.", Type.Object({}), async () => {
+			const now = new Date(deps.now());
+			const zone = await timeZoneOf(runtime, ownerId);
+			return json({ utc: now.toISOString(), timeZone: zone, local: now.toLocaleString("en-US", { timeZone: zone, dateStyle: "full", timeStyle: "long" }) });
+		}, "safe"),
 
 		// Memory.
 		write("note", "Save something to remember: a title and the text. It goes to your own memory unless you give a scope such as everyone.", Type.Object({ title: S({ minLength: 1 }), body: S({ minLength: 1 }), scope: O(S()) }), async (app, call, a) =>

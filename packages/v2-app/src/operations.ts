@@ -108,8 +108,8 @@ export class Approvals {
 		const id = newId("ap");
 		const now = input.now ?? new Date();
 		await this.db.owner(p.ownerId, async (tx) => {
-			// A person who chose `auto` has every approval approved after AUTO_APPROVE_MS, so autonomous jobs never stall; the others wait for them.
-			const auto = input.timeoutMs === undefined && (await approvalPolicyOf(tx)) === "auto";
+			// A person who chose `auto` has every approval approved after AUTO_APPROVE_MS, whatever the caller would have waited, so autonomous jobs never stall; the others wait.
+			const auto = (await approvalPolicyOf(tx)) === "auto";
 			const timeoutMs = auto ? AUTO_APPROVE_MS : input.timeoutMs;
 			await tx.query("INSERT INTO pim_app.approvals (id, owner_id, public_chat_id, tool, args, timeout_policy, expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7)", [id, p.ownerId, input.chatId ?? null, input.action, JSON.stringify({ ...input.args, resource: input.resource ?? {} }), auto ? "approve" : (input.onTimeout ?? "deny"), timeoutMs ? new Date(now.getTime() + timeoutMs) : null]);
 		});

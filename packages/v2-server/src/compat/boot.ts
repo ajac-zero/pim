@@ -169,7 +169,7 @@ const webApproval = (r: any) => {
 		callId: typeof callId === "string" ? callId : null,
 		expiresAt: ms(r.expires_at),
 		onTimeout: r.timeout_policy,
-		decidedBy: r.decided_by === null ? null : r.state.startsWith("timed_out") ? "timeout" : r.via_standing_grant ? "always" : "user",
+		decidedBy: r.state.startsWith("timed_out") ? "timeout" : r.decided_by === null ? null : r.via_standing_grant ? "always" : "user",
 		requestedBy: null,
 	};
 };

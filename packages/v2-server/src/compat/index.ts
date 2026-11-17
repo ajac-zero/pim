@@ -10,8 +10,11 @@ import { modelRoutes } from "./model.ts";
 import { computerRoutes } from "./computer.ts";
 import { connectorRoutes } from "../connector-routes.ts";
 import { chatRoutes } from "./chat.ts";
+import { guestRoutes } from "./guests.ts";
 
 export const webCompatRoutes: Route[] = [
+	// Circles, visits and a guest's bot first: they replace the application's own answers to the same paths, which the web app does not read.
+	...guestRoutes(),
 	// Connectors come first: their approve and deny add "always approve" to the plain decision the boot routes make.
 	...connectorRoutes(),
 	...bootRoutes,

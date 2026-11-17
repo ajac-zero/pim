@@ -21,7 +21,9 @@ export const authRoutes: Route[] = [
 	route("POST", "/auth/register", async ({ app, json, req, secure }) => {
 		if (fromAnotherSite(req)) throw new ForbiddenError("register", "csrf");
 		const b = await json();
-		const account = await app.identity.register({ username: String(b.username ?? ""), invite: b.invite, bootstrap: b.bootstrap ?? b.claim, address: req.socket.remoteAddress });
+		const bot = typeof b.bot === "string" && b.bot ? await app.guests.liveBot(b.bot) : null;
+		const account = await app.identity.register({ username: String(b.username ?? ""), invite: b.invite, bootstrap: b.bootstrap ?? b.claim, address: req.socket.remoteAddress, ...(bot ? { guestOf: { botId: bot.id, host: bot.host } } : {}) });
+		if (bot) await app.guests.enroll(account.ownerId, bot.id);
 		const session = await app.identity.createSession(account.ownerId, { userAgent: req.headers["user-agent"] });
 		return ok({ account }, 201, { "set-cookie": setCookie(sessionCookieName(secure), session, SESSION_SECONDS, secure) });
 	}),

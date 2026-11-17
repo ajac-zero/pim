@@ -8,7 +8,8 @@ import { digest, newId, newOwnerId, secret } from "./ids.ts";
 const USERNAME = /^[a-z][a-z0-9-]{1,31}$/;
 export const SESSION_MS = 30 * 24 * 3600_000;
 
-export type Registration = { username: string; invite?: string; address?: string; bootstrap?: string; now?: Date };
+/** `guestOf` makes a guest account of a live bot's link (`Guests.liveBot` has checked it): allowed whatever the registration mode, with no invite. */
+export type Registration = { username: string; invite?: string; address?: string; bootstrap?: string; now?: Date; guestOf?: { botId: string; host: string } };
 export type ConsumerKind = "computer" | "host" | "mcp_client" | "mcp_grant" | "mcp_refresh";
 const CONSUMER_PREFIX: Record<ConsumerKind, string> = { computer: "pimc_", host: "pimh_", mcp_client: "pimmc_", mcp_grant: "pimmg_", mcp_refresh: "pimmr_" };
 
@@ -27,9 +28,12 @@ export class Identity {
 		if (!USERNAME.test(username)) throw new BadRequestError("Usernames are 2 to 32 lowercase letters, digits or dashes, starting with a letter");
 		const ownerId = newOwnerId();
 		const now = input.now ?? new Date();
-		const first = await this.db.anonymous(async (tx) => (await tx.query("SELECT NOT EXISTS (SELECT 1 FROM pim_app.accounts) AS first")).rows[0].first as boolean);
+		const guest = input.guestOf;
+		const first = !guest && (await this.db.anonymous(async (tx) => (await tx.query("SELECT NOT EXISTS (SELECT 1 FROM pim_app.accounts) AS first")).rows[0].first as boolean));
 		const open = await this.db.anonymous(async (tx) => (await tx.query("SELECT value FROM pim_app.instance_settings WHERE key = 'registration_open'")).rows[0]?.value === true);
-		if (first) {
+		if (guest) {
+			// A bot's link is open to anyone while it is live, whatever the registration mode; only the per-address limit applies.
+		} else if (first) {
 			if (!input.bootstrap) throw new RefusedError("This Pim needs its bootstrap claim code to create the first account", "bootstrap_required");
 			await this.#redeemClaim(input.bootstrap, "bootstrap", now);
 		} else if (!open && !input.invite) throw new RefusedError("Registration is closed", "registration_closed");
@@ -41,15 +45,15 @@ export class Identity {
 				if ((error as { code?: string }).code === "23505") throw new ConflictError("That username is taken, now or in the past", "username_taken");
 				throw error;
 			}
-			await tx.query("INSERT INTO pim_app.accounts (owner_id, username, role, status, activated_at) VALUES ($1, $2, $3, 'active', $4)", [ownerId, username, first ? "admin" : "member", now]);
+			await tx.query("INSERT INTO pim_app.accounts (owner_id, username, role, status, activated_at, bot) VALUES ($1, $2, $3, 'active', $4, $5)", [ownerId, username, first ? "admin" : guest ? "guest" : "member", now, !!guest]);
 			await tx.query("INSERT INTO pim_app.partitions (partition_id, owner_id, home, next_conversation_id) VALUES ($1, $2, true, 2)", [randomUUID(), ownerId]);
 			// The invite is spent in the same transaction as the account, so a failed registration never burns it.
-			if (!first && !open) {
+			if (!first && !open && !guest) {
 				const spent = await tx.query("UPDATE pim_app.invites SET used_by = $1, used_at = $2 WHERE code_hash = $3 AND used_at IS NULL", [ownerId, now, digest(input.invite ?? "")]);
 				if (!spent.rowCount) throw new RefusedError("That invite is not valid", "invite_invalid");
 			}
 		}, digest(input.invite ?? ""));
-		return { ownerId: OwnerId.parse(ownerId), username, role: first ? "admin" : "member", status: "active", bot: false };
+		return { ownerId: OwnerId.parse(ownerId), username, role: first ? "admin" : guest ? "guest" : "member", status: "active", bot: !!guest };
 	}
 
 	async #limit(address: string, now: Date, max = 5, windowMs = 3600_000): Promise<void> {

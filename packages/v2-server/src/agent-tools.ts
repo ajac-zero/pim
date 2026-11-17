@@ -18,6 +18,9 @@ import { computerTools } from "./computer-tools.ts";
 import type { ForgeParts } from "./forge-assembly.ts";
 import type { EnvelopeCrypto } from "@pim/v2-contracts/platform";
 import { connectorToolset, type Transport } from "./connector-tools.ts";
+import { adminTools } from "./admin-tools.ts";
+import { disabledBuiltins } from "./compat/admin-directory.ts";
+import { guestToolset } from "./guest-tools.ts";
 
 export type ToolDeps = {
 	ownerId: string;
@@ -85,6 +88,26 @@ async function readBody(response: Response): Promise<string> {
 
 const REDACT = /^(authorization|cookie|x-api-key|proxy-authorization)$/i;
 const redactHeaders = (headers: Record<string, string> | undefined) => Object.fromEntries(Object.entries(headers ?? {}).map(([k, v]) => [k, REDACT.test(k) ? "[redacted]" : v]));
+
+/** What a guest's agent, and a bot's visitor's chat in the host's space, may use: its own memory and the clock, and a guest's calls to the host's shared tools. */
+const GUEST_TOOLS = new Set(["send_to_user", "current_time", "note", "recall", "zoom", "forget", "move_memory", "read_skill", "read_skill_file", "guest_tools", "guest_call"]);
+const VISIT_TOOLS = new Set(["send_to_user", "current_time"]);
+const kinds = new Map<string, { at: number; allowed: Set<string> | null }>();
+
+/** The tools a chat is limited to, or null when it has all of its owner's. Read fresh each half minute, so a role change or a deleted chat takes effect soon. */
+async function toolsAllowed(app: App, ownerId: string, chat: string | null): Promise<Set<string> | null> {
+	const key = `${ownerId}\u0000${chat ?? ""}`;
+	const held = kinds.get(key);
+	if (held && Date.now() - held.at < 30_000) return held.allowed;
+	const row = await app.db.owner(ownerId, async (tx) => ({
+		role: (await tx.query("SELECT role FROM pim_app.accounts WHERE owner_id = $1", [ownerId])).rows[0]?.role as string | undefined,
+		kind: chat ? ((await tx.query("SELECT kind FROM pim_app.conversations WHERE public_chat_id = $1", [chat])).rows[0]?.kind as string | undefined) : undefined,
+	}));
+	const allowed = row.role === "guest" ? GUEST_TOOLS : row.kind === "visit" ? VISIT_TOOLS : null;
+	if (kinds.size > 5000) kinds.clear();
+	kinds.set(key, { at: Date.now(), allowed });
+	return allowed;
+}
 
 export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 	const { ownerId, partitionId, runtime } = deps;
@@ -354,5 +377,20 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 	const connectors = connectorToolset({ ownerId, partitionId, runtime, app: deps.app, crypto: deps.crypto, transport, ops, owner, now: deps.now, chatOf: deps.chatOf, principalOf });
 	tools.push(...connectors.tools);
 
-	return defineExtension({ name: "pim", tools, sections: [...sections, ...connectors.sections] });
+	// The admin's majordomo runs the deployment (`./admin-tools.ts`); every other agent is refused there.
+	tools.push(...adminTools({ ownerId, app: deps.app, env: process.env, principalOf, chatOf: deps.chatOf, runtime: runtime as never }));
+	// A guest's agent, and a chat that is someone's visit to a bot, work with a short list of tools: nothing of the owner's computer, files, coding or other connectors.
+	tools.push(...guestToolset({ ownerId, partitionId, runtime, app: deps.app, crypto: deps.crypto, transport, ops, owner, now: deps.now, chatOf: deps.chatOf }));
+	const guarded = tools.map((t) => {
+		const name = (t as unknown as { name: string }).name;
+		const run = (t as unknown as { execute: (...a: any[]) => Promise<Result> }).execute;
+		return { ...t, execute: async (args: any, api: any, context: any): Promise<Result> => {
+			const app = deps.app;
+			const allowed = app ? await toolsAllowed(app, ownerId, await deps.chatOf(api.conversationId)) : null;
+			if (app && name.startsWith("note_") && (await disabledBuiltins(app)).includes("notes")) return text("Notes are turned off for everyone by this Pim's admin.", true);
+			if (allowed && !allowed.has(name)) return text(`${name} isn't available here: this chat only has ${[...allowed].join(", ")}.`, true);
+			return run(args, api, context);
+		} };
+	}) as unknown as ToolRegistration[];
+	return defineExtension({ name: "pim", tools: guarded, sections: [...sections, ...connectors.sections] });
 }

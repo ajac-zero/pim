@@ -62,7 +62,7 @@ export function parseCredential(stored: string): { bearer: string; bundle: OAuth
 	return { bearer: stored, bundle: null };
 }
 
-async function refresh(bundle: OAuthBundle, fetcher: typeof fetch, now: number): Promise<OAuthBundle | null> {
+export async function refresh(bundle: OAuthBundle, fetcher: typeof fetch, now: number): Promise<OAuthBundle | null> {
 	if (!bundle.refresh_token || !bundle.token_endpoint) return null;
 	const body = new URLSearchParams({ grant_type: "refresh_token", refresh_token: bundle.refresh_token, ...(bundle.client_id ? { client_id: bundle.client_id } : {}), ...(bundle.client_secret ? { client_secret: bundle.client_secret } : {}) });
 	const response = await fetcher(bundle.token_endpoint, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" }, body, signal: AbortSignal.timeout(15_000), redirect: "manual" });

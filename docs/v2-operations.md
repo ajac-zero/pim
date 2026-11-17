@@ -68,6 +68,17 @@ A personal computer is how agents get a shell, files, a browser and a desktop: `
 
 The Runner reaches a computer over NATS (`pim.v2.relay.<owner>.rpc`), connecting when an agent first uses a computer tool, so the `runner` role needs `PIM_NATS_URL` (it already has it) and the Gate or `relay` container that holds the computer's socket must be running. `PIM_COMPUTER_SOURCE` overrides where the Gate reads `pim-computer.ts` from (default `/app/computer/pim-computer.ts` in the image).
 
+## Stuck chats and the Runner's guards
+
+A chat whose turn cannot finish ends with an error instead of staying busy. Each guard has a setting on the `runner` role, in milliseconds:
+
+- `PIM_MODEL_STALL_MS` (default 120000): a model stream that sends nothing for this long is cut off; before any output the request goes to the next model of the chat's list, otherwise the chat ends with "The model timed out".
+- `PIM_TOOL_TIMEOUT_MS` (default 600000): a tool call that has not returned by then ends with an error result, and a call also ends at once when the person stops the chat, whatever the tool's own work is doing.
+- `PIM_RUN_STALL_MS` (default 600000, 0 turns it off): the run watchdog. A run whose tasks and live document have not changed for this long, and that is not parked for an approval, a retry or a sleep, is stopped, and the chat says so.
+- `PIM_STOP_GRACE_MS` (default 10000): how long a stop (the web app's stop button, or the watchdog) waits for the run to end. A run that ignores its abort signal then has its partition recycled: the Runner closes the Harness and hands the lease back, and the next claim's recovery settles the aborted calls under a newer epoch, so a stuck run's late writes are fenced.
+
+Provider cooldowns are shared between Runners (`pim_runtime.provider_cooldowns`, migration 0666). The approval policy's `auto` (30 seconds unless the person sets another) is applied by the `maintenance` role's timeout sweep; `majordomo` is applied by the Runner's review loop (`approval-review.ts`, migration 0665), which escalates a review that did not finish in 5 minutes.
+
 ## Kubernetes
 
 Kustomize: `kustomize build deploy/k8s | kubectl apply -f -` (needs CloudNativePG, an ingress controller and cert-manager). `overlays/openbao` takes the Secrets from OpenBao or Vault through External Secrets; `overlays/monitoring` adds the PodMonitor, the `PrometheusRule` and the Grafana dashboard (build it with `--load-restrictor LoadRestrictionsNone`, because the dashboard JSON lives in `deploy/observability/`).

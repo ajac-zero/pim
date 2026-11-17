@@ -209,7 +209,7 @@ export const bootRoutes: Route[] = [
 			status: account.status,
 			createdAt: ms(account.created_at),
 			usage,
-			compute: computeReport(),
+			compute: await computeReport(app, p.ownerId),
 			recoveryCodesLeft: codesLeft,
 			alone: others === 0,
 		});

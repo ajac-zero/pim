@@ -176,9 +176,11 @@ export function screenRoutes(env: Env): Route[] {
 		// ---- managed compute and the computer host: not part of this deployment yet ----
 		route("GET", "/api/admin/compute", async ({ app, principal }) => {
 			await admin(app, await principal(), "admin:compute");
-			return ok({ providers: [], kinds: [], quota: { maxConcurrentWorkspaces: null, monthlySandboxMinutes: null, maxSessionMinutes: null }, usage: { month: new Date().toISOString().slice(0, 7), minutes: 0, running: 0, byProvider: [], top: [] } });
+			const quota = await app.db.anonymous(async (tx) => (await tx.query("SELECT max_concurrent, compute_minutes FROM pim_forge.forge_quotas WHERE subject_type = 'deployment' AND subject_id = '*'")).rows[0]);
+			// Everyone's sandbox minutes are in rows each owner alone can read, so the deployment's own usage is shown as nothing here.
+			return ok({ providers: [], kinds: [], quota: { maxConcurrentWorkspaces: quota?.max_concurrent === null || quota === undefined ? null : Number(quota.max_concurrent), monthlySandboxMinutes: quota?.compute_minutes === null || quota === undefined ? null : Number(quota.compute_minutes), maxSessionMinutes: null }, usage: { month: new Date().toISOString().slice(0, 7), minutes: 0, running: 0, byProvider: [], top: [] } });
 		}),
-		...(["POST /api/admin/compute/providers", "PUT /api/admin/compute/providers/:id", "DELETE /api/admin/compute/providers/:id", "POST /api/admin/compute/providers/:id/validate", "PUT /api/admin/compute/quota"] as const).map((spec) => {
+		...(["POST /api/admin/compute/providers", "PUT /api/admin/compute/providers/:id", "DELETE /api/admin/compute/providers/:id", "POST /api/admin/compute/providers/:id/validate"] as const).map((spec) => {
 			const [method, path] = spec.split(" ") as [string, string];
 			return route(method, path, async ({ app, principal }) => (await admin(app, await principal(), "admin:compute"), unsupported("Managed compute")));
 		}),

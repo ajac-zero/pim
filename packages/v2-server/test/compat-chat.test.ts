@@ -148,6 +148,19 @@ describe("usage and per-space limits", () => {
 		expect((await call(ada, "GET", "/api/usage")).body.limits.dailyRuns).toBeNull();
 	});
 
+	it("sets the deployment's and one person's compute quota over Forge's, and shows the person the one that applies and what they used", async () => {
+		expect((await call(ada, "PUT", "/api/admin/compute/quota", { quota: { maxConcurrentWorkspaces: 3, monthlySandboxMinutes: 600 } })).body.quota).toEqual({ maxConcurrentWorkspaces: 3, monthlySandboxMinutes: 600, maxSessionMinutes: null });
+		expect((await call(ada, "PUT", "/api/admin/accounts/bob/compute-quota", { quota: { monthlySandboxMinutes: 30 } })).body.quota).toMatchObject({ monthlySandboxMinutes: 30 });
+		expect((await call(ada, "PUT", "/api/admin/compute/quota", { quota: { maxSessionMinutes: 10 } })).status).toBe(400);
+		expect((await call(bob, "PUT", "/api/admin/compute/quota", { quota: null })).status).toBe(403);
+		const owner = await ownerOf(bob);
+		await app.db.owner(owner, (tx) => tx.query("INSERT INTO pim_forge.forge_compute_usage (owner_id, thread_id, provider, began_at, ended_at) VALUES ($1, 't', 'e2b', now() - interval '90 minutes', now() - interval '30 minutes')", [owner]));
+		const compute = (await call(bob, "GET", "/api/usage")).body.compute;
+		// Bob's own number wins for minutes; the deployment's holds for what he has none of.
+		expect(compute).toMatchObject({ quota: { maxConcurrentWorkspaces: 3, monthlySandboxMinutes: 30 }, own: { monthlySandboxMinutes: 30 }, usage: { minutes: 60, running: 0, byProvider: [{ provider: "e2b", minutes: 60 }] } });
+		expect((await call(ada, "PUT", "/api/admin/accounts/bob/compute-quota", { quota: null })).body.quota).toEqual({ maxConcurrentWorkspaces: null, monthlySandboxMinutes: null, maxSessionMinutes: null });
+	});
+
 	it("reports what calls cost in the cost report's shape, with the ledger's cost in dollars", async () => {
 		await app.usage.record(await ownerOf(ada), { id: "mc1", runKind: "chat", provider: "gateway", model: "m", inputTokens: 1000, outputTokens: 2000, costMicroUsd: 30_000 });
 		await app.usage.record(await ownerOf(ada), { id: "mc2", runKind: "background", provider: "gateway", model: "free", inputTokens: 10, outputTokens: 20, costMicroUsd: 0 });

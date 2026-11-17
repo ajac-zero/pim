@@ -10,6 +10,7 @@ import { modelRoutes } from "./model.ts";
 import { computerRoutes } from "./computer.ts";
 import { connectorRoutes } from "../connector-routes.ts";
 import { chatRoutes } from "./chat.ts";
+import { bridgeRoutes } from "./app-bridge.ts";
 
 export const webCompatRoutes: Route[] = [
 	// Connectors come first: their approve and deny add "always approve" to the plain decision the boot routes make.
@@ -18,6 +19,7 @@ export const webCompatRoutes: Route[] = [
 	// Model settings first: /api/providers/built-in is answered by both, and the model work's answer is the one the provider forms use.
 	...modelRoutes(process.env),
 	...computerRoutes(),
+	...bridgeRoutes(process.env),
 	...adminCompatRoutes,
 	...chatRoutes,
 ];

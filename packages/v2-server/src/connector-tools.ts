@@ -13,11 +13,13 @@ import { openString, sealString } from "@pim/v2-app/crypto";
 import { PartitionId, type Principal } from "@pim/v2-contracts/identity";
 import type { EnvelopeCrypto } from "@pim/v2-contracts/platform";
 import type { ExternalOperations } from "@pim/v2-runtime/external";
+import { AuthRefused } from "./native/http.ts";
+import { endpointsOf, type Env, nativeApp } from "./native/native.ts";
 import type { Db as RuntimeDb } from "@pim/v2-runtime/db";
 
 export type McpTool = { name: string; description?: string; inputSchema?: Record<string, unknown>; annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean; title?: string } };
 export type Approval = "writes" | "all" | "none";
-export type ConnectorRow = { id: string; kind: string; name: string; url: string; status: string; credential: string | null; enabledTools: string[]; approval: Approval };
+export type ConnectorRow = { id: string; kind: string; name: string; url: string | null; status: string; credential: string | null; enabledTools: string[]; approval: Approval; /** The directory entry it connects, for a native connector (`google/gmail`). */ appRef?: string | null };
 export type Permission = "off" | "ask" | "on";
 export type PermissionRow = { audience: string; app: string; tool: string; permission: Permission };
 
@@ -48,7 +50,7 @@ export function resolvePermission(connector: Pick<ConnectorRow, "id" | "enabledT
 
 // ---- credentials ----
 
-type OAuthBundle = { access_token: string; refresh_token?: string; expires_at?: number; token_endpoint?: string; client_id?: string; client_secret?: string };
+export type OAuthBundle = { access_token: string; refresh_token?: string; expires_at?: number; token_endpoint?: string; client_id?: string; client_secret?: string };
 /** A stored credential is a bearer token, or a JSON object of an OAuth sign-in that can be refreshed. */
 export function parseCredential(stored: string): { bearer: string; bundle: OAuthBundle | null } {
 	if (stored.startsWith("{")) {
@@ -62,7 +64,7 @@ export function parseCredential(stored: string): { bearer: string; bundle: OAuth
 	return { bearer: stored, bundle: null };
 }
 
-async function refresh(bundle: OAuthBundle, fetcher: typeof fetch, now: number): Promise<OAuthBundle | null> {
+export async function refresh(bundle: OAuthBundle, fetcher: typeof fetch, now: number): Promise<OAuthBundle | null> {
 	if (!bundle.refresh_token || !bundle.token_endpoint) return null;
 	const body = new URLSearchParams({ grant_type: "refresh_token", refresh_token: bundle.refresh_token, ...(bundle.client_id ? { client_id: bundle.client_id } : {}), ...(bundle.client_secret ? { client_secret: bundle.client_secret } : {}) });
 	const response = await fetcher(bundle.token_endpoint, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" }, body, signal: AbortSignal.timeout(15_000), redirect: "manual" });
@@ -75,7 +77,7 @@ async function refresh(bundle: OAuthBundle, fetcher: typeof fetch, now: number):
 // ---- the MCP client (streamable HTTP) ----
 
 const PROTOCOL = "2025-06-18";
-export class McpAuthError extends Error {}
+export class McpAuthError extends AuthRefused {}
 
 /** How a server is reached: with what `fetch`, and whether a private address may be (a deployment's own network, tests). `check` refuses private addresses otherwise. */
 export type Transport = { fetch: typeof fetch; allowPrivate: boolean; check: (url: string) => Promise<URL> };
@@ -183,6 +185,8 @@ export type ConnectorToolsDeps = {
 	ops: ExternalOperations;
 	owner: unknown;
 	now: () => number;
+	/** The environment the native connectors' service addresses come from (`PIM_GMAIL_API_URL` and the like); the process's own when absent. */
+	env?: Env;
 	chatOf(conversationId: number | string): Promise<string | null>;
 	principalOf(app: App, chat: string | null): Promise<Principal>;
 };
@@ -194,8 +198,8 @@ export function connectorToolset(deps: ConnectorToolsDeps): { tools: ToolRegistr
 	const listed = new Map<string, { at: number; tools: Promise<McpTool[]> }>();
 
 	/** The credential, opened; an OAuth one that has expired is refreshed first and the new one kept sealed. */
-	async function bearerOf(c: ConnectorRow, force = false): Promise<string | null> {
-		if (!c.credential) return null;
+	async function credentialOf(c: ConnectorRow, force = false): Promise<{ bearer: string | null; bundle: OAuthBundle | null }> {
+		if (!c.credential) return { bearer: null, bundle: null };
 		if (!crypto) throw new Error("This Runner has no keys (PIM_KEK_<id> and PIM_KEK_CURRENT), so it cannot open a connector's credential.");
 		const { bearer, bundle } = parseCredential(await openString(crypto, c.credential, `connector:${ownerId}/${c.id}`));
 		if (bundle && (force || (bundle.expires_at !== undefined && bundle.expires_at <= deps.now() + 30_000))) {
@@ -203,27 +207,32 @@ export function connectorToolset(deps: ConnectorToolsDeps): { tools: ToolRegistr
 			if (renewed) {
 				const sealed = await sealString(crypto, JSON.stringify(renewed), `connector:${ownerId}/${c.id}`);
 				await runtime.read(ownerId, "SELECT pim_app.runner_set_connector_credential($1, $2, $3)", [ownerId, c.id, sealed]);
-				return renewed.access_token;
+				return { bearer: renewed.access_token, bundle: renewed };
 			}
 		}
-		return bearer;
+		return { bearer, bundle };
 	}
-	async function withBearer<T>(c: ConnectorRow, run: (bearer: string | null) => Promise<T>): Promise<T> {
+	/** Runs with the credential; a service that refuses it gets the renewed one once. */
+	async function withCredential<T>(c: ConnectorRow, run: (credential: { bearer: string | null; bundle: OAuthBundle | null }) => Promise<T>): Promise<T> {
 		try {
-			return await run(await bearerOf(c));
+			return await run(await credentialOf(c));
 		} catch (error) {
-			if (!(error instanceof McpAuthError)) throw error;
-			return run(await bearerOf(c, true));
+			if (!(error instanceof AuthRefused)) throw error;
+			return run(await credentialOf(c, true));
 		}
 	}
+	const withBearer = <T>(c: ConnectorRow, run: (bearer: string | null) => Promise<T>): Promise<T> => withCredential(c, (credential) => run(credential.bearer));
 
-	const connectors = async (): Promise<ConnectorRow[]> => (await runtime.read<{ c: ConnectorRow[] }>(ownerId, "SELECT pim_app.runner_connectors($1) AS c", [ownerId])).rows[0]!.c.filter((c) => c.status === "connected" || c.credential === null);
+	const connectors = async (): Promise<ConnectorRow[]> => (await runtime.read<{ c: ConnectorRow[] }>(ownerId, "SELECT pim_app.runner_connectors($1) AS c", [ownerId])).rows[0]!.c.filter((c) => c.status === "connected" || (c.credential === null && c.kind !== "native" && c.status !== "auth_required"));
 	const permissions = async (): Promise<PermissionRow[]> => (await runtime.read<{ p: PermissionRow[] }>(ownerId, "SELECT pim_app.runner_tool_permissions($1) AS p", [ownerId])).rows[0]!.p;
 	const toolsOf = (c: ConnectorRow): Promise<McpTool[]> => {
+		// A native connector's tools are Pim's own: nothing to ask a server.
+		const native = c.kind === "native" ? nativeApp(c.appRef ?? "") : undefined;
+		if (native) return Promise.resolve(native.tools.map((t): McpTool => ({ name: t.name, description: t.description, inputSchema: t.parameters as unknown as Record<string, unknown>, ...(t.readOnly || t.destructive ? { annotations: { ...(t.readOnly ? { readOnlyHint: true } : {}), ...(t.destructive ? { destructiveHint: true } : {}) } } : {}) })));
 		const key = `${c.id}\u0000${c.url}`;
 		const held = listed.get(key);
 		if (held && deps.now() - held.at < LISTED_FOR_MS) return held.tools;
-		const tools = withBearer(c, (bearer) => listTools(deps.transport, c.url, bearer));
+		const tools = withBearer(c, (bearer) => listTools(deps.transport, c.url ?? "", bearer));
 		listed.set(key, { at: deps.now(), tools });
 		tools.catch(() => listed.delete(key));
 		return tools;
@@ -302,7 +311,11 @@ export function connectorToolset(deps: ConnectorToolsDeps): { tools: ToolRegistr
 						if (gate.outcome === "waiting") return waiting;
 					}
 				}
-				const run = () => withBearer(c, (bearer) => withSession(deps.transport, c.url, bearer, (rpc) => rpc("tools/call", { name: tool.name, arguments: args.arguments ?? {} }), 30_000));
+				const nativeTool = c.kind === "native" ? nativeApp(c.appRef ?? "")?.tools.find((t) => t.name === tool.name) : undefined;
+				const endpoints = endpointsOf(deps.env ?? process.env);
+				const run = nativeTool
+					? () => withCredential(c, async (credential) => ({ content: [{ type: "text", text: await nativeTool.execute(args.arguments ?? {}, { bearer: credential.bearer ?? "", bundle: credential.bundle ?? {}, endpoints, fetch: deps.transport.fetch }) }] }))
+					: () => withBearer(c, (bearer) => withSession(deps.transport, c.url ?? "", bearer, (rpc) => rpc("tools/call", { name: tool.name, arguments: args.arguments ?? {} }), 30_000));
 				if (readOnly) {
 					const result = await run();
 					return text(resultText(result), result?.isError === true);

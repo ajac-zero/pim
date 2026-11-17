@@ -5,10 +5,13 @@ import { createHash, randomBytes } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
+import { signWebhook } from "@pim/shared/webhook";
 import { App } from "@pim/v2-app/app";
 import { connect as connectApp } from "@pim/v2-app/db";
 import { MemoryObjectStore } from "@pim/v2-app/objects";
 import type { Process } from "../src/main.ts";
+import { keyringFromProcessEnv } from "../src/roles.ts";
+import { renewDue } from "../src/watches.ts";
 import { readTranscript, waitFor } from "../../v2-runtime/test/support/rig.ts";
 import { Client } from "./support/client.ts";
 import { type Deployment, base, start, startS3 } from "./support/processes.ts";
@@ -31,6 +34,8 @@ function providers() {
 	/** What Google grants Drive's client, when a test wants it wrong. */
 	const grant = { drive: "https://www.googleapis.com/auth/drive.file" };
 	const issued = new Set<string>();
+	const subscribed: { name: string; arguments: unknown; delivery: { url: string; secret: string }; cursor: unknown }[] = [];
+	const unsubscribed: { name: string; delivery: { url: string } }[] = [];
 	const mcpTools = [{ name: "lookup", description: "Look a thing up", inputSchema: { type: "object", properties: { q: { type: "string" } } }, annotations: { readOnlyHint: true } }];
 	const server: Server = createServer((req, res) => {
 		let raw = "";
@@ -104,12 +109,21 @@ function providers() {
 				const reply = (result: unknown) => send(200, { jsonrpc: "2.0", id: m.id, result }, { "mcp-session-id": "s1" });
 				if (m.method === "initialize") return reply({ protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "fake", version: "1" } });
 				if (m.method === "tools/list") return reply({ tools: mcpTools });
+				if (m.method === "events/list") return reply({ events: [{ name: "ticket.created", description: "A ticket was opened", delivery: ["webhook"], inputSchema: { type: "object", properties: { project: { type: "string" } } } }, { name: "polled.only", description: "No webhook", delivery: ["poll"] }] });
+				if (m.method === "events/subscribe") {
+					subscribed.push(m.params);
+					return reply({ id: "sub-1", refreshBefore: new Date(Date.now() + 60_000).toISOString() });
+				}
+				if (m.method === "events/unsubscribe") {
+					unsubscribed.push(m.params);
+					return reply({});
+				}
 				if (m.method === "tools/call") return reply({ content: [{ type: "text", text: `found ${m.params.arguments.q}` }] });
 			}
 			send(404, {});
 		});
 	});
-	return { server, log, clients, live, grant, setOrigin: (o: string) => (origin = o), calls: (path: string) => log.filter((l) => l.path === path) };
+	return { server, log, clients, live, grant, subscribed, unsubscribed, setOrigin: (o: string) => (origin = o), calls: (path: string) => log.filter((l) => l.path === path) };
 }
 
 real("native and OAuth connectors", () => {
@@ -167,6 +181,7 @@ real("native and OAuth connectors", () => {
 		const stack = await createStack();
 		d = { stack, nats: await startNats(), s3: await startS3(), gatePort: await freePort(), ingressSecret: "ingress" };
 		const keys = { PIM_KEK_T1: randomBytes(32).toString("base64"), PIM_KEK_CURRENT: "t1", PIM_CONNECTOR_ALLOW_PRIVATE: "1" };
+		process.env.PIM_KEK_T1_TEST = keys.PIM_KEK_T1;
 		app = new App(connectApp(stack.url("gate"), 4), new MemoryObjectStore());
 		gate = await start(d, "gate", {}, keys);
 		web = new Client(base(gate), d.ingressSecret);
@@ -175,6 +190,7 @@ real("native and OAuth connectors", () => {
 		expect(registered.status).toBe(201);
 		ownerId = registered.json.account.ownerId;
 		origin = `http://127.0.0.1:${d.gatePort}`;
+		process.env.PIM_PUBLIC_URL = origin;
 		chatId = (await web.call("POST", "/api/sessions", { title: "Work" })).json.id;
 		runner = await start(d, "runner", { pollMs: 40, providers: () => [faux.provider] }, { PIM_DEFAULT_MODEL: "faux/m", PIM_APP_DATABASE_URL: stack.url("gate"), ...keys });
 	}, 180_000);
@@ -309,4 +325,70 @@ real("native and OAuth connectors", () => {
 		expect(renewed[0]!.body).toContain(`client_id=${registered[0]}`);
 		expect((await web.call("GET", `/mcp/client/${ownerId}`)).json).toMatchObject({ client_name: "Pim", token_endpoint_auth_method: "none" });
 	}, 180_000);
+
+	it("watches a server's events: subscribes with its own secret, takes each signed delivery once, tells the chat, renews the grant and stops", async () => {
+		const mcpId = (await web.call("GET", "/api/mcp")).json.servers.find((x: { url: string }) => x.url === `${standOrigin}/mcp`).id as string;
+		faux.setResponses([toolUse(fauxToolCall("list_connector_events", {})), toolUse(fauxToolCall("watch_connector_event", { connector: mcpId, event: "ticket.created", arguments: { project: "P" }, instruction: "Summarise the ticket" })), toolUse(fauxToolCall("watch_connector_event", { connector: mcpId, event: "nothing", instruction: "x" })), toolUse(fauxToolCall("list_watches", {})), fauxAssistantMessage(`done ${++n}`)] as never);
+		expect((await web.call("POST", `/api/sessions/${chatId}/messages`, { commandId: `m-${n}`, text: "watch tickets" })).status).toBe(202);
+		await waitFor("the watch turn", async () => ((await transcript()).includes(`done ${n}`) ? true : undefined), 60_000);
+		const listed = (await results("list_connector_events"))[0]!;
+		expect(listed).toContain("ticket.created");
+		expect(listed).not.toContain("polled.only");
+		expect((await results("watch_connector_event"))[0]).toContain('Watching Lookup for "ticket.created"');
+		expect((await results("watch_connector_event"))[1]).toContain("has no event named nothing");
+		expect(stand.subscribed).toHaveLength(1);
+		const sub = stand.subscribed[0]!;
+		expect(sub).toMatchObject({ name: "ticket.created", arguments: { project: "P" } });
+		const key = (await d.stack.admin.query("SELECT event_key FROM pim_app.connectors WHERE id = $1", [mcpId])).rows[0].event_key;
+		expect(sub.delivery.url).toBe(`${origin}/mcp/events/${ownerId}/${key}`);
+		expect(sub.delivery.secret).toMatch(/^whsec_/);
+		const stored = (await d.stack.admin.query("SELECT secret, status, provider_id FROM pim_app.watch_subscriptions")).rows[0];
+		expect(stored).toMatchObject({ status: "active", provider_id: "sub-1" });
+		expect(stored.secret).not.toContain(sub.delivery.secret);
+		const listing = JSON.parse((await results("list_watches"))[0]!);
+		expect(listing).toEqual([expect.objectContaining({ app: "Lookup", event: "ticket.created", instruction: "Summarise the ticket", status: "active", session: chatId })]);
+		const watchId = listing[0].id as string;
+
+		// A server delivers: Standard Webhooks, signed with the watch's secret, naming its subscription.
+		const deliver = async (body: object, over: { id?: string; secret?: string; sub?: string } = {}) => {
+			const raw = JSON.stringify(body);
+			const id = over.id ?? (body as { eventId?: string }).eventId ?? "x";
+			const ts = String(Math.floor(Date.now() / 1000));
+			return fetch(`${base(gate)}/mcp/events/${ownerId}/${key}`, { method: "POST", headers: { "content-type": "application/json", "x-pim-ingress-secret": d.ingressSecret, "webhook-id": id, "webhook-timestamp": ts, "webhook-signature": await signWebhook(over.secret ?? sub.delivery.secret, id, ts, raw), "x-mcp-subscription-id": over.sub ?? "sub-1" }, body: raw });
+		};
+		const event = { eventId: "evt-1", name: "ticket.created", timestamp: new Date().toISOString(), data: { title: "Printer on fire" }, cursor: "c1" };
+		expect(await deliver({ type: "verification", challenge: "abc" }, { id: "v1" }).then((r) => r.json())).toEqual({ challenge: "abc" });
+		expect((await deliver(event, { secret: "whsec_" + Buffer.from("wrong").toString("base64") })).status).toBe(401);
+		expect((await deliver(event, { sub: "someone-else" })).status).toBe(401);
+		faux.setResponses([fauxAssistantMessage(`done ${++n}`)] as never);
+		expect((await deliver(event)).status).toBe(204);
+		await waitFor("the event's turn", async () => ((await transcript()).includes(`done ${n}`) ? true : undefined), 60_000);
+		expect(await transcript()).toContain("[Connector event] ticket.created");
+		expect(await transcript()).toContain("Printer on fire");
+		// The same event retried is taken once.
+		expect((await deliver(event)).status).toBe(204);
+		expect((await d.stack.admin.query("SELECT count(*)::int AS n FROM pim_app.trigger_runs WHERE trigger_id = $1 AND phase = 'fired'", [watchId])).rows[0].n).toBe(1);
+		expect((await d.stack.admin.query("SELECT cursor, last_event_at IS NOT NULL AS heard FROM pim_app.watch_subscriptions")).rows[0]).toEqual({ cursor: "c1", heard: true });
+
+		// The grant runs out within a minute: the maintenance pass asks again with the same callback and secret, and the cursor.
+		const crypto = keyringFromProcessEnv({ PIM_KEK_T1: process.env.PIM_KEK_T1_TEST!, PIM_KEK_CURRENT: "t1" })!;
+		const renewed = await renewDue({ app, crypto, transport: { fetch, allowPrivate: true, check: async (u) => new URL(u) }, publicUrl: origin, now: Date.now }, d.stack.admin as never);
+		expect(renewed).toBe(1);
+		expect(stand.subscribed).toHaveLength(2);
+		expect(stand.subscribed[1]).toMatchObject({ delivery: sub.delivery, cursor: "c1" });
+
+		// The server ends the subscription: the watch says so.
+		expect((await deliver({ type: "terminated", error: { code: -32012, message: "gone" } }, { id: "t1" })).status).toBe(204);
+		expect((await d.stack.admin.query("SELECT status, last_error FROM pim_app.watch_subscriptions")).rows[0]).toMatchObject({ status: "ended", last_error: expect.stringContaining("-32012") });
+		expect((await deliver({ ...event, eventId: "evt-2" })).status).toBe(401);
+
+		faux.setResponses([toolUse(fauxToolCall("stop_watch", { id: watchId })), toolUse(fauxToolCall("stop_watch", { id: watchId })), fauxAssistantMessage(`done ${++n}`)] as never);
+		expect((await web.call("POST", `/api/sessions/${chatId}/messages`, { commandId: `m-${n}`, text: "stop watching" })).status).toBe(202);
+		await waitFor("the stop turn", async () => ((await transcript()).includes(`done ${n}`) ? true : undefined), 60_000);
+		expect((await results("stop_watch"))[0]).toBe("Stopped.");
+		expect((await results("stop_watch"))[1]).toContain("No watch with id");
+		expect(stand.unsubscribed).toEqual([{ name: "ticket.created", arguments: { project: "P" }, delivery: { url: sub.delivery.url } }]);
+		expect((await d.stack.admin.query("SELECT count(*)::int AS n FROM pim_app.watch_subscriptions")).rows[0].n).toBe(0);
+		expect((await d.stack.admin.query("SELECT lifecycle FROM pim_app.triggers WHERE id = $1", [watchId])).rows[0]?.lifecycle ?? "deleted").toBe("deleted");
+	}, 240_000);
 });

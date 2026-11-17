@@ -9,6 +9,7 @@ import { ok, route, type Route } from "@pim/v2-app/http";
 import { publicUrl } from "../agent-tools.ts";
 import { ConnectorService } from "../connector-service.ts";
 import { type Env } from "../native/native.ts";
+import { receiveWatchEvent } from "../watches.ts";
 import { drivePage } from "../native/drive.ts";
 import { customApps } from "./admin-gallery.ts";
 
@@ -19,8 +20,10 @@ const escape = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)}
 const resultPage = (result: { name: string } | { error: string }) =>
 	html(200, `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Pim</title><body style="font:15px/1.5 system-ui,sans-serif;max-width:32rem;margin:4rem auto;padding:0 1.5rem;color:#222"><h1 style="font-size:1.25rem">${"name" in result ? `${escape(result.name)} is connected` : "It didn't connect"}</h1><p>${"name" in result ? "You can close this tab and go back to Pim: its tools are ready." : escape(result.error)}</p><p><a href="/">Back to Pim</a></p></body></html>`, { "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'", "referrer-policy": "no-referrer" });
 
+const transportOf = (env: Env) => ({ fetch, allowPrivate: env.PIM_CONNECTOR_ALLOW_PRIVATE === "1", check: publicUrl });
+
 export function connectorScreens(env: Env = process.env): Route[] {
-	const service = (app: Parameters<Route["run"]>[0]["app"]) => new ConnectorService(app, env, { fetch, allowPrivate: env.PIM_CONNECTOR_ALLOW_PRIVATE === "1", check: publicUrl });
+	const service = (app: Parameters<Route["run"]>[0]["app"]) => new ConnectorService(app, env, transportOf(env));
 	return [
 		// The connectors people can connect.
 		route("GET", "/api/app-directory", async ({ app, principal }) => {
@@ -67,6 +70,15 @@ export function connectorScreens(env: Env = process.env): Route[] {
 		// The client metadata document of a sign-in that takes one in place of a registration (Amp's).
 		route("GET", "/mcp/client/:owner", async ({ params, origin }) => ok({ client_id: `${origin}/mcp/client/${params[0]}`, client_name: "Pim", redirect_uris: [`${origin}/mcp/callback/${params[0]}`], grant_types: ["authorization_code", "refresh_token"], response_types: ["code"], token_endpoint_auth_method: "none" })),
 
+		// A server's delivery of an event a watch asked for (Standard Webhooks, signed with the watch's own secret). One without those headers is the generic connector webhook.
+		route("POST", "/mcp/events/:owner/:key", async ({ app, params, bytes, req }) => {
+			const raw = await bytes(1_000_000);
+			const header = (n: string) => (typeof req.headers[n] === "string" ? (req.headers[n] as string) : undefined);
+			if (header("webhook-signature") === undefined) return ok(await app.connectors.receiveEvent(params[0]!, params[1]!, raw, header("x-pim-signature") ?? header("x-hub-signature-256"), header("x-pim-delivery") ?? header("x-github-delivery")), 202);
+			const headers = new Headers(Object.entries(req.headers).flatMap(([k, v]) => (typeof v === "string" ? [[k, v] as [string, string]] : [])));
+			const r = await receiveWatchEvent({ app, crypto: app.crypto, transport: transportOf(env), publicUrl: undefined, now: Date.now }, params[0]!, params[1]!, headers, raw);
+			return r.status === 204 ? { status: 204 } : ok(r.body ?? {}, r.status);
+		}),
 		// A native connector's action, for the person in their own browser only, such as Drive's file picker.
 		route("POST", "/api/app-actions/:extension/:app/:action", async ({ app, principal, params, json }) => {
 			const p = await principal();

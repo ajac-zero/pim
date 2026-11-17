@@ -8,6 +8,7 @@ import { ok, type Reply, type Route, route } from "@pim/v2-app/http";
 import type { App } from "@pim/v2-app/app";
 import type { Tx } from "@pim/v2-app/db";
 import type { Principal } from "@pim/v2-contracts/identity";
+import { grantComputerTrigger, sourceConfigHash } from "../computer-triggers.ts";
 import { previewFirings } from "@pim/triggers/time";
 import { runsOnComputer, TRIGGER_LIFECYCLES, type TriggerLifecycle, type TriggerSpec } from "@pim/triggers/spec";
 
@@ -16,19 +17,19 @@ const DAY = 86_400_000;
 const DELIVERY_TTL_MS = DAY;
 
 type Row = { id: string; lifecycle: TriggerLifecycle; spec: TriggerSpec; created_at: Date; updated_at: Date };
-type Context = { computerPaired: boolean; granted: Set<string> };
+type Context = { computerPaired: boolean; granted: Map<string, string | null> };
 
 async function contextOf(tx: Tx): Promise<Context> {
 	const computerPaired = !!(await tx.query("SELECT 1 FROM pim_app.computers WHERE revoked_at IS NULL LIMIT 1")).rowCount;
-	const granted = new Set((await tx.query("SELECT trigger_id FROM pim_app.trigger_computer_grants WHERE revoked_at IS NULL")).rows.map((r) => r.trigger_id as string));
+	const granted = new Map((await tx.query("SELECT trigger_id, config_hash FROM pim_app.trigger_computer_grants WHERE revoked_at IS NULL")).rows.map((r) => [r.trigger_id as string, r.config_hash as string | null] as const));
 	return { computerPaired, granted };
 }
 
-/** What a source can do here: a timetable and a connector's events run; what runs on the computer, or watches files, is kept as a draft. */
+/** What a source can do here: a timetable and a connector's events run; a poll, stream or process runs on the paired computer; watching files is kept as a draft, as nothing observes files yet. */
 function capabilityOf(kind: string, ctx: Context) {
 	if (kind === "time" || kind === "connector_event") return { status: "available", delivers: true, reason: null };
 	if (kind === "file") return { status: "unavailable", delivers: false, reason: "not_wired" };
-	return { status: "draft_only", delivers: false, reason: ctx.computerPaired ? "not_wired" : "computer_not_paired" };
+	return ctx.computerPaired ? { status: "available", delivers: true, reason: null } : { status: "draft_only", delivers: false, reason: "computer_not_paired" };
 }
 
 function policiesOf(spec: TriggerSpec) {
@@ -76,7 +77,7 @@ async function viewOf(app: App, row: Row, ctx: Context) {
 		policies: policiesOf(spec),
 		schedule: spec.source.kind === "time" ? { nextFiringAt, nextCheckAt: null } : null,
 		capability: capabilityOf(spec.source.kind, ctx),
-		grant: { required, state: !required ? "not_required" : ctx.granted.has(row.id) ? "current" : "missing" },
+		grant: { required, state: !required ? "not_required" : !ctx.granted.has(row.id) ? "missing" : ctx.granted.get(row.id) === sourceConfigHash(spec.source) ? "current" : "not_current" },
 		createdAt: row.created_at.getTime(),
 		updatedAt: row.updated_at.getTime(),
 	};
@@ -133,6 +134,11 @@ const RUN_STATE: Record<string, { state: string; status: string }> = {
 
 export function triggerRoutes(): Route[] {
 	return [
+		// The person's consent to run one trigger's source, as it is now, on their computer; the grant is bound to that source's configuration (../computer-triggers.ts).
+		route("POST", "/api/triggers/:id/computer-grant", async ({ app, principal, params, json }) => {
+			await grantComputerTrigger(app, await principal(), params[0]!, String(((await json()) as { computerId?: unknown }).computerId ?? ""));
+			return ok({ ok: true });
+		}),
 		route("GET", "/api/triggers", async ({ app, principal, url }) => {
 			const p = await principal();
 			await app.identity.authz.enforce(p, "api:read");

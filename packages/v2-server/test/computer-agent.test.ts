@@ -52,7 +52,7 @@ real("an agent on a paired computer", () => {
 	};
 	const connected = (online: boolean) => waitFor(`the computer to be ${online ? "online" : "offline"}`, async () => ((await web.call("GET", "/api/computer")).json.state === (online ? "online" : "offline") ? true : undefined), 30_000);
 	const startDaemon = (...extra: string[]) => {
-		daemon = spawn(process.execPath, [COMPUTER, "--url", `http://127.0.0.1:${d.gatePort}`, "--token", token, "--root", root, ...extra], { stdio: "ignore", env: { ...process.env, HOME: home } });
+		daemon = spawn(process.execPath, [COMPUTER, "--url", `http://127.0.0.1:${d.gatePort}`, "--token", token, "--root", root, ...extra], { stdio: process.env.PIM_TEST_DAEMON_LOG ? "inherit" : "ignore", env: { ...process.env, HOME: home } });
 	};
 
 	beforeAll(async () => {
@@ -194,6 +194,40 @@ real("an agent on a paired computer", () => {
 			await connected(false);
 			spacesd.close();
 		}
+	}, 240_000);
+
+	it("runs a stream trigger on the computer only under a grant for exactly that source, and hands what it saw to the chat", async () => {
+		daemon?.kill("SIGKILL");
+		await connected(false);
+		startDaemon();
+		await connected(true);
+		const computerId = "";
+		const agentId = (await web.call("POST", "/api/agents", { name: "Watcher" })).json.id as string;
+		const made = (await web.call("POST", "/api/triggers", { label: "Watch", instruction: "Tell me what the stream saw.", agentId, source: { kind: "stream", command: "echo '{\"m\":0}'; echo '{\"n\":1}'; sleep 300" }, condition: { when: { op: "exists", path: ["n"] } }, destination: { type: "existing_chat", chatId } })).json;
+		expect(made).toMatchObject({ lifecycle: "draft", capability: { status: "available", delivers: true }, grant: { required: true, state: "missing" } });
+		const resume = (revision: number) => web.call("POST", `/api/triggers/${made.id}/resume`, {}, { "if-match": `"${revision}"` });
+		// Without a grant nothing is enabled, and nothing runs on the computer.
+		expect((await resume(made.revision)).status).toBeGreaterThanOrEqual(400);
+		const grant = await web.call("POST", `/api/triggers/${made.id}/computer-grant`, { computerId });
+		expect(grant.status, JSON.stringify(grant.json)).toBe(200);
+		const granted = (await web.call("GET", `/api/triggers/${made.id}`)).json;
+		expect(granted.grant.state).toBe("current");
+		faux.setResponses([fauxAssistantMessage("It saw n=1.")] as never);
+		expect((await resume(granted.revision)).json.lifecycle).toBe("enabled");
+		const fired = () => d.stack.admin.query("SELECT detail FROM pim_app.trigger_runs WHERE trigger_id = $1 AND phase = 'fired'", [made.id]);
+		const run = await waitFor("the stream's matching line to reach the chat", async () => (await fired()).rows[0], 90_000);
+		// What it says is why it fired, never what was observed.
+		expect(run.detail).toMatchObject({ source: "stream" });
+		expect(JSON.stringify(run.detail)).not.toContain('"n"');
+		// The line that doesn't match the condition fired nothing: one run in all.
+		expect((await fired()).rowCount).toBe(1);
+		// Changing what runs makes the grant stale: it is not run again until it is granted anew.
+		const changed = (await web.call("PATCH", `/api/triggers/${made.id}`, { source: { kind: "stream", command: "echo '{\"n\":2}'; sleep 300" } }, { "if-match": `"${(await web.call("GET", `/api/triggers/${made.id}`)).json.revision}"` })).json;
+		expect(changed.grant.state).toBe("not_current");
+		const stale = await d.stack.admin.query("SELECT 1 FROM pim_app.trigger_computer_grants WHERE trigger_id = $1 AND config_hash IS NOT NULL", [made.id]);
+		expect(stale.rowCount).toBe(1);
+		daemon?.kill("SIGKILL");
+		await connected(false);
 	}, 240_000);
 
 	it.skipIf(!CHROME)("opens pages and clicks links freely, but sending a form waits for a person (the real daemon's Chrome)", async () => {

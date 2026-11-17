@@ -87,6 +87,19 @@ async function readBody(response: Response): Promise<string> {
 const REDACT = /^(authorization|cookie|x-api-key|proxy-authorization)$/i;
 const redactHeaders = (headers: Record<string, string> | undefined) => Object.fromEntries(Object.entries(headers ?? {}).map(([k, v]) => [k, REDACT.test(k) ? "[redacted]" : v]));
 
+/** What the web app reads from an app tool's answer to show the app as a card in the chat that opens in the canvas: `{ artifact }`, an app with a backend being `hosted` there. */
+const appCard = (ref: { id: string; title: string; kind: string; version: number; sha256: string; size: number }, note: string): Result =>
+	text(JSON.stringify({ artifact: { id: ref.id, title: ref.title, kind: ref.kind === "backend" ? "hosted" : ref.kind, version: ref.version, sha256: ref.sha256, size: ref.size }, note }));
+
+/** How an app runs, for the agent that writes one (the same words as v1's). */
+const HOW_APPS_RUN =
+	"An HTML app is a page, index.html: put its CSS in <style> and its JavaScript in <script>, or in files of its own. It runs in a sandbox: fetch, forms, anything from the web (scripts, stylesheets, fonts, images), cookies, localStorage and alert() are blocked, so images must be inline (data: URLs or SVG) or files of its own. It shows in the chat and on a full screen, including on phones, so make it responsive. " +
+	"Any app can use window.pim, whose calls return promises and can fail: pim.storage.get(key), .set(key, text), .delete(key) and .list(prefix) keep text that stays across visits and new versions (up to 1 MB; JSON.stringify anything else); " +
+	"pim.shared has the same calls, for text everyone the user shares the app with sees and changes; pim.ask(prompt) answers with text from Pim's model, which has no tools and sees only the prompt; " +
+	"pim.tools.call(name, input) runs one of the user's connector tools that runs without asking, by its tool name, and answers with its result as text. " +
+	"The user is asked once per version before ask or a tool first runs; tools that ask before they run can't be used. Show a message when a call fails. " +
+	"A jsx app is a React app, App.jsx: `export default function App() { ... }`, with hooks from \"react\"; it may import \"react\", \"recharts\", \"lucide-react\" and its own files, is styled with Tailwind classes, and is compiled when you save it: a compile error comes back to you to fix. ";
+
 export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 	const { ownerId, partitionId, runtime } = deps;
 	const owner = OwnerId.parse(ownerId);
@@ -240,9 +253,10 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 		write("note_edit", "Edit a note by replacing text. base_version is the version you read; if the note changed since, nothing is changed and you read it again. A person's typing is never lost.", Type.Object({ id: S(), base_version: Type.Integer({ minimum: 0 }), find: S({ minLength: 1 }), replace: S() }), async (app, call, a) =>
 			text(`Edited; the note is at version ${(await app.canvas.edit(call.p, a.id, a.base_version, a.find, a.replace)).version}.`)),
 		read("note_list", "Your notes.", Type.Object({}), async (app) => json((await app.db.owner(ownerId, (tx) => tx.query("SELECT note_id, title, version FROM pim_app.notes WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT 200"))).rows)),
-		write("app_create", "Create an app: kind html or jsx, or backend (with a pim.app.json). Files are by path.", Type.Object({ title: S({ minLength: 1 }), kind: Type.Union([Type.Literal("html"), Type.Literal("jsx"), Type.Literal("backend")]), files, message: O(S()) }), async (app, call, a) => json(await app.apps.create(call.p, { title: a.title, kind: a.kind, files: a.files, message: a.message }))),
+		write("app_create", `Create an app: kind html or jsx, or backend (with a pim.app.json). Files are by path. ${HOW_APPS_RUN}`, Type.Object({ title: S({ minLength: 1 }), kind: Type.Union([Type.Literal("html"), Type.Literal("jsx"), Type.Literal("backend")]), files, message: O(S()) }), async (app, call, a) => appCard(await app.apps.create(call.p, { title: a.title, kind: a.kind, files: a.files, message: a.message }), "Made it. The person sees it in the chat and opens it beside the chat.")),
 		write("app_update", "Change an app. base_version is the version you read; an app that changed since is refused.", Type.Object({ id: S(), base_version: Type.Integer({ minimum: 1 }), title: O(S()), files: O(files), delete_files: O(strings), edits: O(Type.Array(Type.Object({ path: O(S()), find: S(), replace: S() }))), message: O(S()) }), async (app, call, a) =>
-			json(await app.apps.update(call.p, a.id, { baseVersion: a.base_version, title: a.title, files: a.files, deleteFiles: a.delete_files, edits: a.edits, message: a.message }))),
+			appCard(await app.apps.update(call.p, a.id, { baseVersion: a.base_version, title: a.title, files: a.files, deleteFiles: a.delete_files, edits: a.edits, message: a.message }), "Saved. The person sees the new version in the chat.")),
+		read("app_show", "Show the person an app that already exists, such as one made in another chat, as the card in this chat that opens it beside the chat: the latest version, or the one asked for. It changes nothing; don't make a new version just to show one. Find its id with app_list.", Type.Object({ id: S(), version: O(Type.Integer({ minimum: 1 })) }), async (app, call, a) => appCard(await app.apps.read(call.p, a.id, { version: a.version, path: undefined, offset: undefined }), "Showed it. The person sees it in the chat.")),
 		read("app_read", "Read an app: its files, or one file.", Type.Object({ id: S(), version: O(Type.Integer({ minimum: 1 })), path: O(S()), offset: O(Type.Integer({ minimum: 0 })) }), async (app, call, a) => json(await app.apps.read(call.p, a.id, { version: a.version, path: a.path, offset: a.offset }))),
 		read("app_list", "Your apps.", Type.Object({ query: O(S()) }), async (app, call, a) => json(await app.apps.list(call.p, a.query ?? ""))),
 

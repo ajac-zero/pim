@@ -101,6 +101,8 @@ real("the default agent host", () => {
 		expect((await rows("SELECT title, version FROM pim_app.notes"))[0]).toMatchObject({ title: "Plan" });
 		expect((await rows("SELECT title, kind FROM pim_app.artifacts"))[0]).toMatchObject({ title: "Tracker", kind: "html" });
 		expect((await results("recall"))[0]).toContain("Tea");
+		// The app comes back as the reference the web app shows as a card and opens in the canvas.
+		expect(JSON.parse((await results("app_create"))[0]!).artifact).toMatchObject({ title: "Tracker", kind: "html", version: 1 });
 		// The next turn's prompt carries what the agent knows: who it is, its goals, its memory.
 		await say("what do you know?", seen(toolUse(fauxToolCall("send_to_user", { message: "I know." }))) as never);
 		expect(prompts).toHaveLength(1);

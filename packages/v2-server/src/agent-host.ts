@@ -22,6 +22,7 @@ import { googleProvider } from "@earendil-works/pi-ai/providers/google";
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 import { createRegistry, section, type HarnessOptions } from "@earendil-works/pi-durable";
 import type { App } from "@pim/v2-app/app";
+import type { RelayBus } from "@pim/v2-app/relay";
 import { openString, type KeyringCrypto } from "@pim/v2-app/crypto";
 import type { Db as RuntimeDb } from "@pim/v2-runtime/db";
 import type { PartitionContext, RunnerOptions } from "@pim/v2-runtime/runner";
@@ -51,6 +52,8 @@ export type AgentHostOptions = {
 	app?: App | undefined;
 	/** Coding, when the Runner has Forge's database. */
 	forge?: ForgeParts | undefined;
+	/** The Relay's bus, for the tools that use the owner's paired computer; made when one is first used. */
+	relay?: (() => Promise<RelayBus>) | undefined;
 	/** Providers added to every owner's catalog besides those of the environment and the owner's own: the deployment's own, and tests'. */
 	providers?: ((ownerId: string) => readonly Provider[] | Promise<readonly Provider[]>) | undefined;
 	/** Where an owner's ChatGPT plan is signed in to and called, when not OpenAI's own (a proxy; tests). */
@@ -214,7 +217,7 @@ export function createAgentHost(options: AgentHostOptions) {
 				.catch(() => {});
 		});
 		const registry = createRegistry();
-		const deps: ToolDeps = { ownerId, partitionId: partition.partitionId, runtime: db, app: options.app, forge: options.forge, fetch: options.fetch ?? fetch, now, chatOf: (conversationId) => publicChatId(ownerId, conversationId) };
+		const deps: ToolDeps = { ownerId, partitionId: partition.partitionId, runtime: db, app: options.app, forge: options.forge, relay: options.relay, fetch: options.fetch ?? fetch, now, chatOf: (conversationId) => publicChatId(ownerId, conversationId) };
 		const ctx = (conversationId: number | string) => publicChatId(ownerId, conversationId).then((chat) => readContext(ownerId, chat));
 		registry.install(pimExtension(deps, [
 			section("agent", async (input) => {

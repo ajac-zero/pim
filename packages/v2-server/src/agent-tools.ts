@@ -13,6 +13,8 @@ import { OwnerId, PartitionId, type Principal } from "@pim/v2-contracts/identity
 import { ExternalOperations } from "@pim/v2-runtime/external";
 import type { Db as RuntimeDb } from "@pim/v2-runtime/db";
 import type { Actor } from "@pim/v2-forge/authz";
+import type { RelayBus } from "@pim/v2-app/relay";
+import { computerTools } from "./computer-tools.ts";
 import type { ForgeParts } from "./forge-assembly.ts";
 
 export type ToolDeps = {
@@ -21,6 +23,8 @@ export type ToolDeps = {
 	runtime: RuntimeDb;
 	app: App | undefined;
 	forge: ForgeParts | undefined;
+	/** The Relay's bus, made when first needed: how the computer, browser and desktop tools reach the owner's paired computer. */
+	relay?: (() => Promise<RelayBus>) | undefined;
 	fetch: typeof fetch;
 	now: () => number;
 	/** The public id of the chat that a pi conversation is. */
@@ -336,6 +340,9 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 		coding("coding_open_pull_request", "Open a pull request for a coding thread's branch. A person approves it first, unless they have said it may go ahead.", Type.Object({ thread, title: O(S()) }), "coding:pr", (f, actor, _c, a) => f.forge.openPullRequest(actor, a.thread, a.title)),
 		coding("coding_merge", "Merge a coding thread's branch into the default branch, fast-forward or rebase, never forced. A person approves it first, unless they have said it may go ahead.", Type.Object({ thread }), "coding:merge", (f, actor, _c, a) => f.forge.merge(actor, a.thread)),
 	);
+
+	// The person's computer: files, shell, browser, desktop (`./computer-tools.ts`).
+	tools.push(...computerTools({ ownerId, partitionId, runtime, app: deps.app, relay: deps.relay, chatOf: deps.chatOf }, { ops, principalOf }));
 
 	return defineExtension({ name: "pim", tools, sections });
 }

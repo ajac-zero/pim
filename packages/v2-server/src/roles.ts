@@ -209,7 +209,10 @@ export async function startRunner(config: ProcessConfig, env: Env, host: Host, h
 	const objects = appDb || forgePool ? s3Of(config, env) : undefined;
 	const app = appDb && objects ? new App(appDb, objects, { ...(crypto ? { crypto } : {}), ...(env.PIM_APP_SECRET_KEY ? { appKey: env.PIM_APP_SECRET_KEY } : {}) }) : undefined;
 	const forge = forgePool && objects ? assembleForge(forgePool as never, objects, env) : undefined;
-	const host_ = hooks.harnessOptions ? undefined : createAgentHost({ db, env, crypto, app, forge, providers: hooks.providers, fetch: hooks.fetch, ...(chatgptFromEnv(env) ? { chatgpt: { ...chatgptFromEnv(env), ...(env.PIM_CHATGPT_BASE_URL ? { baseUrl: env.PIM_CHATGPT_BASE_URL } : {}) } } : {}), ...(env.PIM_PROVIDER_COOLDOWN_MS ? { cooldowns: { transientMs: Number(env.PIM_PROVIDER_COOLDOWN_MS) } } : {}) });
+	// The computer's tools reach a paired computer over the Relay's bus (NATS). The connection is made when an agent first uses one, so a Runner that never does needs no NATS.
+	let relayPulse: Promise<NatsPulse> | undefined;
+	const relayBus = async () => natsRelayBus(await (relayPulse ??= NatsPulse.connect(config.natsUrl)));
+	const host_ = hooks.harnessOptions ? undefined : createAgentHost({ db, env, crypto, app, forge, relay: relayBus, providers: hooks.providers, fetch: hooks.fetch, ...(chatgptFromEnv(env) ? { chatgpt: { ...chatgptFromEnv(env), ...(env.PIM_CHATGPT_BASE_URL ? { baseUrl: env.PIM_CHATGPT_BASE_URL } : {}) } } : {}), ...(env.PIM_PROVIDER_COOLDOWN_MS ? { cooldowns: { transientMs: Number(env.PIM_PROVIDER_COOLDOWN_MS) } } : {}) });
 	const runner = new Runner({
 		db,
 		harnessOptions: hooks.harnessOptions ?? host_!.harnessOptions,
@@ -253,6 +256,7 @@ export async function startRunner(config: ProcessConfig, env: Env, host: Host, h
 			await runtimePool.end();
 			await appDb?.end();
 			await forgePool?.end();
+			await (await relayPulse?.catch(() => undefined))?.close();
 		},
 	};
 }

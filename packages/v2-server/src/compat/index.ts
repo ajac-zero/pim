@@ -6,8 +6,10 @@
 import type { Route } from "@pim/v2-app/http";
 import { bootRoutes } from "./boot.ts";
 import { modelRoutes } from "./model.ts";
+import { computerRoutes } from "./computer.ts";
 
 export const webCompatRoutes: Route[] = [
 	...bootRoutes,
 	...modelRoutes(process.env),
+	...computerRoutes(),
 ];

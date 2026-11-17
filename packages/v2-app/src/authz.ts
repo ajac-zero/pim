@@ -14,8 +14,8 @@ const GUEST_DENIED = /^(admin:|coding:|computer:|token:|mcp:|app:deploy|trigger:
 const AGENT_SCOPES = ["api:*", "app:*", "coding:*", "computer:*", "trigger:*", "http:*"];
 /** Coding actions: the permission an admin's CodingGrant must list. */
 const CODING_ACTIONS = new Set<string>(CODING_PERMISSIONS);
-/** Coding actions, an HTTP request that writes, and deploying an app's backend onto a personal computer, have effects outside Pim that a person approves each time unless a StandingApproval covers them. */
-const NEEDS_APPROVAL = new Set<string>(["coding:push", "coding:pr", "coding:merge", "app:deploy", "http:request"]);
+/** Coding actions, an HTTP request that writes, deploying an app's backend onto a personal computer, and what an agent does there (a shell command, deleting a file, acting in the desktop, sending a form in its browser), have effects outside Pim that a person approves each time unless a StandingApproval covers them. */
+const NEEDS_APPROVAL = new Set<string>(["coding:push", "coding:pr", "coding:merge", "app:deploy", "http:request", "computer:shell", "computer:file_delete", "computer:desktop", "computer:browser_submit"]);
 
 export const principalId = (p: Principal): string => {
 	switch (p.kind) {

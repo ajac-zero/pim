@@ -50,13 +50,13 @@ real("Pim's MCP server", () => {
 
 	it("signs a client in with OAuth 2.1 (registration, consent, PKCE) and lists the pim tool as v1 described it", async () => {
 		const redirect = "http://127.0.0.1:9999/callback";
-		const reg = await fetch(`${base(gate)}/oauth/register`, { method: "POST", headers: { "content-type": "application/json", "x-pim-ingress-secret": d.ingressSecret }, body: JSON.stringify({ client_name: "Claude", redirect_uris: [redirect] }) }).then((r) => r.json());
+		const reg = await fetch(`${base(gate)}/oauth/register`, { method: "POST", headers: { "content-type": "application/json", "x-pim-ingress-secret": d.ingressSecret }, body: JSON.stringify({ client_name: "Claude", redirect_uris: [redirect] }) }).then((r) => r.json() as Promise<any>);
 		const verifier = randomBytes(32).toString("base64url");
 		const q = new URLSearchParams({ client_id: reg.client_id, redirect_uri: redirect, response_type: "code", code_challenge: createHash("sha256").update(verifier).digest("base64url"), code_challenge_method: "S256", state: "st" });
 		const consent = await web.call("GET", `/auth/authorize?${q}`);
 		expect(consent.json).toMatchObject({ client: { name: "Claude" } });
 		const code = new URL((await web.call("POST", "/auth/authorize", { handle: consent.json.handle, allow: true })).json.redirectTo).searchParams.get("code")!;
-		const issued = await fetch(`${base(gate)}/oauth/token`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", "x-pim-ingress-secret": d.ingressSecret }, body: new URLSearchParams({ grant_type: "authorization_code", code, client_id: reg.client_id, redirect_uri: redirect, code_verifier: verifier }) }).then((r) => r.json());
+		const issued = await fetch(`${base(gate)}/oauth/token`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", "x-pim-ingress-secret": d.ingressSecret }, body: new URLSearchParams({ grant_type: "authorization_code", code, client_id: reg.client_id, redirect_uri: redirect, code_verifier: verifier }) }).then((r) => r.json() as Promise<any>);
 		token = issued.access_token;
 		expect(token).toBeTruthy();
 		const listed = (await rpc({ method: "tools/list" })).json.result.tools;

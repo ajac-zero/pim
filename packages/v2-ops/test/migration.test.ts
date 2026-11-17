@@ -116,9 +116,12 @@ describe("export -> import -> audit on a rich synthetic legacy snapshot", () => 
 		await objects.put("BLOBS", "own_ada/img_1.png", Buffer.from("tampered"), null);
 		await pool.query("DELETE FROM pim_ops.pi_entries WHERE owner_id = 'o_own_ada' AND id = (SELECT max(id) FROM pim_ops.pi_entries WHERE owner_id = 'o_own_ada' AND conversation_id=1)");
 		await pool.query(`UPDATE pim_ops.legacy_rows SET row = jsonb_set(row, '{value}', '"{\\"timeZone\\":\\"Europe/Madrid\\",\\"approvalPolicy\\":\\"auto\\",\\"theme\\":null}"') WHERE table_name='pim_meta' AND pk='settings'`);
+		// A provider key in clear inside a JSON array of `pim_meta`, as a real v1 space keeps its custom providers (the fixture's secret pattern does not name it).
+		await pool.query(`INSERT INTO pim_ops.legacy_rows (owner_id, source, table_name, pk, row) VALUES ('o_own_ada', 'Pim:own_ada', 'pim_meta', 'own_providers', $1)`, [JSON.stringify({ key: "own_providers", value: JSON.stringify([{ id: "p", key: "an-unlisted-provider-key" }]) })]);
 		const audit = await auditImport(pool, reader, objects, { cutoverId: "cut-1" });
 		const failed = audit.checks.filter((c) => !c.ok).map((c) => c.name);
 		expect(audit.ok).toBe(false);
+		expect(failed).toEqual(expect.arrayContaining(["no credential-shaped property is left in clear in legacy_rows"]));
 		expect(failed).toEqual(expect.arrayContaining(["count o_own_ada entries", expect.stringContaining("SHA-256"), expect.stringContaining("nothing unset became an override")]));
 		await pool.end();
 	});

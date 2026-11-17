@@ -164,6 +164,10 @@ export async function auditImport(pool: Pool, reader: SnapshotReader, objects: O
 	// No secret survives in clear.
 	const clear = await count(`SELECT count(*) n FROM pim_ops.legacy_rows WHERE row::text ~ '(sk-example|sk-ant-example|mgr-token-example|mcp-oauth-|mcp-client-secret|push-auth-secret|ya29\\.|1//example)'`);
 	equal("no plaintext secret remains in legacy_rows", 0, clear);
+	// The pattern above names the fixture's secrets. A real deployment's are in shapes nobody listed (a provider key inside a JSON array in `pim_meta`, which the first rehearsal on a real export found
+	// in clear), so also refuse any credential-shaped property that holds a value: inside a JSON string (`\"key\":\"...`) or as a property of the row itself, other than the row's own `key` column.
+	const shaped = await count(`SELECT count(*) n FROM pim_ops.legacy_rows WHERE row::text ~ '\\\\"(apiKey|api_key|key|token|secret|password|access_token|refresh_token|client_secret)\\\\"\\s*:\\s*\\\\"[^"\\\\]{8,}' OR (row - 'key')::text ~ '"(apiKey|api_key|token|secret|password|access_token|refresh_token|client_secret)"\\s*:\\s*"[^"]{8,}'`);
+	equal("no credential-shaped property is left in clear in legacy_rows", 0, shaped);
 
 	// Objects.
 	const index = await reader.objects();

@@ -190,7 +190,7 @@ export function createAgentHost(options: AgentHostOptions) {
 	async function buildModels(ownerId: string): Promise<Models> {
 		const own = (await db.read<{ p: ProviderRow[] }>(ownerId, "SELECT pim_app.runner_providers($1) AS p", [ownerId]).catch(() => ({ rows: [{ p: [] as ProviderRow[] }] }))).rows[0]!.p;
 		// What an admin shared with everyone is in every catalog as `shared:<id>`, its key opened under the admin's owner id as it was sealed. An admin's own list leaves it out.
-		const sharedRows = (await db.read<{ p: (ProviderRow & { owner: string })[] }>(ownerId, "SELECT pim_app.shared_providers(true) AS p").catch(() => ({ rows: [{ p: [] as (ProviderRow & { owner: string })[] }] }))).rows[0]!.p;
+		const sharedRows = (await db.read<{ p: (ProviderRow & { owner: string })[] }>(ownerId, "SELECT pim_app.shared_providers(true) AS p").catch(() => ({ rows: [] as { p: (ProviderRow & { owner: string })[] }[] }))).rows[0]?.p ?? [];
 		const context = new Map<string, string>(sharedRows.map((r) => [`shared:${r.id}`, `provider:${r.owner}/${r.id}`]));
 		const rows: ProviderRow[] = [...own.filter((r) => r.config.shared !== true), ...sharedRows.map((r) => ({ id: `shared:${r.id}`, kind: r.kind, config: r.config, secret: r.secret }))];
 		const keys = new Map<string, string>();

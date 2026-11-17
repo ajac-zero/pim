@@ -93,7 +93,11 @@ export class FenceExporter {
 			const scheduler = await this.#dumpAndWrite("CodingScheduler", owner);
 			for (const row of scheduler.tables.pim_coding_threads?.rows ?? []) threads.add(String(row.thread_id));
 		}
-		for (const id of [...threads].sort()) await this.#dumpAndWrite("CodingThread", id);
+		// Coding threads are many small objects, each a few dozen requests: eight at a time, so a space with hundreds of them exports in minutes.
+		const queue = [...threads].sort();
+		await Promise.all(Array.from({ length: Math.min(8, queue.length) }, async () => {
+			for (let id = queue.shift(); id !== undefined; id = queue.shift()) await this.#dumpAndWrite("CodingThread", id);
+		}));
 		for (const [binding, name] of [["Gallery", "gallery"], ["HostOps", "hostops"], ["WorkspaceCatalog", "workspaces"]] as const) await this.#dumpAndWrite(binding, name);
 		const catalog = await this.dumpObject("WorkspaceCatalog", "workspaces");
 		for (const entry of catalog.kv) if (entry.key.startsWith("session:")) await this.#dumpAndWrite("WorkspaceContainer", entry.key.slice("session:".length));

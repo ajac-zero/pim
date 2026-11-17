@@ -104,3 +104,22 @@ export async function postToRoom(app: App, p: Principal, seatChatId: string, key
 		return true;
 	});
 }
+
+/** The room of each of these chats as the app's `Room` (who is in it, which of them is at work, and the model each runs on); a chat that is not a room is absent from the map. */
+export async function roomViews(app: App, ownerId: string, chatIds: readonly string[]) {
+	const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+	const ids = chatIds.filter((id) => uuid.test(id));
+	const rows = ids.length === 0 ? [] : await app.db.owner(ownerId, async (tx) => (await tx.query(
+		`SELECT c.public_chat_id::text AS chat, c.room_mode, m.member, a.name, a.model, a.config,
+		        coalesce((SELECT s.busy FROM pim_projection.sidebar_session_projection s WHERE s.chat_id = m.seat_chat_id::text), false) AS busy
+		 FROM pim_app.room_members m JOIN pim_app.conversations c ON c.public_chat_id = m.public_chat_id LEFT JOIN pim_app.agents a ON a.id = m.member AND a.deleted_at IS NULL
+		 WHERE m.public_chat_id = ANY($1::uuid[]) AND c.deleted_at IS NULL ORDER BY m.member`, [ids])).rows);
+	const views = new Map<string, { mode: "mentions" | "open"; members: unknown[] }>();
+	for (const r of rows) {
+		const model = (r.config?.model as { provider: string; id: string } | undefined) ?? { provider: "", id: r.model ?? "" };
+		const room = views.get(r.chat) ?? { mode: r.room_mode === "open" ? ("open" as const) : ("mentions" as const), members: [] };
+		room.members.push({ id: r.member, name: r.name ?? r.member, busy: r.busy === true, held: false, error: null, model: { model: { provider: model.provider, id: model.id, name: model.id || "Default model", images: false }, override: false } });
+		views.set(r.chat, room);
+	}
+	return views;
+}

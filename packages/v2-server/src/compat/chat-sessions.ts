@@ -7,7 +7,7 @@
  * prompt) and changing the queue behind a running turn, which lives in the runtime's inbox, not in the application's tables.
  */
 import type { App } from "@pim/v2-app/app";
-import { addRoomMember, removeRoomMember } from "../rooms.ts";
+import { addRoomMember, removeRoomMember, roomViews } from "../rooms.ts";
 import { BadRequestError, CapabilityUnavailableError, ConflictError, NotFoundError } from "@pim/v2-app/errors";
 import { ok, type Route, route } from "@pim/v2-app/http";
 import type { Principal } from "@pim/v2-contracts/identity";
@@ -40,22 +40,7 @@ async function sessionView(app: App, p: Principal, id: string) {
 
 /** The group chat's room: how its agents take turns and who besides its host is in it; null for a chat with one agent. */
 async function roomView(app: App, p: Principal, id: string) {
-	return app.db.owner(p.ownerId, async (tx) => {
-		const chat = (await tx.query("SELECT room_mode FROM pim_app.conversations WHERE public_chat_id = $1 AND deleted_at IS NULL", [id])).rows[0];
-		if (!chat) throw new NotFoundError("No such chat");
-		const members = (await tx.query(
-			"SELECT m.member, a.name, a.model, a.config, coalesce((SELECT s.busy FROM pim_projection.sidebar_session_projection s WHERE s.chat_id = m.seat_chat_id::text), false) AS busy FROM pim_app.room_members m LEFT JOIN pim_app.agents a ON a.id = m.member AND a.deleted_at IS NULL WHERE m.public_chat_id = $1 ORDER BY m.member",
-			[id],
-		)).rows;
-		if (members.length === 0) return null;
-		return {
-			mode: chat.room_mode === "open" ? "open" : "mentions",
-			members: members.map((m) => {
-				const model = (m.config?.model as { provider: string; id: string } | undefined) ?? { provider: "", id: m.model ?? "" };
-				return { id: m.member as string, name: (m.name as string | null) ?? m.member, busy: m.busy === true, held: false, error: null, model: { model: { provider: model.provider, id: model.id, name: model.id || "Default model", images: false }, override: false } };
-			}),
-		};
-	});
+	return (await roomViews(app, p.ownerId, [id])).get(id) ?? null;
 }
 
 /** A task as the app's `AgentTask`: who handed it out, who has it, and how it stands. */
@@ -180,7 +165,9 @@ export function sessionRoutes(): Route[] {
 			const limit = Number(url.searchParams.get("limit"));
 			const sessions = await app.conversations.list(p.ownerId, { archived: url.searchParams.get("archived") === "true", limit: Number.isInteger(limit) && limit > 0 ? limit : 100 });
 			const seats = new Set((await app.db.owner(p.ownerId, async (tx) => (await tx.query("SELECT public_chat_id FROM pim_app.conversations WHERE room_of IS NOT NULL AND public_chat_id = ANY($1::uuid[])", [sessions.map((s) => s.id)])).rows)).map((r) => r.public_chat_id as string));
-			return ok({ sessions: sessions.filter((s) => !seats.has(s.id)) });
+			const shown = sessions.filter((s) => !seats.has(s.id));
+			const rooms = await roomViews(app, p.ownerId, shown.map((s) => s.id));
+			return ok({ sessions: shown.map((s) => ({ ...s, room: rooms.get(s.id) ?? null })) });
 		}),
 
 		// ---- a group chat's room ----

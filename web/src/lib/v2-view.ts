@@ -180,6 +180,10 @@ export function sessionOf(row: SidebarRow): Session {
       typeof agent === "object" && agent !== null
         ? (agent as { id: string; name: string })
         : null,
+    // A group chat's room rides in the row's summary, like its agent.
+    ...(typeof summary.room === "object" && summary.room !== null
+      ? { room: summary.room as Session["room"] }
+      : {}),
   };
 }
 

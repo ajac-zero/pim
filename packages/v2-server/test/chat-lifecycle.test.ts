@@ -143,6 +143,9 @@ real("a chat over its life", () => {
 		expect((await web.call("GET", "/api/sessions")).json.sessions.map((s: { id: string }) => s.id)).not.toContain(seat);
 		await waitFor("the seat to leave the sidebar", async () => (await web.call("GET", "/api/snapshot/sidebar")).json.sessions.some((s: { chatId: string }) => s.chatId === host), 30_000);
 		expect((await web.call("GET", "/api/snapshot/sidebar")).json.sessions.map((s: { chatId: string }) => s.chatId)).not.toContain(seat);
+		// The host's row carries the room for the app, and the list does too.
+		expect((await web.call("GET", "/api/snapshot/sidebar")).json.sessions.find((s: { chatId: string }) => s.chatId === host).summary.room).toMatchObject({ mode: "mentions", members: [{ id: coach.id, name: "Coach" }] });
+		expect((await listed(host)).room).toMatchObject({ mode: "mentions", members: [{ name: "Coach" }] });
 
 		// Said to no one in particular: the host answers, and the seat only hears it.
 		await say(host, "I want to run a 10k in the spring", reply("A 10k is a fine goal."));

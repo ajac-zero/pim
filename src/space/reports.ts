@@ -3,7 +3,7 @@
  */
 import { codingThread } from "../coding/thread-do";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { type ConversationId, type Extension, LiveDoc, type LiveState, ProviderDoc, type TaskId } from "@earendil-works/pi-durable";
+import { type ConversationId, type Cursor, type EntryRecord, type Extension, LiveDoc, type LiveState, ProviderDoc, type TaskId } from "@earendil-works/pi-durable";
 import type { Connection } from "agents";
 import { type PiModel, PiHarness } from "agents/harness/pi";
 import { ArtifactStore } from "../artifacts";
@@ -19,7 +19,7 @@ import { LegacyFiles } from "../legacy-files";
 import { NoteStore } from "../notes";
 import { PimBrowser } from "../browser";
 import { readDeployment } from "../deployment";
-import { DiagnosticEvents, diagnose, scrub, scrubValue, type Turn, turnsOf } from "../diagnostics";
+import { DiagnosticEvents, diagnose, scrub, scrubValue, startsTurn, type Turn, turnsOf } from "../diagnostics";
 import type { PublicApproval } from "../protocol";
 import type { Settings } from "../settings";
 import { type Approval, type ApprovalDecider, type ApprovalStatus, PimStore } from "../store";
@@ -39,6 +39,9 @@ import { type MemoryScopeInfo, type OwnerProfile, describeModel } from "./shared
 
 /** The most chats the diagnostics read the turns of at once, those at work most recently. */
 export const TURN_CHATS = 20;
+
+/** How many entries a read of a chat's latest turn takes at a time, newest first. */
+const LATEST_TURN_PAGE = 64;
 
 /** How long an erasure waits for runs to stop and connectors to unsubscribe before wiping anyway. */
 export const ERASE_COURTESY_MS = 3_000;
@@ -169,6 +172,48 @@ export class Reports {
 			}
 		}
 		return found;
+	}
+
+	/**
+	 * A chat's latest turn, by its public id, for the activity line an open chat asks for every few
+	 * seconds. It is read from the end of the transcript back to where the turn began, so what it
+	 * costs is the turn, not the whole chat: reading every message a long chat ever had, every few
+	 * seconds, ran its space out of memory.
+	 */
+	async latestTurn(chat: string): Promise<Turn | undefined> {
+		const session = this.host.store.sessionOf(chat);
+		if (session === undefined) throw new Error(`No chat ${chat}`);
+		const storage = await this.host.harness.storage();
+		const conversationId = Number(session) as ConversationId;
+		const entries: EntryRecord[] = [];
+		// A compaction keeps what follows its head: entries older than that were summarized away.
+		let summary: EntryRecord | undefined;
+		let cursor: Cursor | undefined;
+		scan: do {
+			const page = await storage.scanEntries({ conversationId, order: "descending" }, LATEST_TURN_PAGE, cursor, BACKGROUND_CONTEXT);
+			for (const entry of page.items) {
+				if (entry.kind === "pi.reset" || (summary?.head !== undefined && entry.id < summary.head)) break scan;
+				if (entry.kind === "pi.compaction") {
+					summary = entry;
+					continue;
+				}
+				entries.push(entry);
+				if (entry.model?.some(startsTurn)) {
+					summary = undefined;
+					break scan;
+				}
+			}
+			cursor = page.next;
+		} while (cursor !== undefined);
+		// With none of what it kept beginning a turn, the turn begins with the summary.
+		if (summary) entries.push(summary);
+		const messages = entries.reverse().flatMap((entry) => entry.model ?? []);
+		const calls = new Map(
+			this.host.store
+				.approvalsOf(session)
+				.map((approval) => [approval.callId!, { id: approval.id, status: approval.status, createdAt: approval.createdAt, decidedAt: approval.decidedAt, decidedBy: approval.decidedBy }] as const),
+		);
+		return turnsOf(messages, calls, Date.now(), await this.host.harness.session(session).busy()).at(-1);
 	}
 
 	/**

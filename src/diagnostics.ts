@@ -139,6 +139,13 @@ CREATE TABLE IF NOT EXISTS pim_diagnostic_events (
 	}
 }
 
+/** Whether a message begins a turn: one to the agent, other than Pim's reminder to deliver. */
+export function startsTurn(message: Message): boolean {
+	if (message.role !== "user") return false;
+	const text = typeof message.content === "string" ? message.content : message.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("");
+	return !isDeliveryReminder(text);
+}
+
 /**
  * A chat's turns, from its messages in order: each begins with a message to
  * the agent, other than Pim's reminder to deliver, and goes on to the next.
@@ -151,8 +158,7 @@ export function turnsOf(messages: readonly Message[], approvals: ReadonlyMap<str
 	const turns: { startedAt: number; endedAt: number; modelMs: number; toolsMs: number; approvalsMs: number; steps: TurnStep[] }[] = [];
 	for (const message of messages) {
 		if (message.role === "user") {
-			const text = typeof message.content === "string" ? message.content : message.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("");
-			if (!isDeliveryReminder(text)) turns.push({ startedAt: message.timestamp, endedAt: message.timestamp, modelMs: 0, toolsMs: 0, approvalsMs: 0, steps: [] });
+			if (startsTurn(message)) turns.push({ startedAt: message.timestamp, endedAt: message.timestamp, modelMs: 0, toolsMs: 0, approvalsMs: 0, steps: [] });
 			continue;
 		}
 		const turn = turns.at(-1);

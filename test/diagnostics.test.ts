@@ -353,6 +353,22 @@ describe("the shared activity view", () => {
 		expect(response.status).toBe(200);
 		expect(response.body).toMatchObject({ current: expect.any(Array), steps: expect.any(Array), lastActivityAt: expect.any(Number) });
 	});
+
+	it("shows a chat's latest turn alone, however long the chat is", async () => {
+		const { id } = (await post("/sessions", {})).body;
+		let third = 0;
+		for (const said of ["First answer.", "Second answer.", "Third answer."]) {
+			third = Date.now();
+			faux.setResponses([toolUse("send_to_user", { message: said })]);
+			await say(`ask for ${said}`, id);
+		}
+		const { steps, running } = (await api(`/sessions/${id}/activity`)).body as Activity;
+		expect(running).toBe(false);
+		// The model's call and its tool's, from the third turn; nothing of the two before it.
+		expect(steps.map((step) => step.kind)).toEqual(["model", "tool"]);
+		expect(steps[1]).toMatchObject({ name: "send_to_user" });
+		expect(steps.every((step) => step.at >= third)).toBe(true);
+	});
 });
 
 describe("stall detection", () => {

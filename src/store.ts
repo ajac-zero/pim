@@ -600,6 +600,11 @@ export class PimStore {
 		return rows.toArray().map(approvalOf);
 	}
 
+	/** The approvals a chat's calls filed. */
+	approvalsOf(session: string): Approval[] {
+		return this.#sql.exec("SELECT * FROM pim_approvals WHERE session = ? AND call_id IS NOT NULL", session).toArray().map(approvalOf);
+	}
+
 	/** Moves a pending approval to its decision. False when it was not pending. */
 	decideApproval(id: string, status: "approved" | "denied", note: string | null, decidedBy: ApprovalDecider = "user"): boolean {
 		return (

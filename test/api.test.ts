@@ -1002,6 +1002,34 @@ describe("conversation", () => {
 		expect(textOf(messages[0])).toContain("Summary of everything.");
 	});
 
+	it("compacts a chat in place once it fills its window, rather than letting it grow while it waits to be carried on", async () => {
+		const { id } = (await post("/sessions", { title: "Full chat" })).body;
+		// About 128,000 tokens each: one fits the faux model's 200,000-token window, two don't.
+		const long = (marker: string) => `${marker} ${"words to fill the window ".repeat(18_000)}`;
+		faux.setResponses([toolUse("send_to_user", { message: "Read the first." })]);
+		await say(long("FIRST-LONG"), id);
+		let summarized = "";
+		let sent = "";
+		faux.setResponses([
+			(context) => {
+				summarized = JSON.stringify(context.messages);
+				return fauxAssistantMessage("Summary of the first long message.");
+			},
+			(context) => {
+				sent = JSON.stringify(context.messages);
+				return toolUse("send_to_user", { message: "Read the second." });
+			},
+		]);
+		await say(long("SECOND-LONG"), id);
+		// The summary was written from what came before the latest message, and the request after it was sent without that.
+		expect(summarized).toContain("FIRST-LONG");
+		expect(sent).toContain("Summary of the first long message.");
+		expect(sent).toContain("SECOND-LONG");
+		expect(sent).not.toContain("FIRST-LONG");
+		// It stays the chat the person is in: nothing carries it on.
+		expect((await api("/sessions")).body.sessions.find((session: { continuedFrom: string | null }) => session.continuedFrom === id)).toBeUndefined();
+	});
+
 });
 
 describe("appearance settings", () => {

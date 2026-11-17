@@ -803,6 +803,11 @@ describe("A person's own model providers", () => {
 		// What the server says about the others stays; saving again keeps the settings.
 		expect(saved.models.find((model: { id: string }) => model.id === "served-model")).toMatchObject({ contextWindow: 4_096 });
 		expect((await put("/providers/home-server", { name: "Home" })).body.provider.overrides).toEqual({ "vision-model": { contextWindow: 200_000, cost: { input: 3, output: 15, cacheRead: 0, cacheWrite: 0 } } });
+		// A window of a million tokens is kept as set, but chats are compacted by 200,000, which the space's memory holds.
+		const million = (await put("/providers/home-server", { overrides: { "vision-model": { ...overrides["vision-model"], contextWindow: 1_000_000 } } })).body.provider;
+		expect(million.models.find((model: { id: string }) => model.id === "vision-model")).toMatchObject({ contextWindow: 1_000_000 });
+		expect(await runInDurableObject(env.Pim.getByName(OWNER), (pim: Pim) => pim.modelCatalog().getModel("own:home-server", "vision-model")?.contextWindow)).toBe(200_000);
+		await put("/providers/home-server", { overrides });
 
 		// A chat's cost is its tokens at that price: 10 in and 3 out, per million.
 		await put("/model", { provider: "own:home-server", id: "vision-model" });

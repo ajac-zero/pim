@@ -10,6 +10,7 @@ import { modelRoutes } from "./model.ts";
 import { computerRoutes } from "./computer.ts";
 import { connectorRoutes } from "../connector-routes.ts";
 import { chatRoutes } from "./chat.ts";
+import { hostRoutes, managedComputerRoutes } from "../hostops/routes.ts";
 
 export const webCompatRoutes: Route[] = [
 	// Connectors come first: their approve and deny add "always approve" to the plain decision the boot routes make.
@@ -17,7 +18,9 @@ export const webCompatRoutes: Route[] = [
 	...bootRoutes,
 	// Model settings first: /api/providers/built-in is answered by both, and the model work's answer is the one the provider forms use.
 	...modelRoutes(process.env),
-	...computerRoutes(),
+	// The computer host and host operations, and a person's computer where the host keeps it (`../hostops/`): before the computer routes, which answer none paired.
+	...hostRoutes(),
+	...managedComputerRoutes(computerRoutes()),
 	...adminCompatRoutes,
 	...chatRoutes,
 ];

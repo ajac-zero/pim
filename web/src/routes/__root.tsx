@@ -326,10 +326,13 @@ function usePimEvents() {
         queryClient.setQueryData(["sessions"], sessions);
         return liveCursor;
       },
-      onSidebarSummary: (row) =>
+      onSidebarSummary: (row) => {
         queryClient.setQueryData<Session[]>(["sessions"], (list) =>
           upsertSession(list, sessionOf(row)),
-        ),
+        );
+        // v2 sends no approval events: a chat's line changes when its run parks for an approval or goes on after one, so the approvals are read again then.
+        queryClient.invalidateQueries({ queryKey: ["approvals"] });
+      },
       onCodingSummary: () =>
         queryClient.invalidateQueries({ queryKey: ["coding", "threads"] }),
       onUnauthorized: () =>

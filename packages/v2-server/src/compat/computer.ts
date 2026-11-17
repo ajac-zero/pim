@@ -17,8 +17,8 @@ import { fileURLToPath } from "node:url";
 import { type Computer, ComputerError } from "@pim/v2-app/relay";
 import { BadRequestError, ConflictError, NotFoundError, PimError } from "@pim/v2-app/errors";
 import { ok, type Reply, type Route, route } from "@pim/v2-app/http";
-import { filesPath, FILES_ROOT } from "./computer-tools.ts";
-import { installScript } from "./computer-install-script.ts";
+import { filesPath, FILES_ROOT } from "../computer-tools.ts";
+import { installScript } from "../computer-install-script.ts";
 
 const MAX_UPLOAD_BYTES = 25_000_000;
 const CHUNK_BYTES = 700_000;
@@ -91,7 +91,7 @@ const pageOf = async (send: (method: string, params?: object, sessionId?: string
 };
 
 export function computerRoutes(options: { source?: string } = {}): Route[] {
-	const source = options.source ?? fileURLToPath(new URL("../../../computer/pim-computer.ts", import.meta.url));
+	const source = options.source ?? process.env.PIM_COMPUTER_SOURCE ?? fileURLToPath(new URL("../../../../computer/pim-computer.ts", import.meta.url));
 	/** The signed-in person's computer, for a route that calls it: the owner is checked alive and allowed. */
 	const withComputer = async (ctx: Parameters<Route["run"]>[0], capability: string) => {
 		const p = await ctx.principal();

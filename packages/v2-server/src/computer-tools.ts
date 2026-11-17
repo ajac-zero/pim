@@ -174,7 +174,7 @@ export function computerTools(deps: ComputerToolDeps, kit: ComputerToolKit): Too
 				if ("result" in prepared) return prepared.result;
 				summary = prepared.summary;
 			} else summary = String(g.args.summary ?? g.tool);
-			const gate = await app.approvals.gate(p, { action: g.action, resource: g.resource ?? {}, ...(chat ? { chatId: chat } : {}), args: { taskId, tool: g.tool, ...g.args, summary }, timeoutMs: 24 * 3600_000, onTimeout: "deny" });
+			const gate = await app.approvals.gate(p, { action: g.action, resource: g.resource ?? {}, ...(chat ? { chatId: chat } : {}), args: { taskId, callId: api.callId, tool: g.tool, ...g.args, summary }, timeoutMs: 24 * 3600_000, onTimeout: "deny" });
 			if (gate.outcome === "waiting") return waiting;
 		}
 		// The effect itself, once: a replay or a new owner finds its outcome on the operation, and one that was in flight is reconciled, not run again.

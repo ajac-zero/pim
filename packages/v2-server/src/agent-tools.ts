@@ -258,7 +258,7 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 					if (!signal) {
 						const filed = await app.db.owner(ownerId, async (tx) => (await tx.query("SELECT id FROM pim_app.approvals WHERE tool = 'http:request' AND args->>'taskId' = $1 LIMIT 1", [taskId])).rows[0]?.id as string | undefined);
 						if (filed) return { content: [{ type: "text", text: "Waiting for a person's approval." }], control: { suspend: true } } as never;
-						const gate = await app.approvals.gate(p, { action: "http:request", resource: { host: url.host, method: args.method }, ...(chat ? { chatId: chat } : {}), args: { taskId, method: args.method, url: url.href, headers: redactHeaders(args.headers), body: typeof args.body === "string" ? args.body.slice(0, 2000) : undefined }, timeoutMs: 24 * 3600_000, onTimeout: "deny" });
+						const gate = await app.approvals.gate(p, { action: "http:request", resource: { host: url.host, method: args.method }, ...(chat ? { chatId: chat } : {}), args: { taskId, callId: api.callId, method: args.method, url: url.href, headers: redactHeaders(args.headers), body: typeof args.body === "string" ? args.body.slice(0, 2000) : undefined }, timeoutMs: 24 * 3600_000, onTimeout: "deny" });
 						if (gate.outcome === "waiting") return { content: [{ type: "text", text: "Waiting for a person's approval." }], control: { suspend: true } } as never;
 					}
 					// The request itself, once: its outcome is on the operation, so a replay or a new owner finds it there, and one that was in flight is reconciled, not sent again.

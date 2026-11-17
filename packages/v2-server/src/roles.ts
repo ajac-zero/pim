@@ -31,10 +31,10 @@ import { codingAdminRoutes, forgeAuthenticator, forgeRoutes, projectedTranscript
 import type { Host } from "./host.ts";
 import { AppLiveIdentity, deliverApprovalDecisions, LiveAuthorizer, mirrorCodingGrants, publishRevocations } from "./identity.ts";
 import { runtimeOutboxSource } from "./runtime-source.ts";
-import { computerRoutes } from "./computer-routes.ts";
 import { natsRelayBus } from "./relay-bus.ts";
 import { sweepApprovals, trimForgeOutbox } from "./sweeps.ts";
 import { webAssets } from "./web-assets.ts";
+import { webCompatRoutes } from "./compat/index.ts";
 
 export type Env = Record<string, string | undefined>;
 export type Hooks = {
@@ -97,7 +97,9 @@ export async function startGate(config: ProcessConfig, env: Env, host: Host, nat
 	const authenticate = forgeAuthenticator(app, secure);
 	// Forge's whole HTTP surface (the coding API, harness logins, the git broker, Gitea, the model gateway), each request under its owner's row-level security scope.
 	const coding = forgeHttp(forge, { authenticate, crypto: app.crypto });
-	const options = { publicUrl: config.publicUrl, ...(env.PIM_APPS_ORIGIN ? { appsOrigin: env.PIM_APPS_ORIGIN } : {}), routes: [...snapshotRoutes(db.pool), ...codingAdminRoutes(), ...forgeRoutes(coding), ...computerRoutes(env.PIM_COMPUTER_SOURCE ? { source: env.PIM_COMPUTER_SOURCE } : {})] };
+	const options = { publicUrl: config.publicUrl, ...(env.PIM_APPS_ORIGIN ? { appsOrigin: env.PIM_APPS_ORIGIN } : {}), routes: [...snapshotRoutes(db.pool), ...codingAdminRoutes(), ...forgeRoutes(coding)],
+		// The web app's v1 API over v2's services (packages/v2-server/src/compat/), tried before the built-in routes so its shapes win.
+		first: [...webCompatRoutes] };
 	const gate = createGate(app, options);
 	const listener = gate.listeners("request")[0] as (req: never, res: never) => void;
 	const web = webAssets(env.PIM_WEB_DIR);

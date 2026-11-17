@@ -22,6 +22,7 @@ import { createHash } from "node:crypto";
 import type { ConversationRecord, DocumentRecord, EntryRecord, SubmissionRecord, TaskRecord } from "@earendil-works/pi-durable";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { projectEntries } from "@pim/shared/transcript";
+import { chatgptContext } from "@pim/v2-app/chatgpt";
 import { KeyringCrypto, sealString } from "@pim/v2-app/crypto";
 import { userHandle } from "@pim/v2-app/signin";
 import type { EnvelopeCrypto as OpsCrypto } from "@pim/v2-ops/crypto/envelope";
@@ -362,8 +363,15 @@ async function promoteDomain(pool: Pool, owner: string, options: PromoteOptions,
 
 	// Sealed values are made first: they need no transaction.
 	const providerSecrets = new Map<string, string>();
+	// A ChatGPT sign-in is the `openai` credential in its OAuth form: it moves to the ChatGPT store, sealed again as it is, so nobody signs in again after the cutover.
+	let chatgpt: { sealed: string; email: string | null } | undefined;
 	for (const c of credentials) {
 		const plain = await secret(c.credential, "provider-credential");
+		const oauth = plain ? (parseJson(plain, {}) as { type?: string; access?: string; refresh?: string; email?: string | null }) : undefined;
+		if (c.provider === "openai" && oauth?.type === "oauth" && oauth.access && oauth.refresh) {
+			chatgpt = { sealed: await sealed(JSON.stringify(oauth), chatgptContext(owner)), email: oauth.email ?? null };
+			continue;
+		}
 		const key = plain ? (parseJson(plain, {}) as { apiKey?: string }).apiKey : undefined;
 		if (key) providerSecrets.set(String(c.provider), await sealed(key, `provider:${owner}/pv_legacy_${slug(String(c.provider))}`));
 	}
@@ -442,7 +450,12 @@ async function promoteDomain(pool: Pool, owner: string, options: PromoteOptions,
 			}
 		}
 		// Providers and connectors, with their secrets under the application's keys. Without keys they come without credentials, to be connected again.
-		for (const p of credentials) {
+		if (chatgpt) {
+			const hostId = meta.find((x) => x.key === "chatgpt_host_id")?.value;
+			const r = await c.query("INSERT INTO pim_app.chatgpt_credentials (owner_id, host_id, secret, email, version) VALUES ($1,$2,$3,$4,1) ON CONFLICT DO NOTHING", [owner, typeof hostId === "string" && hostId ? parseJson(hostId, hostId) : `urn:uuid:${randomUUID()}`, chatgpt.sealed, chatgpt.email]);
+			bump(d, "chatgpt", r.rowCount ?? 0);
+		}
+		for (const p of credentials.filter((x) => !(chatgpt && x.provider === "openai" && !providerSecrets.has("openai")))) {
 			const kind = ["anthropic", "openai", "google"].includes(String(p.provider)) ? String(p.provider) : "custom";
 			const r = await c.query("INSERT INTO pim_app.providers (id, owner_id, kind, config, secret) VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING", [`pv_legacy_${slug(String(p.provider))}`, owner, kind, JSON.stringify({ name: p.provider }), providerSecrets.get(String(p.provider)) ?? null]);
 			bump(d, "providers", r.rowCount ?? 0);

@@ -5,6 +5,7 @@ import { makeCtx, type Reply, type Route } from "./http.ts";
 import { authRoutes } from "./routes/auth.ts";
 import { hostedRoutes, serveAppOrigin } from "./routes/hosted.ts";
 import { coreRoutes } from "./routes/core.ts";
+import { chatgptRoutes } from "./routes/chatgpt.ts";
 import { domainRoutes } from "./routes/domain.ts";
 
 /**
@@ -21,7 +22,7 @@ export type GateOptions = {
 	routes?: Route[];
 };
 
-export const builtInRoutes: Route[] = [...hostedRoutes, ...domainRoutes, ...coreRoutes, ...authRoutes];
+export const builtInRoutes: Route[] = [...hostedRoutes, ...chatgptRoutes, ...domainRoutes, ...coreRoutes, ...authRoutes];
 
 export function createGate(app: App, options: GateOptions = {}): Server {
 	const routes = [...builtInRoutes, ...(options.routes ?? [])];

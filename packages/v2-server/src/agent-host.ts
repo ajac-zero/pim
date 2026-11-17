@@ -26,7 +26,9 @@ import { openString, type KeyringCrypto } from "@pim/v2-app/crypto";
 import type { Db as RuntimeDb } from "@pim/v2-runtime/db";
 import type { PartitionContext, RunnerOptions } from "@pim/v2-runtime/runner";
 import { pimExtension, type ToolDeps } from "./agent-tools.ts";
+import { chatgptCredentialStore, chatgptProvider, type ChatGPTRunnerOptions } from "./chatgpt-auth.ts";
 import type { ForgeParts } from "./forge-assembly.ts";
+import { createFailover } from "./provider-failover.ts";
 
 type Env = Record<string, string | undefined>;
 type ModelRef = { provider: string; id: string };
@@ -51,6 +53,10 @@ export type AgentHostOptions = {
 	forge?: ForgeParts | undefined;
 	/** Providers added to every owner's catalog besides those of the environment and the owner's own: the deployment's own, and tests'. */
 	providers?: ((ownerId: string) => readonly Provider[] | Promise<readonly Provider[]>) | undefined;
+	/** Where an owner's ChatGPT plan is signed in to and called, when not OpenAI's own (a proxy; tests). */
+	chatgpt?: ChatGPTRunnerOptions | undefined;
+	/** How long a failed model is skipped. */
+	cooldowns?: { transientMs?: number; authMs?: number } | undefined;
 	fetch?: typeof fetch | undefined;
 	now?: (() => number) | undefined;
 };
@@ -118,6 +124,8 @@ export function createAgentHost(options: AgentHostOptions) {
 	const { db, env } = options;
 	const now = options.now ?? Date.now;
 	const modelsByOwner = new Map<string, Models>();
+	const failover = createFailover({ now, cooldowns: options.cooldowns });
+	const chatgptOptions: ChatGPTRunnerOptions = options.chatgpt ?? {};
 	/** The reads of one request's sections share one query; the next request reads again, so what an agent just saved is in its next prompt. */
 	const contexts = new Map<string, Promise<RunnerContext>>();
 
@@ -146,23 +154,27 @@ export function createAgentHost(options: AgentHostOptions) {
 				// A key sealed under a key this process does not hold stays unavailable, and the provider with it.
 			}
 		}
+		// An owner signed in with ChatGPT runs `openai` on the plan: its sealed credential is read and refreshed live, not opened once.
+		const plan = options.crypto && (await db.read<{ s: string | null }>(ownerId, "SELECT pim_app.runner_chatgpt($1) AS s", [ownerId]).then((r) => r.rows[0]?.s, () => null)) ? chatgptCredentialStore(db, options.crypto, ownerId, chatgptOptions) : undefined;
 		const builtin = (kind: string) => rows.find((r) => r.kind === kind && keys.has(r.id));
 		const credentials = {
 			async read(providerId: string) {
+				if (plan && providerId === "openai") return plan.read();
 				const row = builtin(providerId);
 				return row ? ({ type: "api_key", key: keys.get(row.id) } as const) : undefined;
 			},
 			async list() {
-				return ["anthropic", "openai", "google"].filter((k) => builtin(k)).map((providerId) => ({ providerId, type: "api_key" as const }));
+				return ["anthropic", "openai", "google"].filter((k) => builtin(k) || (plan && k === "openai")).map((providerId) => ({ providerId, type: "api_key" as const }));
 			},
-			async modify(_providerId: string, fn: (c: undefined) => Promise<undefined>) {
+			async modify(providerId: string, fn: (c: any) => Promise<any>) {
+				if (plan && providerId === "openai") return plan.modify(fn);
 				return fn(undefined);
 			},
 			async delete() {},
 		};
 		const models: MutableModels = createModels({ credentials: credentials as never });
 		models.setProvider(anthropicProvider() as never);
-		models.setProvider(openaiProvider() as never);
+		models.setProvider((plan ? chatgptProvider(chatgptOptions) : openaiProvider()) as never);
 		models.setProvider(googleProvider() as never);
 		if (env.PIM_AI_GATEWAY_URL) {
 			const listed = (env.PIM_AI_GATEWAY_MODELS ?? "").split(",").map((m) => m.trim()).filter(Boolean);
@@ -184,7 +196,9 @@ export function createAgentHost(options: AgentHostOptions) {
 		const models = modelsByOwner.get(ownerId);
 		const available = models ? await models.getAvailable().catch(() => []) : [];
 		const found = wanted.find((w) => available.some((a) => a.provider === w.provider && a.id === w.id)) ?? (wanted.length === 0 ? available[0] : undefined);
+		const chain = wanted.filter((w, i) => wanted.findIndex((x) => x.provider === w.provider && x.id === w.id) === i);
 		const pick = found ? { provider: found.provider, id: found.id } : (wanted[0] ?? { provider: "anthropic", id: "claude-sonnet-4-5" });
+		failover.setChain(ownerId, pick, chain);
 		return { provider: pick.provider, modelId: pick.id };
 	}
 
@@ -192,11 +206,11 @@ export function createAgentHost(options: AgentHostOptions) {
 		const ownerId = partition.ownerId;
 		const models = await buildModels(ownerId);
 		modelsByOwner.set(ownerId, models);
-		const metered = meter(models, (message, model) => {
+		const metered = meter(failover.wrap(models, ownerId), (message, model) => {
 			const usage = message?.usage;
 			if (!usage || !(usage.input > 0 || usage.output > 0)) return;
 			void db
-				.read(ownerId, "SELECT pim_app.record_model_call($1, $2, 'chat', NULL, $3, $4, $5, $6, $7)", [ownerId, `mc_${randomUUID()}`, model?.provider ?? null, model?.id ?? null, Math.round(usage.input ?? 0), Math.round(usage.output ?? 0), Math.round((usage.cost?.total ?? 0) * 1_000_000)])
+				.read(ownerId, "SELECT pim_app.record_model_call($1, $2, 'chat', NULL, $3, $4, $5, $6, $7)", [ownerId, `mc_${randomUUID()}`, message?.provider ?? model?.provider ?? null, message?.model ?? model?.id ?? null, Math.round(usage.input ?? 0), Math.round(usage.output ?? 0), Math.round((usage.cost?.total ?? 0) * 1_000_000)])
 				.catch(() => {});
 		});
 		const registry = createRegistry();

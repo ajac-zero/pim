@@ -118,11 +118,33 @@ jobs:
       # The v2 packages' tests run against a real PostgreSQL and NATS; a missing binary fails them rather than skipping them.
       - run: packages/v2-runtime/scripts/ensure-postgres.sh
       - run: packages/v2-server/scripts/ensure-nats.sh
-      - run: pnpm test:packages
+      - run: pnpm test:packages:rest
         env:
           PIM_V2_REQUIRE_INFRA: "1"
           PIM_NATS_BIN: /usr/local/bin/nats-server
       - run: pnpm exec vitest run --project node
+
+  # The integration tests of @pim/v2-server, the longest package: its own job so it runs beside the other packages' tests (`unit`), not after them.
+  # Its files run side by side (four workers on this runner), each in a database copied from a template.
+  unit-v2-server:
+    needs: scope
+    if: needs.scope.outputs.unit == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: packages/v2-runtime/scripts/ensure-postgres.sh
+      - run: packages/v2-server/scripts/ensure-nats.sh
+      - run: pnpm test:packages:v2-server
+        env:
+          PIM_V2_REQUIRE_INFRA: "1"
+          PIM_NATS_BIN: /usr/local/bin/nats-server
+          PIM_V2_TEST_WORKERS: "4"
 
   # Pim v2 as it is deployed: builds deploy/Dockerfile.v2, boots deploy/compose (Caddy, PostgreSQL behind PgBouncer, NATS, SeaweedFS and every
   # role), then signs up, chats, approves a tool, stores an object, and backs up and restores (scripts/v2-compose/smoke.sh).

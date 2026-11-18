@@ -19,6 +19,8 @@
     "test": "node scripts/test-all.mjs",
     "test:serial": "node scripts/check-internal-identifiers.mjs && vitest run && pnpm test:packages && pnpm --filter pim-web test && pnpm test:daemons",
     "test:packages": "pnpm --filter \"./packages/*\" test",
+    "test:packages:v2-server": "pnpm --filter @pim/v2-server test",
+    "test:packages:rest": "pnpm --filter \"./packages/*\" --filter \"!@pim/v2-server\" test",
     "test:daemons": "node --test \"displayd/test/*.test.js\" \"sandbox-manager/test/*.test.js\" \"sandbox-manager/hostopsd/test/*.test.js\" \"workspace-agentd/test/*.test.mjs\"",
     "test:changed": "node scripts/test-changed.mjs",
     "test:live": "PIM_LIVE=1 vitest run"

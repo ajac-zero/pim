@@ -5,7 +5,7 @@ import { createServer, connect } from "node:net";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
 import { Db } from "@pim/v2-runtime/db";
-import { migrateAll } from "../../src/migrate.ts";
+import { databaseFromTemplate } from "../../../v2-runtime/test/support/template.ts";
 
 
 /** `describe` when nats-server is installed, and skipped without it, unless CI says it must be there (PIM_V2_REQUIRE_INFRA): then its absence fails the run. */
@@ -61,17 +61,11 @@ export type Stack = {
 	drop(): Promise<void>;
 };
 
-/** A fresh database with every band migrated by the real migrator (foundation, runtime, application, live, forge, operations, integration), and one login per role. */
+/** A fresh database: a copy of the template the global setup built, with every band migrated by the real migrator (foundation, runtime, application, live, forge, operations, integration) and one login per role. */
 export async function createStack(): Promise<Stack> {
 	const base = process.env.PIM_V2_PG_URL;
 	if (!base) throw new Error("PIM_V2_PG_URL is not set; the global setup starts PostgreSQL");
-	const name = `srv_${randomUUID().replaceAll("-", "").slice(0, 16)}`;
-	const root = new pg.Client({ connectionString: base });
-	await root.connect();
-	await root.query(`CREATE DATABASE ${name}`);
-	// One login per process kind, none a superuser or BYPASSRLS, as the deployments create them.
-	for (const kind of ["gate", "runtime", "live", "forge", "maintenance"]) await root.query(`DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'srv_${kind}_login') THEN CREATE ROLE srv_${kind}_login LOGIN NOSUPERUSER NOBYPASSRLS; END IF; END $$`);
-	await root.end();
+	const name = await databaseFromTemplate("PIM_V2_TEMPLATE_SERVER", "srv");
 	const urlFor = (user?: string) => {
 		const url = new URL(base);
 		url.pathname = `/${name}`;
@@ -80,8 +74,6 @@ export async function createStack(): Promise<Stack> {
 	};
 	// An idle connection that the server drops (the database is dropped under it at teardown) is not a test failure.
 	const admin = new pg.Pool({ connectionString: urlFor(), max: 5 }).on("error", () => {});
-	await migrateAll(admin);
-	for (const kind of ["gate", "runtime", "live", "forge", "maintenance"]) await admin.query(`GRANT pim_${kind} TO srv_${kind}_login`);
 	const runtime = Db.connect({ connectionString: urlFor("srv_runtime_login"), max: 10 });
 	const live = new pg.Pool({ connectionString: urlFor("srv_live_login"), max: 10 }).on("error", () => {});
 	return {

@@ -72,6 +72,13 @@ fi
 backups="$(env_get PIM_BACKUP_DIR)"; backups="${backups:-$PWD/backups}"
 echo "Backing up to $backups" >&2
 if ! ../../scripts/v2-backup/compose-backup.sh "$backups" >&2; then echo "backup failed; nothing was changed" >&2; say failed; exit 1; fi
+# Update backups older than PIM_BACKUP_KEEP_DAYS (14 by default; 0 keeps them all) go once a new one has been taken. Only directories named
+# like a backup's stamp are touched, and the newest one is always kept.
+keep="$(env_get PIM_BACKUP_KEEP_DAYS)"; keep="${keep:-14}"
+if [ "$keep" -gt 0 ] 2>/dev/null; then
+	newest="$(ls -1d "$backups"/[0-9]*T[0-9]*Z 2>/dev/null | sort | tail -1)"
+	find "$backups" -mindepth 1 -maxdepth 1 -type d -name '[0-9]*T[0-9]*Z' -mtime +"$keep" ! -path "$newest" -print -exec rm -rf {} + >&2
+fi
 
 previous="$(env_get PIM_IMAGE_PREVIOUS)"
 previous_computer="$(env_get PIM_COMPUTER_IMAGE)"

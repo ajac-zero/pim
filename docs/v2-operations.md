@@ -62,7 +62,7 @@ deploy/compose/pim.sh update                # the channel in .env (PIM_CHANNEL, 
 deploy/compose/pim.sh update 1.4.2          # a channel (stable, edge), a version (1.4.2, 1.4) or sha-<12 characters>
 ```
 
-`update` pulls the image; takes a backup with `scripts/v2-backup/compose-backup.sh` into `PIM_BACKUP_DIR` (default `deploy/compose/backups/`; old ones are not removed) before anything changes, so the stack must be running; writes the image to `PIM_IMAGE` pinned by digest (`ghcr.io/ajac-zero/pim:stable@sha256:…`); and runs `pim.sh up -d --wait`, which runs migrations first. If that or the health wait fails it puts the previous image back, brings the stack up again and exits non-zero. Its last line of output is one JSON object, and the exit status is non-zero for `rolled_back` and `failed` (nothing changed: the pull or backup failed):
+`update` pulls the image; takes a backup with `scripts/v2-backup/compose-backup.sh` into `PIM_BACKUP_DIR` (default `deploy/compose/backups/`; after a new one is taken, ones older than `PIM_BACKUP_KEEP_DAYS`, 14 by default, are removed, the newest always kept; 0 keeps them all) before anything changes, so the stack must be running; writes the image to `PIM_IMAGE` pinned by digest (`ghcr.io/ajac-zero/pim:stable@sha256:…`); and runs `pim.sh up -d --wait`, which runs migrations first. If that or the health wait fails it puts the previous image back, brings the stack up again and exits non-zero. Its last line of output is one JSON object, and the exit status is non-zero for `rolled_back` and `failed` (nothing changed: the pull or backup failed):
 
 ```json
 {"event":"pim.update","from":"ghcr.io/ajac-zero/pim:stable@sha256:aaa…","to":"ghcr.io/ajac-zero/pim:stable@sha256:bbb…","result":"updated"}

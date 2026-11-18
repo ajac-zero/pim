@@ -24,6 +24,7 @@ pnpm exec vitest run test/goals.test.ts   # one file of Worker tests, while iter
 pnpm --filter pim-web test                # the web app's tests (seconds)
 pnpm --filter @pim/ui-lang test           # a package's own tests, in seconds: also @pim/shared, @pim/triggers, @pim/coding
 pnpm test:packages                        # every package's tests
+pnpm test:packages:v2-server              # only @pim/v2-server, whose files run in parallel (PIM_V2_TEST_WORKERS, default 2)
 pnpm typecheck                            # the root, each package and the web app
 pnpm lint                                 # Biome, for web/; `pnpm --filter pim-web format` fixes formatting
 pnpm test                                 # every test, its three stages at once

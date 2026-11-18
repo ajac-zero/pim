@@ -329,6 +329,11 @@ real("the default agent host", () => {
 		await waitFor("the delivery error", async () => ((await said(stubborn, NOT_DELIVERED)) ? true : undefined), 60_000);
 		expect(await reminders(stubborn)).toBe(2);
 		expect(await sends(stubborn)).toEqual([]);
+		// The runtime's transcript is ahead of Live's projection, which Try again reads: wait until the error is the last message the Gate would see.
+		await waitFor("the error projected as the chat's last message", async () => {
+			const last = (await d.stack.admin.query("SELECT message FROM pim_projection.chat_transcript_projection WHERE chat_id = $1 AND NOT partial ORDER BY position DESC LIMIT 1", [stubborn])).rows[0]?.message;
+			return last?.role === "assistant" && last.stopReason === "error" ? true : undefined;
+		}, 60_000);
 		faux.setResponses([toolUse(fauxToolCall("send_to_user", { message: "Found it." })), fauxAssistantMessage("ended")] as never);
 		expect((await web.call("POST", `/api/sessions/${stubborn}/retry`, {})).status).toBe(200);
 		await waitFor("the answer after Try again", async () => ((await entries(stubborn)).filter((e) => JSON.stringify(e).includes('"ended"')).length > 0 ? true : undefined), 60_000);

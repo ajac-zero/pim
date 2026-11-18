@@ -126,6 +126,8 @@ real("the default agent host", () => {
 		expect((await results("recall"))[0]).toContain("Tea");
 		// The app comes back as the reference the web app shows as a card and opens in the canvas.
 		expect(JSON.parse((await results("app_create"))[0]!).artifact).toMatchObject({ title: "Tracker", kind: "html", version: 1 });
+		// A note comes back as a markdown reference too, with its text's version, so the chat draws a card that opens it.
+		expect(JSON.parse((await results("note_create"))[0]!).artifact).toMatchObject({ title: "Plan", kind: "markdown", version: 1, size: "Week one: run 2k".length });
 		// The next turn's prompt carries what the agent knows: who it is, its goals, its memory.
 		await say("what do you know?", seen(toolUse(fauxToolCall("send_to_user", { message: "I know." }))) as never);
 		expect(prompts).toHaveLength(1);
@@ -141,6 +143,18 @@ real("the default agent host", () => {
 		expect(calls.length).toBeGreaterThanOrEqual(5);
 		expect(calls[0]).toMatchObject({ provider: "faux", model: "m" });
 		expect(Number(calls[0].input_tokens)).toBeGreaterThan(0);
+	}, 120_000);
+
+	it("answers note_edit and note_show with the note's card, and shows a note without changing it", async () => {
+		const note = JSON.parse((await results("note_create"))[0]!).artifact as { id: string };
+		await say("tweak the plan", toolUse(fauxToolCall("note_read", { id: note.id })), toolUse(fauxToolCall("note_edit", { id: note.id, base_version: 1, find: "run 2k", replace: "run 3k" })), toolUse(fauxToolCall("note_show", { id: note.id })));
+		const edited = JSON.parse((await results("note_edit")).at(-1)!);
+		expect(edited.artifact).toMatchObject({ id: note.id, title: "Plan", kind: "markdown", version: 2, size: "Week one: run 3k".length, sha256: expect.stringMatching(/^[0-9a-f]{64}$/) });
+		const shown = JSON.parse((await results("note_show")).at(-1)!);
+		expect(shown.artifact).toEqual(edited.artifact);
+		expect((await d.stack.admin.query("SELECT version FROM pim_app.notes WHERE note_id = $1", [note.id])).rows[0].version).toBe("2");
+		await say("show a missing one", toolUse(fauxToolCall("note_show", { id: "n_nope" })));
+		expect((await results("note_show")).at(-1)).toBe("No such note");
 	}, 120_000);
 
 	it("refuses a message whose ui block cannot be drawn or that names a widget it cannot show, and loads the widgets it can", async () => {

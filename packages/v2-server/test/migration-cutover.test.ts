@@ -11,6 +11,9 @@ import { createModels } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 import { createRegistry, type HarnessOptions } from "@earendil-works/pi-durable";
 import { FakeOrbClient } from "@pim/coding/orb/fake";
+import { sealBlob, vaultKey } from "@pim/coding/vault/crypto";
+import { HARNESS_API_KEYS } from "@pim/shared/harnesses";
+import { ForgeVault } from "@pim/v2-forge/vault";
 import { KeyringCrypto, openString } from "@pim/v2-app/crypto";
 import { userHandle } from "@pim/v2-app/signin";
 import { EnvelopeCrypto } from "@pim/v2-ops/crypto/envelope";
@@ -195,6 +198,28 @@ expect(await as("SELECT kind, app_ref, status FROM pim_app.connectors WHERE owne
 		expect(same).toBe(await count("SELECT count(*) n FROM pim_app.conversations"));
 		const held = await count("SELECT count(*) n FROM pim_runtime.tasks WHERE status <> 'terminal' AND id IN (SELECT id FROM pim_ops.pi_tasks WHERE hold IS NOT NULL)");
 		expect(held).toBe(0);
+	});
+
+	it("promotes a v1-sealed coding credential into a v2 vault entry that opens to the same bytes, and leaves it alone the second time", async () => {
+		const admin = d.stack.admin;
+		const apiKey = `${HARNESS_API_KEYS.amp.prefix}${"k".repeat(40)}`;
+		// What v1 wrote: sealed by its own code under the key made from the Directory's cookie key, bound to the legacy owner id and the harness.
+		const sealed = await sealBlob(await vaultKey(info.keys.cookieKey), { userId: "own_ada", harness: "amp" }, new TextEncoder().encode(apiKey));
+		await admin.query("INSERT INTO pim_ops.legacy_rows (owner_id, source, table_name, pk, row) VALUES ($1,'Pim:own_ada','pim_coding_vault','amp',$2)", [ADA, JSON.stringify({ sealed: { $b64: Buffer.from(sealed).toString("base64") }, harness: "amp", version: 3, updated_at: 1, byte_length: apiKey.length })]);
+		const vault = new ForgeVault(admin as never, appKeys);
+		expect(await vault.loadApiKey(ADA, "amp")).toBeNull();
+		const report = await promoteToLive(admin, promoteOptions());
+		expect(report.domain["coding credentials"]).toBe(1);
+		expect(await vault.loadApiKey(ADA, "amp")).toBe(apiKey);
+		const stored = (await admin.query("SELECT version, sealed FROM pim_forge.forge_vault WHERE owner_id = $1 AND harness = 'amp'", [ADA])).rows[0];
+		expect(Buffer.from(stored.sealed).includes(Buffer.from(apiKey))).toBe(false);
+		// Again, and after the person entered another key: nothing changes.
+		await promoteToLive(admin, promoteOptions());
+		expect((await admin.query("SELECT version, sealed FROM pim_forge.forge_vault WHERE owner_id = $1 AND harness = 'amp'", [ADA])).rows[0]).toEqual(stored);
+		const newer = `${HARNESS_API_KEYS.amp.prefix}${"n".repeat(40)}`;
+		await new ForgeVault(admin as never, appKeys).saveApiKey(ADA, "amp", newer);
+		await promoteToLive(admin, promoteOptions());
+		expect(await new ForgeVault(admin as never, appKeys).loadApiKey(ADA, "amp")).toBe(newer);
 	});
 
 	it("boots real processes that sign in with an imported passkey and read imported forked chats", async () => {

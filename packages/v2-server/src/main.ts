@@ -11,7 +11,7 @@ import pg from "pg";
 import { createHost, type Host } from "./host.ts";
 import { migrateAll } from "./migrate.ts";
 import { markRestored, postRestoreSafetyPass, runnerMayStart } from "@pim/v2-ops/backup/reconcile";
-import { promoteAgentIcons, promoteToLive } from "./migration-bridge.ts";
+import { promoteAgentIcons, promoteCodingVault, promoteToLive } from "./migration-bridge.ts";
 import { S3ObjectStore } from "@pim/v2-app/objects";
 import { cryptoFromEnv } from "@pim/v2-ops/cli/common";
 import { FsObjectStore } from "@pim/v2-ops/migration/objects";
@@ -78,6 +78,23 @@ export async function backfillIconsCommand(env: Env) {
 	}
 }
 
+/**
+ * `backfill-coding-vault`: carries v1's coding credentials (Amp, Codex, Mistral Vibe) into a database that was promoted before the promotion did. Reads `PIM_DATABASE_URL` and the `PIM_KEK_*` keys the migrator already has; safe to run again, and it never replaces a credential entered since.
+ */
+export async function backfillCodingVaultCommand(env: Env) {
+	const app = keyringFromProcessEnv(env);
+	if (!env.PIM_DATABASE_URL || !app) throw new Error("PIM_DATABASE_URL and the PIM_KEK_* keys are required to backfill the coding vault");
+	const pool = new pg.Pool({ connectionString: env.PIM_DATABASE_URL, max: 2 });
+	const domain = { counts: {} as Record<string, number>, skipped: [] as string[] };
+	try {
+		const ops = cryptoFromEnv(env as NodeJS.ProcessEnv);
+		for (const r of (await pool.query("SELECT DISTINCT owner_id FROM pim_ops.legacy_rows WHERE table_name = 'pim_coding_vault' ORDER BY owner_id")).rows) await promoteCodingVault(pool, r.owner_id as string, { ops, app }, domain);
+		return domain;
+	} finally {
+		await pool.end();
+	}
+}
+
 /** Starts the roles `command` names in this process. */
 export async function startProcess(command: string, env: Env, hooks: Hooks = {}): Promise<Process> {
 	if (!(PROCESS_ROLES as readonly string[]).includes(command)) throw new Error(`Unknown role ${command}; one of migrate, ${PROCESS_ROLES.join(", ")}`);
@@ -130,6 +147,10 @@ export async function main(argv = process.argv.slice(2), env: Env = process.env)
 	}
 	if (command === "backfill-icons") {
 		console.log(JSON.stringify({ event: "pim.backfill_icons", ...(await backfillIconsCommand(env)) }));
+		return;
+	}
+	if (command === "backfill-coding-vault") {
+		console.log(JSON.stringify({ event: "pim.backfill_coding_vault", ...(await backfillCodingVaultCommand(env)) }));
 		return;
 	}
 	if (command === "post-restore") {

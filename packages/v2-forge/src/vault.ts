@@ -123,6 +123,11 @@ export class ForgeVault extends CodingVault {
 		return this.backend.write(userId, harness, sealed, plaintext.byteLength, expectedVersion);
 	}
 
+	/** Seals `plaintext` (an archive or an API key, as v1 kept it) as this person's entry for `harness`, only when there is none yet: a credential entered since is never overwritten. True when written. */
+	async adopt(userId: string, harness: CodingVaultKey, plaintext: Uint8Array): Promise<boolean> {
+		return (await this.sealRaw(userId, harness, plaintext, 0)).ok;
+	}
+
 	override async load(userId: string, harness: LoginHarness): Promise<VaultEntry> {
 		if (!isLoginHarness(harness)) throw new Error("No such coding harness login");
 		const o = await this.openRaw(userId, harness, true);

@@ -33,6 +33,10 @@ import { importLegacySpace, type LegacySpace } from "@pim/v2-runtime/splitter";
 import { PgPiStorage } from "@pim/v2-runtime/storage";
 import type { Pool, PoolClient } from "pg";
 import { randomBytes, randomUUID } from "node:crypto";
+import { openBlob, vaultKey } from "@pim/coding/vault/crypto";
+import { base64UrlDecode } from "@pim/shared/encoding";
+import { type CodingVaultKey, HARNESSES } from "@pim/shared/harnesses";
+import { ForgeVault } from "@pim/v2-forge/vault";
 
 export type PromoteOptions = {
 	/** The relying party id of the new deployment: a passkey works only under the hostname it was made for. */
@@ -824,6 +828,37 @@ async function promoteDeployment(pool: Pool, options: PromoteOptions, d: Domain)
 	}
 }
 
+/**
+ * The coding credentials v1 kept sealed in `pim_coding_vault` (one row per harness in each space's Pim object), resealed into `pim_forge.forge_vault` under the
+ * application's keys. v1 sealed each under a key HKDF-derived from the Directory's `cookie_key` (kept in the landing as a secret of the deployment), bound to the
+ * person's legacy owner id and the harness. A harness that already has a v2 entry is left alone, so this can be run again and never overwrites a credential entered since.
+ * No plaintext leaves this function; a row that does not open is reported by owner and harness only.
+ */
+export async function promoteCodingVault(pool: Pool, owner: string, crypto: { ops: OpsCrypto; app: KeyringCrypto }, d: Domain): Promise<void> {
+	const legacyId = (await pool.query("SELECT legacy_id FROM pim_ops.owner_map WHERE owner_id = $1", [owner])).rows[0]?.legacy_id as string | undefined;
+	const rows = (await pool.query("SELECT row FROM pim_ops.legacy_rows WHERE owner_id = $1 AND table_name = 'pim_coding_vault' AND source LIKE 'Pim:%' ORDER BY pk", [owner])).rows.map((r) => r.row as Record<string, any>).filter((r) => r.sealed?.$b64 && typeof r.harness === "string");
+	if (!legacyId || rows.length === 0) return;
+	const ref = (await pool.query("SELECT row FROM pim_ops.legacy_rows WHERE owner_id = '_deployment' AND table_name = 'directory_meta' AND pk = 'cookie_key'")).rows[0]?.row as { value?: { $secret?: string } } | undefined;
+	const name = ref?.value?.$secret;
+	const found = name ? (await pool.query("SELECT envelope FROM pim_ops.secret_envelopes WHERE owner_id = '_deployment' AND name = $1", [name])).rows[0] : undefined;
+	if (!found) {
+		d.skipped.push(`coding credentials of ${owner}: the v1 Directory key was not found, so they were not carried`);
+		return;
+	}
+	const key = await vaultKey(base64UrlDecode(crypto.ops.open(found.envelope, ["_deployment", name!, "meta"]).toString()));
+	const vault = new ForgeVault(pool as never, crypto.app);
+	for (const row of rows) {
+		const harness = row.harness as CodingVaultKey;
+		if (harness !== "amp-http-m2m" && !(HARNESSES as readonly string[]).includes(harness)) continue;
+		try {
+			const plaintext = await openBlob(key, { userId: legacyId, harness }, new Uint8Array(Buffer.from(row.sealed.$b64, "base64")));
+			bump(d, "coding credentials", (await vault.adopt(owner, harness, plaintext)) ? 1 : 0);
+		} catch {
+			d.skipped.push(`coding credential ${harness} of ${owner}: it did not open under the v1 key`);
+		}
+	}
+}
+
 /** Promotes every tenant of the landing; the owners done. Safe to run again: what is already in place is left as it is. */
 export async function promoteToLive(pool: Pool, options: PromoteOptions): Promise<PromoteReport> {
 	const runtime = new RuntimeDb(pool);
@@ -854,6 +889,7 @@ export async function promoteToLive(pool: Pool, options: PromoteOptions): Promis
 			await promoteAgentIcons(pool, owner, (key, bytes, type) => put(key, bytes, type), domain);
 		}
 		report.forgeThreads += await promoteForge(pool, owner);
+		if (options.crypto) await promoteCodingVault(pool, owner, options.crypto, domain);
 		report.owners.push(owner);
 	}
 	await promoteDeployment(pool, options, { counts: report.domain, skipped: report.skipped });

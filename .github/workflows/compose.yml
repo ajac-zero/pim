@@ -1,0 +1,38 @@
+# Pim v2 as it is deployed: builds deploy/Dockerfile.v2, boots deploy/compose (Caddy, PostgreSQL behind PgBouncer, NATS, SeaweedFS and every
+# role), then signs up, chats, approves a tool, stores an object, and backs up and restores (scripts/v2-compose/smoke.sh). It takes about two
+# minutes, so it runs after a push to main rather than in CI on every change; publish.yml moves `edge` only once it and CI have both succeeded.
+# Run it on a branch from the Actions tab.
+name: Compose
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: compose-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      # The image smoke.sh boots, built with the layer cache publish.yml keeps for the same Dockerfile, so an unchanged dependency layer is not rebuilt.
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile.v2
+          tags: pim:v2-smoke
+          load: true
+          cache-from: |
+            type=gha,scope=compose
+            type=gha,scope=pim
+          cache-to: type=gha,mode=max,scope=compose
+      - run: scripts/v2-compose/smoke.sh
+        env:
+          PIM_SMOKE_PREBUILT: "1"
+      - if: failure()
+        run: deploy/compose/pim.sh logs --no-color --tail 200

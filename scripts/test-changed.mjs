@@ -3,7 +3,7 @@
 // suite every time: `pnpm test:changed`. It diffs against origin/main (HEAD~1 when there is no
 // origin/main, or the ref given as an argument) and picks what to run: the whole suite when
 // configuration changed or nothing maps to a test, otherwise vitest's own --changed over the
-// root project for the Worker's tests, plus the web app's tests when web/ or a package it imports changed, the
+// root project's Node tests (not the Worker's own, v1's, which nothing runs unasked), plus the web app's tests when web/ or a package it imports changed, the
 // tests of each package under packages/ a change is in, and the daemons' tests when one of them changed. The whole
 // suite itself runs in GitHub CI on the pushed branch, never locally (AGENTS.md).
 import { spawnSync } from "node:child_process";
@@ -89,8 +89,8 @@ function main() {
 		process.exit(run("pnpm", ["test"]) ? 0 : 1);
 	}
 	if (plan.root) {
-		console.log(`Running the root project's tests changed since ${base}.`);
-		if (!run("pnpm", ["exec", "vitest", "run", "--changed", base])) process.exit(1);
+		console.log(`Running the root project's Node tests changed since ${base}.`);
+		if (!run("pnpm", ["exec", "vitest", "run", "--project", "node", "--changed", base])) process.exit(1);
 	}
 	for (const name of plan.packages) {
 		console.log(`Running @pim/${name}'s tests.`);

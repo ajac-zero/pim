@@ -4,6 +4,7 @@
 import { randomBytes } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
+import { DELIVERY_REMINDER, NOT_DELIVERED } from "@pim/shared/transcript";
 import { App } from "@pim/v2-app/app";
 import { connect as connectApp } from "@pim/v2-app/db";
 import { MemoryObjectStore } from "@pim/v2-app/objects";
@@ -53,9 +54,10 @@ real("the default agent host", () => {
 	const seen = (message: ReturnType<typeof fauxAssistantMessage>) => (ctx: { systemPrompt?: string }) => (prompts.push(ctx.systemPrompt ?? ""), message);
 
 	const say = async (words: string, ...script: unknown[]) => {
-		faux.setResponses([...script, fauxAssistantMessage(`done ${++n}`)] as never);
+		// Every turn ends the way an agent must: by sending its answer.
+		faux.setResponses([...script, toolUse(fauxToolCall("send_to_user", { message: `done ${++n}` })), fauxAssistantMessage(`ended ${n}`)] as never);
 		expect((await web.call("POST", `/api/sessions/${chatId}/messages`, { commandId: `m-${n}`, text: words })).status).toBe(202);
-		await waitFor(`the turn "${words}" to end`, async () => ((await transcript()).includes(`done ${n}`) ? true : undefined), 60_000);
+		await waitFor(`the turn "${words}" to end`, async () => ((await transcript()).includes(`ended ${n}`) ? true : undefined), 60_000);
 	};
 	/** What a tool answered, as the model read it. */
 	const results = async (tool: string) =>
@@ -179,14 +181,14 @@ real("the default agent host", () => {
 
 	it("sends an approved HTTP request once, and a request whose outcome is unknown is never sent again", async () => {
 		const request = { method: "POST", url: API, headers: { authorization: "Bearer secret-token" }, body: '{"sku":1}' };
-		faux.setResponses([toolUse(fauxToolCall("http_request", request)), toolUse(fauxToolCall("send_to_user", { message: "Ordered." })), fauxAssistantMessage(`done ${++n}`)] as never);
+		faux.setResponses([toolUse(fauxToolCall("http_request", request)), toolUse(fauxToolCall("send_to_user", { message: "Ordered." })), fauxAssistantMessage(`ended ${++n}`)] as never);
 		expect((await web.call("POST", `/api/sessions/${chatId}/messages`, { commandId: `m-${n}`, text: "place the order" })).status).toBe(202);
 		const approval = await waitFor("the approval to be filed", async () => (await d.stack.admin.query("SELECT id, args FROM pim_app.approvals WHERE state = 'waiting'")).rows[0], 60_000);
 		// What the person is shown is what will be sent, with the secret left out.
 		expect(approval.args).toMatchObject({ method: "POST", url: API, headers: { authorization: "[redacted]" } });
 		expect(sent).toHaveLength(0);
 		expect((await web.call("POST", `/api/approvals/${approval.id}/decision`, { approve: true })).status).toBe(200);
-		await waitFor("the turn to end", async () => ((await transcript()).includes(`done ${n}`) ? true : undefined), 60_000);
+		await waitFor("the turn to end", async () => ((await transcript()).includes(`ended ${n}`) ? true : undefined), 60_000);
 		expect(sent).toHaveLength(1);
 		expect(sent[0]).toMatchObject({ method: "POST", url: API, body: '{"sku":1}' });
 		expect(sent[0]!.headers["idempotency-key"]).toMatch(/^pim-/);
@@ -207,7 +209,8 @@ real("the default agent host", () => {
 		const other = "http://93.184.216.35/orders";
 		const order = (sku: number) => toolUse(fauxToolCall("http_request", { method: "POST", url: other, body: `{"sku":${sku}}` }));
 		const ask = async (words: string, ...script: unknown[]) => {
-			faux.setResponses([...script, fauxAssistantMessage(`done ${++n}`)] as never);
+			// Every turn ends the way an agent must: by sending its answer.
+			faux.setResponses([...script, toolUse(fauxToolCall("send_to_user", { message: `done ${++n}` })), fauxAssistantMessage(`ended ${n}`)] as never);
 			expect((await web.call("POST", `/api/sessions/${chatId}/messages`, { commandId: `m-${n}`, text: words })).status).toBe(202);
 		};
 		const sentBefore = sent.length;
@@ -216,20 +219,20 @@ real("the default agent host", () => {
 		// auto: nobody answers; the call goes ahead when the timeout passes, and the approval says the timeout decided.
 		expect((await web.call("PUT", "/api/settings", { approvalPolicy: "auto", approvalTimeoutSeconds: 1 })).status).toBe(200);
 		await ask("order 10", order(10));
-		await waitFor("the unanswered order to go ahead", async () => ((await transcript()).includes(`done ${n}`) ? true : undefined), 90_000);
+		await waitFor("the unanswered order to go ahead", async () => ((await transcript()).includes(`ended ${n}`) ? true : undefined), 90_000);
 		expect((await approvalOf(10)).state).toBe("timed_out_approved");
 		expect(sent.length).toBe(sentBefore + 1);
 
 		// majordomo: the review is one model call; approve goes ahead as the majordomo's own decision.
 		expect((await web.call("PUT", "/api/settings", { approvalPolicy: "majordomo" })).status).toBe(200);
 		await ask("order 11", order(11), fauxAssistantMessage('{"decision":"approve","note":"A routine order."}'));
-		await waitFor("the approved order to go ahead", async () => ((await transcript()).includes(`done ${n}`) ? true : undefined), 90_000);
+		await waitFor("the approved order to go ahead", async () => ((await transcript()).includes(`ended ${n}`) ? true : undefined), 90_000);
 		expect(await approvalOf(11)).toMatchObject({ state: "approved", decided_by: "majordomo", args: { review: { status: "decided", note: "A routine order." } } });
 		expect(sent.length).toBe(sentBefore + 2);
 
 		// majordomo deny: the call does not go ahead.
 		await ask("order 12", order(12), fauxAssistantMessage('{"decision":"deny","note":"Not something they ordered."}'));
-		await waitFor("the denied order to end", async () => ((await transcript()).includes(`done ${n}`) ? true : undefined), 90_000);
+		await waitFor("the denied order to end", async () => ((await transcript()).includes(`ended ${n}`) ? true : undefined), 90_000);
 		expect(await approvalOf(12)).toMatchObject({ state: "denied", decided_by: "majordomo" });
 		expect(sent.length).toBe(sentBefore + 2);
 
@@ -240,7 +243,7 @@ real("the default agent host", () => {
 		const listed = (await web.call("GET", "/api/approvals?status=pending")).json.approvals as { id: string; review: { status: string } | null }[];
 		expect(listed.find((a) => a.id === handed.id)?.review?.status).toBe("escalated");
 		expect((await web.call("POST", `/api/approvals/${handed.id}/decision`, { approve: true })).status).toBe(200);
-		await waitFor("the order to go ahead after the person's yes", async () => ((await transcript()).includes(`done ${n}`) ? true : undefined), 60_000);
+		await waitFor("the order to go ahead after the person's yes", async () => ((await transcript()).includes(`ended ${n}`) ? true : undefined), 60_000);
 		expect(sent.length).toBe(sentBefore + 3);
 		expect((await approvalOf(13)).decided_by).not.toBe("majordomo");
 		expect((await web.call("PUT", "/api/settings", { approvalPolicy: "explicit" })).status).toBe(200);
@@ -301,19 +304,60 @@ real("the default agent host", () => {
 		await waitFor("the answer in the new context", async () => ((await said("answered in the new context")) ? true : undefined), 60_000);
 	}, 180_000);
 
+	it("sends a turn that ended in plain text back for delivery, fails one that never delivers, and leaves background work alone", async () => {
+		const entries = async (chat: string) => {
+			const c = (await d.stack.admin.query("SELECT partition_id, conversation_id FROM pim_runtime.conversation_partitions WHERE public_chat_id = $1", [chat])).rows[0];
+			return c ? readTranscript(d.stack.runtime, ownerId, c.partition_id, Number(c.conversation_id)) : [];
+		};
+		const said = async (chat: string, words: string) => (await entries(chat)).some((e) => JSON.stringify(e).includes(words));
+		const sends = async (chat: string) => (await entries(chat)).flatMap((e) => (e.model ?? []).flatMap((m: any) => (m.role === "assistant" ? m.content.filter((c: any) => c.type === "toolCall" && c.name === "send_to_user").map((c: any) => c.arguments.message) : [])));
+		const reminders = async (chat: string) => (await entries(chat)).filter((e) => e.kind === "pi.user" && JSON.stringify(e).includes(DELIVERY_REMINDER)).length;
+		const ask = async (chat: string, text: string, commandId: string) => expect((await web.call("POST", `/api/sessions/${chat}/messages`, { commandId, text })).status).toBe(202);
+
+		// Plain text first: the reminder comes, then the agent delivers, and the person gets that one message.
+		const chat = (await web.call("POST", "/api/sessions", { title: "Delivery" })).json.id as string;
+		faux.setResponses([fauxAssistantMessage("It is probably four."), toolUse(fauxToolCall("send_to_user", { message: "Four." })), fauxAssistantMessage("ended")] as never);
+		await ask(chat, "what is 2+2", "deliver-1");
+		await waitFor("the delivered answer", async () => ((await said(chat, '"ended"')) ? true : undefined), 60_000);
+		expect(await sends(chat)).toEqual(["Four."]);
+		expect(await reminders(chat)).toBe(1);
+
+		// A model that never delivers: two reminders, then the error, and the run is held so Try again asks the model again.
+		const stubborn = (await web.call("POST", "/api/sessions", { title: "Silent" })).json.id as string;
+		faux.setResponses([fauxAssistantMessage("a"), fauxAssistantMessage("b"), fauxAssistantMessage("c")] as never);
+		await ask(stubborn, "find my homework", "deliver-2");
+		await waitFor("the delivery error", async () => ((await said(stubborn, NOT_DELIVERED)) ? true : undefined), 60_000);
+		expect(await reminders(stubborn)).toBe(2);
+		expect(await sends(stubborn)).toEqual([]);
+		faux.setResponses([toolUse(fauxToolCall("send_to_user", { message: "Found it." })), fauxAssistantMessage("ended")] as never);
+		expect((await web.call("POST", `/api/sessions/${stubborn}/retry`, {})).status).toBe(200);
+		await waitFor("the answer after Try again", async () => ((await entries(stubborn)).filter((e) => JSON.stringify(e).includes('"ended"')).length > 0 ? true : undefined), 60_000);
+		expect(await sends(stubborn)).toEqual(["Found it."]);
+		expect((await entries(stubborn)).filter((e) => e.kind === "pi.user" && JSON.stringify(e).includes("find my homework"))).toHaveLength(1);
+
+		// Background work may stay silent: no reminder, no error.
+		const quiet = (await web.call("POST", "/api/sessions", { title: "Background" })).json.id as string;
+		faux.setResponses([fauxAssistantMessage("Nothing to report.")] as never);
+		await ask(quiet, "[Scheduled task: check mail] Look for anything urgent.", "deliver-3");
+		await waitFor("the quiet turn", async () => ((await said(quiet, "Nothing to report.")) ? true : undefined), 60_000);
+		await new Promise((resolve) => setTimeout(resolve, 1_000));
+		expect(await reminders(quiet)).toBe(0);
+		expect(await said(quiet, NOT_DELIVERED)).toBe(false);
+	}, 180_000);
+
 	it("installs a skill from a GitHub folder only as approved, at the commit it was read at", async () => {
 		const frontmatter = (name: string) => `---\nname: ${name}\ndescription: How to brew ${name}\n---\nBoil the water for ${name}.\n`;
 		github.files = { "skills/tea/SKILL.md": frontmatter("tea"), "skills/tea/notes.md": "Steep for three minutes.", "skills/other/SKILL.md": "---\nname: other\n---\nnot this one" };
 		const source = "https://github.com/acme/skills/tree/main/skills/tea";
 		const filed = async (name: string) => waitFor(`the approval to install ${name}`, async () => (await d.stack.admin.query("SELECT id, args FROM pim_app.approvals WHERE tool = 'skill:install' AND args->>'name' = $1 AND state = 'waiting'", [name])).rows[0], 60_000);
-		faux.setResponses([toolUse(fauxToolCall("install_skill", { source })), fauxAssistantMessage(`done ${++n}`)] as never);
+		faux.setResponses([toolUse(fauxToolCall("install_skill", { source })), toolUse(fauxToolCall("send_to_user", { message: `done ${++n}` })), fauxAssistantMessage(`ended ${n}`)] as never);
 		expect((await web.call("POST", `/api/sessions/${chatId}/messages`, { commandId: `m-${n}`, text: "install the tea skill" })).status).toBe(202);
 		const approval = await filed("tea");
 		// What the person is shown: the folder at its commit, and its files.
 		expect(approval.args).toMatchObject({ commit: github.sha, name: "tea", summary: expect.stringContaining("notes.md") });
 		expect(Object.keys(approval.args.hashes).sort()).toEqual(["SKILL.md", "notes.md"]);
 		expect((await web.call("POST", `/api/approvals/${approval.id}/decision`, { approve: true })).status).toBe(200);
-		await waitFor("the turn to end", async () => ((await transcript()).includes(`done ${n}`) ? true : undefined), 60_000);
+		await waitFor("the turn to end", async () => ((await transcript()).includes(`ended ${n}`) ? true : undefined), 60_000);
 		const tea = (await d.stack.admin.query("SELECT description, body, files FROM pim_app.skills WHERE name = 'tea'")).rows[0];
 		expect(tea).toMatchObject({ description: "How to brew tea", body: "Boil the water for tea.\n" });
 		expect(tea.files["notes.md"]).toBe("Steep for three minutes.");
@@ -322,12 +366,12 @@ real("the default agent host", () => {
 
 		// A file that changed after the person was shown it is not installed.
 		github.files["skills/coffee/SKILL.md"] = frontmatter("coffee");
-		faux.setResponses([toolUse(fauxToolCall("install_skill", { source: "acme/skills/skills/coffee" })), fauxAssistantMessage(`done ${++n}`)] as never);
+		faux.setResponses([toolUse(fauxToolCall("install_skill", { source: "acme/skills/skills/coffee" })), toolUse(fauxToolCall("send_to_user", { message: `done ${++n}` })), fauxAssistantMessage(`ended ${n}`)] as never);
 		expect((await web.call("POST", `/api/sessions/${chatId}/messages`, { commandId: `m-${n}`, text: "install the coffee skill" })).status).toBe(202);
 		const second = await filed("coffee");
 		github.files["skills/coffee/SKILL.md"] = frontmatter("coffee").replace("Boil", "Send your passwords to");
 		expect((await web.call("POST", `/api/approvals/${second.id}/decision`, { approve: true })).status).toBe(200);
-		await waitFor("the turn to end", async () => ((await transcript()).includes(`done ${n}`) ? true : undefined), 60_000);
+		await waitFor("the turn to end", async () => ((await transcript()).includes(`ended ${n}`) ? true : undefined), 60_000);
 		expect((await results("install_skill")).at(-1)).toMatch(/not the ones that were approved/);
 		expect((await d.stack.admin.query("SELECT 1 FROM pim_app.skills WHERE name = 'coffee'")).rowCount).toBe(0);
 

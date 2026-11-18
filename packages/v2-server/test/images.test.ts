@@ -81,9 +81,9 @@ real("generate_image", () => {
 	};
 	const draw = async (prompt: string, extra: Record<string, unknown> = {}) => {
 		const id = ++n;
-		faux.setResponses([toolUse(fauxToolCall("generate_image", { prompt, ...extra })), fauxAssistantMessage(`done ${id}`)] as never);
+		faux.setResponses([toolUse(fauxToolCall("generate_image", { prompt, ...extra })), toolUse(fauxToolCall("send_to_user", { message: `done ${id}` })), fauxAssistantMessage(`ended ${id}`)] as never);
 		expect((await web.call("POST", `/api/sessions/${chatId}/messages`, { commandId: `m-${id}`, text: prompt })).status).toBe(202);
-		await waitFor(`turn ${id} to end`, async () => ((await transcript()).includes(`done ${id}`) ? true : undefined), 60_000);
+		await waitFor(`turn ${id} to end`, async () => ((await transcript()).includes(`ended ${id}`) ? true : undefined), 60_000);
 		const results = (JSON.parse(await transcript()) as { model?: { role: string; toolName?: string; content: { text?: string }[] }[] }[]).flatMap((e) => (e.model ?? []).filter((m) => m.role === "toolResult" && m.toolName === "generate_image").map((m) => m.content.map((c) => c.text ?? "").join("")));
 		return results[results.length - 1]!;
 	};

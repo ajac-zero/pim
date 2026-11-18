@@ -1,4 +1,5 @@
 import { codingWakeText } from "@pim/shared/coding-wake";
+import { DELIVERY_REMINDER, NOT_DELIVERED } from "@pim/shared/transcript";
 import { describe, expect, it } from "vitest";
 import { codingNoticeOf, EMPTY_STREAM } from "~/lib/pim-view";
 import {
@@ -98,6 +99,26 @@ describe("a v2 chat drawn by the same reducer as v1's", () => {
     expect(
       entryOf({ id: "7", role: "notice", parts: [], timestamp: 0 }),
     ).toMatchObject({ kind: "pi.reset" });
+  });
+
+  it("leaves the harness's delivery reminders out of the chat and shows an undelivered reply as the error", () => {
+    const failed: V2Message = {
+      ...assistant(4, ""),
+      parts: [],
+      stopReason: "error",
+      error: NOT_DELIVERED,
+    };
+    const stream = streamOf([
+      user(1, "find my homework"),
+      assistant(2, "Found it."),
+      user(3, DELIVERY_REMINDER),
+      failed,
+    ]);
+    expect(JSON.stringify(stream.view.entries)).not.toContain(
+      "Delivery required",
+    );
+    expect(JSON.stringify(stream.view.entries)).toContain("find my homework");
+    expect(JSON.stringify(stream)).toContain(NOT_DELIVERED);
   });
 
   it("builds the view of a snapshot: messages, a compaction summary, and an answer still being written", () => {

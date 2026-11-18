@@ -46,10 +46,10 @@ real("an agent on a paired computer", () => {
 	const results = async (tool: string) =>
 		(JSON.parse(await transcript()) as { model?: { role: string; toolName?: string; content: { text?: string }[] }[] }[]).flatMap((e) => (e.model ?? []).filter((m) => m.role === "toolResult" && m.toolName === tool).map((m) => m.content.map((c) => c.text ?? "").join("")));
 	const ask = async (words: string, ...script: unknown[]) => {
-		faux.setResponses([...script, fauxAssistantMessage(`done ${++n}`)] as never);
+		faux.setResponses([...script, toolUse(fauxToolCall("send_to_user", { message: `done ${++n}` })), fauxAssistantMessage(`ended ${n}`)] as never);
 		expect((await web.call("POST", `/api/sessions/${chatId}/messages`, { commandId: `m-${n}`, text: words })).status).toBe(202);
 		const mine = n;
-		return () => waitFor(`the turn "${words}" to end`, async () => ((await transcript()).includes(`done ${mine}`) ? true : undefined), 60_000);
+		return () => waitFor(`the turn "${words}" to end`, async () => ((await transcript()).includes(`ended ${mine}`) ? true : undefined), 60_000);
 	};
 	const connected = (online: boolean) => waitFor(`the computer to be ${online ? "online" : "offline"}`, async () => ((await web.call("GET", "/api/computer")).json.state === (online ? "online" : "offline") ? true : undefined), 30_000);
 	const startDaemon = (...extra: string[]) => {
@@ -175,12 +175,13 @@ real("an agent on a paired computer", () => {
 		faux.setResponses([
 			(context: { messages: { role: string; content: string | Seen }[] }) => {
 				asked = context.messages.flatMap((m) => (m.role === "user" && Array.isArray(m.content) ? m.content.filter((part) => part.type === "image") : []));
-				return fauxAssistantMessage(`done ${mine}`);
+				return toolUse(fauxToolCall("send_to_user", { message: `done ${mine}` }));
 			},
+			fauxAssistantMessage(`ended ${mine}`),
 		] as never);
 		const content = [{ type: "text", text: "What is this?" }, { type: "image", data: photo.toString("base64"), mimeType: "image/jpeg" }];
 		expect((await web.call("POST", `/api/sessions/${chatId}/messages`, { commandId: `m-${mine}`, operationId: `m-${mine}`, text: "What is this?", content })).status).toBe(202);
-		await waitFor("the turn with the photo to end", async () => ((await transcript()).includes(`done ${mine}`) ? true : undefined), 60_000);
+		await waitFor("the turn with the photo to end", async () => ((await transcript()).includes(`ended ${mine}`) ? true : undefined), 60_000);
 		expect(asked).toHaveLength(1);
 		expect(asked[0]!.mimeType).toBe("image/jpeg");
 		expect(fitted(asked[0]!).length).toBeLessThan(750_000);

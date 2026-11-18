@@ -20,7 +20,8 @@ import { anthropicMessagesApi } from "@earendil-works/pi-ai/api/anthropic-messag
 import { createProvider } from "@earendil-works/pi-ai/models";
 import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
 import { googleProvider } from "@earendil-works/pi-ai/providers/google";
-import { createRegistry, section, type HarnessOptions } from "@earendil-works/pi-durable";
+import { createRegistry, defineExtension, GenerationTask, hook, section, type HarnessOptions } from "@earendil-works/pi-durable";
+import { deliveryOwed, DELIVERY_REMINDER, enforceDelivery, LENGTH_REMINDER, ROOM_POST } from "@pim/shared/transcript";
 import type { App } from "@pim/v2-app/app";
 import type { RelayBus } from "@pim/v2-app/relay";
 import { openString, type KeyringCrypto } from "@pim/v2-app/crypto";
@@ -34,6 +35,7 @@ import { hostopsExtension } from "./hostops/tools.ts";
 import { currentOpenaiProvider } from "./openai-catalog.ts";
 import { chatgptCredentialStore, chatgptProvider, type ChatGPTRunnerOptions } from "./chatgpt-auth.ts";
 import type { ForgeParts } from "./forge-assembly.ts";
+import { mentionedAgents } from "./rooms.ts";
 import { createFailover } from "./provider-failover.ts";
 
 type Env = Record<string, string | undefined>;
@@ -358,6 +360,38 @@ export function createAgentHost(options: AgentHostOptions) {
 			? undefined
 			: { model: env.PIM_IMAGE_MODEL, codex: () => (options.crypto ? new CodexImagesClient(db, options.crypto, ownerId, env, { fetch: options.fetch, now }) : undefined), endpoints: () => imageEndpoints(db, options.crypto, env, ownerId) };
 
+	/**
+	 * Enforces delivery: a request that owes the person a reply (`deliveryOwed`) gets a reminder when the agent stops without `send_to_user`, and after two the run fails with
+	 * NOT_DELIVERED, which holds it for the person's Try again. In a group chat, what others said that was not for this agent leaves what it owes as it was.
+	 */
+	const deliveryHook = (ownerId: string) =>
+		hook(GenerationTask, {
+			async beforeRequest({ messages }: { messages: any[] }, api: any, context: any) {
+				const chat = await publicChatId(ownerId, api.conversationId);
+				const room = chat ? (await db.read<{ r: { role: "host" | "seat"; host: { id: string; name: string } | null; members: { id: string; name: string }[] } | null }>(ownerId, "SELECT pim_app.runner_room($1, $2) AS r", [ownerId, chat]).catch(() => ({ rows: [] as never[] }))).rows[0]?.r : undefined;
+				const self = room ? (room.role === "host" ? (room.host?.id ?? "host") : (await readContext(ownerId, chat).catch(() => undefined))?.agent?.id) : undefined;
+				const everyone = room ? [room.host ?? { id: "host", name: "Pim" }, ...room.members] : [];
+				const skip = (input: string) => {
+					if (!room) return false;
+					if (input.startsWith("[Room]")) return true;
+					const named = mentionedAgents(input, everyone);
+					if (self !== undefined && named.includes(self)) return false;
+					// What the person says to no one in particular is for the host.
+					return ROOM_POST.test(input) || room.role === "seat" || named.length > 0;
+				};
+				await api.memo("delivery", deliveryOwed(messages, skip), context);
+			},
+			async afterResponse(answer: any, api: any, context: any) {
+				const state = await api.memo("delivery", context);
+				if (state?.required) enforceDelivery(answer, state);
+			},
+			async onYield(answer: any, api: any, context: any) {
+				const state = await api.memo("delivery", context);
+				// Continuations make new generation tasks, so the reminders are counted in the transcript, not in the task.
+				if (state?.required) return { continue: answer.stopReason === "length" ? LENGTH_REMINDER : DELIVERY_REMINDER };
+			},
+		} as never);
+
 	const harnessOptions = async (partition: PartitionContext): Promise<HarnessOptions> => {
 		const ownerId = partition.ownerId;
 		const models = await refreshCatalog(ownerId);
@@ -406,6 +440,8 @@ export function createAgentHost(options: AgentHostOptions) {
 				return c.contacts.length === 0 ? undefined : `Agents you can hand work to with delegate:\n${c.contacts.map((a) => `- ${a.id}: ${a.name}${a.about ? ` — ${a.about}` : ""}`).join("\n")}`;
 			}),
 		]));
+		// Only what send_to_user sends reaches the person, so a turn that ends in plain text is sent back for delivery, and after two reminders it fails (v1's messaging extension).
+		registry.install(defineExtension({ name: "delivery", hooks: [deliveryHook(ownerId)] }));
 		// The admin's majordomo may ask the host daemon for operations, each after a person approves it (`./hostops/`).
 		const hostops = await hostopsExtension({ ownerId, partitionId: partition.partitionId, app: options.app, chatOf: deps.chatOf });
 		if (hostops) registry.install(hostops);

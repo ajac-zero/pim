@@ -362,3 +362,37 @@ describe("run guard and watchdog", () => {
 		await runner.stop();
 	});
 });
+
+describe("a retry after a model error", () => {
+	it("asks the model again in the held run, with the message once in the transcript", async () => {
+		const ownerId = uniqueOwner();
+		const rig = createRig(database.db, ownerId);
+		const home = await new PartitionDirectory(database.db).createPartition(ownerId, { kind: "home" });
+		// A failure no retry cures holds the run, as the agent host's settings do.
+		(rig.settings.retry as Record<string, unknown>).suspend = () => true;
+		rig.faux.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: "422 GCPVertexAIBackendError" }), fauxAssistantMessage("second time lucky")]);
+		const runner = rig.runner({ idleUnloadMs: 60_000 });
+		await runner.start();
+		await command(runner.inbox, ownerId, home, "m1", 1, { content: "plan my week" });
+		await waitFor("the failed request to be in the transcript", async () => ((await readTranscript(database.db, ownerId, home, 1)).some((e) => JSON.stringify(e).includes("GCPVertexAIBackendError")) ? true : undefined));
+		await command(runner.inbox, ownerId, home, "r1", 1, { content: "plan my week", retry: true });
+		await waitFor("the model to answer the retry", async () => ((await readTranscript(database.db, ownerId, home, 1)).some((e) => textOf(e) === "second time lucky") ? true : undefined), 20_000);
+		expect((await readTranscript(database.db, ownerId, home, 1)).filter((e) => e.kind === "pi.user")).toHaveLength(1);
+		await runner.stop();
+	});
+
+	it("goes on with the held run when the person writes a new message instead", async () => {
+		const ownerId = uniqueOwner();
+		const rig = createRig(database.db, ownerId);
+		const home = await new PartitionDirectory(database.db).createPartition(ownerId, { kind: "home" });
+		(rig.settings.retry as Record<string, unknown>).suspend = () => true;
+		rig.faux.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: "422 GCPVertexAIBackendError" }), fauxAssistantMessage("answered both")]);
+		const runner = rig.runner({ idleUnloadMs: 60_000 });
+		await runner.start();
+		await command(runner.inbox, ownerId, home, "m1", 1, { content: "plan my week" });
+		await waitFor("the failed request to be in the transcript", async () => ((await readTranscript(database.db, ownerId, home, 1)).some((e) => JSON.stringify(e).includes("GCPVertexAIBackendError")) ? true : undefined));
+		await command(runner.inbox, ownerId, home, "m2", 1, { content: "never mind, plan the weekend" });
+		await waitFor("the model to answer", async () => ((await readTranscript(database.db, ownerId, home, 1)).some((e) => textOf(e) === "answered both") ? true : undefined), 20_000);
+		await runner.stop();
+	});
+});

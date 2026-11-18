@@ -265,11 +265,11 @@ real("the default agent host", () => {
 		// Nothing to retry in a chat that is not held.
 		const other = (await web.call("POST", "/api/sessions", { title: "Fine" })).json.id as string;
 		expect((await web.call("POST", `/api/sessions/${other}/retry`, {})).status).toBe(409);
-		// Retrying sends the person's last message again; the model answers it.
+		// The failed run is held, so retrying asks the model again where it stopped: it answers, and the message is in the transcript once.
 		faux.setResponses([toolUse(fauxToolCall("send_to_user", { message: "Four." })), fauxAssistantMessage("answered after the retry")] as never);
 		expect((await web.call("POST", `/api/sessions/${chat}/retry`, {})).status).toBe(200);
 		await waitFor("the answer after the retry", async () => ((await said("answered after the retry")) ? true : undefined), 60_000);
-		expect((await entries()).filter((e) => e.kind === "pi.user" && JSON.stringify(e).includes("what is 2+2"))).toHaveLength(2);
+		expect((await entries()).filter((e) => e.kind === "pi.user" && JSON.stringify(e).includes("what is 2+2"))).toHaveLength(1);
 		// A chat that has been answered is not held any more.
 		expect((await web.call("POST", `/api/sessions/${chat}/retry`, {})).status).toBe(409);
 

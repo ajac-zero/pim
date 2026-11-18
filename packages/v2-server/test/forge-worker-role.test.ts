@@ -214,7 +214,7 @@ real("Forge's worker role with the Gate and Maintenance", () => {
 		expect((await web.call("POST", `/api/coding/threads/${id}/seen`)).json).toEqual({ seen: true });
 		// The same start again is the same thread, over HTTP.
 		expect((await web.call("POST", "/api/coding/threads", { operationId: "role-pi", task: "Build the project", repo: REPO, harness: "pi", chat: chatId })).json).toMatchObject({ threadId: id, created: false });
-		await waitFor("the wake in the chat", async () => ((await chatHeard()).some((t) => t.includes(`Coding thread ${id} completed`)) ? true : undefined), 60_000);
+		await waitFor("the wake in the chat", async () => ((await chatHeard()).some((t) => t.includes(`[Coding thread ${id}] It finished its turn.`)) ? true : undefined), 60_000);
 		const wakes = (await d.stack.admin.query("select dedupe_key, delivered_at from pim_forge.forge_outbox where topic = 'wake' and thread_id = $1", [id])).rows;
 		expect(wakes.map((w) => w.dedupe_key)).toEqual([`coding:${id}:role-pi`]);
 		expect(wakes[0].delivered_at).toBeTruthy();
@@ -306,7 +306,7 @@ real("Forge's worker role with the Gate and Maintenance", () => {
 		const wakes = (await d.stack.admin.query("select dedupe_key from pim_forge.forge_outbox where topic = 'wake' and thread_id = $1", [id])).rows;
 		expect(wakes).toHaveLength(1);
 		expect(wakes[0].dedupe_key).toMatch(new RegExp(`^coding:${id}:role-amp$`));
-		await waitFor("the chat to hear it", async () => ((await chatHeard()).some((t) => t.includes(`Coding thread ${id} completed`)) ? true : undefined), 60_000);
+		await waitFor("the chat to hear it", async () => ((await chatHeard()).some((t) => t.includes(`[Coding thread ${id}] It finished its turn.`)) ? true : undefined), 60_000);
 		void readTranscript;
 	}, 120_000);
 

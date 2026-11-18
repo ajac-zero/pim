@@ -105,8 +105,6 @@ export function ArtifactView({
   const router = useRouter();
   const canGoBack = useCanGoBack();
   const [view, setView] = useState<"preview" | "source">("preview");
-  // A live note is written, or previewed with its drawings drawn.
-  const [noteView, setNoteView] = useState<"write" | "preview">("write");
   // Counts the times the backend was started or stopped, so the preview loads its page again.
   const [reload, setReload] = useState(0);
   // The source being edited, from the latest version; null when not editing.
@@ -345,16 +343,7 @@ export function ArtifactView({
         )}
         {draft === null ? (
           <>
-            {live ? (
-              <ModeSwitch
-                value={noteView}
-                onChange={setNoteView}
-                modes={[
-                  { mode: "write", label: t("noteWrite"), icon: Pencil },
-                  { mode: "preview", label: t("artifactPreview"), icon: Eye },
-                ]}
-              />
-            ) : (
+            {live ? null : (
               <ModeSwitch
                 value={view}
                 onChange={setView}
@@ -559,7 +548,6 @@ export function ArtifactView({
               key={artifactId}
               noteId={artifactId}
               name={account?.username ?? ""}
-              preview={noteView === "preview"}
               onVersion={(made) => {
                 void queryClient.invalidateQueries({ queryKey: ["artifacts"] });
                 onVersion(made);

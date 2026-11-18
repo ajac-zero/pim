@@ -69,7 +69,7 @@ export const coreRoutes: Route[] = [
 	}),
 	route("POST", "/api/notes/:id/edit", async ({ app, principal, json, params }) => {
 		const b = await json();
-		return ok(await app.canvas.edit(await principal(), params[0]!, Number(b.baseVersion), String(b.find ?? ""), String(b.replace ?? "")));
+		return ok(await app.canvas.edit(await principal(), params[0]!, String(b.find ?? ""), String(b.replace ?? "")));
 	}),
 	// ---- objects ----
 	route("POST", "/api/images", async ({ app, principal, bytes, req }) => ok(await app.objects.put(await principal(), { bytes: await bytes(), contentType: String(req.headers["content-type"] ?? ""), purpose: "image" }), 201)),

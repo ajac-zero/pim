@@ -125,7 +125,13 @@ export function ArtifactView({
     ...artifactBackendQuery(artifactId),
     enabled: artifact?.kind === "hosted",
   });
-  const version = v ?? artifact?.version;
+  // A note pinned at a version its history lacks, such as an old card's, opens live at the latest rather than as a missing version.
+  const version =
+    artifact?.kind === "markdown" &&
+    v !== undefined &&
+    !artifact.history.some((entry) => entry.version === v)
+      ? artifact.version
+      : (v ?? artifact?.version);
   // A note on its latest version is its live text, which the person and the agent write in together; a version
   // newer than the cached history is one just made, which the editor already shows.
   const live =

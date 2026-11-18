@@ -84,38 +84,35 @@ for (const [label, make] of [["memory store", () => f.store as ObjectStore], ["S
 }
 
 describe("Canvas", () => {
-	it("keeps live typing when an agent edits at the current version, and refuses an edit based on a stale one", async () => {
+	it("applies an agent's edit to the live text whatever version it read, keeping what was typed, and refuses it only when find is not there exactly once", async () => {
 		const canvas = new Canvas(f.db, f.store);
-		const note = await canvas.create(u.principal, "plan", "Hello world");
-		let { text, version } = await canvas.read(u.account.ownerId, note);
-		expect([text, version]).toEqual(["Hello world", 1]);
+		const note = await canvas.create(u.principal, "plan", "Hello world, world");
+		await canvas.edit(u.principal, note, "world,", "there,");
+		expect((await canvas.read(u.account.ownerId, note)).text).toBe("Hello there, world");
 
-		// A person types at the end in a live editor holding a copy of the document.
+		// A person types at the end in a live editor holding a copy of the document, after the agent read version 2.
 		const editor = new Y.Doc();
 		Y.applyUpdate(editor, (await canvas.state(u.account.ownerId, note)).update);
 		const typed: Uint8Array[] = [];
 		editor.on("update", (up: Uint8Array) => typed.push(up));
-		editor.getText("markdown").insert(11, "!!!");
+		editor.getText("markdown").insert(18, "!!!");
 		await canvas.applyLive(u.account.ownerId, note, "ada", typed[0]!);
 
-		// The agent read version 1, so its edit is stale: the person's typing is not overwritten, the agent is told to read again.
-		await expect(canvas.edit(u.principal, note, 1, "world", "there")).rejects.toMatchObject({ code: "version_conflict" });
-		({ text, version } = await canvas.read(u.account.ownerId, note));
-		expect([text, version]).toEqual(["Hello world!!!", 2]);
-
-		// Reading again, the edit applies on top, and the person's live editor merges it without losing what was typed meanwhile.
-		const before = typed.length;
+		// The edit still lands, on top of the typing, which the editor merges without losing what it typed meanwhile.
 		editor.getText("markdown").insert(0, ">> ");
-		expect(await canvas.edit(u.principal, note, 2, "world", "there")).toEqual({ version: 3 });
-		await canvas.applyLive(u.account.ownerId, note, "ada", typed[before]!);
+		expect(await canvas.edit(u.principal, note, "world", "planet")).toEqual({ version: 4 });
+		await canvas.applyLive(u.account.ownerId, note, "ada", typed[1]!);
 		Y.applyUpdate(editor, (await canvas.state(u.account.ownerId, note)).update);
 		const merged = (await canvas.read(u.account.ownerId, note)).text;
-		expect(merged).toBe(">> Hello there!!!");
+		expect(merged).toBe(">> Hello there, planet!!!");
 		expect(editor.getText("markdown").toString()).toBe(merged);
-		await expect(canvas.edit(u.principal, note, 4, "absent", "x")).rejects.toMatchObject({ code: "text_not_found" });
+		// Refused, with nothing changed, when find is gone or ambiguous.
+		await expect(canvas.edit(u.principal, note, "absent", "x")).rejects.toMatchObject({ code: "text_not_found" });
+		await expect(canvas.edit(u.principal, note, "e", "E")).rejects.toMatchObject({ code: "text_ambiguous" });
+		expect((await canvas.read(u.account.ownerId, note)).text).toBe(merged);
 	});
 
-	it("races a live edit against note_edit on one version: exactly one wins, and nothing is lost", async () => {
+	it("races a live edit against note_edit: both land, and nothing is lost", async () => {
 		const canvas = new Canvas(f.db, f.store);
 		const note = await canvas.create(u.principal, "race", "abc");
 		const editor = new Y.Doc();
@@ -123,13 +120,42 @@ describe("Canvas", () => {
 		const ups: Uint8Array[] = [];
 		editor.on("update", (up: Uint8Array) => ups.push(up));
 		editor.getText("markdown").insert(3, "-typed");
-		const [live, edit] = await Promise.allSettled([canvas.applyLive(u.account.ownerId, note, "ada", ups[0]!), canvas.edit(u.principal, note, 1, "abc", "ABC")]);
-		const { text, version } = await canvas.read(u.account.ownerId, note);
-		expect(live.status).toBe("fulfilled"); // typing always lands
-		if (edit.status === "fulfilled") expect(text).toContain("ABC");
-		else expect(edit.reason).toMatchObject({ code: "version_conflict" });
-		expect(text).toContain("-typed");
-		expect(version).toBe(edit.status === "fulfilled" ? 3 : 2);
+		const [live, edit] = await Promise.allSettled([canvas.applyLive(u.account.ownerId, note, "ada", ups[0]!), canvas.edit(u.principal, note, "abc", "ABC")]);
+		expect([live.status, edit.status]).toEqual(["fulfilled", "fulfilled"]);
+		expect((await canvas.read(u.account.ownerId, note)).text).toBe("ABC-typed");
+	});
+
+	it("keeps versions at pauses and around agent changes, not one per update", async () => {
+		const canvas = new Canvas(f.db, f.store);
+		const owner = u.account.ownerId;
+		const note = await canvas.create(u.principal, "kept", "Hello");
+		const editor = new Y.Doc();
+		Y.applyUpdate(editor, (await canvas.state(owner, note)).update);
+		const typed: Uint8Array[] = [];
+		editor.on("update", (up: Uint8Array) => typed.push(up));
+		for (const ch of " there") editor.getText("markdown").insert(editor.getText("markdown").length, ch);
+		for (const up of typed) await canvas.applyLive(owner, note, "ada", up);
+		// Six updates are still one kept version, until the person pauses.
+		expect(await canvas.read(owner, note)).toEqual({ text: "Hello there", version: 1 });
+		expect(await canvas.keep(owner, note, "person")).toBe(2);
+		expect(await canvas.keep(owner, note, "person")).toBe(2);
+		// An agent change is kept before and after: the person's text stays readable as it was.
+		expect(await canvas.edit(u.principal, note, "there", "world")).toEqual({ version: 3 });
+		expect((await canvas.versions(owner, note)).map((v) => [v.version, v.source, v.text])).toEqual([[3, "agent", "Hello world"], [2, "person", "Hello there"], [1, "person", "Hello"]]);
+		// Restoring an old version is a new version, and the text it replaced is kept.
+		expect(await canvas.restore(u.principal, note, 1)).toEqual({ version: 4 });
+		expect((await canvas.versions(owner, note))[0]).toMatchObject({ version: 4, source: "restore", restoredFrom: 1, text: "Hello" });
+		expect((await canvas.read(owner, note)).text).toBe("Hello");
+	});
+
+	it("keeps a note made before versions as version 1 the first time it is read", async () => {
+		const canvas = new Canvas(f.db, f.store);
+		const note = await canvas.create(u.principal, "old", "Old text");
+		await f.db.owner(u.account.ownerId, async (tx) => {
+			await tx.query("DELETE FROM pim_app.note_versions WHERE note_id = $1", [note]);
+			await tx.query("UPDATE pim_app.notes SET kept_version = 0, version = 280 WHERE note_id = $1", [note]);
+		});
+		expect(await canvas.read(u.account.ownerId, note)).toEqual({ text: "Old text", version: 1 });
 	});
 
 	it("fences a writer whose lease was taken over", async () => {
@@ -151,8 +177,8 @@ describe("Canvas", () => {
 		const canvas = new Canvas(f.db, s3Store);
 		const note = await canvas.create(u.principal, "snap", "one");
 		for (const word of ["two", "three"]) {
-			const { text, version } = await canvas.read(u.account.ownerId, note);
-			await canvas.edit(u.principal, note, version, text, `${text} ${word}`);
+			const { text } = await canvas.read(u.account.ownerId, note);
+			await canvas.edit(u.principal, note, text, `${text} ${word}`);
 		}
 		await canvas.compact(u.account.ownerId, note);
 		const left = await f.db.owner(u.account.ownerId, async (tx) => (await tx.query("SELECT count(*)::int AS n FROM pim_app.note_updates WHERE note_id = $1", [note])).rows[0].n);

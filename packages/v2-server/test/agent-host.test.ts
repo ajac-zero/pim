@@ -154,7 +154,7 @@ real("the default agent host", () => {
 		expect(edited.artifact).toMatchObject({ id: note.id, title: "Plan", kind: "markdown", version: 2, size: "Week one: run 3k".length, sha256: expect.stringMatching(/^[0-9a-f]{64}$/) });
 		const shown = JSON.parse((await results("note_show")).at(-1)!);
 		expect(shown.artifact).toEqual(edited.artifact);
-		expect((await d.stack.admin.query("SELECT version FROM pim_app.notes WHERE note_id = $1", [note.id])).rows[0].version).toBe("2");
+		expect((await d.stack.admin.query("SELECT kept_version FROM pim_app.notes WHERE note_id = $1", [note.id])).rows[0].kept_version).toBe(2);
 		await say("show a missing one", toolUse(fauxToolCall("note_show", { id: "n_nope" })));
 		expect((await results("note_show")).at(-1)).toBe("No such note");
 	}, 120_000);

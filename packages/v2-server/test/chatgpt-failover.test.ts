@@ -4,7 +4,7 @@
 import { createServer, type Server } from "node:http";
 import { generateKeyPairSync, createSign, randomBytes } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
+import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { App } from "@pim/v2-app/app";
 import { chatgptContext } from "@pim/v2-app/chatgpt";
 import { KeyringCrypto, openString, sealString } from "@pim/v2-app/crypto";
@@ -201,16 +201,16 @@ real("Sign in with ChatGPT and provider failover", () => {
 
 	it("moves to the next model on a 429, leaves nothing of the failed attempt, and skips the cooling model afterwards", async () => {
 		openai.state.limited = true;
-		faux.setResponses([fauxAssistantMessage("from the fallback")] as never);
-		await say("hello again", "from the fallback");
+		faux.setResponses([fauxAssistantMessage([fauxToolCall("send_to_user", { message: "from the fallback" })], { stopReason: "toolUse" }), fauxAssistantMessage("ended the fallback")] as never);
+		await say("hello again", "ended the fallback");
 		const asked = openai.state.responses.length;
 		expect(asked).toBeGreaterThanOrEqual(2);
 		const shown = await transcript();
 		expect(shown).not.toMatch(/rate limit/i);
 		expect(shown).not.toContain('"stopReason":"error"');
 		// The plan's model is cooling: the next turn goes straight to the fallback without asking it.
-		faux.setResponses([fauxAssistantMessage("fallback again")] as never);
-		await say("and again", "fallback again");
+		faux.setResponses([fauxAssistantMessage([fauxToolCall("send_to_user", { message: "fallback again" })], { stopReason: "toolUse" }), fauxAssistantMessage("ended again")] as never);
+		await say("and again", "ended again");
 		expect(openai.state.responses).toHaveLength(asked);
 		// The cooldown is in the database, where every other Runner reads it.
 		expect((await d.stack.admin.query("SELECT ref FROM pim_runtime.provider_cooldowns WHERE until > now()")).rows.map((r) => r.ref)).toContain(`openai/${MODEL}`);

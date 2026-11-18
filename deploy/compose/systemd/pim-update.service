@@ -8,6 +8,11 @@ Type=oneshot
 # Edit User and the paths to the account that owns the checkout and is in the docker group, and to where the checkout is.
 User=pim
 WorkingDirectory=/opt/pim
+# The update script and hostopsd run from this checkout, not from the image, so it is fast-forwarded to its branch first (a checkout
+# on a branch that tracks origin, such as main). A pull that cannot fast-forward is reported and the update goes on with the checkout as it is.
+ExecStartPre=-/usr/bin/git -C /opt/pim pull --ff-only --quiet
 ExecStart=/opt/pim/deploy/compose/pim.sh update
+# hostopsd runs from the same checkout; restart it (as root, hence the +) so it runs the code just pulled. Nothing happens when it is not installed.
+ExecStartPost=+/bin/systemctl try-restart hostopsd.service
 # The last line it prints is the result as JSON; journalctl -u pim-update shows it. A rolled-back or failed update makes the unit fail.
 TimeoutStartSec=1h

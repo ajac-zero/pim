@@ -1,29 +1,29 @@
 # Publishes the Pim images to GHCR (docs/v2-operations.md "Installing and updating"):
-#   - a push to main that passed CI (the CI workflow's run, not a rerun of its checks here): edge and sha-<12 characters>
+#   - a push to main: sha-<12 characters> is built and pushed while CI runs on the same commit, and `edge` is moved to that image only once CI has succeeded
 #   - a tag vX.Y.Z: X.Y.Z, X.Y and stable
-# It never runs for pim/* branches or pull requests: workflow_run is limited to main, and the job checks the run was a push. workflow_run workflows are read from the default branch.
+# The slow part is the multi-arch build, so it does not wait for CI: both run at once, and what is left after CI is a retag that takes seconds. The sha tag
+# is harmless on its own (nothing follows it but `pim.sh update sha-<12>`), so a commit whose CI failed leaves an unused image and never gets `edge`.
+# It never runs for pim/* branches or pull requests: the trigger is limited to main and release tags. Workflows are read from the pushed commit, so this one can
+# only be exercised by a push to main.
 name: Publish
 
 on:
-  workflow_run:
-    workflows: [CI]
-    types: [completed]
-    branches: [main]
   push:
+    branches: [main]
     tags: ["v[0-9]+.[0-9]+.[0-9]+"]
 
-# Images are published one run at a time and in order, so an older commit's `edge` never lands after a newer one's.
+# One build per commit; builds of different commits may overlap, and nothing is cancelled (CI on main is not cancelled either).
 concurrency:
-  group: publish
+  group: publish-${{ github.sha }}
   cancel-in-progress: false
 
 permissions:
   contents: read
   packages: write
+  actions: read
 
 jobs:
-  publish:
-    if: github.event_name == 'push' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main')
+  image:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
@@ -37,27 +37,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           fetch-depth: 0
       - name: Work out the tags
         id: meta
         env:
-          SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
-          REF: ${{ github.ref }}
+          SHA: ${{ github.sha }}
           REF_NAME: ${{ github.ref_name }}
           IMAGE: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
         run: |
           set -eu
           image="$(printf %s "$IMAGE" | tr '[:upper:]' '[:lower:]')"
-          if [ "${{ github.event_name }}" = push ]; then
+          if [ "${{ github.ref_type }}" = tag ]; then
             # A release is a tag on a commit of main, which is the code CI has passed.
             git fetch --quiet origin main
             git merge-base --is-ancestor "$SHA" origin/main || { echo "::error::$REF_NAME is not on main"; exit 1; }
             version="${REF_NAME#v}"
             tags="$image:$version,$image:${version%.*},$image:stable"
           else
+            # `edge` is added later, by the retag job below, by pointing it at this image.
             version="sha-$(printf %s "$SHA" | cut -c1-12)"
-            tags="$image:edge,$image:$version"
+            tags="$image:$version"
           fi
           echo "tags=$tags" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
@@ -78,10 +77,68 @@ jobs:
           # Baked into the image as PIM_VERSION and PIM_REVISION, which Settings → Deployment shows and the update check compares.
           build-args: |
             PIM_VERSION=${{ steps.meta.outputs.version }}
-            PIM_REVISION=${{ github.event.workflow_run.head_sha || github.sha }}
+            PIM_REVISION=${{ github.sha }}
           labels: |
             org.opencontainers.image.version=${{ steps.meta.outputs.version }}
-            org.opencontainers.image.revision=${{ github.event.workflow_run.head_sha || github.sha }}
+            org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
           cache-from: type=gha,scope=${{ matrix.image }}
           cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+
+  # Moves `edge` to the sha image once CI on the commit has succeeded. `imagetools create` writes a new tag for the same manifest list, so the
+  # digest, both architectures and the labels the update check reads (version sha-<12>, revision) are exactly those of the image that was built.
+  edge:
+    if: github.ref_type == 'branch'
+    needs: image
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # One retag at a time and none cancelled, so a run waiting for its CI is not dropped by a newer push.
+    concurrency:
+      group: publish-edge
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Wait for CI on this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -eu
+          # The CI run for this push may not exist yet when the image is ready, and may still be running: look every 15 s, for up to 50 minutes.
+          for _ in $(seq 200); do
+            result="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --commit "$SHA" --event push --limit 1 --json status,conclusion --jq '.[0] | "\(.status) \(.conclusion)"')"
+            echo "CI: ${result:-not started}"
+            case "$result" in
+              "completed success") exit 0 ;;
+              "completed "*) echo "::error::CI did not succeed on $SHA, so edge stays where it is"; exit 1 ;;
+            esac
+            sleep 15
+          done
+          echo "::error::CI on $SHA did not finish in time"; exit 1
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Move edge
+        env:
+          SHA: ${{ github.sha }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -eu
+          owner="$(printf %s "$OWNER" | tr '[:upper:]' '[:lower:]')"
+          sha12="$(printf %s "$SHA" | cut -c1-12)"
+          for name in pim pim-computer; do
+            image="ghcr.io/$owner/$name"
+            # Pushes to main can finish out of order. Leave `edge` alone when it is already on this commit or a later one.
+            current="$(docker buildx imagetools inspect "$image:edge" --format '{{ json .Image }}' 2>/dev/null | jq -r '.. | .Labels? // empty | ."org.opencontainers.image.revision" // empty' | head -n1 || true)"
+            if [ -n "$current" ] && git merge-base --is-ancestor "$SHA" "$current" 2>/dev/null; then
+              echo "$name: edge is already at $current, which includes $SHA"
+              continue
+            fi
+            docker buildx imagetools create --tag "$image:edge" "$image:sha-$sha12"
+            docker buildx imagetools inspect "$image:edge"
+          done

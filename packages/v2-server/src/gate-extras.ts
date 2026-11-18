@@ -10,7 +10,7 @@ import { principalId } from "@pim/v2-app/authz";
 import type { TranscriptSource } from "@pim/v2-app/sharing";
 import { roomViews } from "./rooms.ts";
 import { MAX_PAGE, sidebarPage, transcriptPage } from "@pim/v2-live/projections/snapshots";
-import { titleChat } from "./compat/utility.ts";
+import { nameOneUntitled } from "./compat/utility.ts";
 import type { Authenticate, Caller, Handler } from "@pim/v2-forge/http/common";
 import type { Pool } from "pg";
 
@@ -33,9 +33,6 @@ export function projectedTranscripts(pool: Pool): TranscriptSource {
 
 /** A chat's own model as the app's `Session.model`; the app finds the rest of it (name, images) among the choices. */
 const chosenModel = (m: { provider: string; id: string }) => ({ model: { provider: m.provider, id: m.id, name: m.id, images: false }, override: true });
-
-/** When each untitled chat was last offered to the utility model. */
-const titleTried = new Map<string, number>();
 
 /** `GET /api/snapshot/sidebar`, `/api/snapshot/chat/:id` and `/api/snapshot/coding/:id`: bounded, paginated, read as the caller. */
 export function snapshotRoutes(pool: Pool): Route[] {
@@ -78,14 +75,9 @@ export function snapshotRoutes(pool: Pool): Route[] {
 					const fresh = await chats("c.deleted_at IS NULL AND c.archived_at IS NULL AND c.room_of IS NULL AND c.kind IN ('normal','group') AND c.created_at > now() - interval '10 minutes' ORDER BY c.updated_at DESC LIMIT 20", []);
 					for (const r of fresh) if (!known.has(r.id) && !kept.has(r.id)) sessions.unshift({ chatId: r.id, title: r.title, busy: true, unread: false, stalled: false, updatedAt: new Date(r.updated_at).getTime(), summary: summaryOf(r, null) } as (typeof sessions)[number]);
 				}
-				// A chat with no title is named by the utility model once its first answer is in (nothing happens with no utility model); one attempt a
-				// minute per chat, and only one chat per request, so the sidebar is never held for long.
-				const untitled = page.sessions.find((s) => !s.busy && kept.get(s.chatId) && !kept.get(s.chatId)!.title && !kept.get(s.chatId)!.deleted_at && (titleTried.get(s.chatId) ?? 0) < Date.now() - 60_000);
-				if (untitled) {
-					titleTried.set(untitled.chatId, Date.now());
-					const title = await Promise.race([titleChat(app, process.env, p, untitled.chatId).catch((error) => (console.warn(`naming chat ${untitled.chatId} failed`, error), null)), new Promise<null>((resolve) => setTimeout(() => resolve(null), 8000))]);
-					if (title) for (const s of sessions) if (s.chatId === untitled.chatId) s.title = title;
-				}
+				// A chat with no title is named by the utility model once it is idle and has something said in it (nothing happens with no utility model).
+				const named = await nameOneUntitled(app, process.env, p, page.sessions.filter((s) => !s.busy && kept.get(s.chatId) && !kept.get(s.chatId)!.deleted_at).map((s) => ({ id: s.chatId, title: kept.get(s.chatId)!.title })));
+				if (named) for (const s of sessions) if (s.chatId === named.id) s.title = named.title;
 				return ok({ ...page, sessions });
 			},
 		},

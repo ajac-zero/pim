@@ -84,6 +84,7 @@ export function conversationText(messages: readonly TranscriptMessage[], limit: 
 
 type Endpoint =
 	| { api: "chat"; url: string; key: string | null; model: string }
+	| { api: "responses"; url: string; key: string; model: string }
 	| { api: "anthropic"; key: string; model: string }
 	| { api: "google"; key: string; model: string };
 
@@ -107,7 +108,7 @@ async function endpointOf(app: App, env: Env, p: Principal): Promise<Endpoint | 
 	// A person signed in with ChatGPT runs `openai` on their plan, here as for the Runner.
 	if (chosen.provider === "openai") {
 		const plan = await app.chatgpt.access(p.ownerId);
-		if (plan) return { api: "chat", url: `${strip(plan.resource)}/chat/completions`, key: plan.token, model: chosen.id };
+		if (plan) return { api: "responses", url: `${strip(plan.resource)}/responses`, key: plan.token, model: chosen.id };
 	}
 	const rows = await app.providers.list(p);
 	const own = rows.find((r) => r.id === chosen.provider);
@@ -134,7 +135,9 @@ export async function runUtility(app: App, env: Env, p: Principal, task: Utility
 	const post = (url: string, headers: Record<string, string>, body: unknown) => fetch(url, { method: "POST", signal, headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
 	// A reasoning model spends its cap thinking, so the caps are generous; the task's `clean` keeps the answer short.
 	const response =
-		endpoint.api === "chat"
+		endpoint.api === "responses"
+			? await post(endpoint.url, { authorization: `Bearer ${endpoint.key}` }, { model: endpoint.model, stream: false, store: false, instructions: task.instructions, max_output_tokens: Math.max(task.maxTokens, 1024), input: input })
+			: endpoint.api === "chat"
 			? await post(endpoint.url, endpoint.key ? { authorization: `Bearer ${endpoint.key}` } : {}, { model: endpoint.model, stream: false, max_completion_tokens: Math.max(task.maxTokens, 1024), messages: [{ role: "system", content: task.instructions }, { role: "user", content: input }] })
 			: endpoint.api === "anthropic"
 				? await post("https://api.anthropic.com/v1/messages", { "x-api-key": endpoint.key, "anthropic-version": "2023-06-01" }, { model: endpoint.model, max_tokens: Math.max(task.maxTokens, 1024), system: task.instructions, messages: [{ role: "user", content: input }] })
@@ -142,7 +145,9 @@ export async function runUtility(app: App, env: Env, p: Principal, task: Utility
 	if (!response.ok) throw new Error(`The utility model answered ${response.status}`);
 	const body = (await response.json()) as any;
 	const answer =
-		endpoint.api === "chat"
+		endpoint.api === "responses"
+			? (body.output ?? []).flatMap((item: { content?: { type?: string; text?: unknown }[] }) => (item.content ?? []).filter((part) => part.type === "output_text").map((part) => str(part.text))).join("")
+			: endpoint.api === "chat"
 			? str(body.choices?.[0]?.message?.content)
 			: endpoint.api === "anthropic"
 				? (body.content ?? []).map((part: { text?: unknown }) => str(part.text)).join("")
@@ -172,13 +177,27 @@ export async function chatConversation(app: App, p: Principal, chatId: string, l
 
 /**
  * Names a chat from what has been said in it and keeps the title, unless the person renamed it meanwhile. Null when there is no utility model or
- * nothing has been answered yet.
+ * nothing has been said yet.
  */
 export async function titleChat(app: App, env: Env, p: Principal, chatId: string): Promise<string | null> {
 	const conversation = await chatConversation(app, p, chatId, 2000);
-	if (!conversation.includes("Assistant:")) return null;
+	if (conversation === "") return null;
 	const title = await runUtility(app, env, p, NAME_CHAT, conversation);
 	if (title === null) return null;
 	await app.db.owner(p.ownerId, (tx) => tx.query("UPDATE pim_app.conversations SET title = $2 WHERE public_chat_id = $1 AND deleted_at IS NULL", [chatId, title]));
 	return title;
+}
+
+const titleTried = new Map<string, number>();
+
+/**
+ * Names the first of these chats that has no title and has not been tried in the last minute, and returns its title; one chat per call, and a wait of 8 seconds at
+ * most, so a list is never held for long. A slow answer is still kept, and shows the next time the list is read. A failure is logged, not thrown.
+ */
+export async function nameOneUntitled(app: App, env: Env, p: Principal, chats: readonly { id: string; title: string | null | undefined }[]): Promise<{ id: string; title: string } | null> {
+	const chat = chats.find((c) => !c.title && (titleTried.get(c.id) ?? 0) < Date.now() - 60_000);
+	if (!chat) return null;
+	titleTried.set(chat.id, Date.now());
+	const title = await Promise.race([titleChat(app, env, p, chat.id).catch((error) => (console.warn(`naming chat ${chat.id} failed`, error), null)), new Promise<null>((resolve) => setTimeout(() => resolve(null), 8000))]);
+	return title ? { id: chat.id, title } : null;
 }

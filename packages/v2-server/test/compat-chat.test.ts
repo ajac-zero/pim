@@ -44,9 +44,10 @@ beforeAll(async () => {
 		const body = JSON.parse(raw);
 		asked.push(body);
 		auths.push(String(req.headers.authorization));
-		const system = String(body.messages[0].content);
+		const responses = req.url?.endsWith("/responses");
+		const system = String(responses ? body.instructions : body.messages[0].content);
 		const content = system.includes("name chats") ? 'Title: "Fresh Garden Plan".' : system.includes("improve messages") ? "Plan my week in detail" : system.includes("suggest") ? 'Sure! {"messages":["Plan my week","Water the garden","Plan my week"]}' : "- They planned a garden";
-		res.setHeader("content-type", "application/json").end(JSON.stringify({ choices: [{ message: { content } }] }));
+		res.setHeader("content-type", "application/json").end(JSON.stringify(responses ? { output: [{ type: "reasoning", summary: [] }, { type: "message", content: [{ type: "output_text", text: content }] }] } : { choices: [{ message: { content } }] }));
 	});
 	await new Promise<void>((resolve) => utility.listen(0, "127.0.0.1", resolve));
 	const refresh = (async () => new Response(JSON.stringify({ access_token: "plan-access", refresh_token: "plan-refresh-2", expires_in: 3600 }), { headers: { "content-type": "application/json" } })) as typeof fetch;
@@ -301,22 +302,42 @@ describe("the utility model", () => {
 });
 
 describe("the utility model on a ChatGPT plan", () => {
-	it("names an untitled chat in the sidebar with the plan's token, refreshing an expired one", async () => {
+	it("names an untitled chat with the plan's token on the Responses API, from the chat list, the sidebar and the title route", async () => {
 		const carol = await app.identity.register({ username: "carol" });
 		const token = await app.identity.createSession(carol.ownerId);
+		// What a ChatGPT-plan owner has: an expired sealed credential, model_utility `openai`, and no OpenAI API key.
 		const credential = { type: "oauth", access: "old", refresh: "plan-refresh-1", expires: 0, clientId: "c", scopes: [], idToken: "", subject: "s", email: null };
 		await stack.admin.query("INSERT INTO pim_app.chatgpt_credentials (owner_id, host_id, secret) VALUES ($1, 'h', $2)", [carol.ownerId, await sealString(crypto, JSON.stringify(credential), chatgptContext(carol.ownerId))]);
-		// What ChatGPT-plan owners have: model_utility is `openai`, and they have no OpenAI key.
 		expect((await call(token, "PUT", "/api/model/utility", { provider: "openai", id: "gpt-6-luna" })).status).toBe(200);
-		const chat = (await call(token, "POST", "/api/sessions", { agentId: (await call(token, "POST", "/api/agents", { name: "Pim" })).body.id })).body.id as string;
-		await stack.admin.query("INSERT INTO pim_projection.chat_transcript_projection (owner_id, stream_kind, chat_id, entry_id, position, message, partition_id, commit_seq, projection_version) VALUES ($1,'chat',$2,'a1',1,$3,'00000000-0000-0000-0000-000000000001',1,1), ($1,'chat',$2,'a2',2,$4,'00000000-0000-0000-0000-000000000001',2,1)", [
-			carol.ownerId, chat, JSON.stringify({ id: "a1", role: "user", timestamp: 1, parts: [{ type: "text", text: "Help me plan my garden" }] }), JSON.stringify({ id: "a2", role: "assistant", timestamp: 2, parts: [{ type: "tool-call", id: "c", name: "send_to_user", arguments: { message: "Start with the beds." } }] }),
-		]);
-		await stack.admin.query("INSERT INTO pim_projection.sidebar_session_projection (owner_id, chat_id, title, busy, unread, stalled, updated_at, partition_id, commit_seq, projection_version) VALUES ($1,$2,NULL,false,false,false,1,'00000000-0000-0000-0000-000000000001',1,1) ON CONFLICT DO NOTHING", [carol.ownerId, chat]);
-		const sidebar = async () => ((await call(token, "GET", "/api/snapshot/sidebar")).body.sessions as { chatId: string; title: string | null }[]).find((s) => s.chatId === chat);
-		expect((await sidebar())?.title).toBe("Fresh Garden Plan");
+		const agentId = (await call(token, "POST", "/api/agents", { name: "Pim" })).body.id;
+		const say = (chat: string, n: number, message: unknown) => stack.admin.query("INSERT INTO pim_projection.chat_transcript_projection (owner_id, stream_kind, chat_id, entry_id, position, message, partition_id, commit_seq, projection_version) VALUES ($1,'chat',$2,$3,$4,$5,'00000000-0000-0000-0000-000000000001',$4,1)", [carol.ownerId, chat, `m${n}-${chat}`, n, JSON.stringify(message)]);
+		const chatWith = async (answer: unknown) => {
+			const chat = (await call(token, "POST", "/api/sessions", { agentId })).body.id as string;
+			await say(chat, 1, { id: "u", role: "user", timestamp: 1, parts: [{ type: "text", text: "Help me plan my garden" }] });
+			if (answer) await say(chat, 2, answer);
+			await stack.admin.query("INSERT INTO pim_projection.sidebar_session_projection (owner_id, chat_id, title, busy, unread, stalled, updated_at, partition_id, commit_seq, projection_version) VALUES ($1,$2,NULL,false,false,false,1,'00000000-0000-0000-0000-000000000001',1,1)", [carol.ownerId, chat]);
+			return chat;
+		};
+		const dbTitle = async (chat: string) => (await stack.admin.query("SELECT title FROM pim_app.conversations WHERE public_chat_id = $1", [chat])).rows[0].title;
+		const before = asked.length;
+
+		// The chat list names a chat whose answer is the plain text a plan model writes between tool calls, so only the person's message is there to go on.
+		const plain = await chatWith({ id: "a", role: "assistant", timestamp: 2, parts: [{ type: "text", text: "Thinking about beds" }] });
+		const listed = (await call(token, "GET", "/api/sessions")).body.sessions as { id: string; title: string | null }[];
+		expect(listed.find((s) => s.id === plain)?.title).toBe("Fresh Garden Plan");
+		expect(await dbTitle(plain)).toBe("Fresh Garden Plan");
 		expect(auths.at(-1)).toBe("Bearer plan-access");
-		expect((await stack.admin.query("SELECT title FROM pim_app.conversations WHERE public_chat_id = $1", [chat])).rows[0].title).toBe("Fresh Garden Plan");
+		expect(asked.length).toBe(before + 1);
+		expect(asked.at(-1)).toMatchObject({ model: "gpt-6-luna", stream: false, store: false });
+
+		// The sidebar names one that has been answered through send_to_user.
+		const sent = await chatWith({ id: "a", role: "assistant", timestamp: 2, parts: [{ type: "tool-call", id: "c", name: "send_to_user", arguments: { message: "Start with the beds." } }] });
+		const rows = (await call(token, "GET", "/api/snapshot/sidebar")).body.sessions as { chatId: string; title: string | null }[];
+		expect(rows.find((s) => s.chatId === sent)?.title).toBe("Fresh Garden Plan");
+
+		// And the title route.
+		const asked3 = await chatWith(null);
+		expect((await call(token, "POST", `/api/sessions/${asked3}/title`)).body).toMatchObject({ id: asked3, title: "Fresh Garden Plan" });
 	});
 });
 

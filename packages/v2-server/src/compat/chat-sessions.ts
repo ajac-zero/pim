@@ -13,7 +13,7 @@ import { BadRequestError, CapabilityUnavailableError, ConflictError, NotFoundErr
 import { ok, type Route, route } from "@pim/v2-app/http";
 import type { Principal } from "@pim/v2-contracts/identity";
 import { transcriptPage } from "@pim/v2-live/projections/snapshots";
-import { chatConversation, IMPROVE_PROMPT, runUtility, SUGGEST_PROMPTS, suggestionsIn, SUMMARIZE_CHAT, titleChat } from "./utility.ts";
+import { chatConversation, IMPROVE_PROMPT, runUtility, SUGGEST_PROMPTS, suggestionsIn, nameOneUntitled, SUMMARIZE_CHAT, titleChat } from "./utility.ts";
 
 const ms = (value: Date | string | null | undefined): number | null => (value ? new Date(value).getTime() : null);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -212,6 +212,9 @@ export function sessionRoutes(env: Record<string, string | undefined> = process.
 			const sessions = await app.conversations.list(p.ownerId, { archived: url.searchParams.get("archived") === "true", limit: Number.isInteger(limit) && limit > 0 ? limit : 100 });
 			const seats = new Set((await app.db.owner(p.ownerId, async (tx) => (await tx.query("SELECT public_chat_id FROM pim_app.conversations WHERE room_of IS NOT NULL AND public_chat_id = ANY($1::uuid[])", [sessions.map((s) => s.id)])).rows)).map((r) => r.public_chat_id as string));
 			const shown = sessions.filter((s) => !seats.has(s.id));
+			// Reading the list names one untitled chat, as reading the sidebar does.
+			const named = url.searchParams.get("archived") === "true" ? null : await nameOneUntitled(app, process.env, p, shown);
+			if (named) for (const s of shown) if (s.id === named.id) s.title = named.title;
 			const rooms = await roomViews(app, p.ownerId, shown.map((s) => s.id));
 			return ok({ sessions: shown.map((s) => ({ ...s, room: rooms.get(s.id) ?? null })) });
 		}),

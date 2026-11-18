@@ -90,9 +90,9 @@ export class Conversations {
 			} else if (input.kind === "delegate") {
 				result = await delegateTask(tx, p, chatId!, input.commandId, payload);
 				chatId = result.taskChatId as string;
-				// The task chat starts working: a wake in the task's own chat, stable under a retry of this command.
+				// The task chat starts working: its first message, in its own chat and stable under a retry of this command. (The runtime's `task_wake` resumes a pi task by number; it is not a message.)
 				const wakeId = `${input.commandId}:wake`;
-				await tx.query("INSERT INTO pim_app.accepted_commands (owner_id, command_id, kind, public_chat_id, pi_request_id, payload) VALUES ($1,$2,'task_wake',$3,$4,$5)", [p.ownerId, wakeId, chatId, requestId(p.ownerId, wakeId), JSON.stringify({ text: String(payload.prompt ?? payload.title ?? "") , taskId: result.taskId })]);
+				await tx.query("INSERT INTO pim_app.accepted_commands (owner_id, command_id, kind, public_chat_id, pi_request_id, payload) VALUES ($1,$2,'user_message',$3,$4,$5)", [p.ownerId, wakeId, chatId, requestId(p.ownerId, wakeId), JSON.stringify({ text: String(payload.text ?? payload.prompt ?? payload.title ?? ""), taskId: result.taskId })]);
 				await tx.query("INSERT INTO pim_app.command_inbox (owner_id, command_id, partition_id) VALUES ($1,$2,(SELECT partition_id FROM pim_app.conversations WHERE public_chat_id = $3))", [p.ownerId, wakeId, chatId]);
 			}
 			await tx.query("UPDATE pim_app.accepted_commands SET public_chat_id = $2, payload = payload || $3::jsonb WHERE command_id = $1", [input.commandId, chatId, JSON.stringify(result ? { _result: result } : {})]);
@@ -233,7 +233,7 @@ export class Conversations {
 			const commandId = `task:${taskId}:${status}`;
 			const first = await tx.query("INSERT INTO pim_app.task_update_deliveries (task_id, owner_id, status, command_id) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING", [taskId, p.ownerId, status, commandId]);
 			if (!first.rowCount) return { delivered: false };
-			await tx.query("INSERT INTO pim_app.accepted_commands (owner_id, command_id, kind, public_chat_id, pi_request_id, payload) VALUES ($1, $2, 'task_wake', $3, $4, $5)", [
+			await tx.query("INSERT INTO pim_app.accepted_commands (owner_id, command_id, kind, public_chat_id, pi_request_id, payload) VALUES ($1, $2, 'user_message', $3, $4, $5)", [
 				p.ownerId, commandId, task.started_by, requestId(p.ownerId, commandId), JSON.stringify({ text: `[Task update] ${taskId} is ${status}${result ? `: ${result}` : ""}`, taskId, status }),
 			]);
 			await tx.query("INSERT INTO pim_app.command_inbox (owner_id, command_id) VALUES ($1, $2)", [p.ownerId, commandId]);

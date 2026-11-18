@@ -415,22 +415,41 @@ real("the default agent host", () => {
 		expect((await web.call("POST", "/api/admin/coding-grants", { ownerId, permissions: ["admin:grants"], repositories: ["acme/*"] })).status).toBe(400);
 		void forgeDb;
 	}, 120_000);
-	it("manages agents, skills, schedules and triggers, and hands a task to another agent", async () => {
+	it("manages agents, skills, schedules and triggers", async () => {
 		await say("set things up", toolUse(fauxToolCall("create_agent", { name: "Poet", instructions: "Answer in verse." }), fauxToolCall("write_skill", { name: "haiku", description: "Write haiku", body: "Five, seven, five.", files: { "ref.md": "# ref" } })));
 const agentId = (await d.stack.admin.query("SELECT id FROM pim_app.agents WHERE name = 'Poet'")).rows[0].id as string;
 		const trigger = { version: 1, owningAgentId: agentId, originChatId: "api", label: "Hourly", instruction: "check in", source: { kind: "time", schedule: "cron", expression: "0 * * * *", timeZone: "UTC" }, condition: null, destination: { type: "new_chat" }, delivery: {}, authorizationRef: null };
 		await say(
 			"more",
 			toolUse(fauxToolCall("read_skill", { name: "haiku" }), fauxToolCall("read_skill_file", { name: "haiku", path: "ref.md" }), fauxToolCall("schedule_task", { kind: "delay", spec: "3600000", prompt: "Stretch", target: "same_chat" }), fauxToolCall("create_trigger", { spec: trigger })),
-			toolUse(fauxToolCall("list_scheduled_tasks", {}), fauxToolCall("list_triggers", {}), fauxToolCall("update_agent", { id: agentId, name: "Bard" }), fauxToolCall("delegate", { title: "Write a haiku", text: "About tea", agent_id: agentId })),
+			toolUse(fauxToolCall("list_scheduled_tasks", {}), fauxToolCall("list_triggers", {}), fauxToolCall("update_agent", { id: agentId, name: "Bard" })),
 		);
 		expect((await results("read_skill")).at(-1)).toContain("Five, seven, five.");
 		expect((await results("read_skill_file")).at(-1)).toBe("# ref");
 		expect((await d.stack.admin.query("SELECT name FROM pim_app.agents WHERE id = $1", [agentId])).rows[0].name).toBe("Bard");
 		expect((await d.stack.admin.query("SELECT lifecycle FROM pim_app.triggers")).rows).toEqual([{ lifecycle: "draft" }]);
 		expect((await d.stack.admin.query("SELECT kind, prompt FROM pim_app.schedules")).rows).toEqual([{ kind: "delay", prompt: "Stretch" }]);
-		// The task has a chat of its own, started by this one, and a task row whose origin is the agent that asked.
-		const task = (await d.stack.admin.query("SELECT t.task_id, t.status, t.origin_principal, c.agent_id, c.kind FROM pim_app.tasks t JOIN pim_app.conversations c ON c.public_chat_id = t.task_chat")).rows[0];
-		expect(task).toMatchObject({ status: "working", agent_id: agentId, kind: "task", origin_principal: { kind: "agent", ownerId } });
+	}, 120_000);
+
+	it("hands a task to another agent in a chat of its own, and brings its answer back to the chat that asked", async () => {
+		// Each model request is answered by what it is for: the requester's message, the task's first message, the requester's [Task update], or a tool result that ends the turn.
+		const answer = (ctx: { messages: { role: string; toolName?: string }[] }) => {
+			const asked = JSON.stringify(ctx.messages);
+			const last = ctx.messages.at(-1);
+			if (last?.toolName === "delegate") return toolUse(fauxToolCall("send_to_user", { message: "On it" }));
+			if (last?.role === "toolResult") return fauxAssistantMessage("ended");
+			if (asked.includes("[Task update] task_")) return toolUse(fauxToolCall("send_to_user", { message: "Relayed: tea haiku" }));
+			if (asked.includes("hand it off")) return toolUse(fauxToolCall("delegate", { title: "Tea", text: "About tea" }));
+			return toolUse(fauxToolCall("send_to_user", { message: "Tea haiku", complete: true }));
+		};
+		faux.setResponses(Array(8).fill(answer) as never);
+		const chat = (await web.call("POST", "/api/sessions", { title: "Asker" })).json.id as string;
+		expect((await web.call("POST", `/api/sessions/${chat}/messages`, { commandId: "hand-off", text: "please hand it off" })).status).toBe(202);
+		const said = async (id: string) => JSON.stringify((await d.stack.admin.query("SELECT message FROM pim_projection.chat_transcript_projection WHERE chat_id = $1 AND NOT partial ORDER BY position", [id])).rows);
+		await waitFor("the requester to hear back", async () => ((await said(chat)).includes("Relayed: tea haiku") ? true : undefined), 60_000);
+		// The task has a chat of its own, started by this one, with the words it was given; its row's origin is the agent that asked.
+		const task = (await d.stack.admin.query("SELECT t.status, t.result, t.task_chat, t.origin_principal, c.kind FROM pim_app.tasks t JOIN pim_app.conversations c ON c.public_chat_id = t.task_chat WHERE t.started_by = $1", [chat])).rows[0];
+		expect(task).toMatchObject({ status: "completed", result: "Tea haiku", kind: "task", origin_principal: { kind: "agent", ownerId } });
+		expect(await said(task.task_chat)).toContain("About tea");
 	}, 120_000);
 });

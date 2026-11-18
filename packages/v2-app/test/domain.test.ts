@@ -81,7 +81,7 @@ describe("command admission", () => {
 		await f.app.conversations.updateTask(u.principal, taskId, "working");
 		expect(await f.app.conversations.updateTask(u.principal, taskId, "completed", "done")).toEqual({ delivered: true });
 		await expect(f.app.conversations.updateTask(u.principal, taskId, "working")).rejects.toMatchObject({ code: "bad_task_transition" });
-		const updates = (await f.app.conversations.pending(owner(), chat)).filter((c) => c.kind === "task_wake" && c.commandId.startsWith("task:"));
+		const updates = (await f.app.conversations.pending(owner(), chat)).filter((c) => c.kind === "user_message" && c.commandId.startsWith("task:"));
 		expect(updates.map((c) => c.commandId)).toEqual([`task:${taskId}:auth-required`, `task:${taskId}:working`, `task:${taskId}:completed`]);
 		expect(await f.app.conversations.archiveTaskChats(u.principal)).toBeGreaterThanOrEqual(1);
 		expect((await f.app.conversations.get(owner(), d.chatId!)).archived).toBe(true);

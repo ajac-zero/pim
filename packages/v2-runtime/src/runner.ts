@@ -307,10 +307,10 @@ export class ResidentPartition {
 		}
 	}
 
-	/** The run of `conversation` held after a model request failed for good: its generation task waits on nothing but `resumeTask`. */
+	/** The run of `conversation` held after a model request failed for good: its live state says so (a read of one document, as every message needs), and its run's task waits on nothing but `resumeTask`. */
 	async heldGeneration(conversation: Conversation, context: Context): Promise<TaskId | undefined> {
-		const { tasks } = await this.#harness.inspect(context);
-		return tasks.find(({ record }) => record.conversationId === conversation.id && record.kind === "pi.generation" && record.state.status === "waiting" && record.state.on?.length === 0)?.record.id as TaskId | undefined;
+		const live = await this.#harness.snapshot(LiveDoc, conversation.id, context);
+		return live?.generation?.retry?.at === 0 ? live.run?.taskId : undefined;
 	}
 
 	/** Asks the model again in a held run, as a durable signal like a decision, so a restart before it is applied does not lose it. */

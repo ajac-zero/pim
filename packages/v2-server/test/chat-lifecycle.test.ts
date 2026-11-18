@@ -178,6 +178,17 @@ real("a chat over its life", () => {
 		await web.call("POST", `/api/sessions/${host}/messages`, { commandId: "m-open", text: "what else?" });
 		await waitFor("both to answer", async () => ((await transcript(seat)).some((e) => JSON.stringify(e.model ?? "").includes("\"I have something to add.\"")) && (await transcript(host)).some((e) => e.kind === "pi.assistant" && JSON.stringify(e.model ?? "").includes("I have something to add.")) ? true : undefined), 60_000);
 
+		// Both are still in their turns, and each one's post wakes the other: let them all end before the script is replaced, or a request still on its way is answered from the next script.
+		let calls = -1;
+		await waitFor("the open-mode turns to end", async () => {
+			const now = faux.state.callCount;
+			if (now === calls) return true;
+			calls = now;
+			await new Promise((resolve) => setTimeout(resolve, 1_000));
+			return undefined;
+		}, 60_000);
+		faux.setResponses([]);
+
 		// Taking the agent out: it hears nothing more and its seat is gone.
 		expect((await web.call("DELETE", `/api/sessions/${host}/room/members/${coach.id}`)).json.room).toBeNull();
 		expect((await d.stack.admin.query("SELECT deleted_at FROM pim_app.conversations WHERE public_chat_id = $1", [seat])).rows[0].deleted_at).not.toBeNull();

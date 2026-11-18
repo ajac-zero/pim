@@ -3,6 +3,10 @@
 #
 #   docker build -f deploy/Dockerfile.v2 -t registry.example.test/pim:2.0.0 .
 #
+# The version and the commit this image was built from are build arguments (the publishing workflow passes `--build-arg PIM_VERSION=<X.Y.Z, or edge> --build-arg PIM_REVISION=<full commit>`):
+# the running Pim reads them from its environment and shows them in Settings → Deployment, and they are the image's `org.opencontainers.image.version` and `.revision` labels, which
+# the update check reads from the registry. A local build without them is `dev` at an unknown revision, which is never offered an update.
+#
 # The sources run under tsx, which keeps every package's own paths (its migrations, its SQL) where the code expects them; there is no bundle.
 # The web app (web/) is built in its own stage and served by the Gate from PIM_WEB_DIR (packages/v2-server/src/web-assets.ts).
 FROM node:26-bookworm-slim AS web
@@ -31,7 +35,10 @@ COPY packages ./packages
 RUN pnpm install --frozen-lockfile --prod --filter "@pim/v2-server..."
 
 FROM node:26-bookworm-slim
-ENV NODE_ENV=production
+ARG PIM_VERSION=dev
+ARG PIM_REVISION=unknown
+LABEL org.opencontainers.image.version=$PIM_VERSION org.opencontainers.image.revision=$PIM_REVISION
+ENV NODE_ENV=production PIM_VERSION=$PIM_VERSION PIM_REVISION=$PIM_REVISION
 WORKDIR /app/packages/v2-server
 COPY --from=build /app /app
 COPY --from=web /app/web/dist /app/web/dist

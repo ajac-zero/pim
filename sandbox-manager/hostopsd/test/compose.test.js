@@ -49,7 +49,7 @@ describe('the stack on Docker Compose', () => {
 		assert.equal(r.state, 'succeeded', r.summary)
 		assert.equal(h.head(), h.repo.c3)
 		const build = ran('docker', (a) => a[0] === 'build')[0]
-		assert.deepEqual(build.args, ['build', '-f', 'deploy/Dockerfile.v2', '-t', 'pim:test', '.'])
+		assert.deepEqual(build.args, ['build', '-f', 'deploy/Dockerfile.v2', '--build-arg', `PIM_REVISION=${h.repo.c3}`, '-t', 'pim:test', '.'])
 		assert.equal(build.cwd, await import('node:fs').then((fs) => fs.realpathSync(h.repo.checkout)))
 		const up = ran('pimsh', (a) => a[0] === 'up')[0]
 		assert.deepEqual(up.args.slice(0, 3), ['up', '-d', '--wait'])
@@ -57,6 +57,33 @@ describe('the stack on Docker Compose', () => {
 		assert.match(r.summary, /Deployed/)
 		// Nothing of the daemon's or the stack's credentials goes to the commands it runs, but the .env the stack reads stays where compose finds it.
 		assert.ok(!up.env.includes('HOSTOPS_TOKEN'))
+	})
+
+	test('updates through pim.sh and reports its result line, whatever else it printed', async () => {
+		const d = await start()
+		h.setFake({ update: { from: 'sha256:aaa', to: 'sha256:bbb', result: 'updated' } })
+		const r = await op(d, 'update', { tag: 'edge' })
+		assert.equal(r.state, 'succeeded', r.summary)
+		assert.deepEqual(ran('pimsh', (a) => a[0] === 'update')[0].args, ['update', 'edge'])
+		assert.deepEqual(r.data, { from: 'sha256:aaa', to: 'sha256:bbb', result: 'updated' })
+		h.setFake({ update: { from: 'sha256:bbb', to: 'sha256:bbb', result: 'unchanged' } })
+		const same = await op(d, 'update', {})
+		assert.equal(same.state, 'succeeded')
+		assert.deepEqual(ran('pimsh', (a) => a[0] === 'update').at(-1).args, ['update'])
+		assert.match(same.summary, /up to date/)
+		h.setFake({ update: { from: 'sha256:bbb', to: 'sha256:ccc', result: 'rolled_back' } })
+		const back = await op(d, 'update', {})
+		assert.equal(back.state, 'rolled_back')
+		assert.equal(back.data.result, 'rolled_back')
+		h.setFake({ update: null })
+		const none = await op(d, 'update', {})
+		assert.equal(none.state, 'failed')
+	})
+
+	test('refuses an update tag that is not an image tag', () => {
+		assert.equal(validateOp({ id: 'a', name: 'update', args: {} }, COMPOSE_SERVICES).error, undefined)
+		assert.equal(validateOp({ id: 'a', name: 'update', args: { tag: 'sha-0123456789ab' } }, COMPOSE_SERVICES).error, undefined)
+		for (const tag of ['--force', '-x', 'a b', 'a;id', '', 7]) assert.match(validateOp({ id: 'a', name: 'update', args: { tag } }, COMPOSE_SERVICES).error, /tag must be/)
 	})
 
 	test('goes back to the commit it came from when the new one does not come up healthy', async () => {

@@ -230,7 +230,8 @@ export function createOps(cfg, { state, save, log = () => {} }) {
 		if (!image) return { ok: false, step: 'checkout', error: `PIM_IMAGE is not set in ${path.join(cfg.composeDir, '.env')}` }
 		const co = await git(['checkout', '--detach', '--quiet', sha], t.git)
 		if (co.code !== 0) return { ok: false, step: 'checkout', error: failText(`git checkout ${short(sha)}`, co) }
-		const build = await run('docker', ['build', '-f', 'deploy/Dockerfile.v2', '-t', image, '.'], { cwd: checkout, env: baseEnv, timeoutMs: t.up })
+		// The image says which commit it is (shown in Settings → Deployment); a source build has no release version.
+		const build = await run('docker', ['build', '-f', 'deploy/Dockerfile.v2', '--build-arg', `PIM_REVISION=${sha}`, '-t', image, '.'], { cwd: checkout, env: baseEnv, timeoutMs: t.up })
 		if (build.code !== 0) return { ok: false, step: 'build', error: failText('docker build', build) }
 		const up = await pimSh(['up', '-d', '--wait', '--wait-timeout', String(Math.ceil(cfg.healthTimeoutMs / 1000))], t.up)
 		if (up.code !== 0) return { ok: false, step: 'up', error: failText('docker compose up', up) }
@@ -416,6 +417,33 @@ export function createOps(cfg, { state, save, log = () => {} }) {
 			}
 			if (waited) out.result = done(op.id, out.result.state, `${waited} ${out.result.summary}`, out.result.data)
 			return out
+		},
+
+		// `pim.sh update [TAG]`, which pulls the channel's image, backs up, pins it in .env and recreates the stack, going back to the previous image when it does not come up healthy. It
+		// ends by printing one line, {"event":"pim.update","from":…,"to":…,"result":"updated|unchanged|rolled_back"}, which is this operation's result.
+		async update(op) {
+			if (!composeMode) return fail(op, 'update needs HOSTOPSD_STACK=compose: this host is built from source, so use deploy.')
+			const blocked = deployBlocked()
+			if (blocked) return fail(op, `Not updating: ${blocked}.`)
+			const waited = await waitIdle(op)
+			const r = await pimSh(['update', ...(op.args.tag ? [op.args.tag] : [])], t.up)
+			let line = null
+			for (const l of r.stdout.split('\n').reverse()) {
+				try {
+					const j = JSON.parse(l)
+					if (j && j.event === 'pim.update') {
+						line = j
+						break
+					}
+				} catch {}
+			}
+			const lead = waited ? `${waited} ` : ''
+			if (!line) return fail(op, `${lead}${failText('pim.sh update', r)}`)
+			const data = { from: line.from ?? null, to: line.to ?? null, result: line.result }
+			if (line.result === 'updated') return { result: done(op.id, 'succeeded', `${lead}Updated from ${line.from} to ${line.to}; the stack is up.`, data) }
+			if (line.result === 'unchanged') return { result: done(op.id, 'succeeded', `${lead}Already up to date at ${line.to ?? line.from}.`, data) }
+			if (line.result === 'rolled_back') return { result: done(op.id, 'rolled_back', `${lead}The update to ${line.to} did not come up healthy, so the stack went back to ${line.from}. ${failText('pim.sh update', r).slice(-600)}`, data) }
+			return fail(op, `${lead}pim.sh update reported ${JSON.stringify(String(line.result)).slice(0, 60)}.`, data)
 		},
 
 		async rollback(op) {

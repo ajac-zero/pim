@@ -54,6 +54,7 @@ import { MemorySection } from "~/components/memory-settings";
 import { ModelProviderLogo } from "~/components/model-logo";
 import { ProvidersSection } from "~/components/model-providers";
 import { ProviderLogo } from "~/components/provider-buttons";
+import { ReleaseSection } from "~/components/release-settings";
 import { SignInMethodsSection } from "~/components/sign-in-methods";
 import { useTheme } from "~/components/theme";
 import { ToolPermissionList } from "~/components/tool-permissions";
@@ -259,6 +260,9 @@ function SettingsTabs({ initial }: { initial: SettingsTab }) {
         {tab === "compute" && <ComputeSection />}
         {tab === "deployment" && (
           <>
+            <div className="mb-10">
+              <ReleaseSection />
+            </div>
             <DeploymentSection />
             <ComputerHostSection />
             <HostOpsSection />

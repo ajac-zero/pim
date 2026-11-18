@@ -47,6 +47,7 @@ import { webAssets } from "./web-assets.ts";
 import { poolRoutes } from "./compat/admin.ts";
 import { webCompatRoutes } from "./compat/index.ts";
 import { gateBefore, limitGuestMessages } from "./limits.ts";
+import { checkForUpdate } from "./update-check.ts";
 
 export type Env = Record<string, string | undefined>;
 export type Hooks = {
@@ -322,7 +323,13 @@ export async function startMaintenance(config: ProcessConfig, env: Env, host: Ho
 	const notifier = { vapid: vapidFromEnv(env), subject: env.PIM_VAPID_SUBJECT || config.publicUrl, allowPrivate: env.PIM_PUSH_ALLOW_PRIVATE === "1" };
 	const keys = keyringFromProcessEnv(env);
 	let lastRenewal = 0;
+	let lastUpdateCheck = 0;
 	const pass = async () => {
+		// Whether a newer image is published on this instance's channel: a look at the registry is due a few times a day (`update-check.ts`), and this asks whether one is due every ten minutes.
+		if (Date.now() - lastUpdateCheck > 600_000) {
+			lastUpdateCheck = Date.now();
+			await checkForUpdate(app, env).catch((e) => console.error("update check", e));
+		}
 		// Watches' grants that are running out are asked for again (`watches.ts`), once a minute.
 		if (keys && Date.now() - lastRenewal > 60_000) {
 			lastRenewal = Date.now();

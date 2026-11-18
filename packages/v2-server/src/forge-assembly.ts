@@ -26,7 +26,7 @@ import { mistralVibe } from "@pim/coding/harness/vibe";
 import { ComposeWorkspaceProvider } from "@pim/coding/workspace/compose";
 import type { WorkspaceProvider } from "@pim/coding/workspace/types";
 import type { EnvelopeCrypto, ObjectStore } from "@pim/v2-contracts/platform";
-import { Authz } from "@pim/v2-forge/authz";
+import { type ApprovalFiled, Authz } from "@pim/v2-forge/authz";
 import { ampAttachmentFetcher, ampOrbClients } from "@pim/v2-forge/amp-adapter";
 import { CliTurnPort } from "@pim/v2-forge/cli-port";
 import type { ComputeProvider } from "@pim/v2-forge/compute";
@@ -109,9 +109,9 @@ function defaultModels(env: Env): PiPortDeps["models"] {
 	return async () => models;
 }
 
-export function assembleForge(db: ForgeDb, objects: ObjectStore, env: Env, crypto?: EnvelopeCrypto, opts: { scoped?: boolean; /** Whether this deployment can run Amp, for a process that holds no vault of its own (the Runner, which only starts threads). Default: this process has a vault. */ ampConfigured?: boolean } = {}): ForgeParts {
+export function assembleForge(db: ForgeDb, objects: ObjectStore, env: Env, crypto?: EnvelopeCrypto, opts: { scoped?: boolean; /** Whether this deployment can run Amp, for a process that holds no vault of its own (the Runner, which only starts threads). Default: this process has a vault. */ ampConfigured?: boolean; /** Where a person answers what Forge asks them to approve. */ onApprovalFiled?: (filed: ApprovalFiled) => Promise<void> } = {}): ForgeParts {
 	const store = new ForgeStore(db);
-	const authz = new Authz(db, { allowedRepos: (env.PIM_CODING_ALLOWED_REPOS ?? "").split(",").map((r) => r.trim()).filter(Boolean), branchPrefix: env.PIM_CODING_BRANCH_PREFIX ?? "pim/" });
+	const authz = new Authz(db, { allowedRepos: (env.PIM_CODING_ALLOWED_REPOS ?? "").split(",").map((r) => r.trim()).filter(Boolean), branchPrefix: env.PIM_CODING_BRANCH_PREFIX ?? "pim/" }, opts.onApprovalFiled);
 	const clock = overrides.clock ?? Date.now;
 	const scheduler = new ForgeScheduler(db, store, clock);
 	// Without a configured signing key a process signs with its own, so the broker tokens it issues die with it: fine for a trial, set one in a deployment.

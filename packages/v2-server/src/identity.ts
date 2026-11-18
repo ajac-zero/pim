@@ -7,6 +7,9 @@ import type { IncomingMessage } from "node:http";
 import { type AuthzRequest, type Authorizer, ForbiddenError } from "@pim/v2-contracts/authz";
 import { OwnerId, type Principal } from "@pim/v2-contracts/identity";
 import type { App } from "@pim/v2-app/app";
+import { newId } from "@pim/v2-app/ids";
+import type { ApprovalFiled } from "@pim/v2-forge/authz";
+import type { Forge } from "@pim/v2-forge/forge";
 import { bearerOf } from "@pim/v2-app/http";
 import type { LiveIdentity } from "@pim/v2-live/server/identity";
 import type { Pulse } from "@pim/v2-live/server/pulse";
@@ -97,6 +100,36 @@ export function deliverApprovalDecisions(app: App): void {
 		} else if (row?.public_chat_id && taskId !== undefined) {
 			await app.conversations.admit(p, { commandId: `approval:${approvalId}`, kind: "approval_decision", chatId: row.public_chat_id, payload: { taskId, approved: approve, approvalId } });
 		}
+	};
+}
+
+const FORGE_ACTIONS: Record<string, string> = { push: "Push", pr: "Open a pull request on", merge: "Merge into" };
+const CHAT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/**
+ * What Forge needs a person to approve (a push, a pull request or a merge) is filed in their approvals list, where they answer it, as one that waits a day and that neither
+ * the auto policy nor the majordomo answers for them (`explicit`). Forge's own row is the one its next try reads, so the answer is carried back to it (`deliverForgeDecisions`).
+ * Asking again while one waits files nothing more.
+ */
+export function surfaceForgeApprovals(app: App): (filed: ApprovalFiled) => Promise<void> {
+	return async ({ approvalId, ownerId, chatId, action, repo }) => {
+		await app.db.owner(ownerId, async (tx) => {
+			// Two asks at once (an agent's tool calls run side by side) take turns, so the second finds the first's.
+			await tx.query("SELECT pg_advisory_xact_lock(hashtext($1))", [approvalId]);
+			if ((await tx.query("SELECT 1 FROM pim_app.approvals WHERE state = 'waiting' AND args->>'forgeApproval' = $1", [approvalId])).rowCount) return;
+			const args = { forgeApproval: approvalId, explicit: true, resource: { repository: repo }, summary: `${FORGE_ACTIONS[action] ?? action} ${repo}` };
+			await tx.query("INSERT INTO pim_app.approvals (id, owner_id, public_chat_id, tool, args, timeout_policy, expires_at) VALUES ($1,$2,$3,$4,$5,'deny', now() + interval '24 hours')", [newId("ap"), ownerId, chatId && CHAT_ID.test(chatId) ? chatId : null, `coding:${action}`, JSON.stringify(args)]);
+		});
+	};
+}
+
+/** A person's answer to an approval that stands for one of Forge's reaches Forge, which only the thread's owner may give. */
+export function deliverForgeDecisions(app: App, forge: Forge): void {
+	const decide = app.approvals.decide.bind(app.approvals);
+	app.approvals.decide = async (p, approvalId, approve) => {
+		await decide(p, approvalId, approve);
+		const forgeApproval = (await app.db.owner(p.ownerId, async (tx) => (await tx.query("SELECT args->>'forgeApproval' AS id FROM pim_app.approvals WHERE id = $1", [approvalId])).rows[0]))?.id;
+		if (typeof forgeApproval === "string") await forge.scopedTo(p.ownerId).decideApproval({ ownerId: p.ownerId, role: "member" }, forgeApproval, approve);
 	};
 }
 

@@ -372,6 +372,33 @@ real("the default agent host", () => {
 		expect((await results("coding_open_pull_request")).at(-1)).toMatch(/coding:pr/);
 		expect((await results("coding_merge")).at(-1)).toMatch(/workspace/);
 	}, 120_000);
+	it("shows a person the push, pull request or merge Forge needs them to approve, and carries their answer back to it", async () => {
+		const id = (await d.stack.admin.query("SELECT thread_id FROM pim_forge.forge_threads WHERE owner_id = $1", [ownerId])).rows[0].thread_id as string;
+		const granted = await web.call("POST", "/api/admin/coding-grants", { ownerId, permissions: ["coding:pr"], repositories: ["github.com/acme/*"], pools: ["default"] });
+		expect(granted.status).toBe(201);
+		const waiting = async () => (await d.stack.admin.query("SELECT id, tool, public_chat_id, args FROM pim_app.approvals WHERE state = 'waiting' AND args ? 'forgeApproval'")).rows;
+		const forgeState = async () => (await d.stack.admin.query("SELECT status FROM pim_forge.forge_approvals WHERE thread_id = $1 AND action = 'pr'", [id])).rows.map((r) => r.status);
+		// Asking twice files one approval, in the person's list and in the chat that asked.
+		await say("open a pull request", toolUse(fauxToolCall("coding_open_pull_request", { thread: id }), fauxToolCall("coding_open_pull_request", { thread: id })));
+		expect((await results("coding_open_pull_request")).at(-1)).toMatch(/waiting in their approvals/);
+		const [filed, ...others] = await waiting();
+		expect(others).toEqual([]);
+		expect(filed).toMatchObject({ tool: "coding:pr", public_chat_id: chatId, args: { explicit: true } });
+		expect((await web.call("GET", "/api/approvals?status=pending")).json.approvals.map((a: { id: string }) => a.id)).toContain(filed.id);
+		expect(await forgeState()).toEqual(["pending"]);
+		// Their yes is Forge's, so the next try goes past the approval; a no is Forge's too.
+		expect((await web.call("POST", `/api/approvals/${filed.id}/approve`, {})).status).toBe(200);
+		expect(await forgeState()).toEqual(["approved"]);
+		await say("try again", toolUse(fauxToolCall("coding_open_pull_request", { thread: id })));
+		expect((await results("coding_open_pull_request")).at(-1)).not.toMatch(/approval/);
+		await d.stack.admin.query("DELETE FROM pim_forge.forge_approvals WHERE thread_id = $1", [id]);
+		await say("and again", toolUse(fauxToolCall("coding_open_pull_request", { thread: id })));
+		const [second] = await waiting();
+		expect(second.id).not.toBe(filed.id);
+		expect((await web.call("POST", `/api/approvals/${second.id}/deny`, {})).status).toBe(200);
+		expect(await forgeState()).toEqual(["denied"]);
+		await web.call("DELETE", `/api/admin/coding-grants/${ownerId}/${granted.json.grantId}`);
+	}, 120_000);
 	it("lets an admin list, give and revoke coding access, and an amp thread needs no pool", async () => {
 		const forgeDb = d.stack.admin as unknown as ForgeDb;
 		const access = (await web.call("GET", "/api/admin/coding-access")).json;

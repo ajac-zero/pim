@@ -38,10 +38,15 @@ export class Forge {
 	scopedTo(ownerId: string): Forge {
 		const db = scopedDb(this.c.db, ownerId);
 		const store = new ForgeStore(db, this.c.store.now);
-		const authz = new Authz(db, this.c.authz.policy);
+		const authz = new Authz(db, this.c.authz.policy, this.c.authz.onFiled);
 		return new Forge({ ...this.c, db, store, authz, scheduler: new ForgeScheduler(db, store, this.c.scheduler.clock), promoteOnRelease: false });
 	}
 
+
+	/** A person's answer to an approval Forge filed (a push, pull request or merge): the thread's next try goes ahead or is refused. */
+	decideApproval(actor: Actor, approvalId: string, approve: boolean): Promise<void> {
+		return this.c.authz.decide(approvalId, actor, approve);
+	}
 
 	private async own(actor: Actor, ref: string): Promise<ThreadRow> {
 		if (actor.role === "guest") throw new ForbiddenError("coding", "guests can't use coding threads");

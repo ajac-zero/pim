@@ -36,7 +36,7 @@ import { mcpFetchTools } from "./connector-tools.ts";
 import { publicUrl } from "./agent-tools.ts";
 import { renewDue } from "./watches.ts";
 import type { Host } from "./host.ts";
-import { AppLiveIdentity, deliverApprovalDecisions, LiveAuthorizer, mirrorCodingGrants, publishRevocations } from "./identity.ts";
+import { AppLiveIdentity, deliverApprovalDecisions, deliverForgeDecisions, LiveAuthorizer, mirrorCodingGrants, publishRevocations, surfaceForgeApprovals } from "./identity.ts";
 import { runtimeOutboxSource } from "./runtime-source.ts";
 import { natsRelayBus } from "./relay-bus.ts";
 import { notifyPass } from "./notifier.ts";
@@ -112,8 +112,9 @@ export async function startGate(config: ProcessConfig, env: Env, host: Host, nat
 	// What the triggers runtime on a person's computer says over its connection is answered here, in the process that holds the socket.
 	app.relay.computerTriggers = new ComputerTriggers(app);
 	const secure = config.publicUrl.startsWith("https:");
-	const forge = assembleForge(db.pool as never, objects, env, crypto, { scoped: true });
+	const forge = assembleForge(db.pool as never, objects, env, crypto, { scoped: true, onApprovalFiled: surfaceForgeApprovals(app) });
 	mirrorCodingGrants(app, forge.authz as never);
+	deliverForgeDecisions(app, forge.forge);
 	const authenticate = forgeAuthenticator(app, secure);
 	// Forge's whole HTTP surface (the coding API, harness logins, the git broker, Gitea, the model gateway), each request under its owner's row-level security scope.
 	const coding = forgeHttp(forge, { authenticate, crypto: app.crypto });
@@ -225,7 +226,7 @@ export async function startRunner(config: ProcessConfig, env: Env, host: Host, h
 	const objects = appDb || forgePool ? s3Of(config, env) : undefined;
 	const app = appDb && objects ? new App(appDb, objects, { ...(crypto ? { crypto } : {}), ...(env.PIM_APP_SECRET_KEY ? { appKey: env.PIM_APP_SECRET_KEY } : {}) }) : undefined;
 	// With the deployment's keys, so the coding tools see the vault: Amp threads start only when Forge can open the person's Amp key.
-	const forge = forgePool && objects ? assembleForge(forgePool as never, objects, env, crypto) : undefined;
+	const forge = forgePool && objects ? assembleForge(forgePool as never, objects, env, crypto, app ? { onApprovalFiled: surfaceForgeApprovals(app) } : {}) : undefined;
 	// The computer's tools reach a paired computer over the Relay's bus (NATS). The connection is made when an agent first uses one, so a Runner that never does needs no NATS.
 	let relayPulse: Promise<NatsPulse> | undefined;
 	const relayBus = async () => natsRelayBus(await (relayPulse ??= NatsPulse.connect(config.natsUrl)));

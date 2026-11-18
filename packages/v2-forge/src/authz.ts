@@ -49,10 +49,15 @@ export function repoMatches(patterns: readonly string[], repo: string): boolean 
 	return repoName(repo) !== null && repositoryAllowed(patterns, repo);
 }
 
+/** What a deployment is told when Forge files an approval: the thread's owner and chat, and what is being approved. */
+export type ApprovalFiled = { approvalId: string; ownerId: string; chatId: string | null; action: string; repo: string };
+
 export class Authz {
 	constructor(
 		private readonly db: Db,
 		readonly policy: Policy = DEFAULT_POLICY,
+		/** Called each time Forge asks for an approval, so the person can be shown it where they answer approvals; it must not file the same one twice. */
+		readonly onFiled?: (filed: ApprovalFiled) => Promise<void>,
 	) {}
 
 	/** Throws ForbiddenError unless some live grant lets the actor do this to the repository (and pool); otherwise says whether a person must also approve. */
@@ -140,6 +145,8 @@ export class Authz {
 	async requestApproval(threadId: string, action: string, payload: object = {}): Promise<string> {
 		const id = `cp-${threadId.slice(0, 8)}-${action}`;
 		await this.db.query("insert into pim_forge.forge_approvals (approval_id, thread_id, action, payload) values ($1,$2,$3,$4) on conflict (approval_id) do nothing", [id, threadId, action, payload]);
+		const thread = (await this.db.query<Row>("select owner_id, chat_id, repo from pim_forge.forge_threads where thread_id = $1", [threadId])).rows[0];
+		if (thread) await this.onFiled?.({ approvalId: id, ownerId: thread.owner_id as string, chatId: (thread.chat_id as string | null) ?? null, action, repo: thread.repo as string });
 		return id;
 	}
 

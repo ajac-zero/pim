@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { type OutboxSource, tableOutboxSource } from "../src/projections/outbox-source.ts";
 import { Projector } from "../src/projections/projector.ts";
 import { sidebarPage, transcriptPage } from "../src/projections/snapshots.ts";
 import { withOwner } from "../src/owner-tx.ts";
@@ -115,6 +116,30 @@ live("projections over PostgreSQL", () => {
 		await db.admin.query("INSERT INTO pim_runtime.runtime_outbox (partition_id, commit_seq, projection_version, owner_id, public_chat_id, conversation_id, event_kind, payload) VALUES ($1, 2, 1, $2, $3, 1, 'chat.meta', '{\"title\":\"b\"}')", [P1, ADA, C1]);
 		expect(await projector.drainAll()).toBe(2);
 		expect((await views()).sidebar[0]!.title).toBe("c");
+	});
+
+	it("projects text with a NUL, which jsonb refuses, and a partition that fails does not hold back the others", async () => {
+		// The runtime keeps records as text, which holds a NUL; this fixture's outbox is jsonb, so the source puts the NULs back in.
+		await outbox.entry(P1, ADA, C1, entry(10, "pi.message", { role: "toolResult", toolCallId: "call-1", toolName: "shell", content: [{ type: "text", text: "page<NUL>1" }], isError: false, timestamp: 1010 }));
+		await outbox.commit(P1, ADA, C1, "chat.meta", { title: "a<NUL>b", busy: false, summary: { last: "<NUL>" } });
+		await outbox.commit(P2, ADA, C2, "chat.meta", { title: "unreadable" });
+		await outbox.entry(P3, GRACE, C1, user(10, "after the broken partition"));
+		const table = tableOutboxSource(db.pool);
+		const source: OutboxSource = {
+			...table,
+			commitsAfter: async (owner, partition, version, after, limit) => {
+				if (partition === P2) throw new Error("unreadable commit");
+				const commits = await table.commitsAfter(owner, partition, version, after, limit);
+				return commits.map((c) => ({ ...c, events: c.events.map((e) => ({ ...e, payload: JSON.parse(JSON.stringify(e.payload).replaceAll("<NUL>", "\\u0000")) })) }));
+			},
+		};
+		await expect(new Projector(db.pool, { source }).drainAll()).rejects.toThrow("unreadable commit");
+		const { transcript, sidebar } = await views();
+		expect(transcript.map((row) => [row.owner_id, JSON.stringify(row.message)])).toEqual([
+			[ADA, expect.stringContaining('"page1"')],
+			[GRACE, expect.stringContaining("after the broken partition")],
+		]);
+		expect(sidebar.map((row) => row.title)).toEqual(["ab"]);
 	});
 
 	it("keeps an owner's rows from every other owner, and from a connection that set none, by row-level security", async () => {

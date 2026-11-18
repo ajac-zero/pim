@@ -35,6 +35,17 @@ type Emitted = { kind: string; data: JsonValue; replaceableKey: string | null };
 
 const num = (value: string | number | null | undefined) => (value === null || value === undefined ? 0 : Number(value));
 
+/**
+ * `value` without U+0000, which PostgreSQL's text and jsonb refuse. The runtime keeps records as text that may hold one, such as a tool's dump of a
+ * PDF; projecting it as is would fail that commit on every attempt and leave its partition's chats frozen.
+ */
+function withoutNul(value: unknown): unknown {
+	if (typeof value === "string") return value.includes("\u0000") ? value.replaceAll("\u0000", "") : value;
+	if (Array.isArray(value)) return value.map(withoutNul);
+	if (typeof value === "object" && value !== null && !(value instanceof Date)) return Object.fromEntries(Object.entries(value).map(([k, v]) => [withoutNul(k), withoutNul(v)]));
+	return value;
+}
+
 export class Projector {
 	readonly version: number;
 	readonly #pool: Pool;
@@ -70,10 +81,19 @@ export class Projector {
 		}
 	}
 
-	/** Projects every partition the source has commits for. */
+	/** Projects every partition the source has commits for. A partition that fails waits for the next pass without holding back the others, whose failures are thrown together after them. */
 	async drainAll(): Promise<number> {
 		let applied = 0;
-		for (const { ownerId, partitionId } of await this.#source.partitions(this.version)) applied += await this.drain(ownerId, partitionId);
+		const failures: unknown[] = [];
+		for (const { ownerId, partitionId } of await this.#source.partitions(this.version)) {
+			try {
+				applied += await this.drain(ownerId, partitionId);
+			} catch (error) {
+				failures.push(error);
+			}
+		}
+		if (failures.length === 1) throw failures[0];
+		if (failures.length > 1) throw new AggregateError(failures, `${failures.length} partitions could not be projected`);
 		return applied;
 	}
 
@@ -95,7 +115,7 @@ export class Projector {
 			if (fresh.rowCount === 0) return false;
 			// A commit has one cursor, so a topic gets one row per commit: several events for it fold into a batch.
 			const emitted = new Map<string, Emitted[]>();
-			for (const event of events) if (PROJECTED_KINDS.includes(event.eventKind)) await this.#project(client, event, emitted);
+			for (const event of events) if (PROJECTED_KINDS.includes(event.eventKind)) await this.#project(client, { ...event, payload: withoutNul(event.payload) as RuntimeOutboxEvent["payload"] }, emitted);
 			for (const [topic, list] of emitted) hints.push(await this.#log(client, ownerId, partitionId, commit.commitSeq, topic, list));
 			await client.query("UPDATE pim_projection.projection_watermarks SET projected_seq = greatest(projected_seq, $3), updated_at = now() WHERE partition_id = $1 AND projection_version = $2", [partitionId, this.version, commit.commitSeq.toString()]);
 			return true;

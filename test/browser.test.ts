@@ -109,7 +109,8 @@ describe("the browser", () => {
 		expect(browserCalls.map((call) => call.op)).toEqual(expect.arrayContaining(["browser_status", "browser_connect"]));
 	});
 
-	it("reads pages, clicks and types at once, and sends a form only once the person approves what the page shows", async () => {
+	it("reads pages, clicks and types at once, and sends a form only once the person approves what the page shows, where they set it to ask", async () => {
+		for (const tool of ["browser_click", "browser_type", "browser_upload"]) await setPermission(tool, "ask");
 		const page = await callTool("browser_open", { url: FORM });
 		expect(page).toContain("Page: Orders");
 		expect(page).toContain("# Order soup");
@@ -166,17 +167,11 @@ describe("the browser", () => {
 
 		expect(await callTool("browser_hover", { ref: refOf(page, "button", "Menu") })).toContain("# Menu open");
 
-		// Uploading asks, naming the files; they come from the person's files, on the computer.
+		// Uploading runs at once, and the request names the files; they come from the person's files, on the computer.
 		await fs.writeFile(`${root}/notes.txt`, "Less salt");
-		faux.setResponses([
-			toolUse("browser_upload", { ref: refOf(page, "file field", "Attachment"), paths: ["/workspace/notes.txt"] }),
-			toolUse("send_to_user", { message: "Attached." }),
-		]);
-		const attaching = say("Attach my notes.");
-		const upload = await pendingApproval();
-		expect(upload.summary).toBe("On a page the agent wrote, upload notes.txt with the file field “Attachment”");
-		expect((await post<Approval>(`/approvals/${upload.id}/approve`)).body.result).toContain("# Attached notes.txt");
-		await attaching;
+		expect(await callTool("browser_upload", { ref: refOf(page, "file field", "Attachment"), paths: ["/workspace/notes.txt"] })).toContain("# Attached notes.txt");
+		const { approvals } = (await api<{ approvals: Approval[] }>("/approvals?status=approved")).body;
+		expect(approvals.find((approval) => approval.action === "browser_upload")?.summary).toBe("On a page the agent wrote, upload notes.txt with the file field “Attachment”");
 		expect(await callTool("browser_upload", { ref: refOf(page, "file field", "Attachment"), paths: ["/workspace/missing.txt"] })).toMatch(/missing\.txt/);
 
 		// What a click downloads goes to the person's files, and the agent hears where.
@@ -185,8 +180,6 @@ describe("the browser", () => {
 	});
 
 	it("types, clicks and hovers in a window the person minimized, which Chrome doesn't draw", async () => {
-		await setPermission("browser_click", "on");
-		await setPermission("browser_type", "on");
 		const page = await callTool("browser_open", { url: CONTROLS });
 		const { targetInfos } = await computer.browser.devtools("Target.getTargets");
 		const { targetId } = targetInfos.find((target: { url: string }) => target.url === CONTROLS);
@@ -212,8 +205,7 @@ describe("the browser", () => {
 		expect((await api("/approvals?status=pending")).body.approvals).toEqual([]);
 	});
 
-	it("clicks at once when the person lets it", async () => {
-		await setPermission("browser_click", "on");
+	it("sends a form at once unless the person set it to ask", async () => {
 		const page = await callTool("browser_open", { url: FORM });
 		const clicked = await callTool("browser_click", { ref: refOf(page, "button", "Order") });
 		expect(clicked).toContain("approved automatically");

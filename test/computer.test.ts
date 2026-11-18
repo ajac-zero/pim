@@ -6,7 +6,6 @@ import { env, runInDurableObject } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vitest";
 import { handle, OUTDATED, PROTOCOL_VERSION, type DisplayHost, type DriverHost, type ExecArgs, type ExecResult, type ScreenHost } from "../computer/pim-computer";
-import type { Approval } from "../src/store";
 import { COMPUTER_GRANT_ACTION, PROTOCOL, runtimeIdOf, TRIGGERS_ENVELOPE } from "@pim/triggers/computer";
 import { TRIGGER_TICK_CALLBACK } from "@pim/triggers/engine";
 import { Computer, MAX_FILE_LISTENERS, MAX_WATCHED_PATHS } from "../src/computer";
@@ -408,23 +407,19 @@ describe("the computer", () => {
 		await response.body?.cancel();
 	});
 
-	it("deletes an agent's files only once the person approves; the person deletes their own", async () => {
+	it("deletes an agent's files without asking; the person deletes their own", async () => {
 		await upload("/workspace/old/draft.txt", "first draft");
 		faux.setResponses([toolUse("file_delete", { path: "/workspace/old", recursive: true }), toolUse("send_to_user", { message: "Deleted." })]);
-		const cleaning = say("Clean up the old folder.");
-		const approval = await pendingApproval();
-		expect(approval.summary).toBe("Delete /workspace/old and everything in it");
-		expect(await fs.readFile(`${ROOT}/old/draft.txt`, "utf8")).toBe("first draft");
-		expect((await post<Approval>(`/approvals/${approval.id}/approve`)).body.status).toBe("approved");
-		expect(await cleaning).toMatchObject({ status: "done", replies: ["Deleted."] });
+		expect(await say("Clean up the old folder.")).toMatchObject({ status: "done", replies: ["Deleted."] });
 		await expect(fs.stat(`${ROOT}/old`)).rejects.toThrow();
+		expect((await api("/permissions")).body.tools).toContainEqual(expect.objectContaining({ name: "file_delete", permission: "on", chosen: null }));
 
 		await upload("/workspace/gone.txt", "bye");
 		expect((await raw("/files?path=/workspace/gone.txt", { method: "DELETE" })).status).toBe(200);
 		expect((await raw("/files/content?path=/workspace/gone.txt")).status).toBe(404);
 	});
 
-	it("runs commands once the person approves, where the agent asks", async () => {
+	it("runs commands without asking", async () => {
 		await fs.mkdir(`${ROOT}/project`, { recursive: true });
 		answer = (args) => ({ exitCode: 2, signal: null, stdout: `ran ${args.command}\n`, stderr: "warning: old npm\n", timedOut: false, truncated: false });
 		let result = { text: "", isError: false, images: [] as string[] };
@@ -435,22 +430,15 @@ describe("the computer", () => {
 				return toolUse("send_to_user", { message: "Tested." });
 			},
 		]);
-		const testing = say("Run the tests.");
-		const approval = await pendingApproval();
-		expect(approval.summary).toBe("Run a command");
-		expect(ran).toEqual([]);
-		await post(`/approvals/${approval.id}/approve`);
-		await testing;
+		await say("Run the tests.");
 		expect(ran).toEqual([{ command: "npm test", cwd: "/workspace/project", timeoutMs: 30_000, maxBytes: 64_000, thread: "1" }]);
 		expect(result.text).toContain("Exit code 2\nstdout:\nran npm test\n\nstderr:\nwarning: old npm");
+		expect((await api("/permissions")).body.tools).toContainEqual(expect.objectContaining({ name: "shell", permission: "on", chosen: null }));
 
 		// A folder outside the files is refused before anything runs.
 		faux.setResponses([toolUse("shell", { command: "ls", cwd: "/etc" }), toolUse("send_to_user", { message: "No." })]);
-		const refused = say("List /etc.");
-		await post(`/approvals/${(await pendingApproval()).id}/approve`);
-		await refused;
+		await say("List /etc.");
 		expect(ran.length).toBe(1);
-		expect((await api("/permissions")).body.tools).toContainEqual(expect.objectContaining({ name: "shell", permission: "ask" }));
 	});
 
 	it("saves the images agents make, each counted as a model request", async () => {
@@ -909,7 +897,7 @@ describe("a computer this Pim's host keeps", () => {
 		const hosted = await connectTestComputer(again!.token!, `/tmp/computer-${crypto.randomUUID()}`, async () => answer({ command: "true" }), undefined, screen, driver);
 		expect(await status()).toMatchObject({ state: "online", managed: true, error: null, computer: { screen: true, desktop: true } });
 
-		// Looking runs at once, and shows the model the screen; acting asks first, naming what it does, and then runs in the agent's own driver session.
+		// Looking runs at once, and shows the model the screen; acting runs at once too, in the agent's own driver session, and the request names what it did.
 		expect(await offeredTools()).toEqual(expect.arrayContaining(["desktop_look", "desktop_read", "desktop_act"]));
 		const looked = await callTool("desktop_look", {});
 		expect(looked).toMatchObject({ isError: false, images: ["image/png"] });
@@ -918,11 +906,9 @@ describe("a computer this Pim's host keeps", () => {
 			toolUse("desktop_act", { action: "type_text", pid: 3547, window_id: 7, text: "Dear Ada," }),
 			toolUse("send_to_user", { message: "Typed." }),
 		]);
-		const typing = say("Start the letter.");
-		const typed = await pendingApproval();
-		expect(typed.summary).toBe("Type “Dear Ada,” on your computer in app 3547");
-		await post(`/approvals/${typed.id}/approve`);
-		await typing;
+		await say("Start the letter.");
+		const { approvals } = (await api("/approvals")).body as { approvals: { action: string; summary: string; status: string }[] };
+		expect(approvals.find((approval) => approval.action === "desktop_act")).toMatchObject({ summary: "Type “Dear Ada,” on your computer in app 3547", status: "approved" });
 		expect(driven.map(({ tool }) => tool)).toEqual(["get_desktop_state", "type_text"]);
 		expect(driven[1]!.args).toEqual({ pid: 3547, window_id: 7, text: "Dear Ada,", session: driven[0]!.args.session });
 		expect(driven[0]!.args.session).toMatch(/^pim-/);

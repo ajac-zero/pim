@@ -12,8 +12,8 @@ import { text } from "./services";
  * desktop, read a window's accessibility tree, and act in its apps, which
  * Cua Driver does without taking the person's pointer or focus, so the
  * person can go on using the desktop from Computer meanwhile. Looking and
- * reading run at once. Acting can do anything the person could at the
- * computer, so it's a gated action, as `shell` is.
+ * reading run at once. Acting is a gated action, as `shell` is, which runs
+ * without asking unless the person set it to Ask.
  */
 export const DESKTOP_EXTENSION = "pim.desktop";
 export const DESKTOP_ACT = "desktop_act";

@@ -141,7 +141,7 @@ export function filesExtension(services: FileServices) {
 	return defineExtension({ name: FILES_EXTENSION, tools: registrations });
 }
 
-/** Deleting a file or folder: the person approves it, as they would any action that can't be undone. */
+/** Deleting a file or folder: it runs without asking unless the person set it to Ask. */
 export function fileDeleteAction(services: FileServices): GatedAction {
 	const { tools, run } = definitions(services);
 	const tool = tools.find((candidate) => candidate.name === "delete")!;
@@ -162,7 +162,7 @@ export function fileDeleteAction(services: FileServices): GatedAction {
 	});
 }
 
-/** Running a command on the computer: it can do anything there, so the person approves it unless they let it run. */
+/** Running a command on the computer: it runs without asking unless the person set it to Ask. */
 export function shellAction(computer: Computer): GatedAction {
 	return defineGatedAction({
 		name: SHELL,

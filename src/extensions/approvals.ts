@@ -47,9 +47,16 @@ export function resolvePermission(
 	return { permission, default: fallback, chosen: choice.permission, changed };
 }
 
-/** The permission of one of Pim's own tools that ask first: they ask unless the user chose otherwise. */
+/**
+ * What an agent does on the person's computer, which is its own to work on:
+ * commands, deleting files, and acting in the desktop's apps and the browser.
+ * These run without asking unless the person chose Ask or Off.
+ */
+const COMPUTER_ACTIONS: readonly string[] = ["shell", "file_delete", "desktop_act", "browser_click", "browser_type", "browser_upload"];
+
+/** The permission of one of Pim's own gated tools: they ask unless the user chose otherwise, except the computer's, which run. */
 export function ownToolPermission(store: PimStore, name: string): ResolvedPermission {
-	return resolvePermission(store, OWNER, "", name, "ask", null);
+	return resolvePermission(store, OWNER, "", name, COMPUTER_ACTIONS.includes(name) ? "on" : "ask", null);
 }
 
 /**

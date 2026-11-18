@@ -204,8 +204,11 @@ export class PimClient {
   #v2Link(): V2Link {
     this.#v2 ??= new V2Link({
       handlers: {
-        loadSidebar: () =>
-          this.handlers.loadSidebar?.() ?? Promise.resolve(null),
+        loadSidebar: async () =>
+          (await this.handlers.loadSidebar?.()) ?? {
+            liveCursor: null,
+            sessions: [],
+          },
         onSidebarSummary: (row) => this.handlers.onSidebarSummary?.(row),
         onCodingSummary: () => this.handlers.onCodingSummary?.(),
         onUnauthorized: () => this.handlers.onUnauthorized?.(),

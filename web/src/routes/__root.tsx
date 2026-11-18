@@ -324,7 +324,7 @@ function usePimEvents() {
       loadSidebar: async () => {
         const { sessions, liveCursor } = await fetchSidebar();
         queryClient.setQueryData(["sessions"], sessions);
-        return liveCursor;
+        return { liveCursor, sessions };
       },
       onSidebarSummary: (row) => {
         queryClient.setQueryData<Session[]>(["sessions"], (list) =>

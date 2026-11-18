@@ -79,8 +79,11 @@ type ChatPage = {
 };
 
 export type V2Handlers = {
-  /** Reads the sidebar's snapshot into the app's lists; resolves with the cursor to follow it from. */
-  loadSidebar(): Promise<string | null>;
+  /** Reads the sidebar's snapshot into the app's lists; resolves with the cursor to follow it from and the chats it holds, which say which are at work. */
+  loadSidebar(): Promise<{
+    liveCursor: string | null;
+    sessions: readonly Pick<Session, "id" | "busy">[];
+  }>;
   onSidebarSummary(row: SidebarRow): void;
   onCodingSummary(): void;
   onUnauthorized(): void;
@@ -104,6 +107,8 @@ export class V2Link {
     stream: StreamState;
   } | null = null;
   #sidebar = false;
+  /** Which chats the sidebar last said are at work. A chat's own messages can't say so while a long tool call writes nothing, so every view of a chat is settled by this. */
+  readonly #busy = new Map<string, boolean>();
   readonly #onChat: (chat: V2Chat) => void;
 
   constructor(options: {
@@ -160,7 +165,15 @@ export class V2Link {
 
   async #snapshot(topic: string): Promise<{ liveCursor: string | null }> {
     if (topic === "sidebar") {
-      return { liveCursor: await this.#handlers.loadSidebar() };
+      const { liveCursor, sessions } = await this.#handlers.loadSidebar();
+      for (const row of sessions) this.#busy.set(row.id, row.busy);
+      const open = this.#chat;
+      const busy = open ? this.#busy.get(open.id) : undefined;
+      if (open && busy !== undefined) {
+        open.stream = applyBusy(open.stream, busy);
+        this.#publish();
+      }
+      return { liveCursor };
     }
     const chat = this.#chat;
     const id = topic.slice("chat:".length);
@@ -174,7 +187,7 @@ export class V2Link {
     }
     chat.messages = page.messages;
     chat.nextBefore = page.nextBefore;
-    chat.stream = streamOf(page.messages);
+    chat.stream = this.#drawn(chat);
     this.#publish();
     return { liveCursor: page.liveCursor };
   }
@@ -194,8 +207,15 @@ export class V2Link {
       ...chat.messages,
     ];
     chat.nextBefore = page.nextBefore;
-    chat.stream = streamOf(chat.messages);
+    chat.stream = this.#drawn(chat);
     this.#publish();
+  }
+
+  /** A chat drawn from its messages, at work as the sidebar last said: a reload or a page of older messages in the middle of a long tool call still shows the turn going on. */
+  #drawn(chat: { id: string; messages: V2Message[] }): StreamState {
+    const stream = streamOf(chat.messages);
+    const busy = this.#busy.get(chat.id);
+    return busy === undefined ? stream : applyBusy(stream, busy);
   }
 
   #publish(): void {
@@ -227,6 +247,7 @@ export class V2Link {
       if (update.topic === "sidebar") {
         if (event.kind === "sidebar.summary") {
           const row = event.data as SidebarRow;
+          this.#busy.set(row.chatId, row.busy);
           this.#handlers.onSidebarSummary(row);
           const chat = this.#chat;
           // The sidebar says whether the chat on screen is at work.

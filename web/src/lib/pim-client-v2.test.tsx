@@ -343,7 +343,10 @@ describe("a chat and the sidebar on Pim v2, with the socket still connecting", (
   it("keeps the sidebar current with the live service's summaries, one chat's line at a time", async () => {
     const { fetchImpl } = server({});
     vi.stubGlobal("fetch", fetchImpl);
-    const loadSidebar = vi.fn(async () => at(5));
+    const loadSidebar = vi.fn(async () => ({
+      liveCursor: at(5),
+      sessions: [],
+    }));
     const onSidebarSummary = vi.fn();
     const client = new PimClient();
     client.handlers = { loadSidebar, onSidebarSummary };
@@ -390,6 +393,53 @@ describe("a chat and the sidebar on Pim v2, with the socket still connecting", (
     ]);
     // No chat is open: the page makes no request for one.
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("shows a chat opened or paged in the middle of a long tool call as working, as the sidebar said", async () => {
+    const { fetchImpl } = server({
+      c1: {
+        messages: [user(3, "export"), assistant(4, "on it")],
+        nextBefore: "3",
+        liveCursor: at(4),
+      },
+      "c1:older": {
+        messages: [user(1, "before"), assistant(2, "ok")],
+        nextBefore: null,
+        liveCursor: at(4),
+      },
+    });
+    vi.stubGlobal("fetch", fetchImpl);
+    const client = new PimClient();
+    client.handlers = {
+      loadSidebar: async () => ({
+        liveCursor: at(5),
+        sessions: [{ id: "c1", busy: true }],
+      }),
+    };
+    client.followSidebar(true);
+    await flush();
+    client.open("c1");
+    await flush();
+    expect(client.getState().view.running).toBe(true);
+    await client.loadEarlier();
+    expect(client.getState().view.running).toBe(true);
+    // The sidebar's summary that ends the turn still ends it.
+    const socket = LiveSocket.at(0);
+    socket.open();
+    socket.say({
+      type: "event",
+      topic: "sidebar",
+      cursor: at(6),
+      kind: "sidebar.summary",
+      data: {
+        chatId: "c1",
+        title: null,
+        busy: false,
+        unread: false,
+        updatedAt: 1,
+      },
+    });
+    expect(client.getState().view.running).toBe(false);
   });
 
   it("wipes what was kept when access ends: 4003 stops the connection and tells the app", async () => {

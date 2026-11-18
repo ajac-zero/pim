@@ -207,6 +207,33 @@ describe("a v2 chat drawn by the same reducer as v1's", () => {
     expect(applyBusy(mid, false).view.running).toBe(false);
   });
 
+  it("keeps working through a progress note and a long tool call, until the sidebar says the turn is over", () => {
+    const call = (
+      id: number,
+      name: string,
+      callId: string,
+      args: Record<string, string | boolean>,
+    ) =>
+      assistant(id, "", [
+        { type: "tool-call", id: callId, name, arguments: args },
+      ]);
+    let stream = applyBusy(streamOf([user(1, "export a PDF")]), true);
+    for (const m of [
+      assistant(2, "I'll make a clean PDF", [], true),
+      call(2, "send_to_user", "c1", {
+        message: "I'll make a PDF",
+        complete: false,
+      }),
+      result(3, "c1"),
+      call(4, "shell", "c2", { command: "pandoc" }),
+    ]) {
+      stream = applyMessage(stream, m);
+      expect(stream.view.running).toBe(true);
+    }
+    // The sidebar's word ends it.
+    expect(applyBusy(stream, false).view.running).toBe(false);
+  });
+
   it("maps the sidebar's rows onto the app's sessions, most recently active first", () => {
     const a = sessionOf({
       chatId: "a",

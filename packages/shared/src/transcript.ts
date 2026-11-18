@@ -1,4 +1,5 @@
 import type { ImageContent, JsonValue, Message, TextContent } from "@earendil-works/pi-ai";
+import { isRetryableAssistantError } from "@earendil-works/pi-ai/utils/retry";
 import type { EntryRecord } from "@earendil-works/pi-durable";
 
 /** Private harness continuation, never a message from the person. */
@@ -10,6 +11,83 @@ export const LENGTH_REMINDER = "[Delivery required] Your previous output was cut
 /** Whether a user-role message is one of the harness's delivery reminders, not something the person said. */
 export function isDeliveryReminder(text: string): boolean {
 	return text === DELIVERY_REMINDER || text === LENGTH_REMINDER;
+}
+
+/** Why a run fails when the agent keeps answering without send_to_user: trying the model again wouldn't help. */
+export const NOT_DELIVERED = "The agent did not deliver its reply with send_to_user.";
+
+/**
+ * How the error starts when an answer was cut off at the output limit twice in a row: the model ran out of output
+ * tokens (reasoning counts) before it finished. Not retried, since another request ends the same way; the rest of the message
+ * says the limit it hit, so the person can raise the model's longest answer or pick another model.
+ */
+export const OUT_OF_OUTPUT_TOKENS = "The model ran out of output tokens before finishing";
+
+/** The error for an answer cut off at `limit` output tokens, with what the person can do. */
+export function outOfOutputTokens(limit: number): string {
+	const base = `${OUT_OF_OUTPUT_TOKENS}, twice`;
+	const advice = "Ask for something smaller, use a model with a longer output limit or less reasoning, or set the model's longest answer in its provider settings.";
+	const message = limit > 0 ? `${base} (limit ${limit}). ${advice}` : `${base}. ${advice}`;
+	// A number such as 4500 would read as an HTTP status to pi's retry check; fail without it rather than retry.
+	return isRetryableAssistantError({ stopReason: "error", errorMessage: message } as Parameters<typeof isRetryableAssistantError>[0]) ? `${base}. ${advice}` : message;
+}
+
+/**
+ * Whether the agent owes the person a reply, from the transcript a request is about to send: the last real input that is not background work (which may stay silent) and
+ * not skipped (`skip`: what others said in a room that was not for this agent), unless a finishing, successful `send_to_user` has answered it since. Also how many delivery
+ * and length reminders came after that input.
+ */
+export function deliveryOwed(messages: readonly Message[], skip: (input: string) => boolean = () => false): { required: boolean; reminders: number; truncations: number } {
+	let required = false;
+	let reminders = 0;
+	let truncations = 0;
+	/** Sends that finish a turn, by call: one that went through answered what was owed. */
+	const finishing = new Set<string>();
+	for (const message of messages) {
+		if (message.role === "assistant") {
+			for (const part of message.content) {
+				if (part.type === "toolCall" && part.name === "send_to_user" && part.arguments?.complete !== false) finishing.add(part.id);
+			}
+		} else if (message.role === "toolResult") {
+			if (finishing.has(message.toolCallId) && !message.isError) required = false;
+		} else if (message.role === "user") {
+			const input = typeof message.content === "string" ? message.content : message.content.flatMap((part) => part.type === "text" ? [part.text] : []).join("");
+			if (input === DELIVERY_REMINDER) {
+				reminders++;
+				continue;
+			}
+			if (input === LENGTH_REMINDER) {
+				truncations++;
+				continue;
+			}
+			if (skip(input)) continue;
+			// Background work may deliberately stay silent.
+			required = !/^\[(?:Scheduled task|Approval |Connector event\]|Team:|Chat with |Coding thread [^\]\n]+\] Stalled:)/.test(input);
+			reminders = 0;
+			truncations = 0;
+		}
+	}
+	return { required, reminders, truncations };
+}
+
+/**
+ * What an answer to a request that owes the person a reply turns into: pi runs no tool of an answer that stopped on length, so a half-written call never executes, and one
+ * shorter try is allowed; a second cut-off ends the run with its own error. After two delivery reminders a plain stop becomes a failure that is not retried, so the person sees
+ * it, with Try again, instead of silence. (Hook throws are reported and ignored by pi, hence the answer is changed rather than a throw.)
+ */
+export function enforceDelivery(answer: { stopReason: string; errorMessage?: string; content: readonly { type: string }[]; usage: { output: number } }, state: { reminders: number; truncations: number }): void {
+	if (answer.stopReason === "length") {
+		if (state.truncations >= 1) {
+			answer.stopReason = "error";
+			answer.errorMessage = outOfOutputTokens(answer.usage.output);
+		}
+		return;
+	}
+	if (state.reminders < 2) return;
+	if (answer.stopReason === "stop" || (answer.stopReason === "toolUse" && !answer.content.some((part) => part.type === "toolCall"))) {
+		answer.stopReason = "error";
+		answer.errorMessage = NOT_DELIVERED;
+	}
 }
 
 /** How the message starts that has the majordomo open its first chat by introducing itself (see ../majordomo.ts); apps don't show it. */

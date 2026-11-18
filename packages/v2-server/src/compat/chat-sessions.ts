@@ -6,6 +6,7 @@
  * The utility model's side jobs (a title, a summary, an improved prompt, suggestions) are in ./utility.ts and are off until one is chosen. Not here:
  * changing the queue behind a running turn, which lives in the runtime's inbox, not in the application's tables.
  */
+import { isDeliveryReminder } from "@pim/shared/transcript";
 import { randomUUID } from "node:crypto";
 import type { App } from "@pim/v2-app/app";
 import { addRoomMember, removeRoomMember, roomViews } from "../rooms.ts";
@@ -184,7 +185,8 @@ export function sessionRoutes(env: Record<string, string | undefined> = process.
 			await sessionView(app, p, id);
 			const messages = (await transcriptPage(app.db.pool, p.ownerId, id)).messages.filter((m) => !m.partial);
 			const last = messages.at(-1);
-			const asked = messages.findLast((m) => m.role === "user");
+			// The harness's own delivery reminders are user entries too, but not what the person asked.
+			const asked = messages.findLast((m) => m.role === "user" && !isDeliveryReminder(m.parts.map((part) => (part.type === "text" ? part.text : "")).join("")));
 			const text = asked?.parts.map((part) => (part.type === "text" ? part.text : "")).join("");
 			if (last?.role !== "assistant" || last.stopReason !== "error" || !text) throw new ConflictError("This chat isn't waiting to try again", "not_held");
 			const commandId = String(((await json().catch(() => ({}))) as Record<string, unknown>).commandId ?? `retry-${randomUUID()}`);

@@ -43,7 +43,7 @@ Pim publishes its images, so an instance updates the way a self-hosted app does:
 | `ghcr.io/ajac-zero/pim` | `deploy/Dockerfile.v2` | every role of the stack |
 | `ghcr.io/ajac-zero/pim-computer` | `deploy/Dockerfile.computer` | the `local-computer` profile |
 
-Both are `linux/amd64` and `linux/arm64`, carry `org.opencontainers.image.version` and `.revision`, and are published by `.github/workflows/publish.yml`. **Channels and tags:** `stable` is the newest release; a tag `vX.Y.Z` on a commit of `main` publishes `X.Y.Z`, `X.Y` and `stable`. `edge` is the newest push to `main` that passed CI, and each such push is also `sha-<first 12 characters of the commit>`. Nothing is published for `pim/*` branches or pull requests.
+Both are `linux/amd64` and `linux/arm64`, carry `org.opencontainers.image.version` and `.revision`, and are published by `.github/workflows/publish.yml`. **Channels and tags:** `stable` is the newest release; a tag `vX.Y.Z` on a commit of `main` publishes `X.Y.Z`, `X.Y` and `stable`. each push to `main` is built as `sha-<first 12 characters of the commit>` while CI runs, and `edge` is moved to that same image (same digest and labels) once CI on the commit has passed, so `edge` is the newest push to `main` that passed CI. Nothing is published for `pim/*` branches or pull requests.
 
 **First install from the published image.** `init-env.sh` writes `PIM_IMAGE=ghcr.io/ajac-zero/pim:stable` and `PIM_CHANNEL=stable` by default:
 
@@ -82,7 +82,7 @@ systemctl list-timers pim-update; journalctl -u pim-update   # the last line of 
 
 Follow `stable` for this; `edge` is every push to `main`.
 
-**Making the packages public (once).** The first push of an image to GHCR creates the package **private**, linked to the repository. A package owner has to open github.com → the organisation or user → Packages → `pim` (and `pim-computer`) → Package settings → Change visibility → Public, once, or instances cannot pull without `docker login ghcr.io`. The workflow needs no secret beyond the `GITHUB_TOKEN` it is given (`packages: write`). `workflow_run` workflows run from the default branch, so publishing starts once `publish.yml` is on `main`.
+**Making the packages public (once).** The first push of an image to GHCR creates the package **private**, linked to the repository. A package owner has to open github.com → the organisation or user → Packages → `pim` (and `pim-computer`) → Package settings → Change visibility → Public, once, or instances cannot pull without `docker login ghcr.io`. The workflow needs no secret beyond the `GITHUB_TOKEN` it is given (`packages: write`). Publishing starts with the first push to `main` that contains `publish.yml`.
 
 ## Compose (homelab)
 

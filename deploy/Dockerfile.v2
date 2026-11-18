@@ -14,14 +14,29 @@ FROM node:26-bookworm-slim AS web
 # Node 26 no longer ships corepack; pnpm is the version package.json pins.
 RUN npm install -g pnpm@12.0.0
 WORKDIR /app
+# Install layers come first and take only manifests (the lockfile, the workspace file, patches and each workspace package's package.json, at their own paths), so a source change reuses the
+# cached install, native modules such as sharp included. Add a line here when a workspace package is added; `pnpm install --frozen-lockfile` fails if one is missing.
 COPY pnpm-lock.yaml pnpm-workspace.yaml package.json ./
 COPY patches ./patches
+COPY web/package.json ./web/
+COPY packages/coding/package.json ./packages/coding/
+COPY packages/shared/package.json ./packages/shared/
+COPY packages/triggers/package.json ./packages/triggers/
+COPY packages/ui-lang/package.json ./packages/ui-lang/
+COPY packages/v2-app/package.json ./packages/v2-app/
+COPY packages/v2-contracts/package.json ./packages/v2-contracts/
+COPY packages/v2-forge/package.json ./packages/v2-forge/
+COPY packages/v2-live/package.json ./packages/v2-live/
+COPY packages/v2-ops/package.json ./packages/v2-ops/
+COPY packages/v2-runtime/package.json ./packages/v2-runtime/
+COPY packages/v2-server/package.json ./packages/v2-server/
+RUN pnpm install --frozen-lockfile --filter "pim-web..."
 COPY packages ./packages
 # The web build reads the computer's sources (web/vite.config.ts).
 COPY web ./web
 COPY computer ./computer
 COPY displayd ./displayd
-RUN pnpm install --frozen-lockfile --filter "pim-web..." && pnpm --filter pim-web build
+RUN pnpm --filter pim-web build
 
 FROM node:26-bookworm-slim AS build
 
@@ -30,9 +45,21 @@ RUN npm install -g pnpm@12.0.0
 WORKDIR /app
 COPY pnpm-lock.yaml pnpm-workspace.yaml package.json ./
 COPY patches ./patches
-COPY packages ./packages
+COPY web/package.json ./web/
+COPY packages/coding/package.json ./packages/coding/
+COPY packages/shared/package.json ./packages/shared/
+COPY packages/triggers/package.json ./packages/triggers/
+COPY packages/ui-lang/package.json ./packages/ui-lang/
+COPY packages/v2-app/package.json ./packages/v2-app/
+COPY packages/v2-contracts/package.json ./packages/v2-contracts/
+COPY packages/v2-forge/package.json ./packages/v2-forge/
+COPY packages/v2-live/package.json ./packages/v2-live/
+COPY packages/v2-ops/package.json ./packages/v2-ops/
+COPY packages/v2-runtime/package.json ./packages/v2-runtime/
+COPY packages/v2-server/package.json ./packages/v2-server/
 # Only the v2 server and what it imports are installed, production dependencies only.
 RUN pnpm install --frozen-lockfile --prod --filter "@pim/v2-server..."
+COPY packages ./packages
 
 FROM node:26-bookworm-slim
 ARG PIM_VERSION=dev

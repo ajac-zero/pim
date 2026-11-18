@@ -31,9 +31,9 @@ real("the memory nap", () => {
 	};
 	const say = async (chat: string, words: string, ...script: unknown[]) => {
 		const id = ++n;
-		faux.setResponses([...script, fauxAssistantMessage(`done ${id}`)] as never);
+		faux.setResponses([...script, reply(`done ${id}`), fauxAssistantMessage(`ended ${id}`)] as never);
 		expect((await web.call("POST", `/api/sessions/${chat}/messages`, { commandId: `m-${id}`, text: words })).status).toBe(202);
-		await waitFor(`the turn to end`, async () => ((await transcript(chat)).includes(`done ${id}`) ? true : undefined), 60_000);
+		await waitFor(`the turn to end`, async () => ((await transcript(chat)).includes(`ended ${id}`) ? true : undefined), 60_000);
 	};
 	const memory = async (chat: string) => (await d.stack.admin.query("SELECT scope, title, body, deleted_at FROM pim_app.memories WHERE id = $1", [napMemoryId(chat)])).rows[0];
 	const napped = async (chat: string) => (await d.stack.admin.query("SELECT napped_at, memory_id FROM pim_app.chat_naps WHERE public_chat_id = $1", [chat])).rows[0];

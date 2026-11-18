@@ -45,10 +45,10 @@ real("host operations through the admin's majordomo", () => {
 	const resultsOf = async (chat: string, owner: string, tool: string) =>
 		(JSON.parse(await transcriptOf(chat, owner)) as { model?: { role: string; toolName?: string; content: { text?: string }[] }[] }[]).flatMap((e) => (e.model ?? []).filter((m) => m.role === "toolResult" && m.toolName === tool).map((m) => m.content.map((c) => c.text ?? "").join("")));
 	const ask = async (client: Client, chat: string, owner: string, words: string, ...script: unknown[]) => {
-		faux.setResponses([...script, fauxAssistantMessage(`done ${++n}`)] as never);
+		faux.setResponses([...script, toolUse(fauxToolCall("send_to_user", { message: `done ${++n}` })), fauxAssistantMessage(`ended ${n}`)] as never);
 		expect((await client.call("POST", `/api/sessions/${chat}/messages`, { commandId: `m-${n}`, text: words })).status).toBe(202);
 		const mine = n;
-		return () => waitFor(`the turn "${words}" to end`, async () => ((await transcriptOf(chat, owner)).includes(`done ${mine}`) ? true : undefined), 60_000);
+		return () => waitFor(`the turn "${words}" to end`, async () => ((await transcriptOf(chat, owner)).includes(`ended ${mine}`) ? true : undefined), 60_000);
 	};
 	const waiting = () => waitFor("the approval to be filed", async () => (await d.stack.admin.query("SELECT id, tool, args FROM pim_app.approvals WHERE state = 'waiting' ORDER BY created_at LIMIT 1")).rows[0], 60_000);
 	const audit = async () => (await web.call("GET", "/api/hostops/audit?limit=200")).json.audit as { action: string; outcome: string; actorKind: string; args: any }[];

@@ -72,9 +72,9 @@ real("guests, circles and the admin's majordomo", () => {
 	};
 	const results = async (who: Person, tool: string) =>
 		(JSON.parse(await transcript(who)) as { model?: { role: string; toolName?: string; content: { text?: string }[] }[] }[]).flatMap((e) => (e.model ?? []).filter((m) => m.role === "toolResult" && m.toolName === tool).map((m) => m.content.map((c) => c.text ?? "").join("")));
-	const finish = (who: Person) => waitFor("the turn to end", async () => ((await transcript(who)).includes(`done ${n}`) ? true : undefined), 60_000);
+	const finish = (who: Person) => waitFor("the turn to end", async () => ((await transcript(who)).includes(`ended ${n}`) ? true : undefined), 60_000);
 	const send = async (who: Person, words: string, park: boolean, ...script: unknown[]) => {
-		faux.setResponses([...script, fauxAssistantMessage(`done ${++n}`)] as never);
+		faux.setResponses([...script, toolUse(fauxToolCall("send_to_user", { message: `done ${++n}` })), fauxAssistantMessage(`ended ${n}`)] as never);
 		expect((await who.web.call("POST", `/api/sessions/${who.chat}/messages`, { commandId: `m-${n}`, text: words })).status).toBe(202);
 		if (!park) await finish(who);
 	};

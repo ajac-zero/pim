@@ -41,9 +41,9 @@ real("a chat over its life", () => {
 	};
 	const say = async (chat: string, words: string, ...script: unknown[]) => {
 		const id = ++n;
-		faux.setResponses([...script, fauxAssistantMessage(`done ${id}`)] as never);
+		faux.setResponses([...script, toolUse(fauxToolCall("send_to_user", { message: `done ${id}` })), fauxAssistantMessage(`ended ${id}`)] as never);
 		expect((await web.call("POST", `/api/sessions/${chat}/messages`, { commandId: `m-${id}`, text: words })).status).toBe(202);
-		await waitFor(`the turn "${words.slice(0, 20)}" to end`, async () => (JSON.stringify(await transcript(chat)).includes(`done ${id}`) ? true : undefined), 60_000);
+		await waitFor(`the turn "${words.slice(0, 20)}" to end`, async () => (JSON.stringify(await transcript(chat)).includes(`ended ${id}`) ? true : undefined), 60_000);
 	};
 	const listed = async (chat: string) => (await web.call("GET", "/api/sessions")).json.sessions.find((s: { id: string }) => s.id === chat);
 

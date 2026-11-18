@@ -147,9 +147,9 @@ real("native and OAuth connectors", () => {
 	const results = async (tool: string) =>
 		(JSON.parse(await transcript()) as { model?: { role: string; toolName?: string; content: { text?: string }[] }[] }[]).flatMap((e) => (e.model ?? []).filter((m) => m.role === "toolResult" && m.toolName === tool).map((m) => m.content.map((c) => c.text ?? "").join("")));
 	const send = async (words: string, ...script: unknown[]) => {
-		faux.setResponses([...script, fauxAssistantMessage(`done ${++n}`)] as never);
+		faux.setResponses([...script, toolUse(fauxToolCall("send_to_user", { message: `done ${++n}` })), fauxAssistantMessage(`ended ${n}`)] as never);
 		expect((await web.call("POST", `/api/sessions/${chatId}/messages`, { commandId: `m-${n}`, text: words })).status).toBe(202);
-		await waitFor(`the turn "${words}" to end`, async () => ((await transcript()).includes(`done ${n}`) ? true : undefined), 60_000);
+		await waitFor(`the turn "${words}" to end`, async () => ((await transcript()).includes(`ended ${n}`) ? true : undefined), 60_000);
 	};
 	/** The person's browser: goes to the sign-in address, which sends it back to Pim with a code; Pim's own callback page is what it ends on. */
 	let lastReturn = "";
@@ -328,9 +328,9 @@ real("native and OAuth connectors", () => {
 
 	it("watches a server's events: subscribes with its own secret, takes each signed delivery once, tells the chat, renews the grant and stops", async () => {
 		const mcpId = (await web.call("GET", "/api/mcp")).json.servers.find((x: { url: string }) => x.url === `${standOrigin}/mcp`).id as string;
-		faux.setResponses([toolUse(fauxToolCall("list_connector_events", {})), toolUse(fauxToolCall("watch_connector_event", { connector: mcpId, event: "ticket.created", arguments: { project: "P" }, instruction: "Summarise the ticket" })), toolUse(fauxToolCall("watch_connector_event", { connector: mcpId, event: "nothing", instruction: "x" })), toolUse(fauxToolCall("list_watches", {})), fauxAssistantMessage(`done ${++n}`)] as never);
+		faux.setResponses([toolUse(fauxToolCall("list_connector_events", {})), toolUse(fauxToolCall("watch_connector_event", { connector: mcpId, event: "ticket.created", arguments: { project: "P" }, instruction: "Summarise the ticket" })), toolUse(fauxToolCall("watch_connector_event", { connector: mcpId, event: "nothing", instruction: "x" })), toolUse(fauxToolCall("list_watches", {})), toolUse(fauxToolCall("send_to_user", { message: `done ${++n}` })), fauxAssistantMessage(`ended ${n}`)] as never);
 		expect((await web.call("POST", `/api/sessions/${chatId}/messages`, { commandId: `m-${n}`, text: "watch tickets" })).status).toBe(202);
-		await waitFor("the watch turn", async () => ((await transcript()).includes(`done ${n}`) ? true : undefined), 60_000);
+		await waitFor("the watch turn", async () => ((await transcript()).includes(`ended ${n}`) ? true : undefined), 60_000);
 		const listed = (await results("list_connector_events"))[0]!;
 		expect(listed).toContain("ticket.created");
 		expect(listed).not.toContain("polled.only");
@@ -360,9 +360,9 @@ real("native and OAuth connectors", () => {
 		expect(await deliver({ type: "verification", challenge: "abc" }, { id: "v1" }).then((r) => r.json())).toEqual({ challenge: "abc" });
 		expect((await deliver(event, { secret: "whsec_" + Buffer.from("wrong").toString("base64") })).status).toBe(401);
 		expect((await deliver(event, { sub: "someone-else" })).status).toBe(401);
-		faux.setResponses([fauxAssistantMessage(`done ${++n}`)] as never);
+		faux.setResponses([toolUse(fauxToolCall("send_to_user", { message: `done ${++n}` })), fauxAssistantMessage(`ended ${n}`)] as never);
 		expect((await deliver(event)).status).toBe(204);
-		await waitFor("the event's turn", async () => ((await transcript()).includes(`done ${n}`) ? true : undefined), 60_000);
+		await waitFor("the event's turn", async () => ((await transcript()).includes(`ended ${n}`) ? true : undefined), 60_000);
 		expect(await transcript()).toContain("[Connector event] ticket.created");
 		expect(await transcript()).toContain("Printer on fire");
 		// The same event retried is taken once.
@@ -382,9 +382,9 @@ real("native and OAuth connectors", () => {
 		expect((await d.stack.admin.query("SELECT status, last_error FROM pim_app.watch_subscriptions")).rows[0]).toMatchObject({ status: "ended", last_error: expect.stringContaining("-32012") });
 		expect((await deliver({ ...event, eventId: "evt-2" })).status).toBe(401);
 
-		faux.setResponses([toolUse(fauxToolCall("stop_watch", { id: watchId })), toolUse(fauxToolCall("stop_watch", { id: watchId })), fauxAssistantMessage(`done ${++n}`)] as never);
+		faux.setResponses([toolUse(fauxToolCall("stop_watch", { id: watchId })), toolUse(fauxToolCall("stop_watch", { id: watchId })), toolUse(fauxToolCall("send_to_user", { message: `done ${++n}` })), fauxAssistantMessage(`ended ${n}`)] as never);
 		expect((await web.call("POST", `/api/sessions/${chatId}/messages`, { commandId: `m-${n}`, text: "stop watching" })).status).toBe(202);
-		await waitFor("the stop turn", async () => ((await transcript()).includes(`done ${n}`) ? true : undefined), 60_000);
+		await waitFor("the stop turn", async () => ((await transcript()).includes(`ended ${n}`) ? true : undefined), 60_000);
 		expect((await results("stop_watch"))[0]).toBe("Stopped.");
 		expect((await results("stop_watch"))[1]).toContain("No watch with id");
 		expect(stand.unsubscribed).toEqual([{ name: "ticket.created", arguments: { project: "P" }, delivery: { url: sub.delivery.url } }]);

@@ -72,12 +72,12 @@ real("connector tools", () => {
 		(JSON.parse(await transcript()) as { model?: { role: string; toolName?: string; content: { text?: string }[] }[] }[]).flatMap((e) => (e.model ?? []).filter((m) => m.role === "toolResult" && m.toolName === tool).map((m) => m.content.map((c) => c.text ?? "").join("")));
 	/** Sends a message, scripting the model; resolves once the turn ended unless it parks. */
 	const send = async (words: string, park: boolean, ...script: unknown[]) => {
-		faux.setResponses([...script, fauxAssistantMessage(`done ${++n}`)] as never);
+		faux.setResponses([...script, toolUse(fauxToolCall("send_to_user", { message: `done ${++n}` })), fauxAssistantMessage(`ended ${n}`)] as never);
 		expect((await web.call("POST", `/api/sessions/${chatId}/messages`, { commandId: `m-${n}`, text: words })).status).toBe(202);
-		if (!park) await waitFor(`the turn "${words}" to end`, async () => ((await transcript()).includes(`done ${n}`) ? true : undefined), 60_000);
+		if (!park) await waitFor(`the turn "${words}" to end`, async () => ((await transcript()).includes(`ended ${n}`) ? true : undefined), 60_000);
 	};
 	const waiting = () => waitFor("an approval to be filed", async () => (await d.stack.admin.query("SELECT id, tool, args FROM pim_app.approvals WHERE state = 'waiting'")).rows[0], 60_000);
-	const finish = () => waitFor("the turn to end", async () => ((await transcript()).includes(`done ${n}`) ? true : undefined), 60_000);
+	const finish = () => waitFor("the turn to end", async () => ((await transcript()).includes(`ended ${n}`) ? true : undefined), 60_000);
 	const callNames = () => mcp.calls.map((c) => c.name);
 
 	beforeAll(async () => {

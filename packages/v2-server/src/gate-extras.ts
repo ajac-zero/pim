@@ -83,7 +83,7 @@ export function snapshotRoutes(pool: Pool): Route[] {
 				const untitled = page.sessions.find((s) => !s.busy && kept.get(s.chatId) && !kept.get(s.chatId)!.title && !kept.get(s.chatId)!.deleted_at && (titleTried.get(s.chatId) ?? 0) < Date.now() - 60_000);
 				if (untitled) {
 					titleTried.set(untitled.chatId, Date.now());
-					const title = await Promise.race([titleChat(app, process.env, p, untitled.chatId).catch(() => null), new Promise<null>((resolve) => setTimeout(() => resolve(null), 8000))]);
+					const title = await Promise.race([titleChat(app, process.env, p, untitled.chatId).catch((error) => (console.warn(`naming chat ${untitled.chatId} failed`, error), null)), new Promise<null>((resolve) => setTimeout(() => resolve(null), 8000))]);
 					if (title) for (const s of sessions) if (s.chatId === untitled.chatId) s.title = title;
 				}
 				return ok({ ...page, sessions });

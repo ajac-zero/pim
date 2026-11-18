@@ -4,7 +4,7 @@
  *
  * The Gate asks it over plain HTTP, without a conversation: one system prompt, one user message, one answer. It reaches the deployment's AI
  * gateway, a person's own OpenAI-compatible provider, and the Anthropic, OpenAI and Google services whose key they added. A model run on a
- * ChatGPT plan is not reachable this way, so with that chosen the jobs are off too.
+ * ChatGPT plan is reached with the person's plan token on OpenAI's own API, as the Runner does.
  */
 import type { App } from "@pim/v2-app/app";
 import type { Principal } from "@pim/v2-contracts/identity";
@@ -87,25 +87,41 @@ type Endpoint =
 	| { api: "anthropic"; key: string; model: string }
 	| { api: "google"; key: string; model: string };
 
+const warned = new Set<string>();
+/** Says once per owner and model that the chosen utility model cannot be reached, so the jobs that stay off are not silent. */
+function unreachable(p: Principal, chosen: ModelRef): null {
+	const key = `${p.ownerId}/${chosen.provider}/${chosen.id}`;
+	if (!warned.has(key)) {
+		warned.add(key);
+		console.warn(`the utility model ${chosen.provider}/${chosen.id} cannot be reached from the Gate (no gateway, address or key for it), so chats are not named`);
+	}
+	return null;
+}
+
 /** Where the person's chosen utility model is reached, or null when none is chosen or it cannot be reached from here. */
 async function endpointOf(app: App, env: Env, p: Principal): Promise<Endpoint | null> {
 	const chosen = (await app.db.owner(p.ownerId, async (tx) => (await tx.query("SELECT value FROM pim_app.owner_settings WHERE key = 'model_utility'")).rows[0]?.value)) as ModelRef | undefined;
 	if (!chosen?.provider || !chosen.id) return null;
 	const strip = (u: string) => u.replace(/\/+$/, "");
-	if (chosen.provider === "gateway") return env.PIM_AI_GATEWAY_URL ? { api: "chat", url: `${strip(env.PIM_AI_GATEWAY_URL)}/chat/completions`, key: env.PIM_AI_GATEWAY_KEY ?? null, model: chosen.id } : null;
+	if (chosen.provider === "gateway") return env.PIM_AI_GATEWAY_URL ? { api: "chat", url: `${strip(env.PIM_AI_GATEWAY_URL)}/chat/completions`, key: env.PIM_AI_GATEWAY_KEY ?? null, model: chosen.id } : unreachable(p, chosen);
+	// A person signed in with ChatGPT runs `openai` on their plan, here as for the Runner.
+	if (chosen.provider === "openai") {
+		const plan = await app.chatgpt.access(p.ownerId);
+		if (plan) return { api: "chat", url: `${strip(plan.resource)}/chat/completions`, key: plan.token, model: chosen.id };
+	}
 	const rows = await app.providers.list(p);
 	const own = rows.find((r) => r.id === chosen.provider);
 	if (own) {
 		const url = (own.config.baseUrl ?? own.config.url) as unknown;
-		return typeof url === "string" ? { api: "chat", url: `${strip(url)}/chat/completions`, key: await app.providers.reveal(p.ownerId, own.id), model: chosen.id } : null;
+		return typeof url === "string" ? { api: "chat", url: `${strip(url)}/chat/completions`, key: await app.providers.reveal(p.ownerId, own.id), model: chosen.id } : unreachable(p, chosen);
 	}
 	const service = rows.find((r) => ((r.config.builtin as string | undefined) ?? r.kind) === chosen.provider && r.hasKey);
 	const key = service ? await app.providers.reveal(p.ownerId, service.id) : null;
-	if (!key) return null;
+	if (!key) return unreachable(p, chosen);
 	if (chosen.provider === "anthropic") return { api: "anthropic", key, model: chosen.id };
 	if (chosen.provider === "google") return { api: "google", key, model: chosen.id };
 	if (chosen.provider === "openai") return { api: "chat", url: "https://api.openai.com/v1/chat/completions", key, model: chosen.id };
-	return null;
+	return unreachable(p, chosen);
 }
 
 const str = (v: unknown): string => (typeof v === "string" ? v : "");

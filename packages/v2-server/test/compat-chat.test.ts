@@ -1,8 +1,11 @@
 // The web app's chat-side routes over a real PostgreSQL and the real migrations: what each answers in the shape the app reads, that a person reaches
 // only their own rows, and that a change made on a stale revision or an old ui-block version is refused.
+import { randomBytes } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { App } from "@pim/v2-app/app";
+import { chatgptContext } from "@pim/v2-app/chatgpt";
+import { KeyringCrypto, sealString } from "@pim/v2-app/crypto";
 import { connect } from "@pim/v2-app/db";
 import { createGate } from "@pim/v2-app/gate";
 import { MemoryObjectStore } from "@pim/v2-app/objects";
@@ -23,6 +26,8 @@ let bob: string;
 let agent: string;
 let utility: Server;
 const asked: any[] = [];
+const auths: string[] = [];
+const crypto = new KeyringCrypto("k1", { k1: new Uint8Array(randomBytes(32)) });
 
 const call = async (token: string, method: string, path: string, body?: unknown, headers: Record<string, string> = {}) => {
 	const response = await fetch(base + path, { method, headers: { authorization: `Bearer ${token}`, ...(typeof body === "object" ? { "content-type": "application/json" } : {}), ...headers }, ...(body === undefined ? {} : { body: typeof body === "string" ? body : JSON.stringify(body) }) });
@@ -32,19 +37,21 @@ const call = async (token: string, method: string, path: string, body?: unknown,
 
 beforeAll(async () => {
 	stack = await createStack();
-	app = new App(connect(stack.url("gate"), 4), new MemoryObjectStore()).limitSpaces();
 	// A stand-in utility model: answers each side job the way a small model would, and records what it was asked.
 	utility = createServer(async (req, res) => {
 		let raw = "";
 		for await (const chunk of req) raw += chunk;
 		const body = JSON.parse(raw);
 		asked.push(body);
+		auths.push(String(req.headers.authorization));
 		const system = String(body.messages[0].content);
 		const content = system.includes("name chats") ? 'Title: "Fresh Garden Plan".' : system.includes("improve messages") ? "Plan my week in detail" : system.includes("suggest") ? 'Sure! {"messages":["Plan my week","Water the garden","Plan my week"]}' : "- They planned a garden";
 		res.setHeader("content-type", "application/json").end(JSON.stringify({ choices: [{ message: { content } }] }));
 	});
 	await new Promise<void>((resolve) => utility.listen(0, "127.0.0.1", resolve));
+	const refresh = (async () => new Response(JSON.stringify({ access_token: "plan-access", refresh_token: "plan-refresh-2", expires_in: 3600 }), { headers: { "content-type": "application/json" } })) as typeof fetch;
 	const gateway = { PIM_AI_GATEWAY_URL: `http://127.0.0.1:${(utility.address() as { port: number }).port}/v1`, PIM_AI_GATEWAY_MODELS: "u1,u2" };
+	app = new App(connect(stack.url("gate"), 4), new MemoryObjectStore(), { crypto, chatgpt: { fetch: refresh, endpoints: { issuer: "http://issuer.test", modelsUrl: "", resource: gateway.PIM_AI_GATEWAY_URL } } }).limitSpaces();
 	server = createGate(app, { first: [...modelRoutes(gateway), ...chatRoutes, ...snapshotRoutes(app.db.pool), ...usageRoutes(), ...apiClientRoutes(), ...diagnosticsRoutes({ PIM_PUBLIC_URL: "https://pim.example.test" })] });
 	await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
 	base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
@@ -290,6 +297,26 @@ describe("the utility model", () => {
 		await call(ada, "GET", `/api/sessions/${chat}/summary`);
 		expect(asked).toHaveLength(before);
 		expect((await call(bob, "POST", `/api/sessions/${chat}/title`)).status).toBe(404);
+	});
+});
+
+describe("the utility model on a ChatGPT plan", () => {
+	it("names an untitled chat in the sidebar with the plan's token, refreshing an expired one", async () => {
+		const carol = await app.identity.register({ username: "carol" });
+		const token = await app.identity.createSession(carol.ownerId);
+		const credential = { type: "oauth", access: "old", refresh: "plan-refresh-1", expires: 0, clientId: "c", scopes: [], idToken: "", subject: "s", email: null };
+		await stack.admin.query("INSERT INTO pim_app.chatgpt_credentials (owner_id, host_id, secret) VALUES ($1, 'h', $2)", [carol.ownerId, await sealString(crypto, JSON.stringify(credential), chatgptContext(carol.ownerId))]);
+		// What ChatGPT-plan owners have: model_utility is `openai`, and they have no OpenAI key.
+		expect((await call(token, "PUT", "/api/model/utility", { provider: "openai", id: "gpt-6-luna" })).status).toBe(200);
+		const chat = (await call(token, "POST", "/api/sessions", { agentId: (await call(token, "POST", "/api/agents", { name: "Pim" })).body.id })).body.id as string;
+		await stack.admin.query("INSERT INTO pim_projection.chat_transcript_projection (owner_id, stream_kind, chat_id, entry_id, position, message, partition_id, commit_seq, projection_version) VALUES ($1,'chat',$2,'a1',1,$3,'00000000-0000-0000-0000-000000000001',1,1), ($1,'chat',$2,'a2',2,$4,'00000000-0000-0000-0000-000000000001',2,1)", [
+			carol.ownerId, chat, JSON.stringify({ id: "a1", role: "user", timestamp: 1, parts: [{ type: "text", text: "Help me plan my garden" }] }), JSON.stringify({ id: "a2", role: "assistant", timestamp: 2, parts: [{ type: "tool-call", id: "c", name: "send_to_user", arguments: { message: "Start with the beds." } }] }),
+		]);
+		await stack.admin.query("INSERT INTO pim_projection.sidebar_session_projection (owner_id, chat_id, title, busy, unread, stalled, updated_at, partition_id, commit_seq, projection_version) VALUES ($1,$2,NULL,false,false,false,1,'00000000-0000-0000-0000-000000000001',1,1) ON CONFLICT DO NOTHING", [carol.ownerId, chat]);
+		const sidebar = async () => ((await call(token, "GET", "/api/snapshot/sidebar")).body.sessions as { chatId: string; title: string | null }[]).find((s) => s.chatId === chat);
+		expect((await sidebar())?.title).toBe("Fresh Garden Plan");
+		expect(auths.at(-1)).toBe("Bearer plan-access");
+		expect((await stack.admin.query("SELECT title FROM pim_app.conversations WHERE public_chat_id = $1", [chat])).rows[0].title).toBe("Fresh Garden Plan");
 	});
 });
 

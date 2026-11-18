@@ -146,6 +146,23 @@ export class ChatGPT {
 		return secret ? (JSON.parse(await openString(this.crypto, secret, chatgptContext(ownerId))) as ChatGPTCredential) : undefined;
 	}
 
+	/**
+	 * A token for calling OpenAI on the owner's plan from the Gate (the utility model's side jobs), and where to call; null when they are not signed in. A token near its
+	 * expiry is refreshed under the credential row's lock, as the Runner does, so a rotated refresh token is never spent twice.
+	 */
+	async access(ownerId: string): Promise<{ token: string; resource: string } | null> {
+		const credential = await this.db.owner(ownerId, async (tx) => {
+			const sealed = (await tx.query("SELECT secret FROM pim_app.chatgpt_credentials WHERE secret IS NOT NULL FOR UPDATE")).rows[0]?.secret as string | undefined;
+			if (!sealed) return undefined;
+			const current = JSON.parse(await openString(this.crypto, sealed, chatgptContext(ownerId))) as ChatGPTCredential;
+			if (current.expires > this.#now()) return current;
+			const next = await refreshChatGPT(current, { fetch: this.#fetch, endpoints: this.#endpoints, now: this.#now() });
+			await tx.query("UPDATE pim_app.chatgpt_credentials SET secret = $1, version = version + 1, updated_at = now()", [await sealString(this.crypto, JSON.stringify(next), chatgptContext(ownerId))]);
+			return next;
+		});
+		return credential ? { token: credential.access, resource: this.#endpoints.resource } : null;
+	}
+
 	async status(p: Principal): Promise<ChatGPTStatus> {
 		await this.authz.enforce(p, "api:read");
 		const email = await this.db.owner(p.ownerId, async (tx) => (await tx.query("SELECT email FROM pim_app.chatgpt_credentials WHERE secret IS NOT NULL")).rows[0]);

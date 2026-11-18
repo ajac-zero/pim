@@ -323,9 +323,9 @@ describe("a coding thread's wake in a v2 chat", () => {
     const text = codingWakeText({ ...facts, outcome: "completed" });
     const stream = streamOf([user(1, text)]);
     expect(stream.view.entries).toHaveLength(1);
-    const entry = stream.view.entries[0] as any;
-    expect(entry.kind).toBe("notice");
-    expect(entry.notice.kind).toBe("coding");
-    expect(entry.notice.coding.state).toBe("idle");
+    expect(stream.view.entries[0]).toMatchObject({
+      kind: "notice",
+      notice: { kind: "coding", coding: { state: "idle" } },
+    });
   });
 });

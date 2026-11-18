@@ -9,7 +9,7 @@ import { BadRequestError, ConflictError, GoneError, NotFoundError, RefusedError 
 import { route, type Reply, type Route } from "@pim/v2-app/http";
 import type { Principal } from "@pim/v2-contracts/identity";
 import { framePage } from "./app-frame.ts";
-import { deleted, digestOf, type Files, ms, ok, sizeOf, typeOf } from "./admin-util.ts";
+import { deleted, digestOf, textDigest, type Files, ms, ok, sizeOf, typeOf } from "./admin-util.ts";
 
 const MAIN: Record<string, string[]> = { html: ["index.html"], jsx: ["App.jsx", "App.tsx"], backend: ["pim.app.json"] };
 const mainOf = (kind: string, files: Files) => (MAIN[kind] ?? []).find((m) => m in files) ?? Object.keys(files).sort()[0]!;
@@ -26,6 +26,32 @@ const LATEST =
 
 /** An app as its latest version (`Artifact`). */
 const artifactOf = (r: Latest) => ({ id: r.id, title: r.title, kind: kindOut(r.kind), session: null, version: r.latest_version, versions: r.versions, size: sizeOf(r.files), files: Object.keys(r.files).length, sha256: digestOf(r.files), createdAt: ms(r.created_at), updatedAt: ms(r.updated_at) });
+
+/**
+ * A note as the web app's markdown app. Notes are live Yjs documents (`pim_app.notes`, kept apart from apps), so the web app opens one here and edits it
+ * over `/api/notes/live`; only its latest text is kept as a version, and it is read through the note's own service.
+ */
+const NOTE = "SELECT n.note_id, n.title, n.created_at, COALESCE((SELECT max(u.at) FROM pim_app.note_updates u WHERE u.owner_id = n.owner_id AND u.note_id = n.note_id), n.created_at) AS updated_at FROM pim_app.notes n WHERE n.owner_id = $1 AND n.deleted_at IS NULL";
+
+type NoteRow = { note_id: string; title: string; created_at: Date; updated_at: Date };
+
+async function noteAs(app: App, p: Principal, row: NoteRow) {
+	const { text, version } = await app.canvas.read(p.ownerId, row.note_id);
+	const size = Buffer.byteLength(text);
+	const sha256 = textDigest(text);
+	return { text, size, sha256, artifact: { id: row.note_id, title: row.title, kind: "markdown", session: null, version, versions: 1, size, files: 1, sha256, createdAt: ms(row.created_at), updatedAt: ms(row.updated_at) } };
+}
+
+async function noteOf(app: App, p: Principal, id: string) {
+	const row = (await app.db.owner(p.ownerId, async (tx) => (await tx.query(`${NOTE} AND n.note_id = $2`, [p.ownerId, id])).rows[0])) as NoteRow | undefined;
+	return row ? noteAs(app, p, row) : null;
+}
+
+/** All the caller's notes, as the markdown apps the web app lists. */
+async function notesOf(app: App, p: Principal) {
+	const rows = (await app.db.owner(p.ownerId, async (tx) => (await tx.query(`${NOTE} ORDER BY updated_at DESC`, [p.ownerId])).rows)) as NoteRow[];
+	return Promise.all(rows.map((row) => noteAs(app, p, row).then((n) => n.artifact, () => null))).then((all) => all.filter((n) => n !== null));
+}
 
 export const readable = (app: App, p: Principal) => app.identity.authz.enforce(p, "api:read");
 
@@ -128,21 +154,51 @@ export function artifactRoutes(): Route[] {
 			return app.db.owner(p.ownerId, async (tx) => {
 				const rows = (await tx.query(`${LATEST} WHERE a.owner_id = $1 ORDER BY a.updated_at DESC`, [p.ownerId])).rows as Latest[];
 				const stored = (await tx.query("SELECT files FROM pim_app.artifact_versions WHERE owner_id = $1", [p.ownerId])).rows;
-				return ok({ artifacts: rows.map(artifactOf), bytes: stored.reduce((n, r) => n + sizeOf(r.files), 0) });
+				return { rows, stored };
+			}).then(async ({ rows, stored }) => {
+				const notes = await notesOf(app, p);
+				const artifacts = [...rows.map(artifactOf), ...notes].sort((x, y) => (y.updatedAt ?? 0) - (x.updatedAt ?? 0));
+				return ok({ artifacts, bytes: stored.reduce((n, r) => n + sizeOf(r.files), 0) + notes.reduce((n, x) => n + x.size, 0) });
 			});
 		}),
-		route("GET", "/api/artifacts/:id", async ({ app, principal, params }) => ok(await detail(app, await principal(), params[0]!))),
+		route("GET", "/api/artifacts/:id", async ({ app, principal, params }) => {
+			const p = await principal();
+			await readable(app, p);
+			const note = await noteOf(app, p, params[0]!);
+			if (!note) return ok(await detail(app, p, params[0]!));
+			return ok({ ...note.artifact, circles: [], history: [{ version: note.artifact.version, sha256: note.sha256, size: note.size, source: "agent", restoredFrom: null, createdAt: note.artifact.createdAt }] });
+		}),
 		route("PUT", "/api/artifacts/:id", async ({ app, principal, params, json }) => {
 			const p = await principal();
 			const b = await json();
 			if (typeof b.title !== "string") throw new BadRequestError("title is required");
+			if (await noteOf(app, p, params[0]!)) {
+				await app.identity.authz.enforce(p, "api:write");
+				await app.db.owner(p.ownerId, (tx) => tx.query("UPDATE pim_app.notes SET title = $3 WHERE owner_id = $1 AND note_id = $2", [p.ownerId, params[0]!, b.title]));
+				return ok((await noteOf(app, p, params[0]!))!.artifact);
+			}
 			await app.apps.update(p, params[0]!, { baseVersion: (await latestOf(app, p, params[0]!)).latest_version, title: b.title });
 			return ok(artifactOf(await latestOf(app, p, params[0]!)));
 		}),
-		route("DELETE", "/api/artifacts/:id", async ({ app, principal, params }) => (await app.apps.remove(await principal(), params[0]!), deleted())),
+		route("DELETE", "/api/artifacts/:id", async ({ app, principal, params }) => {
+			const p = await principal();
+			if (await noteOf(app, p, params[0]!)) {
+				await app.identity.authz.enforce(p, "api:write");
+				await app.db.owner(p.ownerId, (tx) => tx.query("UPDATE pim_app.notes SET deleted_at = now() WHERE owner_id = $1 AND note_id = $2", [p.ownerId, params[0]!]));
+				return deleted();
+			}
+			await app.apps.remove(p, params[0]!);
+			return deleted();
+		}),
 		route("GET", "/api/artifacts/:id/versions/:version", async ({ app, principal, params, url }) => {
 			const p = await principal();
 			await readable(app, p);
+			const note = await noteOf(app, p, params[0]!);
+			if (note) {
+				if (num(params[1]) !== note.artifact.version) throw new NotFoundError("Only the latest version of a note is kept");
+				const { id, title, version } = note.artifact;
+				return ok({ id, title, kind: "markdown", latest: version, version, sha256: note.sha256, size: note.size, source: "agent", restoredFrom: null, createdAt: note.artifact.createdAt, files: [{ path: "README.md", sha256: note.sha256, size: note.size, type: "text/markdown" }], path: "README.md", content: note.text });
+			}
 			const { head, v } = await app.db.owner(p.ownerId, (tx) => ownVersion(tx, p.ownerId, params[0]!, num(params[1])));
 			return ok(versionOf(head, v, url.searchParams.get("path") ?? undefined));
 		}),

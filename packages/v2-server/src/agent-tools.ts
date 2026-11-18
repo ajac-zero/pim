@@ -28,6 +28,7 @@ import { builtinSkill } from "./builtin-skills.ts";
 import { readSkillFolder } from "./skill-sources.ts";
 import { adminTools } from "./admin-tools.ts";
 import { disabledBuiltins } from "./compat/admin-directory.ts";
+import { textDigest } from "./compat/admin-util.ts";
 import { guestToolset } from "./guest-tools.ts";
 
 export type ToolDeps = {
@@ -110,6 +111,12 @@ export async function timeZoneOf(runtime: RuntimeDb, ownerId: string): Promise<s
 /** What the web app reads from an app tool's answer to show the app as a card in the chat that opens in the canvas: `{ artifact }`, an app with a backend being `hosted` there. */
 const appCard = (ref: { id: string; title: string; kind: string; version: number; sha256: string; size: number }, note: string): Result =>
 	text(JSON.stringify({ artifact: { id: ref.id, title: ref.title, kind: ref.kind === "backend" ? "hosted" : ref.kind, version: ref.version, sha256: ref.sha256, size: ref.size }, note }));
+
+/** What the web app reads from a note tool's answer to show the note as a card in the chat that opens it beside the chat: `{ artifact }`, the same shape as an app's, of kind `markdown`. */
+const noteCard = async (app: App, ownerId: string, id: string, note: string): Promise<Result> => {
+	const [{ text: body, version }, row] = await Promise.all([app.canvas.read(ownerId, id), app.db.owner(ownerId, async (tx) => (await tx.query("SELECT title FROM pim_app.notes WHERE note_id = $1 AND deleted_at IS NULL", [id])).rows[0])]);
+	return text(JSON.stringify({ artifact: { id, title: String(row?.title ?? ""), kind: "markdown", version, sha256: textDigest(body), size: Buffer.byteLength(body) }, note }));
+};
 
 /** How an app runs, for the agent that writes one (the same words as v1's). */
 const HOW_APPS_RUN =
@@ -360,13 +367,17 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 		}),
 
 		// Notes and apps.
-		write("note_create", "Create a note a person can open and edit alongside you.", Type.Object({ title: S({ minLength: 1 }), text: O(S()) }), async (app, call, a) => text(`Created note ${await app.canvas.create(call.p, a.title, a.text ?? "")}.`)),
+		write("note_create", "Create a note a person can open and edit alongside you. The answer is the note's card in the chat, which is how the person sees and opens it; there is no panel for you to open.", Type.Object({ title: S({ minLength: 1 }), text: O(S()) }), async (app, call, a) =>
+			noteCard(app, ownerId, await app.canvas.create(call.p, a.title, a.text ?? ""), "Made it. The person sees it as a card in the chat and opens it beside the chat.")),
 		read("note_read", "Read a note: its text and its version.", Type.Object({ id: S() }), async (app, call, a) => {
 			const n = await app.canvas.read(ownerId, a.id);
 			return text(`version ${n.version}\n${n.text}`);
 		}),
-		write("note_edit", "Edit a note by replacing text. base_version is the version you read; if the note changed since, nothing is changed and you read it again. A person's typing is never lost.", Type.Object({ id: S(), base_version: Type.Integer({ minimum: 0 }), find: S({ minLength: 1 }), replace: S() }), async (app, call, a) =>
-			text(`Edited; the note is at version ${(await app.canvas.edit(call.p, a.id, a.base_version, a.find, a.replace)).version}.`)),
+		write("note_edit", "Edit a note by replacing text. base_version is the version you read; if the note changed since, nothing is changed and you read it again. A person's typing is never lost. The answer is the note's card in the chat, which is how the person sees and opens it; you can't open a panel, so don't say you did.", Type.Object({ id: S(), base_version: Type.Integer({ minimum: 0 }), find: S({ minLength: 1 }), replace: S() }), async (app, call, a) => {
+			const { version } = await app.canvas.edit(call.p, a.id, a.base_version, a.find, a.replace);
+			return noteCard(app, ownerId, a.id, `Saved version ${version}. The person sees the card in the chat and opens the note from it.`);
+		}),
+		read("note_show", "Show the person a note that already exists, such as one from another chat or the one they asked you to open, as the card in this chat that opens it beside the chat. It changes nothing. Find its id with note_list.", Type.Object({ id: S() }), async (app, _call, a) => noteCard(app, ownerId, a.id, "Showed it. The person sees the card in the chat and opens the note from it.")),
 		read("note_list", "Your notes.", Type.Object({}), async (app) => json((await app.db.owner(ownerId, (tx) => tx.query("SELECT note_id, title, version FROM pim_app.notes WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT 200"))).rows)),
 		write("app_create", `Create an app: kind html or jsx, or backend (with a pim.app.json). Files are by path. ${HOW_APPS_RUN}`, Type.Object({ title: S({ minLength: 1 }), kind: Type.Union([Type.Literal("html"), Type.Literal("jsx"), Type.Literal("backend")]), files, message: O(S()) }), async (app, call, a) => appCard(await app.apps.create(call.p, { title: a.title, kind: a.kind, files: a.files, message: a.message }), "Made it. The person sees it in the chat and opens it beside the chat.")),
 		write("app_update", "Change an app. base_version is the version you read; an app that changed since is refused.", Type.Object({ id: S(), base_version: Type.Integer({ minimum: 1 }), title: O(S()), files: O(files), delete_files: O(strings), edits: O(Type.Array(Type.Object({ path: O(S()), find: S(), replace: S() }))), message: O(S()) }), async (app, call, a) =>

@@ -54,7 +54,13 @@ export const coreRoutes: Route[] = [
 	// ---- memories, goals, schedules, notes ----
 	route("POST", "/api/notes", async ({ app, principal, json }) => {
 		const b = await json();
-		return ok({ id: await app.canvas.create(await principal(), String(b.title ?? ""), b.text) }, 201);
+		const p = await principal();
+		const title = String(b.title ?? "");
+		const id = await app.canvas.create(p, title, b.text);
+		const { text, version } = await app.canvas.read(p.ownerId, id);
+		// The web app's markdown app: what it navigates to as the new note's page.
+		const now = Date.now();
+		return ok({ id, title, kind: "markdown", session: null, version, versions: 1, size: Buffer.byteLength(text), files: 1, sha256: "", createdAt: now, updatedAt: now }, 201);
 	}),
 	route("GET", "/api/notes/:id", async ({ app, principal, params }) => {
 		const p = await principal();

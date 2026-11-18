@@ -75,6 +75,25 @@ describe("the web app's apps, gallery and admin routes", () => {
 		expect((await call("bob", "GET", "/api/published-artifacts")).json.artifacts).toEqual([]);
 	});
 
+	it("opens a note as the markdown app the web app's card names, and renames it", async () => {
+		const ownerId = people.ada!.ownerId as never;
+		const principal = { kind: "user", ownerId, role: "admin", sessionId: "s" } as never;
+		const id = await app.canvas.create(principal, "Plan", "Week one");
+		expect((await call("ada", "GET", `/api/artifacts/${id}`)).json).toMatchObject({ id, title: "Plan", kind: "markdown", version: 1, history: [{ version: 1 }] });
+		expect((await call("ada", "GET", `/api/artifacts/${id}/versions/1`)).json).toMatchObject({ kind: "markdown", content: "Week one", version: 1, latest: 1 });
+		expect((await call("ada", "GET", `/api/artifacts/${id}/versions/2`)).status).toBe(404);
+		expect((await call("ada", "PUT", `/api/artifacts/${id}`, { title: "Plan B" })).json).toMatchObject({ title: "Plan B", kind: "markdown" });
+		expect((await call("bob", "GET", `/api/artifacts/${id}`)).status).toBe(404);
+		// The list the Notes section reads holds it, and a note started from "New note" is one with a version to open.
+		expect((await call("ada", "GET", "/api/artifacts")).json.artifacts.filter((a: { kind: string }) => a.kind === "markdown")).toMatchObject([{ id, title: "Plan B", version: 1, size: 8 }]);
+		expect((await call("bob", "GET", "/api/artifacts")).json.artifacts.filter((a: { kind: string }) => a.kind === "markdown")).toEqual([]);
+		const started = (await call("ada", "POST", "/api/notes", { title: "Untitled" })).json;
+		expect(started).toMatchObject({ title: "Untitled", kind: "markdown", version: 0 });
+		expect((await call("ada", "GET", `/api/artifacts/${started.id}`)).json).toMatchObject({ id: started.id, kind: "markdown" });
+		expect((await call("ada", "DELETE", `/api/artifacts/${started.id}`)).json).toEqual({ deleted: true });
+		expect((await call("ada", "GET", `/api/artifacts/${started.id}`)).status).toBe(404);
+	});
+
 	it("publishes an agent as a template with its uploaded icon, counts who made it their own, and shares it as a bot with limits", async () => {
 		const agent = await app.agents.create({ kind: "user", ownerId: people.ada!.ownerId as never, role: "admin", sessionId: "s" }, { name: "Scout", instructions: "look", emoji: "🔭" });
 		const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==", "base64");

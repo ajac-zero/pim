@@ -8,6 +8,7 @@ import {
 } from "@tanstack/react-router";
 import { renderToStaticMarkup } from "react-dom/server";
 import { expect, it } from "vitest";
+import { artifactReference } from "~/components/artifact";
 import { ArtifactView } from "~/components/artifact-view";
 import type { ArtifactBackend } from "~/lib/pim-api";
 import { artifactBackendQuery, artifactQuery } from "~/lib/queries";
@@ -185,4 +186,24 @@ it("shows how an app's backend is doing, and offers to run the latest version on
   expect(shared).toContain("Open");
   expect(shared).toContain("Your circles");
   expect(running).not.toContain("Your circles");
+});
+
+it("draws the answer of V2's note tools as a note card", () => {
+  const answer = JSON.stringify({
+    artifact: {
+      id: "n_1",
+      title: "Plan",
+      kind: "markdown",
+      version: 2,
+      sha256: "a".repeat(64),
+      size: 17,
+    },
+    note: "Saved version 2.",
+  });
+  expect(artifactReference(answer)).toMatchObject({
+    id: "n_1",
+    kind: "markdown",
+    version: 2,
+  });
+  expect(artifactReference("No such note")).toBeNull();
 });

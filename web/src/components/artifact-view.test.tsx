@@ -274,7 +274,8 @@ it("opens a note pinned at a version its history lacks as the live latest", asyn
     </QueryClientProvider>,
   );
   expect(html).not.toContain("no version");
-  expect(html).toContain("Write");
+  // The live note's header: its title is editable, which a missing version's screen never shows.
+  expect(html).toContain('aria-label="Note title"');
   client.clear();
 });
 

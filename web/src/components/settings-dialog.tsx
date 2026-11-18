@@ -13,6 +13,7 @@ import { AddDevice } from "~/components/add-device";
 import { ModelOrderList } from "~/components/agent-settings";
 import { ChatGPTLogo } from "~/components/chatgpt-logo";
 import { CodingConnectionsSection } from "~/components/coding";
+import { CodingAccessSection } from "~/components/coding-access";
 import {
   ComputeSection,
   ComputeUsageSection,
@@ -110,6 +111,7 @@ export const SETTINGS_TABS = [
   "account",
   "members",
   "compute",
+  "coding-access",
   "deployment",
 ] as const;
 export type SettingsTab = (typeof SETTINGS_TABS)[number];
@@ -126,6 +128,7 @@ const TAB_LABELS: Record<SettingsTab, [TranslationKey, LucideIcon]> = {
   account: ["settingsAccount", UserRound],
   members: ["settingsMembers", Users],
   compute: ["settingsCompute", Server],
+  "coding-access": ["settingsCodingAccess", Code],
   deployment: ["settingsDeployment", Settings],
 };
 
@@ -170,7 +173,10 @@ function SettingsTabs({ initial }: { initial: SettingsTab }) {
   // Members, how they sign in, their compute, and how the deployment runs are the admin's.
   const tabs = SETTINGS_TABS.filter(
     (tab) =>
-      (tab !== "members" && tab !== "compute" && tab !== "deployment") ||
+      (tab !== "members" &&
+        tab !== "compute" &&
+        tab !== "coding-access" &&
+        tab !== "deployment") ||
       account?.role === "admin",
   );
   const [tab, setTab] = useState(tabs.includes(initial) ? initial : "general");
@@ -258,6 +264,7 @@ function SettingsTabs({ initial }: { initial: SettingsTab }) {
           </>
         )}
         {tab === "compute" && <ComputeSection />}
+        {tab === "coding-access" && <CodingAccessSection />}
         {tab === "deployment" && (
           <>
             <div className="mb-10">

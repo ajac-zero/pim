@@ -1,6 +1,6 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { ApprovalRequiredError, CapabilityUnavailableError, ForbiddenError, repositoryAllowed, standingApprovalCovers, type AuthzError, type StandingApproval } from "../src/authz.ts";
+import { ApprovalRequiredError, CapabilityUnavailableError, ForbiddenError, normalizeRepository, repositoryAllowed, standingApprovalCovers, type AuthzError, type StandingApproval } from "../src/authz.ts";
 import { MIGRATION_BANDS, migrationOwner, parseMigrationFile, validateMigrationFiles, withTenantTransaction, type SqlPool } from "../src/db.ts";
 import { codingThreadId, completionWakeId, ForgeCompletionWake, HARNESS_CAPABILITIES, HARNESS_IDS } from "../src/forge-seam.ts";
 import { effectivePrincipal, OwnerId, type Principal } from "../src/identity.ts";
@@ -138,6 +138,20 @@ describe("authorization contracts", () => {
 		expect(repositoryAllowed(["github.com/org/*"], "github.com/organ/repo")).toBe(false);
 		expect(repositoryAllowed(["github.com/org/repo"], "github.com/org/repo2")).toBe(false);
 		expect(repositoryAllowed([], "github.com/org/repo")).toBe(false);
+	});
+	it("matches the same repository however it is spelled, on either side", () => {
+		for (const entry of ["ajac-zero/*", "github.com/ajac-zero/*", "AJAC-zero/pim", "*"]) {
+			for (const repo of ["ajac-zero/pim", "github.com/ajac-zero/pim", "https://github.com/ajac-zero/pim.git", "https://github.com/ajac-zero/pim/"]) expect(repositoryAllowed([entry], repo), `${entry} ~ ${repo}`).toBe(true);
+		}
+		// A host in the entry pins the host; a repository with no host is on GitHub; an entry with no host covers any.
+		expect(repositoryAllowed(["github.com/ajac-zero/*"], "git.example.com/ajac-zero/pim")).toBe(false);
+		expect(repositoryAllowed(["git.example.com/ajac-zero/*"], "ajac-zero/pim")).toBe(false);
+		expect(repositoryAllowed(["ajac-zero/*"], "https://git.example.com/ajac-zero/pim")).toBe(true);
+		expect(repositoryAllowed(["ajac-zero/*"], "ajac-zero-evil/pim")).toBe(false);
+		expect(repositoryAllowed(["*"], "not a repo")).toBe(false);
+		expect(normalizeRepository("https://GitHub.com/Ajac-Zero/Pim.git")).toBe("github.com/ajac-zero/pim");
+		expect(normalizeRepository("ajac-zero/*")).toBe("ajac-zero/*");
+		expect(normalizeRepository("nonsense")).toBeNull();
 	});
 	it("applies a standing approval only inside its scope, unrevoked and unexpired", () => {
 		const base: StandingApproval = { approvalId: "s1", ownerId: owner, action: "coding:merge", scope: { repository: "github.com/org/repo" }, grantedBy: owner, grantedAt: "2026-01-01T00:00:00Z" };

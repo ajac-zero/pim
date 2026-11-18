@@ -44,16 +44,9 @@ export function repoRef(repo: string): string | null {
 	return url ? `${url[1]}/${url[2]}/${url[3]}`.toLowerCase() : null;
 }
 
-/** Whether `repo` is covered by patterns: `*`, `owner/name`, `owner/*`, or the host-qualified `host/owner/name` and `host/owner/*`. */
+/** Whether `repo` is covered by patterns: `*`, `owner/name`, `owner/*`, or the host-qualified `host/owner/name` and `host/owner/*`, however `repo` is spelled (see `repositoryAllowed`). */
 export function repoMatches(patterns: readonly string[], repo: string): boolean {
-	const name = repoName(repo);
-	if (!name) return false;
-	const ref = repoRef(repo);
-	return patterns.some((raw) => {
-		const p = raw.toLowerCase();
-		if (p === "*") return true;
-		return repositoryAllowed([p], p.split("/").length >= 3 ? (ref ?? "") : name);
-	});
+	return repoName(repo) !== null && repositoryAllowed(patterns, repo);
 }
 
 export class Authz {
@@ -106,10 +99,10 @@ export class Authz {
 		await this.db.query("update pim_forge.forge_standing_approvals set revoked_at = now() where approval_id = $1", [approvalId]);
 	}
 
-	async grant(g: { subjectType: "user" | "tenant" | "agent"; subjectId: string; permission: Permission; repos?: string[] | null; pools?: string[] | null; requiresApproval?: boolean; standing?: boolean; grantedBy: string }): Promise<number> {
+	async grant(g: { subjectType: "user" | "tenant" | "agent"; subjectId: string; permission: Permission; repos?: string[] | null; pools?: string[] | null; requiresApproval?: boolean; standing?: boolean; grantedBy: string; /** The Gate's grant this one follows, so revoking that revokes this. */ sourceGrantId?: string }): Promise<number> {
 		const r = await this.db.query<Row>(
-			`insert into pim_forge.forge_grants (subject_type, subject_id, permission, repos, pools, requires_approval, standing, granted_by) values ($1,$2,$3,$4,$5,$6,$7,$8) returning grant_id`,
-			[g.subjectType, g.subjectId, g.permission, g.repos ?? null, g.pools ?? null, g.requiresApproval ?? false, g.standing ?? false, g.grantedBy],
+			`insert into pim_forge.forge_grants (subject_type, subject_id, permission, repos, pools, requires_approval, standing, granted_by, source_grant_id) values ($1,$2,$3,$4,$5,$6,$7,$8,$9) returning grant_id`,
+			[g.subjectType, g.subjectId, g.permission, g.repos ?? null, g.pools ?? null, g.requiresApproval ?? false, g.standing ?? false, g.grantedBy, g.sourceGrantId ?? null],
 		);
 		return Number(r.rows[0]!.grant_id);
 	}
@@ -117,6 +110,18 @@ export class Authz {
 	/** Revokes at once: the next check of any thread by that subject fails. */
 	async revoke(grantId: number): Promise<void> {
 		await this.db.query("update pim_forge.forge_grants set revoked_at = now() where grant_id = $1 and revoked_at is null", [grantId]);
+	}
+
+	/**
+	 * Revokes the rows that follow one of the Gate's grants. A grant made before rows were linked to it has none, so its rows are found by what they say: the person,
+	 * the permissions and the same repositories and pools (`legacy`).
+	 */
+	async revokeSource(sourceGrantId: string, legacy: { ownerId: string; permissions: string[]; repos: string[] | null; pools: string[] | null }): Promise<void> {
+		await this.db.query(
+			`update pim_forge.forge_grants set revoked_at = now() where revoked_at is null and (source_grant_id = $1
+			 or (source_grant_id is null and subject_type = 'user' and subject_id = $2 and permission = any($3) and repos is not distinct from $4::text[] and pools is not distinct from $5::text[]))`,
+			[sourceGrantId, legacy.ownerId, legacy.permissions, legacy.repos, legacy.pools],
+		);
 	}
 
 	async setSuspended(ownerId: string, suspended: boolean, tenantId: string | null = null): Promise<void> {

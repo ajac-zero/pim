@@ -1,7 +1,7 @@
-import { type AuthzDecision, type AuthzRequest, type Authorizer as AuthorizerContract, ApprovalRequiredError, CapabilityUnavailableError, CODING_PERMISSIONS, type CodingGrant, type CodingPermission, ForbiddenError, type ResourceQuota, repositoryAllowed, type StandingApproval, standingApprovalCovers } from "@pim/v2-contracts/authz";
+import { type AuthzDecision, type AuthzRequest, type Authorizer as AuthorizerContract, ApprovalRequiredError, CapabilityUnavailableError, CODING_PERMISSIONS, type CodingGrant, type CodingPermission, ForbiddenError, normalizeRepository, type ResourceQuota, repositoryAllowed, type StandingApproval, standingApprovalCovers } from "@pim/v2-contracts/authz";
 import { type AccountRole, type AccountStatus, effectivePrincipal, OwnerId, type Principal } from "@pim/v2-contracts/identity";
 import type { Db, Tx } from "./db.ts";
-import { GoneError, UnauthorizedError } from "./errors.ts";
+import { BadRequestError, GoneError, NotFoundError, RefusedError, UnauthorizedError } from "./errors.ts";
 import { newId } from "./ids.ts";
 
 export type Account = { ownerId: OwnerId; username: string; role: AccountRole; status: AccountStatus; bot: boolean };
@@ -106,9 +106,11 @@ export class Authorizer implements AuthorizerContract {
 		const grants = await this.codingGrants(request.ownerId);
 		const covering = grants.filter((g) => g.permissions.includes(action));
 		if (!covering.length) throw new ForbiddenError(action, "no-coding-grant");
-		if (action === "coding:start" && !covering.some((g) => g.pools.length)) throw new CapabilityUnavailableError("coding", "no compute pool is granted or configured for this owner");
+		// A thread that runs in an Amp orb takes no compute pool, so the grant needs none for it; every other harness runs in a pool.
+		const amp = resource.harness === "amp";
+		if (action === "coding:start" && !amp && !covering.some((g) => g.pools.length)) throw new CapabilityUnavailableError("coding", "no compute pool is granted or configured for this owner");
 		if (resource.repository && !covering.some((g) => repositoryAllowed(g.repositories, resource.repository!))) throw new ForbiddenError(action, "repository-not-granted");
-		if (resource.pool && !covering.some((g) => g.pools.includes(resource.pool!))) throw new ForbiddenError(action, "pool-not-granted");
+		if (resource.pool && !amp && !covering.some((g) => g.pools.includes(resource.pool!))) throw new ForbiddenError(action, "pool-not-granted");
 	}
 
 	async codingGrants(ownerId: string): Promise<CodingGrant[]> {
@@ -135,16 +137,38 @@ export class Authorizer implements AuthorizerContract {
 		});
 	}
 
-	/** An admin gives `ownerId` a coding grant. Absence of a grant is a refusal. */
+	/** An admin gives `ownerId` a coding grant. Absence of a grant is a refusal, and a guest is never given one. */
 	async grantCoding(admin: Principal, input: { ownerId: string; permissions: CodingPermission[]; pools?: string[]; repositories?: string[]; quota?: ResourceQuota }): Promise<string> {
 		await this.enforce(admin, "admin:grants");
+		if (!input.permissions.length || !input.permissions.every((p) => CODING_ACTIONS.has(p))) throw new BadRequestError(`Permissions are some of ${CODING_PERMISSIONS.join(", ")}`);
+		const repositories = (input.repositories ?? []).map((r) => normalizeRepository(r) ?? (() => { throw new BadRequestError(`Not a repository or pattern: ${r}`); })());
+		const account = await this.account(input.ownerId);
+		if (!account || account.status === "deleting" || account.status === "deleted") throw new NotFoundError("No such account");
+		if (account.role === "guest") throw new RefusedError("A guest is never given coding access.", "guest");
 		const grantId = newId("cg");
 		await this.db.owner(input.ownerId, (tx) =>
 			tx.query("INSERT INTO pim_app.coding_grants (grant_id, owner_id, permissions, pools, repositories, quota, granted_by) VALUES ($1,$2,$3,$4,$5,$6,$7)", [
-				grantId, input.ownerId, input.permissions, input.pools ?? [], input.repositories ?? [], JSON.stringify(input.quota ?? {}), admin.ownerId,
+				grantId, input.ownerId, [...new Set(input.permissions)], input.pools ?? [], [...new Set(repositories)], JSON.stringify(input.quota ?? {}), admin.ownerId,
 			]),
 		);
 		return grantId;
+	}
+
+	/** Every live coding grant on the deployment, with who holds it: the admin's list. */
+	async listCodingGrants(admin: Principal): Promise<(CodingGrant & { username: string })[]> {
+		await this.enforce(admin, "admin:grants");
+		const accounts = await this.db.anonymous(async (tx) => (await tx.query("SELECT owner_id, username FROM pim_app.accounts WHERE status NOT IN ('deleting', 'deleted') ORDER BY username")).rows);
+		const grants = await Promise.all(accounts.map(async (a) => (await this.codingGrants(a.owner_id)).map((g) => ({ ...g, username: a.username as string }))));
+		return grants.flat().sort((a, b) => a.grantedAt.localeCompare(b.grantedAt));
+	}
+
+	/** An admin takes a grant back; what it permitted stops at the next check. Returns the grant, so a mirror of it can follow. */
+	async revokeCoding(admin: Principal, ownerId: string, grantId: string): Promise<CodingGrant> {
+		await this.enforce(admin, "admin:grants");
+		const grant = (await this.codingGrants(ownerId)).find((g) => g.grantId === grantId);
+		if (!grant) throw new NotFoundError("No such grant");
+		await this.db.owner(ownerId, (tx) => tx.query("UPDATE pim_app.coding_grants SET revoked_at = now() WHERE grant_id = $1 AND revoked_at IS NULL", [grantId]));
+		return grant;
 	}
 
 	/** An admin records that a kind of gated action may go ahead without asking again, within `scope` and until `expiresAt`. */

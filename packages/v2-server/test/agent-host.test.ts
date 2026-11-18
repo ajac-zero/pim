@@ -1,6 +1,7 @@
 // The default agent host on the real stack: a Runner started without any `harnessOptions` runs a real Pim agent. The only thing given to it is a model provider (pi-ai's
 // faux one, as a deployment's own provider would be) and the databases the tools write through. The agent keeps notes and goals, creates a note and an app, makes an
 // HTTP request that waits for a person's approval and is sent once, and starts a coding thread under an admin's grant; every model call lands in the cost ledger.
+import { randomBytes } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { App } from "@pim/v2-app/app";
@@ -16,6 +17,7 @@ import { createStack, describeWith, freePort, hasNats, startNats } from "./suppo
 
 const real = describeWith(hasNats());
 const REPO = "https://github.com/acme/app";
+const KEK = { PIM_KEK_K1: randomBytes(32).toString("base64"), PIM_KEK_CURRENT: "k1" };
 const API = "http://93.184.216.34/orders";
 
 real("the default agent host", () => {
@@ -67,7 +69,7 @@ real("the default agent host", () => {
 		const stack = await createStack();
 		d = { stack, nats: await startNats(), s3: await startS3(), gatePort: await freePort(), ingressSecret: "ingress" };
 		app = new App(connectApp(stack.url("gate"), 4), new MemoryObjectStore());
-		gate = await start(d, "gate", {}, { PIM_CODING_ALLOWED_REPOS: "acme/*" });
+		gate = await start(d, "gate", {}, { PIM_CODING_ALLOWED_REPOS: "acme/*", ...KEK });
 		web = new Client(base(gate), d.ingressSecret);
 		const claim = await app.identity.issueClaim("bootstrap", null, 3_600_000);
 		const registered = await web.call("POST", "/auth/register", { username: "anibal", bootstrap: claim, session: true });
@@ -89,7 +91,7 @@ real("the default agent host", () => {
 					return new Response('{"ok":true}', { status: 201, headers: { "content-type": "application/json" } });
 				}) as typeof fetch,
 			},
-			{ PIM_DEFAULT_MODEL: "faux/m", PIM_APP_DATABASE_URL: stack.url("gate"), PIM_FORGE_DATABASE_URL: stack.url("forge"), PIM_CODING_ALLOWED_REPOS: "acme/*" },
+			{ PIM_DEFAULT_MODEL: "faux/m", PIM_APP_DATABASE_URL: stack.url("gate"), PIM_FORGE_DATABASE_URL: stack.url("forge"), PIM_CODING_ALLOWED_REPOS: "acme/*", ...KEK },
 		);
 		// Maintenance applies approval timeouts, as the auto policy needs.
 		maintenance = await start(d, "maintenance", { pollMs: 100 });
@@ -347,6 +349,49 @@ real("the default agent host", () => {
 		expect((await results("coding_push")).at(-1)).toMatch(/coding:push/);
 		expect((await results("coding_open_pull_request")).at(-1)).toMatch(/coding:pr/);
 		expect((await results("coding_merge")).at(-1)).toMatch(/workspace/);
+	}, 120_000);
+	it("lets an admin list, give and revoke coding access, and an amp thread needs no pool", async () => {
+		const forgeDb = d.stack.admin as unknown as ForgeDb;
+		const access = (await web.call("GET", "/api/admin/coding-access")).json;
+		expect(access.allowedRepositories).toEqual(["acme/*"]);
+		expect(access.harnesses.find((h: { id: string }) => h.id === "amp")).toMatchObject({ available: true, runsIn: "orb" });
+		expect(access.harnesses.find((h: { id: string }) => h.id === "pi")).toMatchObject({ available: true, runsIn: "sandbox" });
+		// The grant the earlier test made by hand is listed, with its holder.
+		const listed = (await web.call("GET", "/api/admin/coding-grants")).json.grants;
+		expect(listed).toEqual([expect.objectContaining({ ownerId, username: "anibal", permissions: ["coding:start", "coding:merge"], repositories: ["github.com/acme/*"] })]);
+		const forgeRows = async () => (await d.stack.admin.query("SELECT permission, source_grant_id FROM pim_forge.forge_grants WHERE subject_id = $1 AND revoked_at IS NULL ORDER BY permission", [ownerId])).rows;
+		expect((await forgeRows()).map((r) => r.permission)).toEqual(["coding:merge", "coding:start"]);
+
+		// Revoking takes both tables' rows back (this grant has no link to its Forge rows, so they are found by what they say) and stops the agent at once.
+		expect((await web.call("DELETE", `/api/admin/coding-grants/${ownerId}/${listed[0].grantId}`)).status).toBe(200);
+		expect((await web.call("GET", "/api/admin/coding-grants")).json.grants).toEqual([]);
+		expect(await forgeRows()).toEqual([]);
+		await say("start one", toolUse(fauxToolCall("coding_start", { task: "Nope", repo: REPO, harness: "amp" })));
+		expect((await results("coding_start")).at(-1)).toMatch(/no-coding-grant/);
+
+		// With no sandbox pool and Amp set up, a grant for a host-less repository pattern is enough, and an agent that names no harness gets amp.
+		await d.stack.admin.query("UPDATE pim_forge.forge_pools SET enabled = false");
+		const given = await web.call("POST", "/api/admin/coding-grants", { ownerId, permissions: ["coding:start", "coding:steer", "coding:push", "coding:pr"], repositories: ["acme/*"] });
+		expect(given.status).toBe(201);
+		const rows = await forgeRows();
+		expect(rows.map((r) => r.permission)).toEqual(["coding:abort", "coding:pr", "coding:push", "coding:start", "coding:steer"]);
+		expect(rows.every((r) => r.source_grant_id === given.json.grantId)).toBe(true);
+		const before = (await d.stack.admin.query("SELECT 1 FROM pim_forge.forge_threads WHERE owner_id = $1", [ownerId])).rowCount!;
+		await say("start one", toolUse(fauxToolCall("coding_start", { task: "Update the docs", repo: REPO })), toolUse(fauxToolCall("send_to_user", { message: "Started." })));
+		const started = (await d.stack.admin.query("SELECT harness, repo FROM pim_forge.forge_threads WHERE owner_id = $1 ORDER BY created_at DESC LIMIT 1", [ownerId])).rows[0];
+		expect((await d.stack.admin.query("SELECT 1 FROM pim_forge.forge_threads WHERE owner_id = $1", [ownerId])).rowCount).toBe(before + 1);
+		expect(started).toMatchObject({ harness: "amp", repo: REPO });
+		// A sandbox harness still needs a pool the grant covers, and a repository outside the grant is refused.
+		await say("start another", toolUse(fauxToolCall("coding_start", { task: "Nope", repo: REPO, harness: "pi" })));
+		expect((await results("coding_start")).at(-1)).toMatch(/no compute pool/);
+		await say("start a third", toolUse(fauxToolCall("coding_start", { task: "Nope", repo: "https://github.com/other/app", harness: "amp" })));
+		expect((await results("coding_start")).at(-1)).toMatch(/repository-not-granted/);
+
+		// Guests are never granted, nor are accounts that don't exist or permissions that aren't coding's.
+		expect((await web.call("POST", "/api/admin/coding-grants", { ownerId: "o_nobody", permissions: ["coding:start"], repositories: ["acme/*"] })).status).toBe(404);
+		expect((await web.call("POST", "/api/admin/coding-grants", { ownerId, permissions: ["coding:start"], repositories: ["not a repo"] })).status).toBe(400);
+		expect((await web.call("POST", "/api/admin/coding-grants", { ownerId, permissions: ["admin:grants"], repositories: ["acme/*"] })).status).toBe(400);
+		void forgeDb;
 	}, 120_000);
 	it("manages agents, skills, schedules and triggers, and hands a task to another agent", async () => {
 		await say("set things up", toolUse(fauxToolCall("create_agent", { name: "Poet", instructions: "Answer in verse." }), fauxToolCall("write_skill", { name: "haiku", description: "Write haiku", body: "Five, seven, five.", files: { "ref.md": "# ref" } })));

@@ -20,6 +20,7 @@ import { computerTools } from "./computer-tools.ts";
 import { type ImageSources, imageTools } from "./image-tools.ts";
 import type { ForgeParts } from "./forge-assembly.ts";
 import type { EnvelopeCrypto } from "@pim/v2-contracts/platform";
+import { uiBlockReference } from "@pim/ui-lang";
 import { loadWidgets, MAX_WIDGETS, type ShownWidget, uiDiagnostics, widgetRefs } from "./agent-widgets.ts";
 import { connectorToolset, type Transport } from "./connector-tools.ts";
 import { watchTools } from "./watch-tools.ts";
@@ -219,7 +220,7 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 	const tools: ToolRegistration[] = [
 		tool(
 			"send_to_user",
-			`Send the person a message. It is the only way they see anything you write: the rest of your text is private working notes. Set complete when you are finishing a delegated task. To draw a small interactive piece, such as a quiz, a checklist or a form, put a \`\`\`ui block of ui source in the message, alone on its lines; a block that can't be drawn refuses the message with what to fix. widgets shows data under the message, by name, up to ${MAX_WIDGETS}: ${widgetRefs().join(", ")}.`,
+			`Send the person a message. It is the only way they see anything you write: the rest of your text is private working notes. Set complete when you are finishing a delegated task. To draw a small interactive piece, such as a quiz, a checklist or a form, put a \`\`\`ui block in the message, alone on its lines; it is not JSON. ${uiBlockReference()} A block that can't be drawn refuses the message with what to fix. widgets shows data under the message, by name, up to ${MAX_WIDGETS}: ${widgetRefs().join(", ")}.`,
 			Type.Object({ message: S({ minLength: 1 }), complete: O(Type.Boolean()), widgets: O(Type.Array(Type.String(), { maxItems: MAX_WIDGETS })) }),
 			async (args, api) => {
 				const app = deps.app;
@@ -244,7 +245,7 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 						return text(`Not sent: ${error instanceof Error ? error.message : String(error)}`, true);
 					}
 				}
-				const result = { sent: "Sent.", ...(shown.length > 0 ? { widgets: shown } : {}), ...(ui.notes ? { uiNotes: ui.notes } : {}) };
+				const result = { sent: "Sent.", ...(shown.length > 0 ? { widgets: shown } : {}) };
 				return text(Object.keys(result).length === 1 ? "Sent." : JSON.stringify(result));
 			},
 			"safe",

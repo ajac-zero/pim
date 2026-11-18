@@ -146,15 +146,19 @@ real("the default agent host", () => {
 		await say(
 			"show me",
 			toolUse(fauxToolCall("send_to_user", { message: "Try:\n```ui\n<box><gauge/></box>\n```" })),
+			toolUse(fauxToolCall("send_to_user", { message: 'Try:\n```ui\n{"type":"form","fields":[{"name":"a"}]}\n```' })),
+			toolUse(fauxToolCall("send_to_user", { message: 'Try:\n```ui\n<form id="f"><number name="a" answer={1}/></form>\n```' })),
 			toolUse(fauxToolCall("send_to_user", { message: "Here.", widgets: ["pim.nothing/here"] })),
 			toolUse(fauxToolCall("send_to_user", { message: "Here are your goals.", widgets: ["pim.goals/active"] })),
 		);
 		const answered = (await results("send_to_user")).slice(before);
 		expect(answered[0]).toMatch(/^Not sent: a ```ui block .*gauge/);
-		expect(answered[1]).toContain("pim.nothing/here isn't a widget you can show");
-		expect(answered[1]).toContain("pim.goals/active");
+		expect(answered[1]).toMatch(/^Not sent: a ```ui block .*didn't parse/);
+		expect(answered[2]).toBe("Sent.");
+		expect(answered[3]).toContain("pim.nothing/here isn't a widget you can show");
+		expect(answered[3]).toContain("pim.goals/active");
 		// What the person was shown goes back to the model as the web app reads it: loaded once, as sent.
-		expect(JSON.parse(answered[2]!).widgets).toMatchObject([{ id: "pim.goals/active", kind: "progress", items: [{ title: "Run a 5k", value: 0, max: 2, detail: "Run 2k" }] }]);
+		expect(JSON.parse(answered[4]!).widgets).toMatchObject([{ id: "pim.goals/active", kind: "progress", items: [{ title: "Run a 5k", value: 0, max: 2, detail: "Run 2k" }] }]);
 	}, 120_000);
 
 	it("sends an approved HTTP request once, and a request whose outcome is unknown is never sent again", async () => {

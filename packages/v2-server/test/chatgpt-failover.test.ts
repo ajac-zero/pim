@@ -53,21 +53,37 @@ async function fakeOpenAI() {
 			return json(200, { access_token: `access-${state.refreshes + 1}`, refresh_token: state.valid, expires_in: 3600 });
 		}
 		if (req.url?.endsWith("/responses")) {
-			state.responses.push(String(req.headers.authorization));
+			// A turn is asked once and answers with a send_to_user call; the request that follows with its result ends the turn in plain text.
+			const followUp = (JSON.parse(text) as { input?: { type?: string }[] }).input?.at(-1)?.type === "function_call_output";
+			if (!followUp) state.responses.push(String(req.headers.authorization));
 			if (state.limited) return json(429, { error: { message: "Rate limit reached", type: "rate_limit_error", code: "rate_limit_exceeded" } });
 			const sse = (event: string, data: unknown) => `event: ${event}\ndata: ${JSON.stringify({ type: event, ...(data as object) })}\n\n`;
-			const msg = { id: "msg_1", type: "message", status: "completed", role: "assistant", content: [{ type: "output_text", text: "plan says hi", annotations: [] }] };
-			const response = { id: "resp_1", object: "response", status: "completed", model: MODEL, output: [msg], usage: { input_tokens: 5, output_tokens: 3, total_tokens: 8, input_tokens_details: { cached_tokens: 0 }, output_tokens_details: { reasoning_tokens: 0 } } };
+			const usage = { input_tokens: 5, output_tokens: 3, total_tokens: 8, input_tokens_details: { cached_tokens: 0 }, output_tokens_details: { reasoning_tokens: 0 } };
+			const done = (output: unknown[]) => ({ id: "resp_1", object: "response", status: "completed", model: MODEL, output, usage });
 			res.writeHead(200, { "content-type": "text/event-stream" });
+			if (!followUp) {
+				const args = JSON.stringify({ message: "plan says hi" });
+				const call = { id: "fc_1", type: "function_call", status: "completed", call_id: "call_1", name: "send_to_user", arguments: args };
+				res.end(
+					sse("response.created", { response: { ...done([]), status: "in_progress" } }) +
+						sse("response.output_item.added", { output_index: 0, item: { ...call, status: "in_progress", arguments: "" } }) +
+						sse("response.function_call_arguments.delta", { item_id: "fc_1", output_index: 0, delta: args }) +
+						sse("response.function_call_arguments.done", { item_id: "fc_1", output_index: 0, arguments: args }) +
+						sse("response.output_item.done", { output_index: 0, item: call }) +
+						sse("response.completed", { response: done([call]) }),
+				);
+				return;
+			}
+			const msg = { id: "msg_1", type: "message", status: "completed", role: "assistant", content: [{ type: "output_text", text: "ended plan", annotations: [] }] };
 			res.end(
-				sse("response.created", { response: { ...response, status: "in_progress", output: [] } }) +
+				sse("response.created", { response: { ...done([]), status: "in_progress" } }) +
 					sse("response.output_item.added", { output_index: 0, item: { ...msg, status: "in_progress", content: [] } }) +
 					sse("response.content_part.added", { item_id: "msg_1", output_index: 0, content_index: 0, part: { type: "output_text", text: "", annotations: [] } }) +
-					sse("response.output_text.delta", { item_id: "msg_1", output_index: 0, content_index: 0, delta: "plan says hi" }) +
-					sse("response.output_text.done", { item_id: "msg_1", output_index: 0, content_index: 0, text: "plan says hi" }) +
+					sse("response.output_text.delta", { item_id: "msg_1", output_index: 0, content_index: 0, delta: "ended plan" }) +
+					sse("response.output_text.done", { item_id: "msg_1", output_index: 0, content_index: 0, text: "ended plan" }) +
 					sse("response.content_part.done", { item_id: "msg_1", output_index: 0, content_index: 0, part: msg.content[0] }) +
 					sse("response.output_item.done", { output_index: 0, item: msg }) +
-					sse("response.completed", { response }),
+					sse("response.completed", { response: done([msg]) }),
 			);
 			return;
 		}
@@ -177,7 +193,7 @@ real("Sign in with ChatGPT and provider failover", () => {
 		expect((await web.call("PUT", "/api/model/fallbacks", { models: [{ provider: "openai", id: MODEL }, { provider: "faux", id: "m" }] })).status).toBe(200);
 		chatId = (await web.call("POST", "/api/sessions", { title: "Plan" })).json.id;
 		const before = (await stored()).version;
-		await say("hello", "plan says hi");
+		await say("hello", "ended plan");
 		expect(openai.state.refreshes).toBe(1);
 		expect(openai.state.responses).toEqual(["Bearer access-2"]);
 		expect((await stored()).version).toBeGreaterThan(before);

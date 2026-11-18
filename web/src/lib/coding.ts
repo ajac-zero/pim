@@ -9,7 +9,7 @@ import {
 } from "@pim/shared/transcript";
 import { queryOptions } from "@tanstack/react-query";
 import type { TranslationKey } from "~/components/i18n";
-import { ApiError, call, SignInRequired } from "~/lib/pim-api";
+import { ApiError, call, refusalMessage, SignInRequired } from "~/lib/pim-api";
 import { applyChanges } from "~/lib/pim-view";
 
 /*
@@ -495,9 +495,7 @@ export const codingApi: CodingApi = {
       > | null;
       throw new ApiError(
         response.status,
-        typeof body?.error === "string"
-          ? body.error
-          : `Pim answered ${response.status}`,
+        refusalMessage(body, response.status),
         body,
       );
     }

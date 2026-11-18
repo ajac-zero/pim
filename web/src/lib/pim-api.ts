@@ -1669,6 +1669,20 @@ export type StoredUiState = {
 };
 
 /** An API answer that isn't a success, with its status. */
+/**
+ * What a refusal says, for people to read: the v2 server sends `{ error: code, message }`, where the code (such as `bad_request`) says little,
+ * and the Worker sends only `{ error: message }`.
+ */
+export function refusalMessage(
+  body: { error?: unknown; message?: unknown } | null,
+  status: number,
+): string {
+  for (const said of [body?.message, body?.error]) {
+    if (typeof said === "string" && said !== "") return said;
+  }
+  return `Pim answered ${status}`;
+}
+
 export class ApiError extends Error {
   constructor(
     readonly status: number,
@@ -1814,13 +1828,18 @@ export async function call<T>(
     throw new SignInRequired();
   }
   const body = (await response.json().catch(() => null)) as
-    | (T & { error?: string; url?: unknown; missing?: unknown })
+    | (T & {
+        error?: string;
+        message?: string;
+        url?: unknown;
+        missing?: unknown;
+      })
     | null;
   if (!response.ok) {
     checkAddress(response, body);
     throw new ApiError(
       response.status,
-      body?.error ?? `Pim answered ${response.status}`,
+      refusalMessage(body, response.status),
       body as Record<string, unknown> | null,
     );
   }
@@ -1922,11 +1941,12 @@ export const pim = {
     });
     const body = (await response.json().catch(() => null)) as {
       error?: string;
+      message?: string;
     } | null;
     if (!response.ok) {
       throw new ApiError(
         response.status,
-        body?.error ?? `Pim answered ${response.status}`,
+        refusalMessage(body, response.status),
       );
     }
   },
@@ -1945,12 +1965,12 @@ export const pim = {
       },
     );
     const body = (await response.json().catch(() => null)) as
-      | (FileEntry & { error?: string })
+      | (FileEntry & { error?: string; message?: string })
       | null;
     if (!response.ok) {
       throw new ApiError(
         response.status,
-        body?.error ?? `Pim answered ${response.status}`,
+        refusalMessage(body, response.status),
       );
     }
     return body as FileEntry;

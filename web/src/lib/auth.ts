@@ -119,11 +119,18 @@ async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
   });
   if (response.type === "opaqueredirect") throw new SignInRequired();
   const body = (await response.json().catch(() => null)) as
-    | (T & { error?: string; url?: unknown; missing?: unknown })
+    | (T & {
+        error?: string;
+        message?: string;
+        url?: unknown;
+        missing?: unknown;
+      })
     | null;
   if (!response.ok) {
     checkAddress(response, body);
-    throw new Error(body?.error ?? `Sign-in answered ${response.status}`);
+    throw new Error(
+      body?.message || body?.error || `Sign-in answered ${response.status}`,
+    );
   }
   return body as T;
 }

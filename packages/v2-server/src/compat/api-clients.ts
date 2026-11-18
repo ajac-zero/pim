@@ -7,6 +7,7 @@ import { randomUUID } from "node:crypto";
 import { BadRequestError } from "@pim/v2-app/errors";
 import { ok, type Reply, type Route, route } from "@pim/v2-app/http";
 import { transcriptPage } from "@pim/v2-live/projections/snapshots";
+import { messageParts } from "../message-images.ts";
 
 /** Message text from what a client sends: a string, or content blocks of which the text ones are joined. */
 function textOf(body: Record<string, unknown>): string {
@@ -27,11 +28,13 @@ export function apiClientRoutes(): Route[] {
 			return ok({ model: null, timeZone: settings["settings.timeZone"] ?? process.env.PIM_TIME_ZONE ?? "UTC", rootSession: settings.majordomo_chat ?? null, tools: [] });
 		}),
 		route("POST", "/api/sessions/:id/messages", async ({ app, principal, json, params }): Promise<Reply> => {
-			const b = await json();
+			// A message with pictures is bigger than the usual 1 MB of JSON; each picture is fitted to what a model takes before it is kept.
+			const b = await json(8_000_000);
 			const text = textOf(b);
-			if (!text.trim() && b.payload === undefined) throw new BadRequestError("A message needs content");
+			const content = await messageParts(b.content);
+			if (!text.trim() && !content && b.payload === undefined) throw new BadRequestError("A message needs content");
 			const commandId = String(b.commandId ?? b.operationId ?? `cmd_${randomUUID()}`);
-			const admission = await app.conversations.admit(await principal(), { commandId, kind: "user_message", chatId: params[0]!, payload: b.payload ?? { text } });
+			const admission = await app.conversations.admit(await principal(), { commandId, kind: "user_message", chatId: params[0]!, payload: b.payload ?? { text, ...(content ? { content } : {}) } });
 			return ok({ ...admission, operationId: commandId, session: params[0] }, admission.duplicate ? 200 : 202);
 		}),
 		// How a sent message went: `pending` until the runtime has taken it, then `committed`. The reply is read from the chat's messages.

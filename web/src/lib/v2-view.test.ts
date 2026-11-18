@@ -134,6 +134,28 @@ describe("a v2 chat drawn by the same reducer as v1's", () => {
     expect(settled.view.live).toEqual([]);
   });
 
+  it("keeps a photo sent with a message as an image of the user's item, for the chat to show", () => {
+    const stream = streamOf([
+      {
+        id: "1",
+        role: "user",
+        parts: [
+          { type: "text", text: "How about now?" },
+          { type: "image", data: "AAEC", mimeType: "image/jpeg" },
+        ],
+        timestamp: 1001,
+      },
+    ]);
+    const entry = stream.view.entries[0];
+    expect(entry?.kind === "item" ? entry.item : null).toMatchObject({
+      role: "user",
+      content: [
+        { type: "input_text", text: "How about now?" },
+        { type: "input_image", image_url: "data:image/jpeg;base64,AAEC" },
+      ],
+    });
+  });
+
   it("follows a turn: a partial grows in place, and the committed message replaces it", () => {
     let stream = streamOf([user(1, "hi")]);
     expect(stream.view.running).toBe(false);

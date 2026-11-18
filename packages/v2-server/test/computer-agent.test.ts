@@ -6,6 +6,7 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSyn
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import sharp from "sharp";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { App } from "@pim/v2-app/app";
@@ -156,6 +157,59 @@ real("an agent on a paired computer", () => {
 		expect(read).toContain("$PIM_WORKSPACE/big.pdf");
 		// A call that needs a bigger answer fails at once, naming its size.
 		expect((await results("file_edit")).at(-1)).toMatch(/answer is \d+ bytes, more than the 1048576 bytes/);
+	}, 120_000);
+
+	it("shows the model a photo attached to a message, and one file_read opens, scaled down to what a model takes", async () => {
+		// A noisy 3000x2000 JPEG, a few MB as a phone photo is: more than a request or one answer of the bus should carry as it is.
+		const photo = await sharp({ create: { width: 3000, height: 2000, channels: 3, background: "#808080", noise: { type: "gaussian", mean: 128, sigma: 60 } } }).jpeg({ quality: 70 }).toBuffer();
+		expect(photo.length).toBeGreaterThan(2_000_000);
+		expect(photo.length).toBeLessThan(5_000_000);
+		writeFileSync(join(root, "photo.jpg"), photo);
+		type Seen = { type: string; data?: string; mimeType?: string }[];
+		const fitted = (part: { data?: string }) => Buffer.from(part.data ?? "", "base64");
+		const sizeOf = async (bytes: Buffer) => sharp(bytes).metadata();
+
+		// The attachment: the message carries the photo as an image part, and the model's request has it.
+		const mine = ++n;
+		let asked: Seen = [];
+		faux.setResponses([
+			(context: { messages: { role: string; content: string | Seen }[] }) => {
+				asked = context.messages.flatMap((m) => (m.role === "user" && Array.isArray(m.content) ? m.content.filter((part) => part.type === "image") : []));
+				return fauxAssistantMessage(`done ${mine}`);
+			},
+		] as never);
+		const content = [{ type: "text", text: "What is this?" }, { type: "image", data: photo.toString("base64"), mimeType: "image/jpeg" }];
+		expect((await web.call("POST", `/api/sessions/${chatId}/messages`, { commandId: `m-${mine}`, operationId: `m-${mine}`, text: "What is this?", content })).status).toBe(202);
+		await waitFor("the turn with the photo to end", async () => ((await transcript()).includes(`done ${mine}`) ? true : undefined), 60_000);
+		expect(asked).toHaveLength(1);
+		expect(asked[0]!.mimeType).toBe("image/jpeg");
+		expect(fitted(asked[0]!).length).toBeLessThan(750_000);
+		expect((await sizeOf(fitted(asked[0]!))).width!).toBeLessThanOrEqual(1568);
+		// The Runner's user entry, which the chat is projected from, keeps the photo as an image part beside the text.
+		const entries = JSON.parse(await transcript()) as { model?: { role: string; content: Seen | string }[] }[];
+		const kept = entries.flatMap((e) => e.model ?? []).find((m) => m.role === "user" && Array.isArray(m.content) && m.content.some((part) => part.type === "image"))!;
+		expect((kept.content as Seen).map((part) => part.type)).toEqual(["text", "image"]);
+		// A picture that is no picture is refused, not sent on as one.
+		expect((await web.call("POST", `/api/sessions/${chatId}/messages`, { commandId: "bad", content: [{ type: "image", data: Buffer.from("not an image").toString("base64"), mimeType: "image/png" }] })).status).toBe(400);
+
+		// file_read: the whole photo is read in pieces, and the model's next request has it as a tool result's image, with a note.
+		let read: Seen = [];
+		let note = "";
+		const end = await ask(
+			"look at photo.jpg",
+			toolUse(fauxToolCall("file_read", { path: "/workspace/photo.jpg" })),
+			(context: { messages: { role: string; content: Seen }[] }) => {
+				const result = context.messages.findLast((m) => m.role === "toolResult")!;
+				read = result.content.filter((part) => part.type === "image");
+				note = result.content.map((part) => (part as { text?: string }).text ?? "").join("");
+				return toolUse(fauxToolCall("send_to_user", { message: "Seen." }));
+			},
+		);
+		await end();
+		expect(read).toHaveLength(1);
+		expect(read[0]!.mimeType).toBe("image/jpeg");
+		expect(fitted(read[0]!).length).toBeLessThan(750_000);
+		expect(note).toContain(`/workspace/photo.jpg (${photo.length} bytes; scaled down to fit)`);
 	}, 120_000);
 
 	it("does nothing when the person declines, and goes unavailable when the computer leaves", async () => {

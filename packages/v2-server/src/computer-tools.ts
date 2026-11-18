@@ -15,6 +15,7 @@ import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ToolRegistration } from "@earendil-works/pi-durable";
 import type { App } from "@pim/v2-app/app";
 import { sniffImage } from "@pim/v2-app/objects";
+import { fitImage } from "./message-images.ts";
 import { acquireRemote, type Computer, type RelayBus, type RemoteComputer } from "@pim/v2-app/relay";
 import { CapabilityUnavailableError } from "@pim/v2-contracts/authz";
 import { OwnerId, PartitionId, type Principal } from "@pim/v2-contracts/identity";
@@ -34,6 +35,8 @@ const DRIVER_CALL_MS = 120_000;
 const MAX_READ = 1_048_576;
 /** What `file_read` takes of a file: it shows 60,000 characters at most, and an answer this size passes a message bus left at NATS's default 1 MB limit. */
 const MAX_TEXT_READ = 524_288;
+/** The largest picture `file_read` opens: what an upload may be. */
+const MAX_IMAGE_FILE = 25_000_000;
 const MAX_WRITE = 1_000_000;
 const MAX_RESULT_CHARS = 60_000;
 
@@ -215,8 +218,8 @@ export function computerTools(deps: ComputerToolDeps, kit: ComputerToolKit): Too
 		for (const path of paths) if (path !== undefined && filesPath(path) === null) return text(`${String(path)} is not one of the person's files. Use an absolute path under ${FILES_ROOT}.`, true);
 		return null;
 	};
-	const readFile = async (c: Computer, path: string, length = MAX_READ): Promise<{ bytes: Buffer; size: number }> => {
-		const r = await c.call<{ data: string; size: number }>("read", { path, offset: 0, length });
+	const readFile = async (c: Computer, path: string, length = MAX_READ, offset = 0): Promise<{ bytes: Buffer; size: number }> => {
+		const r = await c.call<{ data: string; size: number }>("read", { path, offset, length });
 		return { bytes: Buffer.from(r.data, "base64"), size: r.size };
 	};
 	/** Where a path under /workspace is for a command in the shell, which has no /workspace: the files' folder is a real one on the computer. */
@@ -235,16 +238,28 @@ export function computerTools(deps: ComputerToolDeps, kit: ComputerToolKit): Too
 	const EXPECTED_HASH = Type.Optional(Type.String({ description: `The sha256 of the file as you last read it (file_read gives it), or "absent" to only create a new file. If the file changed since, nothing is written and the result is a conflict: read it again and redo the change.` }));
 
 	const tools: ToolRegistration[] = [
-		tool("file_read", `Read a text file, from line \`offset\` (1-based) for \`limit\` lines. ${WHERE}`, Type.Object({ path: Type.String(), offset: Type.Optional(Type.Integer({ minimum: 1 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 5000 })) }), async (a, api) => {
+		tool("file_read", `Read a text file, from line \`offset\` (1-based) for \`limit\` lines. A picture (PNG, JPEG, WebP, GIF) is shown to you instead, scaled down if it is large. ${WHERE}`, Type.Object({ path: Type.String(), offset: Type.Optional(Type.Integer({ minimum: 1 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 5000 })) }), async (a, api) => {
 			const bad = confined(a.path);
 			if (bad) return bad;
 			const { computer } = await use(api, "file_read");
 			const stat = await computer.call<{ isDirectory: boolean; sha256: string | null }>("stat", { path: a.path });
 			if (stat.isDirectory) return text(`${a.path} is a folder: list it with file_list.`, true);
 			const { bytes, size } = await readFile(computer, a.path, MAX_TEXT_READ);
-			const image = sniffImage(bytes);
 			// As in v1, a picture is shown to the model; other binary files (a PDF, an archive) are for a program to open, so the model is told where that is.
-			if (image && size === bytes.length) return { content: [{ type: "image", data: bytes.toString("base64"), mimeType: image }, { type: "text", text: `${a.path} (${size} bytes)` }] };
+			// A phone photo is several MB, more than one answer of the bus carries: it is read in pieces and scaled down to what a model takes. A model that cannot see pictures gets the note alone.
+			if (sniffImage(bytes)) {
+				if (size > MAX_IMAGE_FILE) return text(`${a.path} is a picture of ${size} bytes, more than the ${MAX_IMAGE_FILE} bytes file_read opens. To make it smaller, use shell: ${whereIs(computer, a.path)}`, true);
+				const pieces = [bytes];
+				for (let have = bytes.length; have < size; ) {
+					const next = await readFile(computer, a.path, MAX_TEXT_READ, have);
+					if (next.bytes.length === 0) break;
+					pieces.push(next.bytes);
+					have += next.bytes.length;
+				}
+				const whole = Buffer.concat(pieces);
+				const fitted = await fitImage(whole);
+				if (fitted) return { content: [fitted, { type: "text", text: `${a.path} (${size} bytes${fitted.data.length === Math.ceil(whole.length / 3) * 4 ? "" : "; scaled down to fit"})` }] };
+			}
 			if (bytes.subarray(0, 8192).includes(0)) return text(`${a.path} is a binary file (${size} bytes), not text. To open it with a program, use shell: ${whereIs(computer, a.path)}`, true);
 			const lines = bytes.toString("utf8").split("\n");
 			const from = (a.offset ?? 1) - 1;

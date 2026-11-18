@@ -18,7 +18,8 @@ export type Ctx = {
 	principal: () => Promise<Principal>;
 	/** The principal if there is a valid credential, else null. */
 	maybePrincipal: () => Promise<Principal | null>;
-	json: () => Promise<Record<string, any>>;
+	/** The JSON body, at most `limit` bytes (1 MB unless a route that takes pictures asks for more). */
+	json: (limit?: number) => Promise<Record<string, any>>;
 	form: () => Promise<URLSearchParams>;
 	bytes: (limit?: number) => Promise<Uint8Array>;
 	cookie: (name: string) => string | undefined;
@@ -103,8 +104,8 @@ export function makeCtx(app: App, req: IncomingMessage, url: URL, params: string
 		app, req, url, params, origin: opts.origin, appsOrigin: opts.appsOrigin, secure,
 		principal: async () => (await resolve()) ?? Promise.reject(new UnauthorizedError()),
 		maybePrincipal: () => resolve().catch((error) => (error instanceof UnauthorizedError ? null : Promise.reject(error))),
-		json: async () => {
-			const body = await readBody(req, 1_000_000);
+		json: async (limit = 1_000_000) => {
+			const body = await readBody(req, limit);
 			try {
 				return body.length ? JSON.parse(Buffer.from(body).toString("utf8")) : {};
 			} catch {

@@ -821,6 +821,28 @@ const translations = {
     computerHostNewTokenConfirm:
       "Make a new token? The one the host has now stops working.",
     computerHostPair: "Pair a computer host",
+    release: "Version",
+    releaseDescription:
+      "The version of Pim this deployment runs and whether a newer one is published on its channel. Only you see this.",
+    releaseRevision: "commit {revision}",
+    releaseChannel: "channel {channel}",
+    releaseChecked: "checked {date}",
+    releaseCheckOff: "update check is off (PIM_UPDATE_CHECK)",
+    releaseCheckFailed: "could not check for updates: {error}",
+    releaseNotChecked: "not checked yet",
+    releaseUpToDate: "Up to date",
+    releaseAvailable: "Update available: {version}",
+    releaseNotes: "Release notes",
+    releaseUpdate: "Update now",
+    releaseUpdateConfirm:
+      "Update this Pim to {version}? The host pulls the new image, backs up, and restarts the stack, which takes a minute or two; it goes back to the current version on its own if the new one doesn't start.",
+    releaseUpdating:
+      "Updating. The stack restarts, so Pim may be unreachable for a minute or two.",
+    releaseUpdated: "Updated. {summary}",
+    releaseReload: "Reload",
+    releaseUpdateFailed: "The update did not finish: {summary}",
+    releaseRunCommand: "To update, run this on the host:",
+    releaseNoDaemon: "No host daemon is connected, so Pim can't do it for you.",
     hostOps: "Host operations",
     hostOpsDescription:
       "Your majordomo runs a few fixed operations on this Pim's host through its daemon, hostopsd: stats, logs, restarts, the sandbox limit, deploys and rollbacks. It doesn't ask first; a deploy that fails rolls itself back. Every request, and what came of it, is in the audit log. The host enrolls its daemon by itself when up.sh runs, so Issue credential is only for turning it back on after a revoke, or for rotating the credential.",
@@ -2895,6 +2917,30 @@ const translations = {
     computerHostNewTokenConfirm:
       "¿Crear un token nuevo? El que tiene el host ahora deja de funcionar.",
     computerHostPair: "Vincular un host de computadoras",
+    release: "Versión",
+    releaseDescription:
+      "La versión de Pim que ejecuta este despliegue y si hay otra más nueva publicada en su canal. Solo tú ves esto.",
+    releaseRevision: "commit {revision}",
+    releaseChannel: "canal {channel}",
+    releaseChecked: "comprobado {date}",
+    releaseCheckOff:
+      "la comprobación de actualizaciones está desactivada (PIM_UPDATE_CHECK)",
+    releaseCheckFailed: "no se pudo comprobar si hay actualizaciones: {error}",
+    releaseNotChecked: "aún sin comprobar",
+    releaseUpToDate: "Al día",
+    releaseAvailable: "Actualización disponible: {version}",
+    releaseNotes: "Notas de la versión",
+    releaseUpdate: "Actualizar ahora",
+    releaseUpdateConfirm:
+      "¿Actualizar este Pim a {version}? El host descarga la imagen nueva, hace una copia de seguridad y reinicia el stack, lo que tarda uno o dos minutos; vuelve solo a la versión actual si la nueva no arranca.",
+    releaseUpdating:
+      "Actualizando. El stack se reinicia, así que Pim puede no estar disponible uno o dos minutos.",
+    releaseUpdated: "Actualizado. {summary}",
+    releaseReload: "Recargar",
+    releaseUpdateFailed: "La actualización no terminó: {summary}",
+    releaseRunCommand: "Para actualizar, ejecuta esto en el host:",
+    releaseNoDaemon:
+      "No hay un daemon del host conectado, así que Pim no puede hacerlo por ti.",
     hostOps: "Operaciones del host",
     hostOpsDescription:
       "Tu majordomo ejecuta unas pocas operaciones fijas en el host de este Pim a través de su daemon, hostopsd: estadísticas, registros, reinicios, el límite de sandboxes, despliegues y reversiones. No pregunta antes; un despliegue que falla se revierte solo. Cada solicitud, y lo que resultó de ella, queda en el registro de auditoría. El host inscribe su daemon solo cuando se ejecuta up.sh, así que Emitir credencial solo sirve para reactivarlo tras una revocación o para rotar la credencial.",

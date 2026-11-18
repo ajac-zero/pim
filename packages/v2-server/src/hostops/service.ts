@@ -15,12 +15,14 @@ import type { Db, Tx } from "@pim/v2-app/db";
 import { BadRequestError, ConflictError, ForbiddenError, PimError, UnauthorizedError } from "@pim/v2-app/errors";
 import { newId, secret } from "@pim/v2-app/ids";
 
-export const HOST_OPS = ["stats", "deploy", "rollback", "restart", "logs", "set_slot_limit", "exec"] as const;
+export const HOST_OPS = ["stats", "deploy", "rollback", "restart", "logs", "set_slot_limit", "exec", "update"] as const;
 export type HostOpName = (typeof HOST_OPS)[number];
 /** The services the daemon may restart or read the logs of: the stack's Compose services, and the daemon itself. Its own copy in `sandbox-manager/hostopsd/validate.js` must say the same (a test checks). */
 export const HOST_SERVICES = ["caddy", "postgres", "pgbouncer", "nats", "seaweedfs", "gate", "live", "runner", "forge", "maintenance", "canvas", "relay", "pim-computer", "sandbox-manager", "hostopsd"] as const;
 
 export type HostOpState = "queued" | "running" | "succeeded" | "failed" | "rolled_back" | "expired";
+/** The operations that replace what the stack runs, one at a time. */
+const REPLACES_STACK: readonly HostOpName[] = ["deploy", "rollback", "update"];
 const FINISHED: readonly HostOpState[] = ["succeeded", "failed", "rolled_back", "expired"];
 
 export const QUEUED_MS = 10 * 60_000;
@@ -41,7 +43,7 @@ export type HostOpArgs = Record<string, string | number>;
 export type HostOpData = Record<string, string | number | boolean | null | object>;
 
 /** How long the daemon has to report an operation it took: a deploy builds, so it has longer, and a command has its own timeout and a little more. */
-export const deadlineOf = (op: HostOpName, args?: HostOpArgs) => (op === "deploy" ? 15 * 60_000 : op === "exec" ? Number(args?.timeoutSeconds ?? EXEC_MAX_TIMEOUT) * 1000 + 30_000 : 2 * 60_000);
+export const deadlineOf = (op: HostOpName, args?: HostOpArgs) => (op === "deploy" || op === "update" ? 15 * 60_000 : op === "exec" ? Number(args?.timeoutSeconds ?? EXEC_MAX_TIMEOUT) * 1000 + 30_000 : 2 * 60_000);
 
 /** Who asks, as the code that took the request knows it: an agent running in a chat, a person signed in to the app, an API token, or nobody. */
 export type HostOpsCaller =
@@ -69,11 +71,14 @@ const ARG_KEYS: Record<HostOpName, readonly string[]> = {
 	logs: ["service", "lines", "approval"],
 	set_slot_limit: ["maxConcurrent", "approval"],
 	exec: ["command", "timeoutSeconds", "maxOutputBytes", "approval"],
+	update: ["tag", "approval"],
 };
 /** What the daemon is not told of an operation: which approval it ran under, and who approved. */
 const NOT_FOR_DAEMON = ["approval", "approver"];
 const REF = /^[A-Za-z0-9._/-]{1,100}$/;
 const COMMIT = /^[0-9a-f]{7,40}$/i;
+/** An image tag: `stable`, `edge`, `2.1`, `2.1.0`, `sha-0123456789ab`. */
+const TAG = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const APPROVAL = /^[A-Za-z0-9_.:-]{1,128}$/;
 
 /** A command with its limits, or the 400 to answer with: what `hostops_exec` asks to run, before the person is asked. */
@@ -127,6 +132,10 @@ export function checkHostOp(op: unknown, args: unknown, { approval = true }: { a
 			break;
 		case "exec":
 			checked = checkExecArgs(given);
+			break;
+		case "update":
+			if (given.tag !== undefined && (typeof given.tag !== "string" || !TAG.test(given.tag))) throw new BadRequestError("tag must be an image tag of letters, digits and . _ -, up to 128 characters");
+			checked = given.tag === undefined ? {} : { tag: given.tag as string };
 			break;
 	}
 	if (!approval) return { op: name, args: checked };
@@ -257,17 +266,21 @@ export class HostOps {
 			await this.#refused(actor, "enqueue", checked, (error as Error).message);
 			throw error;
 		}
+		return this.#queue(actor, agent, checked, approver, key);
+	}
+
+	/** Puts a checked, approved operation in the queue; `asker` is who is recorded as having asked. Deploys, rollbacks and updates queue behind one lock, since each replaces the running stack. */
+	async #queue(actor: Actor, asker: { ownerId: string; agentId: string; chatId: string | null }, checked: ReturnType<typeof checkHostOp>, approver: string, key?: string): Promise<HostOpView> {
 		const stored = { ...checked.args, approver };
 		const id = newId("ho");
 		try {
 			return await this.db.anonymous(async (tx) => {
-				// Checking for another deploy and queueing this one is one step: deploys and rollbacks queue behind one lock.
-				if (checked.op === "deploy" || checked.op === "rollback") {
+				if (REPLACES_STACK.includes(checked.op)) {
 					await tx.query("SELECT pg_advisory_xact_lock(hashtext('pim.hostops.deploy'))");
-					const busy = (await tx.query("SELECT id FROM pim_app.hostops_ops WHERE op IN ('deploy', 'rollback') AND state IN ('queued', 'running') LIMIT 1")).rows[0];
-					if (busy) throw new ConflictError(`A deploy or rollback (${busy.id}) is already queued or running.`);
+					const busy = (await tx.query("SELECT id FROM pim_app.hostops_ops WHERE op = ANY($1) AND state IN ('queued', 'running') LIMIT 1", [REPLACES_STACK])).rows[0];
+					if (busy) throw new ConflictError(`A deploy, rollback or update (${busy.id}) is already queued or running.`);
 				}
-				const row = (await tx.query("INSERT INTO pim_app.hostops_ops (id, request_key, approval_id, caller_owner_id, caller_agent_id, caller_chat_id, op, args, state) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'queued') RETURNING *", [id, key ?? null, String(checked.args.approval), agent.ownerId, agent.agentId, agent.chatId, checked.op, JSON.stringify(stored)])).rows[0];
+				const row = (await tx.query("INSERT INTO pim_app.hostops_ops (id, request_key, approval_id, caller_owner_id, caller_agent_id, caller_chat_id, op, args, state) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'queued') RETURNING *", [id, key ?? null, String(checked.args.approval), asker.ownerId, asker.agentId, asker.chatId, checked.op, JSON.stringify(stored)])).rows[0];
 				await this.#audit(tx, actor, "enqueue", "queued", id, { op: checked.op, args: stored });
 				return view(row);
 			});
@@ -283,6 +296,37 @@ export class HostOps {
 			if (error instanceof ConflictError) await this.#refused(actor, "enqueue", checked, error.message, "conflict");
 			throw error;
 		}
+	}
+
+	/**
+	 * The admin's own button in Settings → Deployment: one `update`, which the admin confirmed by pressing it with the operation in front of them (the screen says what it runs), so
+	 * the click is the approval for this call and for no other. Only an active admin account may ask, there must be a host daemon to take it, and the request is in the audit log.
+	 */
+	async requestUpdate(adminId: string, tag?: string): Promise<HostOpView> {
+		const actor: Actor = { kind: "admin", id: adminId };
+		const asked = { op: "update", args: tag === undefined ? {} : { tag } };
+		const account = await this.db.owner(adminId, async (tx) => (await tx.query("SELECT role, status FROM pim_app.accounts WHERE owner_id = $1", [adminId])).rows[0]);
+		if (!account || account.status !== "active" || account.role !== "admin") {
+			await this.#refused(actor, "enqueue", asked, "Only the admin can update this Pim.");
+			throw new ForbiddenError("hostops", "admin-only");
+		}
+		let checked: ReturnType<typeof checkHostOp>;
+		try {
+			checked = checkHostOp("update", { ...asked.args, approval: `settings_${newId("ap")}` });
+		} catch (error) {
+			await this.#refused(actor, "enqueue", asked, (error as Error).message, "invalid");
+			throw error;
+		}
+		await this.sweep();
+		if (!(await this.status()).credential.present) throw new ConflictError("This Pim has no host daemon to carry out an update: set up hostopsd first.");
+		return this.#queue(actor, { ownerId: adminId, agentId: "settings", chatId: null }, checked, `${adminId} (confirmed in Settings, ${new Date().toISOString()})`);
+	}
+
+	/** The newest update, if one was asked for in the last hour: what Settings → Deployment shows while it runs and once it ends. */
+	async latestUpdate(): Promise<HostOpView | null> {
+		await this.sweep();
+		const row = await this.db.anonymous(async (tx) => (await tx.query("SELECT * FROM pim_app.hostops_ops WHERE op = 'update' AND created_at > now() - interval '1 hour' ORDER BY created_at DESC LIMIT 1")).rows[0]);
+		return row ? view(row) : null;
 	}
 
 	async get(id: string): Promise<HostOpView | null> {

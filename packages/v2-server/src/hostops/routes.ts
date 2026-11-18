@@ -5,6 +5,7 @@
  *   GET / POST / DELETE /api/admin/computer-host   the admin pairing the host and seeing it
  *   GET /pim-host.ts                        what installs and updates the host
  *   /api/hostops/{status,audit,credential,ops}      the admin reading, and the refusal of everyone who is not the majordomo
+ *   GET /api/admin/release, POST /api/hostops/update   the admin's view of the version and the update check, and the button that updates the stack
  *   POST /api/hostops/agent/{enroll,poll,result}    the daemon, with its `pimhostops_` credential
  *
  * and what a person's `/api/computer` answers where a host keeps their computer (`managedComputerRoutes`, which wraps `compat/computer.ts`'s routes and leaves them as they are
@@ -16,6 +17,7 @@ import type { App } from "@pim/v2-app/app";
 import { BadRequestError, ForbiddenError, NotFoundError, PimError, UnauthorizedError } from "@pim/v2-app/errors";
 import { type Ctx, ok, type Reply, type Route, route } from "@pim/v2-app/http";
 import { ComputerHost, readSync } from "./computer-host.ts";
+import { readRecord, releaseView } from "../update-check.ts";
 import { AUDIT_ROWS, type HostdResult, type HostOpData, HostOps, MAX_DATA_BYTES, MAX_POLL_WAIT_MS, MAX_SUMMARY } from "./service.ts";
 
 const noStore = { "cache-control": "no-store, private" };
@@ -36,7 +38,8 @@ const isInt = (v: unknown, min: number, max: number): v is number => Number.isIn
 const bearer = (ctx: Ctx) => (ctx.req.headers.authorization?.startsWith("Bearer ") ? ctx.req.headers.authorization.slice(7).trim() : "");
 const addressOf = (ctx: Ctx) => String(ctx.req.headers["x-pim-client-ip"] ?? ctx.req.socket.remoteAddress ?? "");
 
-export function hostRoutes(options: { hostSource?: string } = {}): Route[] {
+export function hostRoutes(options: { hostSource?: string; env?: Readonly<Record<string, string | undefined>> } = {}): Route[] {
+	const env = options.env ?? process.env;
 	const source = options.hostSource ?? process.env.PIM_HOST_SOURCE ?? fileURLToPath(new URL("../../../../computer/pim-host.ts", import.meta.url));
 	const admin = async (ctx: Ctx) => {
 		const p = await ctx.principal();
@@ -79,6 +82,19 @@ export function hostRoutes(options: { hostSource?: string } = {}): Route[] {
 			// Nobody can ask over the API, the admin included: the refusal is the answer, and it is kept.
 			await hostops.enqueue(p ? { kind: p.kind === "user" ? "session" : "token", ownerId: p.ownerId } : { kind: "anonymous", address: addressOf(ctx) }, body.op, body.args);
 			throw new PimError(403, "forbidden", "Only the admin's majordomo can run operations on this Pim's host.");
+		}),
+		// What runs, what the last check found, whether a daemon is there to update the stack, and the newest update (while it runs, and for an hour after).
+		route("GET", "/api/admin/release", async (ctx) => {
+			await adminSession(ctx);
+			const { hostops } = hostServices(ctx.app);
+			const status = await hostops.status();
+			return ok({ ...releaseView(env, await readRecord(ctx.app.db)), daemon: { online: status.credential.present && status.agent.lastSeenAt !== null && Date.now() - status.agent.lastSeenAt < 60_000 }, update: await hostops.latestUpdate() }, 200, noStore);
+		}),
+		// The admin pressing "Update": the press is the approval for this one operation.
+		route("POST", "/api/hostops/update", async (ctx) => {
+			const p = await adminSession(ctx);
+			const body: Record<string, unknown> = await ctx.json().catch(() => ({}));
+			return ok(await hostServices(ctx.app).hostops.requestUpdate(p.ownerId, typeof body.tag === "string" && body.tag !== "" ? body.tag : undefined), 201, noStore);
 		}),
 		route("GET", "/api/hostops/status", async (ctx) => (await adminSession(ctx), ok(await hostServices(ctx.app).hostops.status(), 200, noStore))),
 		route("GET", "/api/hostops/audit", async (ctx) => {

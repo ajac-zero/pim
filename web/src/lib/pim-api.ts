@@ -867,6 +867,41 @@ export type HostOpsStatus = {
   queue: { queued: number; running: number };
 };
 
+/** An operation the host daemon was given, as `update` reports it. */
+export type HostOpUpdate = {
+  id: string;
+  state:
+    | "queued"
+    | "running"
+    | "succeeded"
+    | "failed"
+    | "rolled_back"
+    | "expired";
+  createdAt: number;
+  summary: string | null;
+  args: { tag?: string };
+};
+
+/** What runs, what the last check for a newer image found, and the update asked for most recently: the admin's view of this Pim's release. */
+export type Release = {
+  version: string;
+  revision: string;
+  channel: string;
+  /** `off` when PIM_UPDATE_CHECK=off: nothing is asked of the registry. */
+  check: "on" | "off";
+  checkedAt: number | null;
+  error: string | null;
+  available: boolean;
+  latest: {
+    version: string | null;
+    revision: string | null;
+    notesUrl: string | null;
+  } | null;
+  /** Whether a host daemon is there to carry out an update. */
+  daemon: { online: boolean };
+  update: HostOpUpdate | null;
+};
+
 /** One row of the host operations' audit log: a request, refused or not, or a change of an operation's state. */
 export type HostOpsAuditRow = {
   id: number;
@@ -2623,6 +2658,14 @@ export const admin = {
     call<{ audit: HostOpsAuditRow[] }>("/hostops/audit?limit=100").then(
       (body) => body.audit,
     ),
+  /** The version this Pim runs, whether a newer image is published, and the latest update. */
+  release: () => call<Release>("/admin/release"),
+  /** Updates the stack to the newest image on its channel (or on `tag`), through the host daemon. */
+  updateHost: (tag?: string) =>
+    call<HostOpUpdate>("/hostops/update", {
+      method: "POST",
+      body: JSON.stringify(tag ? { tag } : {}),
+    }),
   /** A new credential for the host daemon, in place of any other; shown only now. */
   issueHostOpsCredential: () =>
     call<{ token: string; rotated: boolean }>("/hostops/credential", {

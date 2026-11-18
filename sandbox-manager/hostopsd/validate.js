@@ -23,6 +23,8 @@ function ref(v) {
 // shell would cut the command there, so the person would approve something other than what runs).
 export const EXEC_MAX_COMMAND = 2000
 const command = (v) => (typeof v === 'string' && v.trim() !== '' && v.length <= EXEC_MAX_COMMAND && !v.includes('\0') ? null : `must be 1 to ${EXEC_MAX_COMMAND} characters, without NUL`)
+// An image tag for `pim.sh update`: stable, edge, 2.1, 2.1.0, sha-0123456789ab. It goes to a script as one argument, and a leading dash would read as an option.
+const tag = (v) => (typeof v === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(v) ? null : 'must be an image tag of letters, digits and . _ -')
 const commit = (v) => (typeof v === 'string' && COMMIT.test(v) ? null : 'must be 7 to 40 hex characters')
 
 // name -> { arg: [check, required, default] }
@@ -32,6 +34,7 @@ const opsFor = (services) => ({
 	rollback: { commit: [commit, true] },
 	restart: { service: [oneOf(services), true] },
 	logs: { service: [oneOf(services), true], lines: [int(1, 500), false, 200] },
+	update: { tag: [tag, false, undefined] },
 	set_slot_limit: { maxConcurrent: [int(1, 16), true] },
 	exec: { command: [command, true], timeoutSeconds: [int(1, 300), false, 60], maxOutputBytes: [int(1, 65536), false, 65536] },
 })
@@ -56,7 +59,7 @@ export function validateOp(op, services = SERVICES) {
 	for (const [key, [check, required, fallback]] of Object.entries(spec)) {
 		if (raw[key] === undefined) {
 			if (required) return { id, error: `${op.name} needs ${key}` }
-			args[key] = fallback
+			if (fallback !== undefined) args[key] = fallback
 			continue
 		}
 		const problem = check(raw[key])

@@ -75,6 +75,10 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
+          # Baked into the image as PIM_VERSION and PIM_REVISION, which Settings → Deployment shows and the update check compares.
+          build-args: |
+            PIM_VERSION=${{ steps.meta.outputs.version }}
+            PIM_REVISION=${{ github.event.workflow_run.head_sha || github.sha }}
           labels: |
             org.opencontainers.image.version=${{ steps.meta.outputs.version }}
             org.opencontainers.image.revision=${{ github.event.workflow_run.head_sha || github.sha }}

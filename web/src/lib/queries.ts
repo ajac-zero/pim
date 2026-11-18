@@ -125,6 +125,17 @@ export const hostOpsStatusQuery = () =>
 export const hostOpsAuditQuery = () =>
   queryOptions({ queryKey: ["hostops", "audit"], queryFn: admin.hostOpsAudit });
 
+/** The version this Pim runs and whether an update is available: the admin's view. Looks again every few seconds while an update runs. */
+export const releaseQuery = () =>
+  queryOptions({
+    queryKey: ["hostops", "release"],
+    queryFn: admin.release,
+    refetchInterval: (query) => {
+      const state = query.state.data?.update?.state;
+      return state === "queued" || state === "running" ? 3_000 : false;
+    },
+  });
+
 /** A chat's window in the agents' browser: its own, or that of a task it handed out. */
 export const browserQuery = (sessionId: string) =>
   queryOptions({

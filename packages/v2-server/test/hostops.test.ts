@@ -156,6 +156,40 @@ describe("host operations", () => {
 		expect((await audit()).filter((r) => ["expire", "timeout"].includes(r.action)).length).toBe(2);
 	});
 
+	it("updates only when the majordomo has an approval for it or the admin presses the button, one update at a time, and hands the daemon the tag alone", async () => {
+		expect(() => checkHostOp("update", { tag: "--force", approval: "ap_1" })).toThrow(/tag must be/);
+		expect(checkHostOp("update", { approval: "ap_1" })).toEqual({ op: "update", args: { approval: "ap_1" } });
+		// The majordomo's call is like any other: no approval, no operation.
+		await expect(hostops().enqueue(majordomo(), "update", { approval: "ap_missing" })).rejects.toMatchObject({ code: "approval_required" });
+		const wrongOp = await approved("ada", "deploy", { ref: "origin/main" });
+		await expect(hostops().enqueue(majordomo(), "update", { approval: wrongOp })).rejects.toMatchObject({ code: "approval_required" });
+		// The button is the admin's alone, and not a member's or anonymous.
+		expect((await as("bob", "POST", "/api/hostops/update", {})).status).toBe(403);
+		expect((await call("", "POST", "/api/hostops/update", {})).status).toBe(401);
+		expect((await as("ada", "POST", "/api/hostops/update", { tag: "a b" })).status).toBe(400);
+		// With no daemon there is nothing to carry it out.
+		await stack.admin.query("UPDATE pim_app.hostops_credential SET revoked_at = now() WHERE revoked_at IS NULL");
+		expect((await as("ada", "POST", "/api/hostops/update", {})).status).toBe(409);
+		const cred = (await as("ada", "POST", "/api/hostops/credential")).json.token as string;
+		await call(cred, "POST", "/api/hostops/agent/poll", { waitMs: 0, agentVersion: "1.0.0", commit: "abc123" });
+		expect((await as("ada", "GET", "/api/admin/release")).json).toMatchObject({ daemon: { online: true }, update: null });
+		const pressed = await as("ada", "POST", "/api/hostops/update", { tag: "edge" });
+		expect(pressed.status).toBe(201);
+		expect(pressed.json).toMatchObject({ op: "update", state: "queued", args: { tag: "edge", approver: expect.stringContaining("confirmed in Settings") } });
+		// Another update, a deploy or a rollback waits for it.
+		expect((await as("ada", "POST", "/api/hostops/update", {})).status).toBe(409);
+		const a = await approved("ada", "deploy", { ref: "origin/main" });
+		await expect(hostops().enqueue(majordomo(), "deploy", { ref: "origin/main", approval: a })).rejects.toMatchObject({ status: 409 });
+		const polled = (await call(cred, "POST", "/api/hostops/agent/poll", { waitMs: 0 })).json.op;
+		expect(polled).toMatchObject({ id: pressed.json.id, name: "update", args: { tag: "edge" }, deadlineMs: 900_000 });
+		expect(Object.keys(polled.args)).toEqual(["tag"]);
+		expect((await as("ada", "GET", "/api/admin/release")).json.update).toMatchObject({ id: pressed.json.id, state: "running" });
+		await call(cred, "POST", "/api/hostops/agent/result", { id: polled.id, ok: true, state: "succeeded", summary: "Updated.", data: { from: "sha256:a", to: "sha256:b", result: "updated" } });
+		expect((await as("ada", "GET", "/api/admin/release")).json.update).toMatchObject({ state: "succeeded", summary: "Updated." });
+		expect((await as("bob", "GET", "/api/admin/release")).status).toBe(403);
+		expect((await audit()).some((r) => r.actorKind === "admin" && r.action === "enqueue" && r.outcome === "queued")).toBe(true);
+	});
+
 	it("rotates the credential, enrolls the host with the shared secret, and lets a revoke stick", async () => {
 		const one = (await as("ada", "POST", "/api/hostops/credential")).json;
 		const two = (await as("ada", "POST", "/api/hostops/credential")).json;

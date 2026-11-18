@@ -11,6 +11,7 @@ The admin's majordomo can look after the machine a self-hosted Pim runs on: read
 | `hostops_restart` | Restart a service |
 | `hostops_set_slot_limit` | How many sandboxes the sandbox manager runs at once (`maxConcurrent`, 1 to 16) |
 | `hostops_deploy` | Deploy a git ref (`ref`, `origin/main` by default). The daemon checks the new version and rolls back on its own when it fails, which reports `rolled_back` |
+| `hostops_update` | (Compose stacks on published images) Update to the newest image on the Pim's channel, or on an image tag (`tag`): the daemon runs `pim.sh update`, which goes back to the previous image on its own when the new one fails. Settings → Deployment has an **Update now** button for the same thing: see [v2-operations.md](v2-operations.md#versions-and-updates) |
 | `hostops_rollback` | Go back to a commit (`commit`, 7 to 40 hex digits) |
 | `hostops_status` | Whether the daemon has a credential, when it was last seen, its version and commit, and its queue |
 | `hostops_audit` | The audit log, newest first, read-only (`limit`, 1 to 200, 50 by default; `since`, an ISO time; `op`, an operation or action): when, what, a short summary of its arguments, which agent and chat asked, the approval for a command and how it ended. Never secrets or a command's output |

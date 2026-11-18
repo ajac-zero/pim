@@ -76,6 +76,11 @@ if (tool === 'pimsh') {
 			process.exit(1)
 		}
 		writeFileSync(path.join(dir, 'deployed'), built)
+	} else if (args[0] === 'update') {
+		// pim.sh update [TAG]: some progress on stdout, then the one result line (ctl.update), after which it exits non-zero unless the update worked.
+		console.log('Pulling ghcr.io/ajac-zero/pim:' + (args[1] ?? 'stable'))
+		if (ctl.update) console.log(JSON.stringify({ event: 'pim.update', ...ctl.update }))
+		process.exit(ctl.update && ctl.update.result !== 'rolled_back' ? 0 : 1)
 	} else if (args[0] === 'ps') {
 		console.log(JSON.stringify({ Service: 'gate', State: 'running', Health: 'healthy' }))
 		console.log(JSON.stringify({ Service: 'runner', State: 'running', Health: 'healthy' }))

@@ -392,8 +392,7 @@ describe("live notes over WebSocket", () => {
 		// An agent edits at the current version; both open editors receive it, with what B typed meanwhile kept.
 		docB.getText("markdown").insert(0, ">> ");
 		await until(async () => (await app.canvas.read(u.account.ownerId, note)).text === ">> Hello world");
-		const version = await app.canvas.keep(u.account.ownerId, note, "person");
-		await app.canvas.edit(u.principal, note, version, "world", "there");
+		await app.canvas.edit(u.principal, note, "world", "there");
 		await until(() => docA.getText("markdown").toString() === ">> Hello there" && docB.getText("markdown").toString() === ">> Hello there");
 		expect((await app.canvas.read(u.account.ownerId, note)).text).toBe(">> Hello there");
 		// Someone else's note, and a note that is not there, are not opened.

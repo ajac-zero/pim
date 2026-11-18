@@ -29,9 +29,8 @@ export type Lease = { noteId: string; holder: string; fence: number };
  * Canvas: collaborative notes as Yjs documents. PostgreSQL holds the ordered update log and the lease; snapshots go to the object store.
  * Each append is checked against the lease's fence in the same statement, so a writer whose lease was taken over cannot add an update.
  * The live text is the truth; a version is what it said at a moment worth keeping (`keep`): when the person pauses or closes the note, before and
- * after each agent change, and on restore. The version people and agents see is that kept number. An edit tool reads a version and edits with it,
- * and the person's typing since makes a newer kept version, so the edit is a conflict the caller resolves by reading again. `notes.version`
- * only counts the log's updates. Live typing is never lost: edits are Yjs updates merged into the log, not replacements of it.
+ * after each agent change, and on restore. The version people and agents see is that kept number. An agent's edit is a find and replace that applies to
+ * the live text as it is when it lands, whatever version the agent read. `notes.version` only counts the log's updates. Live typing is never lost: edits are Yjs updates merged into the log, not replacements of it.
  */
 export class Canvas {
 	/** `instance` names this service process: every writer in it (live editors, note tools) shares one lease holder, so they never block each other, while another process taking over fences this one out. */
@@ -163,18 +162,19 @@ export class Canvas {
 	}
 
 	/**
-	 * note_edit: replaces the first occurrence of `find` with `replace`, only if the note is still at the kept version `baseVersion`. What the person has
-	 * typed since is kept first, so it makes a newer version and the edit is refused. The change is made as a Yjs delete and insert on the current
-	 * document, so characters a person typed elsewhere in the note stay, and the result is kept as the agent's version.
+	 * note_edit: replaces `find` with `replace` in the live text as it is when the edit lands, so what the person typed meanwhile stays; it is refused
+	 * only when `find` no longer appears exactly once. What the person had is kept as a version first and the result as the agent's. The change is made
+	 * as a Yjs delete and insert on the current document.
 	 */
-	async edit(p: Principal, noteId: string, baseVersion: number, find: string, replace: string): Promise<{ version: number }> {
+	async edit(p: Principal, noteId: string, find: string, replace: string): Promise<{ version: number }> {
 		await this.authz.enforce(p, "api:write");
 		return this.#withLease(p.ownerId, noteId, async (lease) => {
-			const current = await this.keep(p.ownerId, noteId, "person");
-			if (current !== baseVersion) throw new ConflictError(`The note changed (version ${current}, you edited ${baseVersion}); read it again`, "version_conflict");
+			await this.keep(p.ownerId, noteId, "person");
 			await this.#replace(p, lease, (text) => {
-				const at = text.toString().indexOf(find);
-				if (at < 0) throw new ConflictError("That text is not in the note", "text_not_found");
+				const body = text.toString();
+				const at = body.indexOf(find);
+				if (at < 0) throw new ConflictError("That text is not in the note any more; read it again", "text_not_found");
+				if (body.indexOf(find, at + 1) >= 0) throw new ConflictError("That text appears more than once in the note; read it again and use a longer find", "text_ambiguous");
 				return [at, find.length, replace];
 			});
 			return { version: await this.keep(p.ownerId, noteId, "agent") };

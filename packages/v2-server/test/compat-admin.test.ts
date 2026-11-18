@@ -83,7 +83,7 @@ describe("the web app's apps, gallery and admin routes", () => {
 		expect((await call("ada", "GET", `/api/artifacts/${id}/versions/1`)).json).toMatchObject({ kind: "markdown", content: "Week one", version: 1, latest: 1 });
 		expect((await call("ada", "GET", `/api/artifacts/${id}/versions/2`)).status).toBe(404);
 		// An agent's edit keeps versions, so an older one still reads back its text, is listed in the history, and can be restored.
-		await app.canvas.edit(principal, id, 1, "one", "two");
+		await app.canvas.edit(principal, id, "one", "two");
 		expect((await call("ada", "GET", `/api/artifacts/${id}`)).json).toMatchObject({ version: 2, versions: 2, history: [{ version: 2, source: "agent" }, { version: 1, source: "person" }] });
 		expect((await call("ada", "GET", `/api/artifacts/${id}/versions/1`)).json).toMatchObject({ content: "Week one", version: 1, latest: 2 });
 		expect((await call("ada", "POST", `/api/artifacts/${id}/restore`, { version: 1, baseVersion: 2 })).json).toMatchObject({ version: 3, restored: 1 });

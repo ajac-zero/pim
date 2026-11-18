@@ -375,8 +375,8 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 			const n = await app.canvas.read(ownerId, a.id);
 			return text(`version ${n.version}\n${n.text}`);
 		}),
-		write("note_edit", "Edit a note by replacing text. base_version is the version you read; if the note changed since, nothing is changed and you read it again. A person's typing is never lost. The answer is the note's card in the chat, which is how the person sees and opens it; you can't open a panel, so don't say you did.", Type.Object({ id: S(), base_version: Type.Integer({ minimum: 0 }), find: S({ minLength: 1 }), replace: S() }), async (app, call, a) => {
-			const { version } = await app.canvas.edit(call.p, a.id, a.base_version, a.find, a.replace);
+		write("note_edit", "Edit a note by replacing text. The edit applies to the note as it is now, so what the person typed meanwhile stays; it is refused, and you read the note again, only when find no longer appears exactly once. base_version is not needed. A person's typing is never lost. The answer is the note's card in the chat, which is how the person sees and opens it; you can't open a panel, so don't say you did.", Type.Object({ id: S(), base_version: O(Type.Integer({ minimum: 0 })), find: S({ minLength: 1 }), replace: S() }), async (app, call, a) => {
+			const { version } = await app.canvas.edit(call.p, a.id, a.find, a.replace);
 			return noteCard(app, ownerId, a.id, `Saved version ${version}. The person sees the card in the chat and opens the note from it.`);
 		}),
 		read("note_show", "Show the person a note that already exists, such as one from another chat or the one they asked you to open, as the card in this chat that opens it beside the chat. It changes nothing. Find its id with note_list.", Type.Object({ id: S() }), async (app, _call, a) => noteCard(app, ownerId, a.id, "Showed it. The person sees the card in the chat and opens the note from it.")),

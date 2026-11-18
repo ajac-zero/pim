@@ -9,44 +9,26 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
+# Every job runs on every change, side by side, and each is sized to finish in about a minute and a half with its setup, so CI as a whole
+# answers in under two. The Worker's own tests (vitest's `worker` and `browser` projects) are v1's: v1 is no longer deployed and is kept only
+# until v2 reaches feature parity, so CI doesn't run them (`pnpm exec vitest run --project worker` does). The Compose smoke test runs after a
+# push to main, in compose.yml.
 jobs:
-  # Decides which of the jobs below a change needs (scripts/ci-scope.mjs): a push to main runs them all,
-  # and a branch or pull request only those its files can reach, so a docs change doesn't wait for the
-  # Worker's tests. It needs only Node and git, so it runs before anything is installed.
-  scope:
-    runs-on: ubuntu-latest
-    outputs:
-      typecheck: ${{ steps.scope.outputs.typecheck }}
-      lint: ${{ steps.scope.outputs.lint }}
-      web: ${{ steps.scope.outputs.web }}
-      daemons: ${{ steps.scope.outputs.daemons }}
-      unit: ${{ steps.scope.outputs.unit }}
-      worker: ${{ steps.scope.outputs.worker }}
-      browser: ${{ steps.scope.outputs.browser }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-node@v4
-        with:
-          node-version-file: .nvmrc
-      - id: scope
-        run: node scripts/ci-scope.mjs
-
-  # Fails when the repository names a deployment's internal hosts or identifiers, so it runs on its
-  # own, on every change: it needs only the checkout and Node, not the dependencies.
-  internal-identifiers:
+  # Biome over web/, and the check that the repository names no deployment's internal hosts or identifiers.
+  lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version-file: .nvmrc
       - run: node scripts/check-internal-identifiers.mjs
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
 
   typecheck:
-    needs: scope
-    if: needs.scope.outputs.typecheck == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -58,23 +40,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
 
-  lint:
-    needs: scope
-    if: needs.scope.outputs.lint == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version-file: .nvmrc
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm lint
-
   web:
-    needs: scope
-    if: needs.scope.outputs.web == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -86,10 +52,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter pim-web test
 
-  # The standalone daemons (displayd, sandbox-manager and its hostopsd, workspace-agentd): `node --test`, no dependencies.
+  # The standalone daemons (displayd, sandbox-manager and its hostopsd, workspace-agentd): `node --test`.
   daemons:
-    needs: scope
-    if: needs.scope.outputs.daemons == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -101,11 +65,21 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm test:daemons
 
-  # What runs in Node, with no workerd: the packages' own tests (packages/*, in seconds), and
-  # the root's Node project, which starts real processes (computer/, the supervisor of apps).
-  unit:
-    needs: scope
-    if: needs.scope.outputs.unit == 'true'
+  # The root's Node project, which starts real processes (computer/, the supervisor of apps), four files at a time on this runner.
+  node:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec vitest run --project node --maxWorkers=4
+
+  # Every package's own tests but @pim/v2-server's, all packages at once rather than in dependency order (their tests don't depend on each other's).
+  packages:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -118,17 +92,14 @@ jobs:
       # The v2 packages' tests run against a real PostgreSQL and NATS; a missing binary fails them rather than skipping them.
       - run: packages/v2-runtime/scripts/ensure-postgres.sh
       - run: packages/v2-server/scripts/ensure-nats.sh
-      - run: pnpm test:packages:rest
+      # `pnpm test:packages:rest`, with every package started at once rather than four at a time, which this runner holds.
+      - run: pnpm --filter "./packages/*" --filter "!@pim/v2-server" --no-sort --workspace-concurrency=16 test
         env:
           PIM_V2_REQUIRE_INFRA: "1"
           PIM_NATS_BIN: /usr/local/bin/nats-server
-      - run: pnpm exec vitest run --project node
 
-  # The integration tests of @pim/v2-server, the longest package: its own job so it runs beside the other packages' tests (`unit`), not after them.
-  # Its files run side by side (four workers on this runner), each in a database copied from a template.
-  unit-v2-server:
-    needs: scope
-    if: needs.scope.outputs.unit == 'true'
+  # The integration tests of @pim/v2-server, the longest package, four files at a time, each in a database copied from a template.
+  v2-server:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -145,64 +116,3 @@ jobs:
           PIM_V2_REQUIRE_INFRA: "1"
           PIM_NATS_BIN: /usr/local/bin/nats-server
           PIM_V2_TEST_WORKERS: "4"
-
-  # Pim v2 as it is deployed: builds deploy/Dockerfile.v2, boots deploy/compose (Caddy, PostgreSQL behind PgBouncer, NATS, SeaweedFS and every
-  # role), then signs up, chats, approves a tool, stores an object, and backs up and restores (scripts/v2-compose/smoke.sh).
-  compose:
-    needs: scope
-    if: needs.scope.outputs.unit == 'true' || startsWith(github.ref, 'refs/heads/pim/v2')
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-      - run: scripts/v2-compose/smoke.sh
-      - if: failure()
-        run: deploy/compose/pim.sh logs --no-color --tail 200
-
-  # The Worker's tests in workerd, a quarter of the files each, so one job's files don't wait for the
-  # other three quarters'. Vitest sharding splits by file size, which tracks duration. None of them
-  # browses, so none needs Chrome.
-  worker:
-    name: worker (${{ matrix.shard }}/4)
-    needs: scope
-    if: needs.scope.outputs.worker == 'true'
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2, 3, 4]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version-file: .nvmrc
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      # test/people.test.ts can hang for good in workerd, past even the test timeout, so the step has a hard limit.
-      - run: pnpm exec vitest run --project worker --shard=${{ matrix.shard }}/4
-        timeout-minutes: 45
-
-  # The tests that browse, in a Worker with the Chrome that stands in for Browser Run. Wrangler's cache of
-  # that Chrome is kept between runs, keyed on the version miniflare asks for.
-  browser:
-    needs: scope
-    if: needs.scope.outputs.browser == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version-file: .nvmrc
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - id: chrome
-        run: echo "version=$(node scripts/install-test-browser.mjs --version)" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@v4
-        with:
-          path: ~/.cache/.wrangler/chrome
-          key: chrome-${{ runner.os }}-${{ steps.chrome.outputs.version }}
-      - run: node scripts/install-test-browser.mjs
-      - run: pnpm exec vitest run --project browser
-        timeout-minutes: 20

@@ -1,7 +1,7 @@
 {
   "name": "@pim/v2-ops",
   "version": "0.1.0",
-  "description": "Operations for Pim's portable persistent backend: the migration, fence and backup toolkit, observability, deployment checks and the multi-tenant benchmark harness. Depends on no other Pim package and never on the Worker.",
+  "description": "Operations for Pim's portable persistent backend: the migration, fence and backup toolkit, observability and deployment checks. Depends on no other Pim package and never on the Worker.",
   "private": true,
   "type": "module",
   "license": "FSL-1.1-ALv2",
@@ -30,7 +30,7 @@
     "@types/pg": "^8.11.0",
     "@types/ws": "^8.5.0",
     "embedded-postgres": "17.11.0-beta.19",
-    "typescript": "^6.0.3",
+    "typescript": "^7.0.2",
     "vitest": "^4.1.11"
   }
 }

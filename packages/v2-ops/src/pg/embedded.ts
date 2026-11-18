@@ -1,4 +1,4 @@
-// A real PostgreSQL for tests, rehearsals and benchmarks, run from the `embedded-postgres` binaries with
+// A real PostgreSQL for tests and rehearsals, run from the `embedded-postgres` binaries with
 // the durability settings a production server has (fsync, full_page_writes, synchronous_commit all on).
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";

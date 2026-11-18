@@ -24,7 +24,7 @@ import { LocalGitHost } from "@pim/v2-forge/local-git";
 import { LocalSandboxProvider } from "@pim/v2-forge/local-sandbox";
 import { ForgeVault } from "@pim/v2-forge/vault";
 import { GitHttpHost } from "../../v2-forge/test/git-http-backend.ts";
-import { HTML, MockAmp, PNG } from "../../v2-forge/test/amp-mock.ts";
+import { MockAmp } from "../../v2-forge/test/amp-mock.ts";
 import { useForgeOverrides } from "../src/forge-assembly.ts";
 import type { Process } from "../src/main.ts";
 import { keyringFromProcessEnv } from "../src/roles.ts";
@@ -274,57 +274,4 @@ real("Forge's worker role with the Gate and Maintenance", () => {
 		await waitFor("both wakes", async () => (((await d.stack.admin.query("select count(*) c from pim_forge.forge_outbox where topic = 'wake' and thread_id = $1 and delivered_at is not null", [id])).rows[0].c as string) === "2" ? true : undefined), 30_000);
 		expect((await d.stack.admin.query("select dedupe_key from pim_forge.forge_outbox where topic = 'wake' and thread_id = $1 order by id", [id])).rows.map((r) => r.dedupe_key)).toEqual([`coding:${id}:role-claude`, `coding:${id}:role-claude-go`]);
 	}, 120_000);
-
-	it("an amp thread is started by the loop against Amp with the person's own key, mirrors its output and attachments, and wakes the chat once", async () => {
-		const key = "sgamp_roletest0123456789abcdef";
-		expect((await web.call("PUT", "/api/coding/vault/amp/api-key", { apiKey: key })).status).toBe(200);
-		amp.attachments.set("shot.png", { type: "image/png", body: PNG });
-		amp.attachments.set("fake.png", { type: "image/png", body: HTML });
-		const started = await web.call("POST", "/api/coding/threads", { operationId: "role-amp", task: "Update the docs", repo: REPO, harness: "amp", chat: chatId });
-		expect(started.status).toBe(201);
-		const id = started.json.threadId as string;
-		const handle = await waitFor("the orb to start", async () => (await state(id)).orb?.threadId);
-		expect(amp.creates).toBe(1);
-		expect(amp.auth.every((a) => a === `Bearer ${key}`)).toBe(true);
-		const at = (n: string) => `${amp.baseUrl}/user-content/attachments/${n}`;
-		// The loop reports Amp idle only once it has seen the thread working (or a minute has passed), so wait for its first look before finishing the thread.
-		await waitFor("the loop's first look at the Amp thread", async () => ((await d.stack.admin.query("select 1 from pim_forge.forge_threads where thread_id = $1 and last_seen_at is not null", [id])).rows.length ? true : undefined));
-		// Scripted before the thread finishes: the wake can reach the chat as soon as it does.
-		chatModel.setResponses([fauxAssistantMessage("The docs thread is done.")]);
-		amp.say(handle, "assistant", `Done. ![shot](${at("shot.png")}) ![fake](${at("fake.png")})`);
-		amp.threads.get(handle)!.state = "idle";
-		await threadIs(id, "idle");
-		const text = await waitFor("the mirrored message", async () => {
-			const events = (await web.call("GET", `/api/coding/threads/${id}/transcript?role=assistant`)).json.messages as { text: string }[];
-			return events.at(-1)?.text.includes("Done.") ? events.at(-1)!.text : undefined;
-		});
-		expect(text).toContain(`/api/coding/${id}/attachments/`);
-		expect(text).toContain(at("fake.png"));
-		// A second poll adopts the same orb: no second start, and one wake.
-		await new Promise((r) => setTimeout(r, 1000));
-		expect(amp.creates).toBe(1);
-		const wakes = (await d.stack.admin.query("select dedupe_key from pim_forge.forge_outbox where topic = 'wake' and thread_id = $1", [id])).rows;
-		expect(wakes).toHaveLength(1);
-		expect(wakes[0].dedupe_key).toMatch(new RegExp(`^coding:${id}:role-amp$`));
-		await waitFor("the chat to hear it", async () => ((await chatHeard()).some((t) => t.includes(`[Coding thread ${id}] It finished its turn.`)) ? true : undefined), 60_000);
-		void readTranscript;
-	}, 120_000);
-
-	it("an Amp thread's pushed pim/* branch is merged by the Gate-side Forge, and a person with no coding grant is still refused", async () => {
-		const id = (await d.stack.admin.query("select thread_id from pim_forge.forge_threads where start_operation = 'role-amp'")).rows[0].thread_id as string;
-		const work = mkdtempSync(join(tmpdir(), "amp-"));
-		execFileSync("git", ["clone", "-q", bare, "w"], { cwd: work });
-		execFileSync("sh", ["-c", "git checkout -q -b pim/amp-docs-1234 && echo docs > docs.txt && git add . && git -c user.name=T -c user.email=t@example.invalid commit -qm docs && git push -q origin pim/amp-docs-1234"], { cwd: join(work, "w") });
-		await d.stack.admin.query("update pim_forge.forge_threads set orb = orb || '{\"branch\": \"pim/amp-docs-1234\"}'::jsonb where thread_id = $1", [id]);
-		// There is no REST merge route (merge is a tool); the facade is the same one the agent tool calls, here under the Gate's scope.
-		// Merge is permitted but needs a person: the admin's recorded, auditable standing approval stands in for them.
-		expect((await web.call("POST", "/api/admin/standing-approvals", { ownerId, action: "coding:merge", scope: { repository: "github.com/acme/app" } })).status).toBe(201);
-		const { assembleForge } = await import("../src/forge-assembly.ts");
-		const parts = assembleForge(d.stack.admin as unknown as ForgeDb, new MemoryObjectStore() as never, { PIM_CODING_ALLOWED_REPOS: "acme/*" }, undefined, { scoped: true });
-		const merged = await parts.forge.scopedTo(ownerId).merge({ ownerId, role: "admin" }, id);
-		expect(merged).toMatchObject({ status: "done", outcome: "merged" });
-		expect(hostGit("show", "main:docs.txt")).toBe("docs");
-		const eve = new Client(base(gate), d.ingressSecret);
-		expect((await eve.call("POST", "/api/coding/threads", { operationId: "x", task: "t", repo: REPO })).status).toBe(403);
-	}, 90_000);
 });

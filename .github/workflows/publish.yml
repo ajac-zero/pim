@@ -1,5 +1,5 @@
 # Publishes the Pim images to GHCR (docs/v2-operations.md "Installing and updating"):
-#   - a push to main: sha-<12 characters> is built and pushed while CI runs on the same commit, and `edge` is moved to that image only once CI has succeeded
+#   - a push to main: sha-<12 characters> is built and pushed while CI runs on the same commit, and `edge` is moved to that image only once CI and the Compose smoke test (compose.yml) have succeeded
 #   - a tag vX.Y.Z: X.Y.Z, X.Y and stable
 # The slow part is the multi-arch build, so it does not wait for CI: both run at once, and what is left after CI is a retag that takes seconds. The sha tag
 # is harmless on its own (nothing follows it but `pim.sh update sha-<12>`), so a commit whose CI failed leaves an unused image and never gets `edge`.
@@ -100,23 +100,25 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Wait for CI on this commit
+      - name: Wait for CI and the Compose smoke test on this commit
         env:
           GH_TOKEN: ${{ github.token }}
           SHA: ${{ github.sha }}
         run: |
           set -eu
-          # The CI run for this push may not exist yet when the image is ready, and may still be running: look every 15 s, for up to 50 minutes.
-          for _ in $(seq 200); do
-            result="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --commit "$SHA" --event push --limit 1 --json status,conclusion --jq '.[0] | "\(.status) \(.conclusion)"')"
-            echo "CI: ${result:-not started}"
-            case "$result" in
-              "completed success") exit 0 ;;
-              "completed "*) echo "::error::CI did not succeed on $SHA, so edge stays where it is"; exit 1 ;;
-            esac
-            sleep 15
+          # A run for this push may not exist yet when the image is ready, and may still be running: look every 15 s, for up to 50 minutes.
+          for workflow in ci.yml compose.yml; do
+            for i in $(seq 201); do
+              [ "$i" -le 200 ] || { echo "::error::$workflow on $SHA did not finish in time"; exit 1; }
+              result="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow "$workflow" --commit "$SHA" --event push --limit 1 --json status,conclusion --jq '.[0] | "\(.status) \(.conclusion)"')"
+              echo "$workflow: ${result:-not started}"
+              case "$result" in
+                "completed success") break ;;
+                "completed "*) echo "::error::$workflow did not succeed on $SHA, so edge stays where it is"; exit 1 ;;
+              esac
+              sleep 15
+            done
           done
-          echo "::error::CI on $SHA did not finish in time"; exit 1
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:

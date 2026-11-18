@@ -17,10 +17,10 @@
     "lint": "pnpm --filter pim-web lint",
     "check": "pnpm typecheck && pnpm lint && pnpm test",
     "test": "node scripts/test-all.mjs",
-    "test:serial": "node scripts/check-internal-identifiers.mjs && vitest run && pnpm test:packages && pnpm --filter pim-web test && pnpm test:daemons",
-    "test:packages": "pnpm --filter \"./packages/*\" test",
+    "test:serial": "node scripts/check-internal-identifiers.mjs && vitest run --project node && pnpm test:packages && pnpm --filter pim-web test && pnpm test:daemons",
+    "test:packages": "pnpm --filter \"./packages/*\" --no-sort test",
     "test:packages:v2-server": "pnpm --filter @pim/v2-server test",
-    "test:packages:rest": "pnpm --filter \"./packages/*\" --filter \"!@pim/v2-server\" test",
+    "test:packages:rest": "pnpm --filter \"./packages/*\" --filter \"!@pim/v2-server\" --no-sort test",
     "test:daemons": "node --test \"displayd/test/*.test.js\" \"sandbox-manager/test/*.test.js\" \"sandbox-manager/hostopsd/test/*.test.js\" \"workspace-agentd/test/*.test.mjs\"",
     "test:changed": "node scripts/test-changed.mjs",
     "test:live": "PIM_LIVE=1 vitest run"
@@ -53,7 +53,7 @@
   },
   "devDependencies": {
     "@cloudflare/vitest-plugin": "^1.3.7",
-    "typescript": "^6.0.3",
+    "typescript": "^7.0.2",
     "vitest": "^4.1.11",
     "wrangler": "^4.148.0"
   }

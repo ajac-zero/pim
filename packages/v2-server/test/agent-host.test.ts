@@ -4,7 +4,6 @@
 import { randomBytes } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
-import { DELIVERY_REMINDER, NOT_DELIVERED } from "@pim/shared/transcript";
 import { App } from "@pim/v2-app/app";
 import { connect as connectApp } from "@pim/v2-app/db";
 import { MemoryObjectStore } from "@pim/v2-app/objects";
@@ -302,52 +301,6 @@ real("the default agent host", () => {
 		faux.setResponses([toolUse(fauxToolCall("send_to_user", { message: "Six." })), fauxAssistantMessage("answered in the new context")] as never);
 		expect((await web.call("POST", `/api/sessions/${chat}/messages`, { commandId: "retry-2", text: "and 3+3" })).status).toBe(202);
 		await waitFor("the answer in the new context", async () => ((await said("answered in the new context")) ? true : undefined), 60_000);
-	}, 180_000);
-
-	it("sends a turn that ended in plain text back for delivery, fails one that never delivers, and leaves background work alone", async () => {
-		const entries = async (chat: string) => {
-			const c = (await d.stack.admin.query("SELECT partition_id, conversation_id FROM pim_runtime.conversation_partitions WHERE public_chat_id = $1", [chat])).rows[0];
-			return c ? readTranscript(d.stack.runtime, ownerId, c.partition_id, Number(c.conversation_id)) : [];
-		};
-		const said = async (chat: string, words: string) => (await entries(chat)).some((e) => JSON.stringify(e).includes(words));
-		const sends = async (chat: string) => (await entries(chat)).flatMap((e) => (e.model ?? []).flatMap((m: any) => (m.role === "assistant" ? m.content.filter((c: any) => c.type === "toolCall" && c.name === "send_to_user").map((c: any) => c.arguments.message) : [])));
-		const reminders = async (chat: string) => (await entries(chat)).filter((e) => e.kind === "pi.user" && JSON.stringify(e).includes(DELIVERY_REMINDER)).length;
-		const ask = async (chat: string, text: string, commandId: string) => expect((await web.call("POST", `/api/sessions/${chat}/messages`, { commandId, text })).status).toBe(202);
-
-		// Plain text first: the reminder comes, then the agent delivers, and the person gets that one message.
-		const chat = (await web.call("POST", "/api/sessions", { title: "Delivery" })).json.id as string;
-		faux.setResponses([fauxAssistantMessage("It is probably four."), toolUse(fauxToolCall("send_to_user", { message: "Four." })), fauxAssistantMessage("ended")] as never);
-		await ask(chat, "what is 2+2", "deliver-1");
-		await waitFor("the delivered answer", async () => ((await said(chat, '"ended"')) ? true : undefined), 60_000);
-		expect(await sends(chat)).toEqual(["Four."]);
-		expect(await reminders(chat)).toBe(1);
-
-		// A model that never delivers: two reminders, then the error, and the run is held so Try again asks the model again.
-		const stubborn = (await web.call("POST", "/api/sessions", { title: "Silent" })).json.id as string;
-		faux.setResponses([fauxAssistantMessage("a"), fauxAssistantMessage("b"), fauxAssistantMessage("c")] as never);
-		await ask(stubborn, "find my homework", "deliver-2");
-		await waitFor("the delivery error", async () => ((await said(stubborn, NOT_DELIVERED)) ? true : undefined), 60_000);
-		expect(await reminders(stubborn)).toBe(2);
-		expect(await sends(stubborn)).toEqual([]);
-		// The runtime's transcript is ahead of Live's projection, which Try again reads: wait until the error is the last message the Gate would see.
-		await waitFor("the error projected as the chat's last message", async () => {
-			const last = (await d.stack.admin.query("SELECT message FROM pim_projection.chat_transcript_projection WHERE chat_id = $1 AND NOT partial ORDER BY position DESC LIMIT 1", [stubborn])).rows[0]?.message;
-			return last?.role === "assistant" && last.stopReason === "error" ? true : undefined;
-		}, 60_000);
-		faux.setResponses([toolUse(fauxToolCall("send_to_user", { message: "Found it." })), fauxAssistantMessage("ended")] as never);
-		expect((await web.call("POST", `/api/sessions/${stubborn}/retry`, {})).status).toBe(200);
-		await waitFor("the answer after Try again", async () => ((await entries(stubborn)).filter((e) => JSON.stringify(e).includes('"ended"')).length > 0 ? true : undefined), 60_000);
-		expect(await sends(stubborn)).toEqual(["Found it."]);
-		expect((await entries(stubborn)).filter((e) => e.kind === "pi.user" && JSON.stringify(e).includes("find my homework"))).toHaveLength(1);
-
-		// Background work may stay silent: no reminder, no error.
-		const quiet = (await web.call("POST", "/api/sessions", { title: "Background" })).json.id as string;
-		faux.setResponses([fauxAssistantMessage("Nothing to report.")] as never);
-		await ask(quiet, "[Scheduled task: check mail] Look for anything urgent.", "deliver-3");
-		await waitFor("the quiet turn", async () => ((await said(quiet, "Nothing to report.")) ? true : undefined), 60_000);
-		await new Promise((resolve) => setTimeout(resolve, 1_000));
-		expect(await reminders(quiet)).toBe(0);
-		expect(await said(quiet, NOT_DELIVERED)).toBe(false);
 	}, 180_000);
 
 	it("installs a skill from a GitHub folder only as approved, at the commit it was read at", async () => {

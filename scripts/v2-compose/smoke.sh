@@ -3,6 +3,7 @@
 # through its claim link, a chat is answered by a Runner through a stand-in OpenAI-compatible model, an http_request is parked for approval and runs
 # after it is approved, an image round-trips through object storage, and a backup and restore bring the database and objects back.
 # Usage: scripts/v2-compose/smoke.sh [--keep]    (needs Docker with compose; uses deploy/compose/.env, creating a local one if there is none)
+# PIM_SMOKE_PREBUILT=1 uses the image already tagged as .env's PIM_IMAGE instead of building it (CI builds it with its layer cache).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 C="$ROOT/deploy/compose/pim.sh"
@@ -12,7 +13,7 @@ step() { printf '\n== %s\n' "$*"; }
 grep -q '^PIM_AI_GATEWAY_URL=' "$ROOT/deploy/compose/.env" || printf 'PIM_AI_GATEWAY_URL=http://fakemodel:9000/v1\nPIM_AI_GATEWAY_KEY=none\nPIM_AI_GATEWAY_MODELS=fake-1\nPIM_DEFAULT_MODEL=gateway/fake-1\n' >> "$ROOT/deploy/compose/.env"
 IMAGE="$(grep '^PIM_IMAGE=' "$ROOT/deploy/compose/.env" | cut -d= -f2)"
 step "build $IMAGE"
-docker build -q -f "$ROOT/deploy/Dockerfile.v2" -t "$IMAGE" "$ROOT"
+[ -n "${PIM_SMOKE_PREBUILT:-}" ] || docker build -q -f "$ROOT/deploy/Dockerfile.v2" -t "$IMAGE" "$ROOT"
 step "up"
 "$C" up -d --wait
 docker rm -f pim-fakemodel >/dev/null 2>&1 || true

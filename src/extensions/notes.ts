@@ -54,7 +54,7 @@ Notes are the person's documents in Pim: plans, lists, drafts, research, meeting
 - Use Markdown: headings, lists, task lists (\`- [ ]\`), tables, links, code. Images and raw HTML aren't shown. The note's title is its own; the text needn't repeat it.
 - Draw a diagram with a \`\`\`mermaid block (flowchart, sequenceDiagram, gantt, timeline, mindmap and so on), without another fence around it.
 - Draw a picture, a logo or a chart with an \`\`\`svg block: one <svg> element with a viewBox, inline and self-contained, since it loads nothing from elsewhere.
-- The person sees blocks drawn when they preview the note, and as source while they write.
+- The person sees blocks drawn, and sees their source only on the line their cursor is on.
 - Don't put passwords, codes or personal details in a note unless the person asks.`,
 };
 

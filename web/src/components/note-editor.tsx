@@ -9,20 +9,22 @@ import {
   placeholder,
 } from "@codemirror/view";
 import { tags } from "@lezer/highlight";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { toast } from "sonner";
 import { yCollab, yUndoManagerKeymap } from "y-codemirror.next";
 import * as Y from "yjs";
 import { Markdown } from "~/components/chat/markdown";
 import { useI18n } from "~/components/i18n";
+import { noteLivePreview } from "~/components/note-live-preview";
 import { NoteLive, type NoteStatus } from "~/lib/note-live";
 import { cn } from "~/lib/utils";
 
 /*
  * A note's editor: its Markdown, written by the person and their agents
  * together, live. The text stays Markdown, as the agent reads and edits it,
- * styled as it's written: headings larger, emphasis and links as they'll
- * read, and the marks that make them quiet.
+ * and reads as it will be read except on the line the cursor is on, which
+ * shows its Markdown to edit (`note-live-preview.ts`).
  */
 
 /** How Markdown looks as it's written, in the theme's own colors. */
@@ -107,13 +109,10 @@ const CURSOR_COLORS = [
 export function NoteEditor({
   noteId,
   name,
-  preview = false,
   onVersion,
   className,
 }: {
   noteId: string;
-  /** Shows the note as it reads, with its diagrams and drawings drawn, in place of its Markdown; it follows every change. */
-  preview?: boolean;
   /** Who's typing, as others at the note see it beside the cursor. */
   name: string;
   /** A new version was made: the person paused, or the agent changed the note. */
@@ -125,14 +124,26 @@ export function NoteEditor({
   const [status, setStatus] = useState<NoteStatus>("connecting");
   const onVersionRef = useRef(onVersion);
   onVersionRef.current = onVersion;
-  const liveRef = useRef<NoteLive | null>(null);
-  // The text the preview shows, kept up to date only while it shows.
-  const [shown, setShown] = useState("");
-  const previewRef = useRef(preview);
-  previewRef.current = preview;
-  useEffect(() => {
-    if (preview) setShown(liveRef.current?.text.toString() ?? "");
-  }, [preview]);
+  // The blocks the preview draws, by the element each is drawn in: diagrams, drawings, images and tables.
+  const [blocks, setBlocks] = useState<
+    ReadonlyMap<HTMLElement, { source: string; key: number }>
+  >(new Map());
+  const blockKeys = useRef(0);
+  const blockHost = useMemo(
+    () => ({
+      mount: (element: HTMLElement, source: string) =>
+        setBlocks((current) =>
+          new Map(current).set(element, { source, key: ++blockKeys.current }),
+        ),
+      unmount: (element: HTMLElement) =>
+        setBlocks((current) => {
+          const next = new Map(current);
+          next.delete(element);
+          return next;
+        }),
+    }),
+    [],
+  );
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: the editor lives as long as the note; the name and texts are read once
   useEffect(() => {
@@ -150,10 +161,6 @@ export function NoteEditor({
       color,
       colorLight: `${color}33`,
     });
-    liveRef.current = live;
-    live.text.observe(() => {
-      if (previewRef.current) setShown(live.text.toString());
-    });
     const undoManager = new Y.UndoManager(live.text);
     const view = new EditorView({
       parent,
@@ -165,6 +172,7 @@ export function NoteEditor({
           keymap.of([...yUndoManagerKeymap, ...defaultKeymap]),
           markdown({ base: markdownLanguage }),
           syntaxHighlighting(markdownStyle),
+          noteLivePreview(blockHost),
           EditorView.lineWrapping,
           EditorView.contentAttributes.of({
             "aria-label": t("noteText"),
@@ -180,23 +188,18 @@ export function NoteEditor({
       view.destroy();
       undoManager.destroy();
       live.close();
-      liveRef.current = null;
     };
   }, [noteId]);
 
   return (
     <div className={cn("relative min-h-0 flex-1", className)}>
-      <div ref={host} className={cn("absolute inset-0", preview && "hidden")} />
-      {preview && (
-        <div className="absolute inset-0 overflow-y-auto scrollbar-thin">
-          <div className="mx-auto max-w-[46rem] px-5 pt-6 pb-24">
-            {shown.trim() === "" ? (
-              <p className="text-muted-foreground">{t("notePlaceholder")}</p>
-            ) : (
-              <Markdown text={shown} untrusted drawings />
-            )}
-          </div>
-        </div>
+      <div ref={host} className="absolute inset-0" />
+      {[...blocks].map(([element, { source, key }]) =>
+        createPortal(
+          <Markdown text={source} untrusted drawings ownImages />,
+          element,
+          String(key),
+        ),
       )}
       {status !== "synced" && (
         <p

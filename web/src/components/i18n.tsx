@@ -718,7 +718,6 @@ const translations = {
     notesDescription: "Write with your agents, live",
     builtInApps: "Built in",
     yourApps: "Yours",
-    noteWrite: "Write",
     noNotes:
       "None yet. Start one, or ask Pim to write something down, and you write it together here.",
     newNote: "New note",
@@ -2847,7 +2846,6 @@ const translations = {
     notesDescription: "Escribe con tus agentes, en directo",
     builtInApps: "Incluidas",
     yourApps: "Tuyas",
-    noteWrite: "Escribir",
     noNotes:
       "Aún no hay ninguna. Empieza una, o pídele a Pim que apunte algo, y la escribiréis juntos aquí.",
     newNote: "Nueva nota",

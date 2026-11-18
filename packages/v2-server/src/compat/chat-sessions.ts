@@ -177,7 +177,7 @@ export function sessionRoutes(env: Record<string, string | undefined> = process.
 			const messages = row.task_chat ? (await transcriptPage(app.db.pool, p.ownerId, row.task_chat as string)).messages : [];
 			return ok({ ...taskView(row), messages });
 		}),
-		// Asks the model again in a chat whose last request failed: the person's last message is sent once more, as it was written. A chat that is not waiting like that says so.
+		// Asks the model again in a chat whose last request failed. A run held after the failure goes on where it stopped, with the message the person wrote and no second copy of it; one that ended before runs were held is sent that message again. A chat that is not waiting like that says so.
 		route("POST", "/api/sessions/:id/retry", async ({ app, principal, params, json }) => {
 			const p = await principal();
 			const id = chatId(params[0]!);
@@ -188,7 +188,7 @@ export function sessionRoutes(env: Record<string, string | undefined> = process.
 			const text = asked?.parts.map((part) => (part.type === "text" ? part.text : "")).join("");
 			if (last?.role !== "assistant" || last.stopReason !== "error" || !text) throw new ConflictError("This chat isn't waiting to try again", "not_held");
 			const commandId = String(((await json().catch(() => ({}))) as Record<string, unknown>).commandId ?? `retry-${randomUUID()}`);
-			await app.conversations.admit(p, { commandId, kind: "user_message", chatId: id, payload: { text } });
+			await app.conversations.admit(p, { commandId, kind: "user_message", chatId: id, payload: { text, retry: true } });
 			return ok({ session: id });
 		}),
 		route("POST", "/api/sessions/:id/tasks/:task/cancel", async ({ app, principal, params }) => {

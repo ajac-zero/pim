@@ -19,7 +19,7 @@ export { Auth, CodingSchedulerDO, CodingThreadDO, Directory, Gallery, HostOps } 
  * no Cloudflare account. Never deploy it. It differs from a deployment in two ways:
  *
  * - A stand-in model, so chats answer. It echoes what you say through
- *   `send_to_user`, and calls a tool when told to: `/tool create_goal {"title": "Run a 5k"}`.
+ *   `send_to_user`, and calls a tool when told to: `/tool create_goal {"title": "Run a 5k"}`. `/fail <error>` makes its request fail.
  *   After a tool runs, it calls the next one if the message has more `/tool` lines, and
  *   otherwise sends the last tool's result. Memory compression gets a short summary.
  *   An agent at work on a task from before tasks were chats answers in plain text, the majordomo introduces itself with a stock greeting,
@@ -131,6 +131,8 @@ const answer: FauxResponseFactory = (context, _options, _state, model) => {
 	}
 
 	const text = textOf(messages.findLast((message) => message.role === "user")).trim();
+	// `/fail <error>` makes the model's request fail with that error, for the chat's error card.
+	if (text.startsWith("/fail")) return fauxAssistantMessage("", { stopReason: "error", errorMessage: text.slice("/fail".length).trim() || "The preview model failed on request." });
 	if (text.startsWith(INTRODUCTION)) {
 		const them = /Their name is (.+?)\.(?: |$)/m.exec(text)?.[1];
 		return send(

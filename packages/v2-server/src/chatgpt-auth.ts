@@ -4,10 +4,10 @@
  * only the first refreshes; the others read what it wrote, and a rotated refresh token is never spent twice or lost.
  */
 import type { Provider } from "@earendil-works/pi-ai";
-import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 import { type ChatGPTCredential, type ChatGPTOptions, chatgptContext, refreshChatGPT } from "@pim/v2-app/chatgpt";
 import { type KeyringCrypto, openString, sealString } from "@pim/v2-app/crypto";
 import type { Db } from "@pim/v2-runtime/db";
+import { currentOpenaiProvider } from "./openai-catalog.ts";
 
 export type ChatGPTRunnerOptions = ChatGPTOptions & {
 	/** Where the plan's models are called, when not OpenAI's own API (a proxy; tests' fake endpoint). */
@@ -34,7 +34,7 @@ export function chatgptCredentialStore(db: Db, crypto: KeyringCrypto, ownerId: s
 
 /** pi-ai's OpenAI provider, authenticated only by the plan. */
 export function chatgptProvider(options: ChatGPTRunnerOptions = {}): Provider {
-	const base = openaiProvider() as unknown as Provider;
+	const base = currentOpenaiProvider() as unknown as Provider;
 	const oauth = {
 		name: "OpenAI (ChatGPT plan)",
 		isSubscription: true,

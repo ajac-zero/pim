@@ -20,7 +20,6 @@ import { anthropicMessagesApi } from "@earendil-works/pi-ai/api/anthropic-messag
 import { createProvider } from "@earendil-works/pi-ai/models";
 import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
 import { googleProvider } from "@earendil-works/pi-ai/providers/google";
-import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 import { createRegistry, section, type HarnessOptions } from "@earendil-works/pi-durable";
 import type { App } from "@pim/v2-app/app";
 import type { RelayBus } from "@pim/v2-app/relay";
@@ -32,6 +31,7 @@ import { BUILTIN_SKILLS } from "./builtin-skills.ts";
 import { CodexImagesClient } from "./codex-images.ts";
 import { imageEndpoints } from "./image-tools.ts";
 import { hostopsExtension } from "./hostops/tools.ts";
+import { currentOpenaiProvider } from "./openai-catalog.ts";
 import { chatgptCredentialStore, chatgptProvider, type ChatGPTRunnerOptions } from "./chatgpt-auth.ts";
 import type { ForgeParts } from "./forge-assembly.ts";
 import { createFailover } from "./provider-failover.ts";
@@ -303,7 +303,7 @@ export function createAgentHost(options: AgentHostOptions) {
 		};
 		const models: MutableModels = createModels({ credentials: credentials as never });
 		models.setProvider(anthropicProvider() as never);
-		models.setProvider((plan ? chatgptProvider(chatgptOptions) : openaiProvider()) as never);
+		models.setProvider((plan ? chatgptProvider(chatgptOptions) : currentOpenaiProvider()) as never);
 		models.setProvider(googleProvider() as never);
 		if (env.PIM_AI_GATEWAY_URL) {
 			const listed = (env.PIM_AI_GATEWAY_MODELS ?? "").split(",").map((m) => m.trim()).filter(Boolean);
@@ -391,7 +391,8 @@ export function createAgentHost(options: AgentHostOptions) {
 		// The admin's majordomo may ask the host daemon for operations, each after a person approves it (`./hostops/`).
 		const hostops = await hostopsExtension({ ownerId, partitionId: partition.partitionId, app: options.app, chatOf: deps.chatOf });
 		if (hostops) registry.install(hostops);
-		return { models: metered, registry } as HarnessOptions;
+		// A request that failed for good, with nothing left to retry or fail over to, holds the run where it stopped: the person's Try again on the error card asks the model again (`POST /api/sessions/:id/retry`), so they need not say it twice.
+		return { models: metered, registry, settings: { retry: { suspend: () => true } } } as HarnessOptions;
 	};
 
 	/** The model the owner chose in Settings for agents with none of their own (migration 0611). */

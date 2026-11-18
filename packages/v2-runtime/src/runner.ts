@@ -307,6 +307,18 @@ export class ResidentPartition {
 		}
 	}
 
+	/** The run of `conversation` held after a model request failed for good: its generation task waits on nothing but `resumeTask`. */
+	async heldGeneration(conversation: Conversation, context: Context): Promise<TaskId | undefined> {
+		const { tasks } = await this.#harness.inspect(context);
+		return tasks.find(({ record }) => record.conversationId === conversation.id && record.kind === "pi.generation" && record.state.status === "waiting" && record.state.on?.length === 0)?.record.id as TaskId | undefined;
+	}
+
+	/** Asks the model again in a held run, as a durable signal like a decision, so a restart before it is applied does not lose it. */
+	async resumeHeld(command: Command, taskId: TaskId): Promise<void> {
+		await this.runner.inbox.recordSignal(this.ownerId, this.partitionId, { key: `resume:${command.commandId}`, kind: "resume", taskId: Number(taskId), payload: command.payload });
+		await this.applySignals();
+	}
+
 	#observeTask(taskId: number, status: string, waitingOn: number): void {
 		const awaiting = this.#awaiting.get(taskId);
 		if (awaiting === undefined) return;
@@ -451,8 +463,12 @@ const inputCommand: CommandHandler = async (resident, command, context) => {
 			resident.runner.report(error);
 		}
 	}
+	// A run held after its model request failed for good waits for a person: a retry asks the model again without saying the message twice, and a new message goes on with it.
+	const held = command.kind === "user_message" ? await resident.heldGeneration(conversation, context) : undefined;
+	if (held !== undefined && command.payload.retry === true) return resident.resumeHeld(command, held);
 	const whenBusy = command.payload.whenBusy as "steer" | "followUp" | "reject" | undefined;
 	await conversation.submit({ type: "input", content, requestId: command.piRequestId, ...(whenBusy === undefined ? {} : { whenBusy }) }, context);
+	if (held !== undefined) await resident.resumeHeld(command, held);
 };
 
 /** approval_decision and task_wake become durable signals: the decision is in PostgreSQL before anything acts on it, and is applied now and at every later activation. */

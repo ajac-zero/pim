@@ -168,7 +168,7 @@ export const RULES = [
 	["B6", /^5\.3 /, "Preserved", "origin checks on cookies and sockets", app("auth"), V, ""],
 	["B6", /^5\.4 /, "Preserved", "cookies, WebAuthn rp id", app("auth"), V, ""],
 	["B6", /^5\.5 /, "Replaced", "stateless Live replicas", live("ws", "hub"), V, ""],
-	["B6", /^5\.6 /, "Changed", "pool budgets and statement timeouts", [ent, srv("integrated-bench")].join(", "), P, "Scale is NOT accepted: the relative p95 budget (within 20% of baseline) failed from 50 active runs up in both harnesses, and the multi-process harness missed the absolute 250 ms budget at 1,000 active runs (451 ms, 100% CPU, 418 of 1,000 admitted, no turn done in the 30 s window)."],
+	["B6", /^5\.6 /, "Changed", "pool budgets and statement timeouts", ent, P, "Scale is NOT accepted: the relative p95 budget (within 20% of baseline) failed from 50 active runs up in both harnesses, and the multi-process harness missed the absolute 250 ms budget at 1,000 active runs (451 ms, 100% CPU, 418 of 1,000 admitted, no turn done in the 30 s window)."],
 	["B6", /^5\.7 /, "Changed", "—", "—", P, ""],
 	["B6", /^8\.1 /, "Changed", "Gate, Caddy", [ent, slice].join(", "), V, "Run as real OS processes, and behind Caddy in the booted Compose stack (scripts/v2-compose/smoke.sh)."],
 	["B6", /^8\.2 /, "Changed", "pim_app identity, bootstrap claim", [app("security"), slice].join(", "), V, ""],

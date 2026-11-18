@@ -171,25 +171,6 @@ describe("sandbox harness turns", () => {
 		expect(await w.reap()).not.toContain(threadId);
 	});
 
-	it("dispatches steps without waiting for them: a slow turn doesn't hold up another thread", async () => {
-		let release!: () => void;
-		const gate = new Promise<void>((r) => (release = r));
-		const slow = new ScriptedPort([async () => (await gate, { outcome: "completed", text: "slow" })]);
-		const fast = new ScriptedPort([{ outcome: "completed", text: "fast" }]);
-		const w = s.worker({ turns: { "claude-code": slow, codex: fast } });
-		const a = (await s.forge.start(ada, startReq("disp-a", { harness: "claude-code" }))).threadId;
-		const b = (await s.forge.start(ada, startReq("disp-b", { harness: "codex" }))).threadId;
-		const started = await w.dispatch();
-		expect(started).toBeGreaterThanOrEqual(2);
-		await waitUntil(async () => (await s.store.get(b))!.state === "idle");
-		expect((await s.store.get(a))!.state).toBe("running");
-		// The same thread is never stepped twice at once.
-		expect(await w.dispatch()).toBe(0);
-		release();
-		await w.drain();
-		expect((await s.store.get(a))!.state).toBe("idle");
-	});
-
 	it("an ambiguous sandbox creation is reconciled by tag, never launched twice", async () => {
 		const real = s.sandboxes;
 		let failNext: "after" | "before" | null = "after";

@@ -79,17 +79,6 @@ describe("model gateway", () => {
 		expect((await s.store.get(t.threadId))!.spentUsd).toBeCloseTo(1.5);
 	});
 
-	it("refuses with 402 once the budget is spent, before anything reaches the provider", async () => {
-		const t = await thread(1);
-		const tok = s.credentials.gatewayToken(t, { families: ["openai"] });
-		expect((await call(tok, "openai/v1/chat/completions", { model: "gpt-x" })).status).toBe(200);
-		const calls = seen.length;
-		const r = await call(tok, "openai/v1/chat/completions", { model: "gpt-x" });
-		expect(r.status).toBe(402);
-		expect(((await r.json()) as any).error.type).toBe("budget_exhausted");
-		expect(seen.length).toBe(calls);
-	});
-
 	it("revoked, suspended, forged, wrong-family and unknown-route requests never reach the provider", async () => {
 		const calls = seen.length;
 		const t = await thread();

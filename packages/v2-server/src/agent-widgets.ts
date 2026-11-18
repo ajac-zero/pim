@@ -58,15 +58,14 @@ export async function loadWidgets(app: App, p: Principal, agentId: string | null
 	}));
 }
 
-/** What is wrong with a message's ```ui blocks, as the model can read and fix: `error` when one cannot be drawn at all, `notes` for what still draws. */
-export function uiDiagnostics(message: string): { error?: string; notes?: string[] } {
-	const notes: string[] = [];
+/**
+ * What is wrong with a message's ```ui blocks, as the model can read and fix. The compiler only warns about what it could not use, such as JSON, which it drops and draws as plain text;
+ * a message that shows the person that instead of the piece the model meant is refused, with what to fix, so the model can send it again.
+ */
+export function uiDiagnostics(message: string): { error?: string } {
 	for (const body of closedUiSources(message)) {
-		for (const d of compile(body).diagnostics) {
-			const said = `a \`\`\`ui block${d.line > 0 ? ` (line ${d.line})` : ""} ${d.message}`;
-			if (d.severity === "error") return { error: said };
-			notes.push(said);
-		}
+		const [d] = compile(body).diagnostics;
+		if (d) return { error: `a \`\`\`ui block${d.line > 0 ? ` (line ${d.line})` : ""} ${d.message}` };
 	}
-	return notes.length > 0 ? { notes } : {};
+	return {};
 }

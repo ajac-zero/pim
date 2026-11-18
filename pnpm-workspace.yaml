@@ -2,6 +2,7 @@ packages:
   - web
   - packages/*
 allowBuilds:
+  '@embedded-postgres/linux-arm64': true
   '@embedded-postgres/linux-x64': true
   '@google/genai': false
   '@mongodb-js/zstd': false

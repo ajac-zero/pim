@@ -36,7 +36,10 @@ COPY packages ./packages
 COPY web ./web
 COPY computer ./computer
 COPY displayd ./displayd
-RUN pnpm --filter pim-web build
+# Run through npm, not pnpm: `pnpm run` first checks that node_modules matches every workspace manifest and, when it thinks they differ (the sources were copied after the install),
+# installs the whole workspace again, which fails on the test-only Postgres binaries and is not needed here.
+WORKDIR /app/web
+RUN npm run build
 
 FROM node:26-bookworm-slim AS build
 

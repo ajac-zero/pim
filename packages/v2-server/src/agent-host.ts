@@ -160,7 +160,7 @@ function messagesProvider(id: string, name: string, baseUrl: string, models: { i
 	} as never) as any;
 	// Requests are the ones v1 sent such an endpoint: no empty answers in the history (Claude refuses the system message they displace), and no thinking
 	// asked for in the middle of a tool round that began without it.
-	const wrap = (stream: (model: any, context: any, options?: any) => any) => (model: any, context: any, options?: any) => stream(model, withoutEmptyAnswers(context, model), withoutThinkingMidToolRound(context, options));
+	const wrap = (stream: (model: any, context: any, options?: any) => any) => (model: any, context: any, options?: any) => stream(model, withoutToolErrorFlag(withoutEmptyAnswers(context, model), model), withoutThinkingMidToolRound(context, options));
 	return { ...configured, stream: wrap(configured.stream), streamSimple: wrap(configured.streamSimple) } as Provider;
 }
 
@@ -171,6 +171,23 @@ function withoutEmptyAnswers(context: { messages: any[] }, model: any) {
 		return message.content.some((block: any) => block.type === "toolCall" || (block.type === "text" ? block.text.trim() !== "" : block.type === "thinking" ? (same && (block.redacted === true || !!block.thinkingSignature?.trim())) || block.thinking.trim() !== "" : true));
 	};
 	return context.messages.every(says) ? context : { ...context, messages: context.messages.filter(says) };
+}
+
+/**
+ * A gateway that serves other makers' models through the Messages API (Gemini on Vertex AI, behind an Anthropic-shaped endpoint) refuses a `tool_result` that carries `is_error`
+ * ("is_error is not supported for GCP Vertex AI translation"), so a tool that failed would end the turn with a 422 instead of reaching the model. For a model that is not Claude the
+ * flag is left off and the result's text says it failed. Claude models, and Anthropic's own provider, which does not pass through here, keep the flag.
+ */
+export function withoutToolErrorFlag<C extends { messages: any[] }>(context: C, model: { id: string }): C {
+	if (/^claude/i.test(model.id) || !context.messages.some((m) => m.role === "toolResult" && m.isError)) return context;
+	const marked = (message: any) => {
+		if (message.role !== "toolResult" || !message.isError) return message;
+		const { isError: _isError, ...rest } = message;
+		const at = message.content.findIndex((block: any) => block.type === "text");
+		const content = at < 0 ? [{ type: "text", text: "Error" }, ...message.content] : message.content.map((block: any, i: number) => (i === at ? { ...block, text: `Error: ${block.text}`.trimEnd() } : block));
+		return { ...rest, content };
+	};
+	return { ...context, messages: context.messages.map(marked) };
 }
 
 function withoutThinkingMidToolRound(context: { messages: any[] }, options: any) {
@@ -329,8 +346,9 @@ export function createAgentHost(options: AgentHostOptions) {
 		const chain = wanted.filter((w, i) => wanted.findIndex((x) => x.provider === w.provider && x.id === w.id) === i);
 		const pick = found ? { provider: found.provider, id: found.id } : (wanted[0] ?? { provider: "anthropic", id: "claude-sonnet-4-5" });
 		failover.setChain(ownerId, pick, chain);
-		// Explicit when the chat, its agent, the person's Settings or their fallbacks named it, rather than the deployment's default standing in for none of them.
-		const explicit = found !== undefined && named.some((w) => w.provider === found.provider && w.id === found.id);
+		// Explicit when the chat, its agent, the person's Settings or their fallbacks named any model, so what runs is the first of them that can, or else the default that stands in
+		// for them: never the model the chat happened to be on. Not explicit only when nothing was named, and the deployment's default stands in for no one's choice.
+		const explicit = named.length > 0;
 		return { provider: pick.provider, modelId: pick.id, explicit };
 	}
 

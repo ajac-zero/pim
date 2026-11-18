@@ -9,6 +9,7 @@ import { KeyringCrypto, sealString } from "@pim/v2-app/crypto";
 import { connect } from "@pim/v2-app/db";
 import { createGate } from "@pim/v2-app/gate";
 import { MemoryObjectStore } from "@pim/v2-app/objects";
+import { planAnswer, NAME_CHAT } from "../src/compat/utility.ts";
 import { chatRoutes } from "../src/compat/chat.ts";
 import { apiClientRoutes } from "../src/compat/api-clients.ts";
 import { diagnosticsRoutes } from "../src/compat/diagnostics.ts";
@@ -45,9 +46,27 @@ beforeAll(async () => {
 		asked.push(body);
 		auths.push(String(req.headers.authorization));
 		const responses = req.url?.endsWith("/responses");
-		const system = String(responses ? body.instructions : body.messages[0].content);
+		const system = String(responses ? (body.instructions ?? body.input?.[0]?.content) : body.messages[0].content);
 		const content = system.includes("name chats") ? 'Title: "Fresh Garden Plan".' : system.includes("improve messages") ? "Plan my week in detail" : system.includes("suggest") ? 'Sure! {"messages":["Plan my week","Water the garden","Plan my week"]}' : "- They planned a garden";
-		res.setHeader("content-type", "application/json").end(JSON.stringify(responses ? { output: [{ type: "reasoning", summary: [] }, { type: "message", content: [{ type: "output_text", text: content }] }] } : { choices: [{ message: { content } }] }));
+		if (responses) {
+			// The plan's Responses API, streamed as the plan requires.
+			const sse = (event: string, data: unknown) => `event: ${event}\ndata: ${JSON.stringify({ type: event, ...(data as object) })}\n\n`;
+			const msg = { id: "msg_1", type: "message", status: "completed", role: "assistant", content: [{ type: "output_text", text: content, annotations: [] }] };
+			const response = { id: "resp_1", object: "response", status: "completed", model: body.model, output: [msg], usage: { input_tokens: 5, output_tokens: 3, total_tokens: 8, input_tokens_details: { cached_tokens: 0 }, output_tokens_details: { reasoning_tokens: 0 } } };
+			res.writeHead(200, { "content-type": "text/event-stream" });
+			res.end(
+				sse("response.created", { response: { ...response, status: "in_progress", output: [] } }) +
+					sse("response.output_item.added", { output_index: 0, item: { ...msg, status: "in_progress", content: [] } }) +
+					sse("response.content_part.added", { item_id: "msg_1", output_index: 0, content_index: 0, part: { type: "output_text", text: "", annotations: [] } }) +
+					sse("response.output_text.delta", { item_id: "msg_1", output_index: 0, content_index: 0, delta: content }) +
+					sse("response.output_text.done", { item_id: "msg_1", output_index: 0, content_index: 0, text: content }) +
+					sse("response.content_part.done", { item_id: "msg_1", output_index: 0, content_index: 0, part: msg.content[0] }) +
+					sse("response.output_item.done", { output_index: 0, item: msg }) +
+					sse("response.completed", { response }),
+			);
+			return;
+		}
+		res.setHeader("content-type", "application/json").end(JSON.stringify({ choices: [{ message: { content } }] }));
 	});
 	await new Promise<void>((resolve) => utility.listen(0, "127.0.0.1", resolve));
 	const refresh = (async () => new Response(JSON.stringify({ access_token: "plan-access", refresh_token: "plan-refresh-2", expires_in: 3600 }), { headers: { "content-type": "application/json" } })) as typeof fetch;
@@ -328,7 +347,8 @@ describe("the utility model on a ChatGPT plan", () => {
 		expect(await dbTitle(plain)).toBe("Fresh Garden Plan");
 		expect(auths.at(-1)).toBe("Bearer plan-access");
 		expect(asked.length).toBe(before + 1);
-		expect(asked.at(-1)).toMatchObject({ model: "gpt-6-luna", stream: false, store: false });
+		// The request is what the Runner sends the plan: pi-ai's streamed Responses call, with the fields the plan accepts and none it rejects.
+		expect(asked.at(-1)).toMatchObject({ model: "gpt-6-luna", stream: true, store: false });
 
 		// The sidebar names one that has been answered through send_to_user.
 		const sent = await chatWith({ id: "a", role: "assistant", timestamp: 2, parts: [{ type: "tool-call", id: "c", name: "send_to_user", arguments: { message: "Start with the beds." } }] });
@@ -338,6 +358,24 @@ describe("the utility model on a ChatGPT plan", () => {
 		// And the title route.
 		const asked3 = await chatWith(null);
 		expect((await call(token, "POST", `/api/sessions/${asked3}/title`)).body).toMatchObject({ id: asked3, title: "Fresh Garden Plan" });
+	});
+});
+
+describe("a plan call to OpenAI's own API", () => {
+	it("is the request the Runner sends the plan: streamed Responses on /v1/responses, store false, and none of the fields the plan rejects", async () => {
+		const sent: { url: string; headers: Headers; body: any }[] = [];
+		const capture = (async (input: Request | string | URL, init?: RequestInit) => {
+			const request = new Request(input as never, init);
+			sent.push({ url: request.url, headers: request.headers, body: JSON.parse(await request.text()) });
+			return new Response("event: response.completed\ndata: " + JSON.stringify({ type: "response.completed", response: { id: "r", object: "response", status: "failed", output: [], error: { code: "x", message: "stop here" } } }) + "\n\n", { headers: { "content-type": "text/event-stream" } });
+		}) as typeof fetch;
+		await planAnswer({ resource: "https://api.openai.com/v1", token: "plan-token", model: "gpt-6-luna" }, NAME_CHAT, "Person: hi", capture).catch(() => {});
+		expect(sent).toHaveLength(1);
+		expect(sent[0]!.url).toBe("https://api.openai.com/v1/responses");
+		expect(sent[0]!.headers.get("authorization")).toBe("Bearer plan-token");
+		expect(sent[0]!.body).toMatchObject({ model: "gpt-6-luna", stream: true, store: false });
+		for (const rejected of ["max_output_tokens", "temperature", "prompt_cache_retention", "prompt_cache_options"]) expect(sent[0]!.body).not.toHaveProperty(rejected);
+		expect(JSON.stringify(sent[0]!.body.input)).toContain("Person: hi");
 	});
 });
 

@@ -6,9 +6,11 @@
  * gateway, a person's own OpenAI-compatible provider, and the Anthropic, OpenAI and Google services whose key they added. A model run on a
  * ChatGPT plan is reached with the person's plan token on OpenAI's own API, as the Runner does.
  */
+import { createModels, type Message } from "@earendil-works/pi-ai";
 import type { App } from "@pim/v2-app/app";
 import type { Principal } from "@pim/v2-contracts/identity";
 import { transcriptPage } from "@pim/v2-live/projections/snapshots";
+import { currentOpenaiProvider } from "../openai-catalog.ts";
 import { INTRODUCTION, isDeliveryReminder, ROOM_POST, type TranscriptMessage } from "@pim/shared/transcript";
 
 type Env = Record<string, string | undefined>;
@@ -84,7 +86,7 @@ export function conversationText(messages: readonly TranscriptMessage[], limit: 
 
 type Endpoint =
 	| { api: "chat"; url: string; key: string | null; model: string }
-	| { api: "responses"; url: string; key: string; model: string }
+	| { api: "plan"; resource: string; token: string; model: string }
 	| { api: "anthropic"; key: string; model: string }
 	| { api: "google"; key: string; model: string };
 
@@ -108,7 +110,7 @@ async function endpointOf(app: App, env: Env, p: Principal): Promise<Endpoint | 
 	// A person signed in with ChatGPT runs `openai` on their plan, here as for the Runner.
 	if (chosen.provider === "openai") {
 		const plan = await app.chatgpt.access(p.ownerId);
-		if (plan) return { api: "responses", url: `${strip(plan.resource)}/responses`, key: plan.token, model: chosen.id };
+		if (plan) return { api: "plan", resource: strip(plan.resource), token: plan.token, model: chosen.id };
 	}
 	const rows = await app.providers.list(p);
 	const own = rows.find((r) => r.id === chosen.provider);
@@ -125,36 +127,55 @@ async function endpointOf(app: App, env: Env, p: Principal): Promise<Endpoint | 
 	return unreachable(p, chosen);
 }
 
+/**
+ * A side job on the person's ChatGPT plan, run by pi-ai's own OpenAI provider with the plan token as its key, as the Runner runs the plan's models: the same base URL,
+ * a streamed Responses request and the fields the plan accepts (it rejects `max_output_tokens`), which pi-ai chooses. `resource` is where OpenAI's API is, unless a proxy stands in.
+ */
+export async function planAnswer(endpoint: { resource: string; token: string; model: string }, task: UtilityTask, input: string, fetcher?: typeof fetch): Promise<string> {
+	const base = currentOpenaiProvider();
+	const moved = (list: readonly any[]) => list.map((m) => ({ ...m, baseUrl: endpoint.resource }));
+	const provider = endpoint.resource === "https://api.openai.com/v1" ? base : { ...base, getModels: () => moved(base.getModels()), ...(base.getAllModels ? { getAllModels: () => moved(base.getAllModels!()) } : {}) };
+	const credentials = { read: async () => ({ type: "api_key", key: endpoint.token }), list: async () => [{ providerId: "openai", type: "api_key" }], modify: async (_id: string, fn: (c: unknown) => Promise<unknown>) => fn(undefined), delete: async () => {} };
+	const models = createModels({ credentials: credentials as never });
+	models.setProvider(provider as never);
+	const model = models.getModel("openai", endpoint.model);
+	if (!model) throw new Error(`OpenAI has no model ${endpoint.model} for the utility model`);
+	const user: Message = { role: "user", content: input, timestamp: Date.now() };
+	const answer = await models.completeSimple(model as never, { systemPrompt: task.instructions, messages: [user] } as never, { signal: AbortSignal.timeout(30_000), ...(fetcher ? { fetch: fetcher } : {}) } as never);
+	if (answer.stopReason === "error") throw new Error(`The utility model failed: ${String(answer.errorMessage ?? "").slice(0, 300)}`);
+	return answer.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("");
+}
+
 const str = (v: unknown): string => (typeof v === "string" ? v : "");
 
 /** Runs a side job on the person's utility model and returns its answer, cleaned as the task says. Null when there is no utility model; throws when it fails. */
 export async function runUtility(app: App, env: Env, p: Principal, task: UtilityTask, input: string): Promise<string | null> {
 	const endpoint = await endpointOf(app, env, p);
 	if (!endpoint) return null;
+	const answer = await rawAnswer(endpoint, task, input);
+	const cleaned = (task.clean ? task.clean(answer) : answer.trim()).trim();
+	if (cleaned === "") throw new Error("The utility model answered nothing usable");
+	return cleaned;
+}
+
+async function rawAnswer(endpoint: Endpoint, task: UtilityTask, input: string): Promise<string> {
+	if (endpoint.api === "plan") return planAnswer(endpoint, task, input);
 	const signal = AbortSignal.timeout(30_000);
 	const post = (url: string, headers: Record<string, string>, body: unknown) => fetch(url, { method: "POST", signal, headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
 	// A reasoning model spends its cap thinking, so the caps are generous; the task's `clean` keeps the answer short.
 	const response =
-		endpoint.api === "responses"
-			? await post(endpoint.url, { authorization: `Bearer ${endpoint.key}` }, { model: endpoint.model, stream: false, store: false, instructions: task.instructions, max_output_tokens: Math.max(task.maxTokens, 1024), input: input })
-			: endpoint.api === "chat"
+		endpoint.api === "chat"
 			? await post(endpoint.url, endpoint.key ? { authorization: `Bearer ${endpoint.key}` } : {}, { model: endpoint.model, stream: false, max_completion_tokens: Math.max(task.maxTokens, 1024), messages: [{ role: "system", content: task.instructions }, { role: "user", content: input }] })
 			: endpoint.api === "anthropic"
 				? await post("https://api.anthropic.com/v1/messages", { "x-api-key": endpoint.key, "anthropic-version": "2023-06-01" }, { model: endpoint.model, max_tokens: Math.max(task.maxTokens, 1024), system: task.instructions, messages: [{ role: "user", content: input }] })
 				: await post(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(endpoint.model)}:generateContent`, { "x-goog-api-key": endpoint.key }, { systemInstruction: { parts: [{ text: task.instructions }] }, contents: [{ role: "user", parts: [{ text: input }] }], generationConfig: { maxOutputTokens: Math.max(task.maxTokens, 1024) } });
-	if (!response.ok) throw new Error(`The utility model answered ${response.status}`);
+	if (!response.ok) throw new Error(`The utility model answered ${response.status}: ${(await response.text().catch(() => "")).slice(0, 300)}`);
 	const body = (await response.json()) as any;
-	const answer =
-		endpoint.api === "responses"
-			? (body.output ?? []).flatMap((item: { content?: { type?: string; text?: unknown }[] }) => (item.content ?? []).filter((part) => part.type === "output_text").map((part) => str(part.text))).join("")
-			: endpoint.api === "chat"
-			? str(body.choices?.[0]?.message?.content)
-			: endpoint.api === "anthropic"
-				? (body.content ?? []).map((part: { text?: unknown }) => str(part.text)).join("")
-				: (body.candidates?.[0]?.content?.parts ?? []).map((part: { text?: unknown }) => str(part.text)).join("");
-	const cleaned = (task.clean ? task.clean(answer) : answer.trim()).trim();
-	if (cleaned === "") throw new Error("The utility model answered nothing usable");
-	return cleaned;
+	return endpoint.api === "chat"
+		? str(body.choices?.[0]?.message?.content)
+		: endpoint.api === "anthropic"
+			? (body.content ?? []).map((part: { text?: unknown }) => str(part.text)).join("")
+			: (body.candidates?.[0]?.content?.parts ?? []).map((part: { text?: unknown }) => str(part.text)).join("");
 }
 
 /** The messages a suggestions answer offers: JSON `{ messages }` as the task asks, found even when the model wraps it in words. */

@@ -224,7 +224,8 @@ export async function startRunner(config: ProcessConfig, env: Env, host: Host, h
 	const forgePool = !hooks.harnessOptions && env.PIM_FORGE_DATABASE_URL ? new pg.Pool({ connectionString: env.PIM_FORGE_DATABASE_URL, max: 4 }).on("error", () => {}) : undefined;
 	const objects = appDb || forgePool ? s3Of(config, env) : undefined;
 	const app = appDb && objects ? new App(appDb, objects, { ...(crypto ? { crypto } : {}), ...(env.PIM_APP_SECRET_KEY ? { appKey: env.PIM_APP_SECRET_KEY } : {}) }) : undefined;
-	const forge = forgePool && objects ? assembleForge(forgePool as never, objects, env) : undefined;
+	// With the deployment's keys, so the coding tools see the vault: Amp threads start only when Forge can open the person's Amp key.
+	const forge = forgePool && objects ? assembleForge(forgePool as never, objects, env, crypto) : undefined;
 	// The computer's tools reach a paired computer over the Relay's bus (NATS). The connection is made when an agent first uses one, so a Runner that never does needs no NATS.
 	let relayPulse: Promise<NatsPulse> | undefined;
 	const relayBus = async () => natsRelayBus(await (relayPulse ??= NatsPulse.connect(config.natsUrl)));

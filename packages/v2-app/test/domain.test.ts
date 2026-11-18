@@ -44,8 +44,9 @@ describe("command admission", () => {
 
 	it("forks into the parent's family with stable ids, and keeps public ids apart from pi ids", async () => {
 		const chat = await f.app.conversations.create(u.principal, { title: "parent" });
-		const fork = await f.app.conversations.admit(u.principal, { commandId: "f1", kind: "fork", chatId: chat });
-		const dup = await f.app.conversations.admit(u.principal, { commandId: "f1", kind: "fork", chatId: chat });
+		await expect(f.app.conversations.admit(u.principal, { commandId: "f0", kind: "fork", chatId: chat })).rejects.toThrow("names the entry");
+		const fork = await f.app.conversations.admit(u.principal, { commandId: "f1", kind: "fork", chatId: chat, payload: { at: "12" } });
+		const dup = await f.app.conversations.admit(u.principal, { commandId: "f1", kind: "fork", chatId: chat, payload: { at: "12" } });
 		expect(dup.result).toEqual(fork.result);
 		const parent = await f.app.conversations.get(owner(), chat);
 		const child = await f.app.conversations.get(owner(), fork.chatId!);

@@ -6,6 +6,7 @@
  *
  * - a committed entry becomes `chat.entry`, and an assistant entry replaces the partial that showed it streaming;
  * - a change of the conversation's live document becomes the in-flight answer as a partial `chat.entry`, and `chat.meta` with `busy`;
+ * - a forked conversation's first commit adds the entries it inherits from its parent as `chat.entry` too;
  * - every conversation a commit touched gets `chat.meta` with when it last changed.
  *
  * A commit is a row of `pim_runtime.commit_receipts`, which every commit writes, so commits are gapless even when one
@@ -100,6 +101,20 @@ async function translate(pool: Pool, storage: PgPiStorage, ownerId: OwnerId, par
 		committedAt: committedAt.toISOString(),
 	});
 	const events: RuntimeOutboxEvent[] = [];
+	// A fork starts with what its parent said up to the entry it forked at, which is none of its own entries: the transcript it shows is made of them.
+	if (changes.some((c) => c.type === "conversation")) {
+		const forked = await withOwner(pool, ownerId, (client) =>
+			client.query<{ parent_at: string }>("SELECT parent_at FROM pim_runtime.conversations WHERE owner_id = $1 AND partition_id = $2 AND id = $3 AND parent_conversation_id IS NOT NULL", [ownerId, partitionId, conversationId]),
+		);
+		if (forked.rows[0]) {
+			let cursor: never | undefined;
+			do {
+				const page = await storage.scanEntries({ conversationId: conversationId as never, order: "ascending", maxEntryId: Number(forked.rows[0].parent_at) as never }, 500, cursor, BACKGROUND_CONTEXT);
+				for (const entry of page.items) events.push(event("chat.entry", { entry }));
+				cursor = page.next as never;
+			} while (cursor !== undefined);
+		}
+	}
 	const entryIds = changes.filter((c) => c.type === "entry").map((c) => c.id);
 	if (entryIds.length > 0) {
 		const records = await withOwner(pool, ownerId, (client) =>

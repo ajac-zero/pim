@@ -4,6 +4,7 @@ import { BACKGROUND_CONTEXT, withAbortSignal } from "@earendil-works/chord/conte
 import {
 	type Conversation,
 	type ConversationId,
+	type EntryId,
 	Harness,
 	type HarnessOptions,
 	LiveDoc,
@@ -496,6 +497,18 @@ const handoffCommand: CommandHandler = async (resident, command, context) => {
 	await (await conversationOf(resident, command, context)).reset(typeof handoff === "string" ? handoff : undefined, context);
 };
 
+/**
+ * Forks the conversation the command is addressed to at the entry `at`, under the new chat's public id. The commit that creates the fork writes its
+ * directory row, so a redelivered command finds the chat routed and does nothing.
+ */
+const forkCommand: CommandHandler = async (resident, command, context) => {
+	const parent = await conversationOf(resident, command, context);
+	if (command.publicChatId === undefined) throw new CommandRejected(`Command ${command.commandId} names no chat for the fork`);
+	if (await resident.runner.directory.routeChat(resident.ownerId, command.publicChatId)) return;
+	resident.storage.reservePublicChatId(command.publicChatId);
+	await parent.fork(Number(command.payload.at) as EntryId, { ownership: { kind: "ownerless" } }, context);
+};
+
 /** What each contract command kind does in the owning partition. */
 const BUILTIN_COMMANDS: Readonly<Record<string, CommandHandler>> = {
 	user_message: inputCommand,
@@ -505,6 +518,7 @@ const BUILTIN_COMMANDS: Readonly<Record<string, CommandHandler>> = {
 	task_wake: signalCommand,
 	abort: abortCommand,
 	compaction_handoff: handoffCommand,
+	fork: forkCommand,
 };
 
 /**

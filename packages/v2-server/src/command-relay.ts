@@ -65,10 +65,11 @@ export class CommandRelay {
 		// A chat's partition is made on its first command, as a family; one that already exists (an imported home partition, which holds a person's first chat) is left as it is.
 		const known = await this.#deps.db.read(owner, "SELECT 1 FROM pim_runtime.partitions WHERE owner_id = $1 AND partition_id = $2", [owner, partition]);
 		if (!known.rowCount) await directory.createPartition(owner, { partitionId: partition, kind: "family" });
-		const route = await directory.routeChat(owner, chat);
+		// A fork is made in its family from its parent's conversation, so that is where its command goes; any other command goes to its own chat.
+		const route = await directory.routeChat(owner, row.kind === "fork" ? PublicChatId.parse(row.payload.parent) : chat);
 		if (!route) {
 			// The conversation does not exist yet: ask for it, and look again at the next pass.
-			await inbox.enqueueCreateConversation(owner, partition, { commandId: `create:${chat}`, publicChatId: chat, firstInput: null });
+			if (row.kind !== "fork") await inbox.enqueueCreateConversation(owner, partition, { commandId: `create:${chat}`, publicChatId: chat, firstInput: null });
 			await pool.query("SELECT pim_app.relay_release($1, $2)", [owner, row.command_id]);
 			return false;
 		}

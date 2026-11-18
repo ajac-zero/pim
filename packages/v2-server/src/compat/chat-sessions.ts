@@ -41,6 +41,38 @@ async function sessionView(app: App, p: Principal, id: string) {
 	});
 }
 
+/**
+ * The entry a fork of a chat ends at, by one of its messages, as the projected transcript has them: an agent's message with the results of the tools
+ * it called, so the fork leaves nothing unanswered, or, `before` a person's message, the message just before it, so it can be sent again changed.
+ * Null when nothing comes before that message, and undefined when `message` is no such message of the chat.
+ */
+async function forkPoint(app: App, p: Principal, chat: string, message: string, before: boolean): Promise<string | null | undefined> {
+	return app.db.owner(p.ownerId, async (tx) => {
+		const rows = (sql: string, ...values: unknown[]) => tx.query(`SELECT entry_id, message FROM pim_projection.chat_transcript_projection WHERE stream_kind = 'chat' AND chat_id = $1 AND NOT partial AND ${sql}`, [chat, ...values]).then((r) => r.rows);
+		const found = (await rows("entry_id = $2", message))[0];
+		if (!found || found.message.role !== (before ? "user" : "assistant")) return undefined;
+		const after = `position ${before ? "<" : ">"} (SELECT position FROM pim_projection.chat_transcript_projection WHERE stream_kind = 'chat' AND chat_id = $1 AND entry_id = $2)`;
+		if (before) return (await rows(`${after} ORDER BY position DESC LIMIT 1`, message))[0]?.entry_id ?? null;
+		const calls = new Set<string>((found.message.parts as { type: string; id?: string }[]).flatMap((part) => (part.type === "tool-call" ? [part.id!] : [])));
+		let end = message;
+		for (const next of calls.size === 0 ? [] : await rows(`${after} ORDER BY position LIMIT ${calls.size}`, message)) {
+			const result = next.message.parts[0];
+			if (next.message.role !== "tool" || !calls.delete(result?.id)) break;
+			end = next.entry_id;
+		}
+		return end;
+	});
+}
+
+/** A fork's title: its chat's, numbered after the forks with that title the person still has, as "Trip (fork #2)"; none for a chat without one. */
+async function forkTitle(app: App, p: Principal, title: string | null): Promise<string | undefined> {
+	if (!title) return undefined;
+	const base = title.replace(/ \(fork #\d+\)$/, "");
+	const taken = await app.db.owner(p.ownerId, async (tx) => (await tx.query("SELECT title FROM pim_app.conversations WHERE deleted_at IS NULL AND starts_with(title, $1)", [`${base} (fork #`])).rows);
+	const numbers = taken.map((r) => Number(/^ \(fork #(\d+)\)$/.exec((r.title as string).slice(base.length))?.[1] ?? 0));
+	return `${base} (fork #${Math.max(0, ...numbers) + 1})`;
+}
+
 /** The group chat's room: how its agents take turns and who besides its host is in it; null for a chat with one agent. */
 async function roomView(app: App, p: Principal, id: string) {
 	return (await roomViews(app, p.ownerId, [id])).get(id) ?? null;
@@ -192,6 +224,24 @@ export function sessionRoutes(env: Record<string, string | undefined> = process.
 			const commandId = String(((await json().catch(() => ({}))) as Record<string, unknown>).commandId ?? `retry-${randomUUID()}`);
 			await app.conversations.admit(p, { commandId, kind: "user_message", chatId: id, payload: { text, retry: true } });
 			return ok({ session: id });
+		}),
+		// A new chat with what was said in this one: through an agent's message (`at`), or up to one of the person's (`before`), to send it again changed.
+		route("POST", "/api/sessions/:id/fork", async ({ app, principal, params, json }) => {
+			const p = await principal();
+			const id = chatId(params[0]!);
+			const { at, before } = (await json()) as { at?: unknown; before?: unknown };
+			const message = before ?? at;
+			if (typeof message !== "string" || (at !== undefined && before !== undefined)) throw new BadRequestError("Give either at or before: a message's id");
+			const chat = (await app.db.owner(p.ownerId, async (tx) => (await tx.query("SELECT agent_id, title, kind, room_of FROM pim_app.conversations WHERE public_chat_id = $1 AND deleted_at IS NULL", [id])).rows))[0];
+			if (!chat) throw new NotFoundError("No such chat");
+			if (chat.kind === "visit") throw new BadRequestError("A chat with someone else's agent can't be forked");
+			if (chat.kind === "group" || chat.room_of !== null) throw new BadRequestError("A group chat can't be forked");
+			const point = await forkPoint(app, p, id, message, before !== undefined);
+			if (point === undefined) throw new BadRequestError(before !== undefined ? "before must be one of your messages in this chat" : "at must be one of the agent's messages in this chat");
+			const title = await forkTitle(app, p, chat.title);
+			// Nothing comes before the first message, so sending it again changed is a new chat.
+			const fork = point === null ? await app.conversations.create(p, { agentId: chat.agent_id ?? undefined, title }) : (await app.conversations.admit(p, { commandId: `fork-${randomUUID()}`, kind: "fork", chatId: id, payload: { at: point, title } })).chatId!;
+			return ok(await sessionView(app, p, fork));
 		}),
 		route("POST", "/api/sessions/:id/tasks/:task/cancel", async ({ app, principal, params }) => {
 			const p = await principal();

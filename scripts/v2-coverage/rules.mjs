@@ -58,7 +58,7 @@ export const RULES = [
 	["B2", /^Normal chats/, "Changed", "Gate admission, command relay, Runner; POST retry and reset", [slice, host].join(", "), V, "Retry sends the person's last message again as a second bubble."],
 	["B2", /^Session\/conversation IDs/, "Changed", "public chat id (uuid) in pim_app.conversations; runtime directory", [app("domain"), cut].join(", "), V, "The application's numeric conversation id is provisional for new chats."],
 	["B2", /^Session info/, "Preserved", "pim_app.conversations, sidebar projection with read state overlaid by the Gate", [app("surfaces"), srv("chat-lifecycle")].join(", "), V, ""],
-	["B2", /^Forks/, "Preserved", "forks stay in the parent's partition (asOf ancestry)", [app("domain"), cut].join(", "), V, ""],
+	["B2", /^Forks/, "Preserved", "forks stay in the parent's partition (asOf ancestry); a new fork is made by the runtime and its transcript starts with the parent's history up to the fork point", [app("domain"), srv("agent-host"), cut].join(", "), V, ""],
 	["B2", /^Compaction and reset/, "Changed", "compaction_handoff command (the summary reaches the new chat); pi compaction in place", srv("chat-lifecycle"), V, "V2 compacts in place through pi; v1's carrying on in a new chat at a threshold is not automatic."],
 	["B2", /^Continuations/, "Preserved", "continued_from/to metadata", app("domain"), V, ""],
 	["B2", /^Group chats/, "Changed", "rooms.ts: a hidden seat per member agent, fan-out in the accept transaction, mentions and open modes, '[From Name]' posts in the host chat; migration 0646", srv("chat-lifecycle"), P, "Agents do not wake each other; no per-seat model; held members are not retried; room changes are not pushed live."],

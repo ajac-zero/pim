@@ -303,6 +303,59 @@ real("the default agent host", () => {
 		await waitFor("the answer in the new context", async () => ((await said("answered in the new context")) ? true : undefined), 60_000);
 	}, 180_000);
 
+	it("forks a chat at a message of the agent's, or before one of the person's so it can be sent again changed", async () => {
+		const shown = async (chat: string) => (await d.stack.admin.query("SELECT entry_id, message FROM pim_projection.chat_transcript_projection WHERE chat_id = $1 AND NOT partial ORDER BY position", [chat])).rows as { entry_id: string; message: { role: string; parts: { text?: string }[] } }[];
+		const texts = async (chat: string) => JSON.stringify((await shown(chat)).map((r) => r.message));
+		const turn = async (chat: string, text: string, answer: string) => {
+			faux.setResponses([toolUse(fauxToolCall("send_to_user", { message: answer })), fauxAssistantMessage(`ended ${answer}`)] as never);
+			expect((await web.call("POST", `/api/sessions/${chat}/messages`, { commandId: `fork-${answer}`, text })).status).toBe(202);
+			await waitFor(`the turn ended ${answer}`, async () => ((await texts(chat)).includes(`ended ${answer}`) ? true : undefined), 60_000);
+		};
+		const chat = (await web.call("POST", "/api/sessions", { title: "Trip" })).json.id as string;
+		await turn(chat, "first question", "first answer");
+		await turn(chat, "second question", "second answer");
+		const parent = await shown(chat);
+		const user = parent.filter((r) => r.message.role === "user");
+		expect(user).toHaveLength(2);
+
+		// What can't be forked there is refused: an agent's message to edit, a person's to fork at, and a message that isn't in the chat.
+		const assistant = parent.find((r) => r.message.role === "assistant")!;
+		expect((await web.call("POST", `/api/sessions/${chat}/fork`, { before: assistant.entry_id })).status).toBe(400);
+		expect((await web.call("POST", `/api/sessions/${chat}/fork`, { at: user[0]!.entry_id })).status).toBe(400);
+		expect((await web.call("POST", `/api/sessions/${chat}/fork`, { before: "999999999" })).status).toBe(400);
+		expect((await web.call("POST", `/api/sessions/${chat}/fork`, {})).status).toBe(400);
+
+		// Editing the second question: a fork that has what came before it, and nothing from it on.
+		const edited = await web.call("POST", `/api/sessions/${chat}/fork`, { before: user[1]!.entry_id });
+		expect(edited.status).toBe(200);
+		const fork = edited.json.id as string;
+		expect(fork).not.toBe(chat);
+		expect(edited.json.title).toBe("Trip (fork #1)");
+		const before = parent.slice(0, parent.findIndex((r) => r.entry_id === user[1]!.entry_id));
+		await waitFor("the fork's transcript", async () => ((await shown(fork)).length === before.length ? true : undefined), 60_000);
+		expect((await shown(fork)).map((r) => r.entry_id)).toEqual(before.map((r) => r.entry_id));
+		// Sending the edited message goes to the fork, which asks the model with the first exchange and the edit, not the question it replaced.
+		await turn(fork, "second question, reworded", "reworded answer");
+		expect(await texts(fork)).toContain("first answer");
+		expect(await texts(fork)).not.toContain('"second question"');
+		expect(await texts(chat)).not.toContain("reworded");
+		expect((await shown(chat)).map((r) => r.entry_id)).toEqual(parent.map((r) => r.entry_id));
+
+		// A fork at the agent's first message, which called a tool, ends after that tool's result so nothing is left unanswered; its number goes on from the first fork's.
+		const at = await web.call("POST", `/api/sessions/${chat}/fork`, { at: assistant.entry_id });
+		expect(at.status).toBe(200);
+		expect(at.json.title).toBe("Trip (fork #2)");
+		const through = parent[parent.findIndex((r) => r.entry_id === assistant.entry_id) + 1]!;
+		expect(through.message.role).toBe("tool");
+		await waitFor("the fork at a message", async () => ((await shown(at.json.id)).at(-1)?.entry_id === through.entry_id ? true : undefined), 60_000);
+
+		// Editing the first message leaves nothing before it: a new chat, not a fork.
+		const fresh = await web.call("POST", `/api/sessions/${chat}/fork`, { before: user[0]!.entry_id });
+		expect(fresh.status).toBe(200);
+		expect((await d.stack.admin.query("SELECT forked_from FROM pim_app.conversations WHERE public_chat_id = $1", [fresh.json.id])).rows[0].forked_from).toBeNull();
+		await turn(fresh.json.id, "first question, reworded", "fresh answer");
+	}, 180_000);
+
 	it("installs a skill from a GitHub folder only as approved, at the commit it was read at", async () => {
 		const frontmatter = (name: string) => `---\nname: ${name}\ndescription: How to brew ${name}\n---\nBoil the water for ${name}.\n`;
 		github.files = { "skills/tea/SKILL.md": frontmatter("tea"), "skills/tea/notes.md": "Steep for three minutes.", "skills/other/SKILL.md": "---\nname: other\n---\nnot this one" };

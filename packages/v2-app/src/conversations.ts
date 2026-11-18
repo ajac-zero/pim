@@ -6,9 +6,9 @@ import { CommandSubmission, type CommandKind } from "@pim/v2-contracts/runtime-s
 import type { Quota } from "./quota.ts";
 import { effectivePrincipal, OwnerId, type Principal } from "@pim/v2-contracts/identity";
 
-/** What a client can submit: the runtime's commands, and three application operations that only change metadata here (fork, unarchive, delegate). */
-export type AdmitKind = CommandKind | "fork" | "unarchive" | "delegate";
-const RUNTIME_KINDS = new Set<string>(["user_message", "approval_decision", "task_wake", "trigger_fire", "coding_wake", "compaction_handoff", "abort"]);
+/** What a client can submit: the runtime's commands, and two application operations that only change metadata here (unarchive, delegate). */
+export type AdmitKind = CommandKind | "unarchive" | "delegate";
+const RUNTIME_KINDS = new Set<string>(["user_message", "approval_decision", "task_wake", "trigger_fire", "coding_wake", "compaction_handoff", "abort", "fork"]);
 export type Admission = { commandId: string; piRequestId: string; duplicate: boolean; state: "inbox_accepted" | "runtime_committed" | "rejected"; chatId: string | null; result?: Record<string, unknown> };
 
 const uuidFrom = (seed: string): string => {
@@ -58,7 +58,9 @@ export class Conversations {
 	async admit(p: Principal, input: { commandId: string; kind: AdmitKind; chatId?: string; payload?: Record<string, unknown> }): Promise<Admission> {
 		await this.authz.enforce(p, input.kind === "approval_decision" ? "approval:decide" : "api:write");
 		if (!input.commandId || input.commandId.length > 128) throw new BadRequestError("commandId is required");
-		const payload = input.payload ?? {};
+		// A fork is made by the runtime, from the entry `at` of the chat it leaves, so the relay needs to know which chat that is.
+		if (input.kind === "fork" && !/^\d+$/.test(String(input.payload?.at))) throw new BadRequestError("A fork names the entry of the chat it leaves at");
+		const payload = input.kind === "fork" ? { ...input.payload, parent: input.chatId } : (input.payload ?? {});
 		return this.db.owner(p.ownerId, async (tx) => {
 			const piRequestId = requestId(p.ownerId, input.commandId);
 			const fingerprint = createHash("sha256").update(JSON.stringify([input.kind, input.chatId ?? null, payload])).digest("hex");
@@ -78,7 +80,7 @@ export class Conversations {
 			let result: Record<string, unknown> | undefined;
 			if (chatId) await requireChat(tx, chatId);
 			if (input.kind === "fork") {
-				chatId = await fork(tx, p.ownerId, chatId!, uuidFrom(`${p.ownerId}\nfork\n${input.commandId}`));
+				chatId = await fork(tx, p.ownerId, chatId!, uuidFrom(`${p.ownerId}\nfork\n${input.commandId}`), payload.title as string | undefined);
 				result = { forkedChatId: chatId };
 			} else if (input.kind === "unarchive") {
 				await resume(tx, chatId!);
@@ -294,9 +296,9 @@ export async function createChat(tx: Tx, ownerId: string, input: NewChat, partit
 }
 
 /** A fork stays in its parent's family: pi's fork needs the parent's entries in the same storage. */
-async function fork(tx: Tx, ownerId: string, parentId: string, id: string): Promise<string> {
+async function fork(tx: Tx, ownerId: string, parentId: string, id: string, title?: string): Promise<string> {
 	const parent = await requireChat(tx, parentId);
-	const chat = await createChat(tx, ownerId, { id, agentId: parent.agent_id, title: parent.title, kind: parent.kind === "group" ? "group" : "normal" }, parent.partition_id);
+	const chat = await createChat(tx, ownerId, { id, agentId: parent.agent_id, title: title ?? parent.title, kind: parent.kind === "group" ? "group" : "normal" }, parent.partition_id);
 	await tx.query("UPDATE pim_app.conversations SET forked_from = $2 WHERE public_chat_id = $1", [chat, parentId]);
 	return chat;
 }

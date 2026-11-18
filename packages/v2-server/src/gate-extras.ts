@@ -11,6 +11,8 @@ import type { TranscriptSource } from "@pim/v2-app/sharing";
 import { roomViews } from "./rooms.ts";
 import { MAX_PAGE, sidebarPage, transcriptPage } from "@pim/v2-live/projections/snapshots";
 import { nameOneUntitled } from "./compat/utility.ts";
+import { HARNESSES } from "@pim/v2-forge/harnesses";
+import type { ForgeParts } from "./forge-assembly.ts";
 import type { Authenticate, Caller, Handler } from "@pim/v2-forge/http/common";
 import type { Pool } from "pg";
 
@@ -131,15 +133,59 @@ export function forgeRoutes(handler: Handler): Route[] {
 	]);
 }
 
-/** The admin's door to coding authority, through the application's Authorizer (which Forge's tables follow, see `mirrorCodingGrants`). */
-export function codingAdminRoutes(): Route[] {
+/** What coding can run on here, for the admin's Settings: each harness with whether this deployment can run it and why not, the pools, and the repositories the deployment allows. */
+async function codingAccess(forge: ForgeParts) {
+	const pools = (await forge.db.query("select pool_id, enabled from pim_forge.forge_pools order by priority desc, pool_id")).rows.map((r) => ({ id: r.pool_id as string, enabled: r.enabled as boolean }));
+	const sandbox = pools.some((p) => p.enabled) ? null : "No sandbox pool is enabled. Pools exist once a sandbox manager is configured (PIM_CODING_MANAGER_URL and PIM_CODING_MANAGER_TOKEN).";
+	const amp = !forge.ampConfigured ? "This deployment has no encryption keys (PIM_KEK_*), so people can't save an Amp key." : null;
+	return {
+		harnesses: HARNESSES.map((id) => {
+			const reason = id === "amp" ? amp : sandbox;
+			return { id, runsIn: id === "amp" ? "orb" : "sandbox", available: reason === null, reason };
+		}),
+		pools,
+		allowedRepositories: [...forge.authz.policy.allowedRepos],
+		allowedRepositoriesVariable: "PIM_CODING_ALLOWED_REPOS",
+	};
+}
+
+/**
+ * The admin's door to coding authority, through the application's Authorizer (which Forge's tables follow, see `mirrorCodingGrants`): what coding can run on here,
+ * and the grants to list, give and take back. The deployment's allowed repositories are only shown: Forge's own processes read them from their environment.
+ */
+export function codingAdminRoutes(forge: ForgeParts): Route[] {
 	return [
+		{
+			method: "GET",
+			pattern: /^\/api\/admin\/coding-access$/,
+			run: async ({ app, principal }): Promise<Reply> => {
+				await app.identity.authz.enforce(await principal(), "admin:grants");
+				return ok(await codingAccess(forge));
+			},
+		},
+		{
+			method: "GET",
+			pattern: /^\/api\/admin\/coding-grants$/,
+			run: async ({ app, principal }): Promise<Reply> => ok({ grants: await app.identity.authz.listCodingGrants(await principal()) }),
+		},
 		{
 			method: "POST",
 			pattern: /^\/api\/admin\/coding-grants$/,
 			run: async ({ app, principal, json }): Promise<Reply> => {
 				const b = await json();
-				return ok({ grantId: await app.identity.authz.grantCoding(await principal(), { ownerId: String(b.ownerId), permissions: b.permissions ?? [], ...(b.pools ? { pools: b.pools } : {}), ...(b.repositories ? { repositories: b.repositories } : {}), ...(b.quota ? { quota: b.quota } : {}) }) }, 201);
+				const p = await principal();
+				await app.identity.authz.enforce(p, "admin:grants");
+				// Without pools named, the grant covers the pools there are now, so a sandbox thread can start under it; an Amp thread needs none.
+				const pools = b.pools ?? (await codingAccess(forge)).pools.filter((x) => x.enabled).map((x) => x.id);
+				return ok({ grantId: await app.identity.authz.grantCoding(p, { ownerId: String(b.ownerId), permissions: b.permissions ?? [], ...(pools.length ? { pools } : {}), ...(b.repositories ? { repositories: b.repositories } : {}), ...(b.quota ? { quota: b.quota } : {}) }) }, 201);
+			},
+		},
+		{
+			method: "DELETE",
+			pattern: /^\/api\/admin\/coding-grants\/([^/]+)\/([^/]+)$/,
+			run: async ({ app, principal, params }): Promise<Reply> => {
+				await app.identity.authz.revokeCoding(await principal(), params[0]!, params[1]!);
+				return ok({ ok: true });
 			},
 		},
 		{

@@ -1065,6 +1065,39 @@ export type SandboxPoolInput = {
   config?: Record<string, unknown>;
 };
 
+/** What coding can run on here: each harness and whether this deployment can run it, the sandbox pools, and the repositories it allows. */
+export type CodingAccess = {
+  harnesses: {
+    id: string;
+    runsIn: "orb" | "sandbox";
+    available: boolean;
+    reason: string | null;
+  }[];
+  pools: { id: string; enabled: boolean }[];
+  allowedRepositories: string[];
+  allowedRepositoriesVariable: string;
+};
+
+export const CODING_PERMISSIONS = [
+  "coding:start",
+  "coding:steer",
+  "coding:push",
+  "coding:pr",
+  "coding:merge",
+] as const;
+export type CodingPermission = (typeof CODING_PERMISSIONS)[number];
+
+/** What an admin lets one person's agents do with coding threads, and on which repositories. */
+export type CodingGrant = {
+  grantId: string;
+  ownerId: string;
+  username: string;
+  permissions: CodingPermission[];
+  pools: string[];
+  repositories: string[];
+  grantedAt: string;
+};
+
 /** Everyone's sandbox minutes this month. */
 export type ComputeDeploymentUsage = {
   month: string;
@@ -2746,6 +2779,25 @@ export const admin = {
   /** Compute providers for everyone's coding sandboxes, the default quota, and everyone's usage this month. */
   compute: () => call<ComputeOverview>("/admin/compute"),
   sandboxPools: () => call<{ pools: SandboxPool[] }>("/admin/coding/pools"),
+  codingAccess: () => call<CodingAccess>("/admin/coding-access"),
+  codingGrants: () =>
+    call<{ grants: CodingGrant[] }>("/admin/coding-grants").then(
+      (body) => body.grants,
+    ),
+  grantCoding: (input: {
+    ownerId: string;
+    permissions: CodingPermission[];
+    repositories: string[];
+  }) =>
+    call<{ grantId: string }>("/admin/coding-grants", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  revokeCoding: (grant: CodingGrant) =>
+    call(
+      `/admin/coding-grants/${encodeURIComponent(grant.ownerId)}/${encodeURIComponent(grant.grantId)}`,
+      { method: "DELETE" },
+    ),
   addSandboxPool: (input: SandboxPoolInput) =>
     call<{ pool: SandboxPool }>("/admin/coding/pools", {
       method: "POST",

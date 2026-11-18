@@ -267,6 +267,15 @@ export const deploymentQuery = () =>
 export const computeQuery = () =>
   queryOptions({ queryKey: ["compute"], queryFn: admin.compute });
 
+/** What coding can run on here, and who may use it: the admin's view. */
+export const codingAccessQuery = () =>
+  queryOptions({ queryKey: ["coding-access"], queryFn: admin.codingAccess });
+export const codingGrantsQuery = () =>
+  queryOptions({
+    queryKey: ["coding-access", "grants"],
+    queryFn: admin.codingGrants,
+  });
+
 /** The sandbox pools with their live state: the admin's view, read again every few seconds. */
 export const sandboxPoolsQuery = () =>
   queryOptions({

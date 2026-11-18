@@ -93,6 +93,8 @@ export type ForgeParts = {
 	gitUpstream: GitUpstream;
 	gitea: GiteaConnection | null;
 	vault: ForgeVault | null;
+	/** Whether people can run Amp threads here: the deployment holds the keys that seal a person's Amp key. */
+	ampConfigured: boolean;
 	env: Env;
 };
 
@@ -107,7 +109,7 @@ function defaultModels(env: Env): PiPortDeps["models"] {
 	return async () => models;
 }
 
-export function assembleForge(db: ForgeDb, objects: ObjectStore, env: Env, crypto?: EnvelopeCrypto, opts: { scoped?: boolean } = {}): ForgeParts {
+export function assembleForge(db: ForgeDb, objects: ObjectStore, env: Env, crypto?: EnvelopeCrypto, opts: { scoped?: boolean; /** Whether this deployment can run Amp, for a process that holds no vault of its own (the Runner, which only starts threads). Default: this process has a vault. */ ampConfigured?: boolean } = {}): ForgeParts {
 	const store = new ForgeStore(db);
 	const authz = new Authz(db, { allowedRepos: (env.PIM_CODING_ALLOWED_REPOS ?? "").split(",").map((r) => r.trim()).filter(Boolean), branchPrefix: env.PIM_CODING_BRANCH_PREFIX ?? "pim/" });
 	const clock = overrides.clock ?? Date.now;
@@ -173,8 +175,9 @@ export function assembleForge(db: ForgeDb, objects: ObjectStore, env: Env, crypt
 				}
 			: undefined,
 	});
-	const forge = new Forge({ db, store, authz, scheduler, credentials, git, objects: objects as never, orbs: wiring ? ampOrbClients(wiring) : () => null, compute, ampConfigured: vault !== null, promoteOnRelease: !opts.scoped });
-	return { forge, store, authz, scheduler, credentials, db, worker, stalls: new StallSupervisor(db, store, clock), compute, workspaces, git, gitUpstream, gitea, vault, env };
+	const ampConfigured = opts.ampConfigured ?? vault !== null;
+	const forge = new Forge({ db, store, authz, scheduler, credentials, git, objects: objects as never, orbs: wiring ? ampOrbClients(wiring) : () => null, compute, ampConfigured, promoteOnRelease: !opts.scoped });
+	return { forge, store, authz, scheduler, credentials, db, worker, stalls: new StallSupervisor(db, store, clock), compute, workspaces, git, gitUpstream, gitea, vault, ampConfigured, env };
 }
 
 /** Forge's HTTP surface for the Gate, whose database role is subject to row-level security: each request runs under its owner's scope. The git broker and the Gitea connection are mounted when there is a git host for them. */

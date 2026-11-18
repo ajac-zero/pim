@@ -181,6 +181,31 @@ describe("grants, standing approvals and delegation", () => {
 		await authz.grantCoding(f.admin.principal, { ownerId: owner, permissions: ["coding:start"], pools: ["shared"] });
 		expect(await ask("coding:start", { pool: "shared" })).toEqual({ outcome: "allow" });
 		await expect(ask("coding:start", { pool: "other" })).rejects.toMatchObject({ reason: "pool-not-granted" });
+		// An Amp thread runs in an orb and takes no pool, so no grant needs one for it; the repository still has to be granted, however it is spelled.
+		await authz.revokeCoding(f.admin.principal, owner, (await authz.codingGrants(owner)).find((g) => g.pools.includes("shared"))!.grantId);
+		await expect(ask("coding:start", { harness: "amp", repository: "github.com/ajac-zero/pim" })).resolves.toEqual({ outcome: "allow" });
+		await expect(ask("coding:start", { harness: "pi", repository: "github.com/ajac-zero/pim" })).rejects.toMatchObject({ name: "CapabilityUnavailableError" });
+		await expect(ask("coding:start", { harness: "amp", repository: "github.com/elsewhere/x" })).rejects.toMatchObject({ reason: "repository-not-granted" });
+		await expect(ask("coding:start", { harness: "amp", repository: "ajac-zero/pim" })).resolves.toEqual({ outcome: "allow" }); // host-less spelling of the same repository
+		// The admin lists every live grant with its holder, and a revoked one is gone from the list and from the checks.
+		const listed = await authz.listCodingGrants(f.admin.principal);
+		expect(listed.filter((g) => g.ownerId === owner).map((g) => g.username)).toEqual(["linus"]);
+		await expect(authz.listCodingGrants(linus.principal)).rejects.toMatchObject({ reason: "admin-only" });
+		await authz.revokeCoding(f.admin.principal, owner, listed.find((g) => g.ownerId === owner)!.grantId);
+		await expect(ask("coding:start", { harness: "amp", repository: "github.com/ajac-zero/pim" })).rejects.toMatchObject({ reason: "no-coding-grant" });
+		await expect(authz.revokeCoding(f.admin.principal, owner, "cg_gone")).rejects.toMatchObject({ name: "NotFoundError" });
+	});
+
+	it("never grants coding to a guest, a missing account, an unknown permission or a malformed repository", async () => {
+		const g = await member(f.app, f.admin.principal, "gus");
+		const owner = g.account.ownerId;
+		const authz = f.app.identity.authz;
+		await expect(authz.grantCoding(f.admin.principal, { ownerId: owner, permissions: ["coding:start"] as never, repositories: ["not a repo"] })).rejects.toMatchObject({ name: "BadRequestError" });
+		await expect(authz.grantCoding(f.admin.principal, { ownerId: owner, permissions: ["admin:grants"] as never, repositories: ["a/b"] })).rejects.toMatchObject({ name: "BadRequestError" });
+		await expect(authz.grantCoding(f.admin.principal, { ownerId: "o_nobody", permissions: ["coding:start"], repositories: ["a/b"] })).rejects.toMatchObject({ name: "NotFoundError" });
+		await f.db.owner(owner, (tx) => tx.query("UPDATE pim_app.accounts SET role = 'guest' WHERE owner_id = $1", [owner]));
+		await expect(authz.grantCoding(f.admin.principal, { ownerId: owner, permissions: ["coding:start"], repositories: ["a/b"] })).rejects.toMatchObject({ name: "RefusedError" });
+		expect(await authz.codingGrants(owner)).toEqual([]);
 	});
 
 	it("decides a delegated principal on its origin, so delegation never launders privilege", async () => {

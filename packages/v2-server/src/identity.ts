@@ -102,24 +102,34 @@ export function deliverApprovalDecisions(app: App): void {
 
 /** `host/owner/name` as Forge names a repository: `owner/name`; a wildcard keeps its star. */
 const forgeRepo = (repository: string) => (repository.split("/").length >= 3 ? repository.split("/").slice(1).join("/") : repository);
+/** The permissions a Forge grant stands for: steering a thread includes aborting it, as Forge names the two. */
+const forgePermissions = (permission: string) => (permission === "coding:steer" ? ["coding:steer", "coding:abort"] : [permission]);
 
 /**
  * One source of coding authority. An admin manages grants and standing approvals through the application's `Authorizer` (the Gate's admin routes); Forge enforces its own
  * tables, so each change the application records is written to Forge in the same call, and a failure in either leaves the admin an error, never a half grant that
  * silently permits. Permission and approval stay apart: push, pr and merge need a person's yes unless a standing approval covers them (`requires_approval`).
  */
-export function mirrorCodingGrants(app: App, forge: { grant(g: { subjectType: "user"; subjectId: string; permission: never; repos?: string[] | null; pools?: string[] | null; requiresApproval?: boolean; grantedBy: string }): Promise<number>; grantStanding(a: { approvalId: string; ownerId: string; action: never; scope: Record<string, string>; grantedBy: string; expiresAt?: Date }): Promise<void>; revokeStanding(id: string): Promise<void> }): void {
+export function mirrorCodingGrants(app: App, forge: { grant(g: { subjectType: "user"; subjectId: string; permission: never; repos?: string[] | null; pools?: string[] | null; requiresApproval?: boolean; grantedBy: string; sourceGrantId?: string }): Promise<number>; revokeSource(sourceGrantId: string, legacy: { ownerId: string; permissions: string[]; repos: string[] | null; pools: string[] | null }): Promise<void>; grantStanding(a: { approvalId: string; ownerId: string; action: never; scope: Record<string, string>; grantedBy: string; expiresAt?: Date }): Promise<void>; revokeStanding(id: string): Promise<void> }): void {
 	const authz = app.identity.authz;
 	const grantCoding = authz.grantCoding.bind(authz);
 	authz.grantCoding = async (admin, input) => {
 		const id = await grantCoding(admin, input);
 		for (const permission of input.permissions) {
-			// Steering a thread includes aborting it, as Forge names the two.
-			for (const mapped of permission === "coding:steer" ? ["coding:steer", "coding:abort"] : [permission]) {
-				await forge.grant({ subjectType: "user", subjectId: input.ownerId, permission: mapped as never, repos: input.repositories?.length ? input.repositories.map(forgeRepo) : null, pools: input.pools?.length ? input.pools : null, requiresApproval: ["coding:push", "coding:pr", "coding:merge"].includes(permission), grantedBy: admin.ownerId });
+			for (const mapped of forgePermissions(permission)) {
+				await forge.grant({ subjectType: "user", subjectId: input.ownerId, permission: mapped as never, repos: input.repositories?.length ? input.repositories.map(forgeRepo) : null, pools: input.pools?.length ? input.pools : null, requiresApproval: ["coding:push", "coding:pr", "coding:merge"].includes(permission), grantedBy: admin.ownerId, sourceGrantId: id });
 			}
 		}
 		return id;
+	};
+	// Revoking takes Forge's rows back first: were the Gate's row revoked and Forge's failure left standing, the coding API would keep permitting what the admin took away.
+	const revokeCoding = authz.revokeCoding.bind(authz);
+	authz.revokeCoding = async (admin, ownerId, grantId) => {
+		await authz.enforce(admin, "admin:grants");
+		const grant = (await authz.codingGrants(ownerId)).find((g) => g.grantId === grantId);
+		if (!grant) return revokeCoding(admin, ownerId, grantId);
+		await forge.revokeSource(grantId, { ownerId, permissions: grant.permissions.flatMap(forgePermissions), repos: grant.repositories.length ? grant.repositories.map(forgeRepo) : null, pools: grant.pools.length ? [...grant.pools] : null });
+		return revokeCoding(admin, ownerId, grantId);
 	};
 	const grantStanding = authz.grantStanding.bind(authz);
 	authz.grantStanding = async (admin, input) => {

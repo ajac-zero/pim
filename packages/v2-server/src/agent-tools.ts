@@ -446,6 +446,11 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 	];
 
 	// Coding: Forge, with the Authorizer deciding first whether this agent may.
+	/** `pi`, which runs in a sandbox pool, unless this deployment has no pool to run it in and can run Amp, whose orbs need none. */
+	const defaultHarness = async (forge: ForgeParts) => {
+		const pooled = (await forge.db.query("select 1 from pim_forge.forge_pools where enabled limit 1")).rows.length > 0;
+		return !pooled && forge.ampConfigured ? "amp" : "pi";
+	};
 	const coding = (name: string, description: string, parameters: any, action: string, run: (forge: ForgeParts, actor: Actor, call: Call, args: any) => Promise<unknown>) =>
 		tool(name, description, parameters, async (args, api, context) => {
 			const app = deps.app;
@@ -456,7 +461,8 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 				const chat = await deps.chatOf(api.conversationId);
 				const p = await principalOf(app, chat);
 				// Whether the agent may at all: its owner's grant, and the repository and pool it covers. What a person must approve (push, pull request, merge) Forge files itself.
-				const repo = typeof args.repo === "string" ? { repository: args.repo.replace(/^https?:\/\//, "").replace(/\.git$/, ""), ...(typeof args.pool === "string" ? { pool: args.pool } : {}) } : undefined;
+				if (action === "coding:start" && !args.harness) args = { ...args, harness: await defaultHarness(forge) };
+				const repo = typeof args.repo === "string" ? { repository: args.repo.replace(/^https?:\/\//, "").replace(/\.git$/, ""), ...(typeof args.pool === "string" ? { pool: args.pool } : {}), ...(action === "coding:start" && typeof args.harness === "string" ? { harness: args.harness } : {}) } : undefined;
 				await app.identity.authz.authorize({ principal: p, ownerId: owner, action, ...(repo ? { resource: repo } : {}) });
 				const role = (await app.db.owner(ownerId, async (tx) => (await tx.query("SELECT role FROM pim_app.accounts WHERE owner_id = $1", [ownerId])).rows[0]?.role)) ?? "member";
 				const actor: Actor = { ownerId: owner, role, ...(p.kind === "agent" && p.agentId !== "pim" ? { agent: p.agentId } : {}) };
@@ -469,7 +475,7 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 		}, action === "coding:start" || action === "coding:push" || action === "coding:merge" || action === "coding:pr" || action === "coding:steer" || action === "coding:abort" ? "unsafe" : "safe");
 	const thread = Type.String({ description: "The coding thread's id." });
 	tools.push(
-		coding("coding_start", "Start a coding thread on a repository: a task for a coding agent in its own workspace.", Type.Object({ task: S({ minLength: 1 }), repo: S({ minLength: 1 }), ref: O(S()), harness: O(S()), pool: O(S()), budget_usd: O(Type.Number({ minimum: 0 })) }), "coding:start", async (f, actor, c, a) =>
+		coding("coding_start", "Start a coding thread on a repository: a task for a coding agent in its own workspace. harness picks what runs it: pi (the default) in a sandbox, or amp in an Amp orb, which needs no sandbox. On a deployment with no sandbox pool where Amp is set up, the default is amp.", Type.Object({ task: S({ minLength: 1 }), repo: S({ minLength: 1 }), ref: O(S()), harness: O(S()), pool: O(S()), budget_usd: O(Type.Number({ minimum: 0 })) }), "coding:start", async (f, actor, c, a) =>
 			f.forge.start(actor, { operationId: `coding:${ownerId}:${c.api.taskId}:${c.api.callId}`, task: a.task, repo: a.repo, ref: a.ref, harness: a.harness, pool: a.pool, ...(c.chat ? { chatId: c.chat } : {}), ...(a.budget_usd !== undefined ? { budgetUsd: a.budget_usd } : {}) })),
 		coding("coding_status", "A coding thread's state.", Type.Object({ thread }), "coding:read", (f, actor, _c, a) => f.forge.status(actor, a.thread)),
 		coding("coding_steer", "Send a coding thread an instruction.", Type.Object({ thread, text: S({ minLength: 1 }) }), "coding:steer", (f, actor, c, a) => f.forge.steer(actor, a.thread, a.text, `steer:${ownerId}:${c.api.taskId}:${c.api.callId}`)),

@@ -117,7 +117,7 @@ export async function startGate(config: ProcessConfig, env: Env, host: Host, nat
 	const authenticate = forgeAuthenticator(app, secure);
 	// Forge's whole HTTP surface (the coding API, harness logins, the git broker, Gitea, the model gateway), each request under its owner's row-level security scope.
 	const coding = forgeHttp(forge, { authenticate, crypto: app.crypto });
-	const options = { publicUrl: config.publicUrl, ...(env.PIM_APPS_ORIGIN ? { appsOrigin: env.PIM_APPS_ORIGIN } : {}), routes: [...snapshotRoutes(db.pool), ...codingAdminRoutes(), ...poolRoutes(coding), ...forgeRoutes(coding)],
+	const options = { publicUrl: config.publicUrl, ...(env.PIM_APPS_ORIGIN ? { appsOrigin: env.PIM_APPS_ORIGIN } : {}), routes: [...snapshotRoutes(db.pool), ...codingAdminRoutes(forge), ...poolRoutes(coding), ...forgeRoutes(coding)],
 		// The web app's v1 API over v2's services (packages/v2-server/src/compat/), tried before the built-in routes so its shapes win.
 		first: [...webCompatRoutes], before: gateBefore(app, env) };
 	const gate = createGate(app, options);
@@ -224,7 +224,7 @@ export async function startRunner(config: ProcessConfig, env: Env, host: Host, h
 	const forgePool = !hooks.harnessOptions && env.PIM_FORGE_DATABASE_URL ? new pg.Pool({ connectionString: env.PIM_FORGE_DATABASE_URL, max: 4 }).on("error", () => {}) : undefined;
 	const objects = appDb || forgePool ? s3Of(config, env) : undefined;
 	const app = appDb && objects ? new App(appDb, objects, { ...(crypto ? { crypto } : {}), ...(env.PIM_APP_SECRET_KEY ? { appKey: env.PIM_APP_SECRET_KEY } : {}) }) : undefined;
-	const forge = forgePool && objects ? assembleForge(forgePool as never, objects, env) : undefined;
+	const forge = forgePool && objects ? assembleForge(forgePool as never, objects, env, undefined, { ampConfigured: crypto !== undefined }) : undefined;
 	// The computer's tools reach a paired computer over the Relay's bus (NATS). The connection is made when an agent first uses one, so a Runner that never does needs no NATS.
 	let relayPulse: Promise<NatsPulse> | undefined;
 	const relayBus = async () => natsRelayBus(await (relayPulse ??= NatsPulse.connect(config.natsUrl)));

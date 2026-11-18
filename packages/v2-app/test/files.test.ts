@@ -129,7 +129,40 @@ describe("Canvas", () => {
 		if (edit.status === "fulfilled") expect(text).toContain("ABC");
 		else expect(edit.reason).toMatchObject({ code: "version_conflict" });
 		expect(text).toContain("-typed");
-		expect(version).toBe(edit.status === "fulfilled" ? 3 : 2);
+		expect(version).toBe(2);
+	});
+
+	it("keeps versions at pauses and around agent changes, not one per update", async () => {
+		const canvas = new Canvas(f.db, f.store);
+		const owner = u.account.ownerId;
+		const note = await canvas.create(u.principal, "kept", "Hello");
+		const editor = new Y.Doc();
+		Y.applyUpdate(editor, (await canvas.state(owner, note)).update);
+		const typed: Uint8Array[] = [];
+		editor.on("update", (up: Uint8Array) => typed.push(up));
+		for (const ch of " there") editor.getText("markdown").insert(editor.getText("markdown").length, ch);
+		for (const up of typed) await canvas.applyLive(owner, note, "ada", up);
+		// Six updates are still one kept version, until the person pauses.
+		expect(await canvas.read(owner, note)).toEqual({ text: "Hello there", version: 1 });
+		expect(await canvas.keep(owner, note, "person")).toBe(2);
+		expect(await canvas.keep(owner, note, "person")).toBe(2);
+		// An agent change is kept before and after: the person's text stays readable as it was.
+		expect(await canvas.edit(u.principal, note, 2, "there", "world")).toEqual({ version: 3 });
+		expect((await canvas.versions(owner, note)).map((v) => [v.version, v.source, v.text])).toEqual([[3, "agent", "Hello world"], [2, "person", "Hello there"], [1, "person", "Hello"]]);
+		// Restoring an old version is a new version, and the text it replaced is kept.
+		expect(await canvas.restore(u.principal, note, 1)).toEqual({ version: 4 });
+		expect((await canvas.versions(owner, note))[0]).toMatchObject({ version: 4, source: "restore", restoredFrom: 1, text: "Hello" });
+		expect((await canvas.read(owner, note)).text).toBe("Hello");
+	});
+
+	it("keeps a note made before versions as version 1 the first time it is read", async () => {
+		const canvas = new Canvas(f.db, f.store);
+		const note = await canvas.create(u.principal, "old", "Old text");
+		await f.db.owner(u.account.ownerId, async (tx) => {
+			await tx.query("DELETE FROM pim_app.note_versions WHERE note_id = $1", [note]);
+			await tx.query("UPDATE pim_app.notes SET kept_version = 0, version = 280 WHERE note_id = $1", [note]);
+		});
+		expect(await canvas.read(u.account.ownerId, note)).toEqual({ text: "Old text", version: 1 });
 	});
 
 	it("fences a writer whose lease was taken over", async () => {

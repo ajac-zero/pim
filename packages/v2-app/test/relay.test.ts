@@ -392,7 +392,7 @@ describe("live notes over WebSocket", () => {
 		// An agent edits at the current version; both open editors receive it, with what B typed meanwhile kept.
 		docB.getText("markdown").insert(0, ">> ");
 		await until(async () => (await app.canvas.read(u.account.ownerId, note)).text === ">> Hello world");
-		const { version } = await app.canvas.read(u.account.ownerId, note);
+		const version = await app.canvas.keep(u.account.ownerId, note, "person");
 		await app.canvas.edit(u.principal, note, version, "world", "there");
 		await until(() => docA.getText("markdown").toString() === ">> Hello there" && docB.getText("markdown").toString() === ">> Hello there");
 		expect((await app.canvas.read(u.account.ownerId, note)).text).toBe(">> Hello there");
@@ -409,6 +409,28 @@ describe("live notes over WebSocket", () => {
 		expect(await closedA).toBe(4003);
 		expect((await app.canvas.read(u.account.ownerId, note)).text).toBe(">> Hello there");
 		b.close();
+	});
+
+	it("keeps one version when typing pauses, and one when the note is closed, not one per update", async () => {
+		const u = await mk("rl-notes-kept");
+		const note = await app.canvas.create(u.principal, "n", "Hi");
+		const kept = async () => (await app.canvas.versions(u.account.ownerId, note)).map((v) => v.text);
+		app.canvas.pauseMs = 100;
+		const doc = new Y.Doc();
+		const ws = await wsOpen(`/api/notes/live?note=${note}`, { cookie: u.cookie });
+		// The server listens once it has loaded the note; a message sent before that is dropped.
+		await new Promise((r) => setTimeout(r, 200));
+		await editor(ws, doc);
+		await until(() => doc.getText("markdown").toString() === "Hi");
+		for (const ch of " you") doc.getText("markdown").insert(doc.getText("markdown").length, ch);
+		await until(async () => (await kept()).length === 2);
+		expect(await kept()).toEqual(["Hi you", "Hi"]);
+		doc.getText("markdown").insert(0, "Oh, ");
+		await until(async () => (await app.canvas.read(u.account.ownerId, note)).text === "Oh, Hi you");
+		ws.close();
+		await until(async () => (await kept()).length === 3);
+		expect((await kept())[0]).toBe("Oh, Hi you");
+		app.canvas.pauseMs = 5_000;
 	});
 });
 

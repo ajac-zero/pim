@@ -82,13 +82,19 @@ describe("the web app's apps, gallery and admin routes", () => {
 		expect((await call("ada", "GET", `/api/artifacts/${id}`)).json).toMatchObject({ id, title: "Plan", kind: "markdown", version: 1, history: [{ version: 1 }] });
 		expect((await call("ada", "GET", `/api/artifacts/${id}/versions/1`)).json).toMatchObject({ kind: "markdown", content: "Week one", version: 1, latest: 1 });
 		expect((await call("ada", "GET", `/api/artifacts/${id}/versions/2`)).status).toBe(404);
+		// An agent's edit keeps versions, so an older one still reads back its text, is listed in the history, and can be restored.
+		await app.canvas.edit(principal, id, 1, "one", "two");
+		expect((await call("ada", "GET", `/api/artifacts/${id}`)).json).toMatchObject({ version: 2, versions: 2, history: [{ version: 2, source: "agent" }, { version: 1, source: "person" }] });
+		expect((await call("ada", "GET", `/api/artifacts/${id}/versions/1`)).json).toMatchObject({ content: "Week one", version: 1, latest: 2 });
+		expect((await call("ada", "POST", `/api/artifacts/${id}/restore`, { version: 1, baseVersion: 2 })).json).toMatchObject({ version: 3, restored: 1 });
+		expect((await call("ada", "GET", `/api/artifacts/${id}/versions/3`)).json).toMatchObject({ content: "Week one", source: "restore", restoredFrom: 1 });
 		expect((await call("ada", "PUT", `/api/artifacts/${id}`, { title: "Plan B" })).json).toMatchObject({ title: "Plan B", kind: "markdown" });
 		expect((await call("bob", "GET", `/api/artifacts/${id}`)).status).toBe(404);
 		// The list the Notes section reads holds it, and a note started from "New note" is one with a version to open.
-		expect((await call("ada", "GET", "/api/artifacts")).json.artifacts.filter((a: { kind: string }) => a.kind === "markdown")).toMatchObject([{ id, title: "Plan B", version: 1, size: 8 }]);
+		expect((await call("ada", "GET", "/api/artifacts")).json.artifacts.filter((a: { kind: string }) => a.kind === "markdown")).toMatchObject([{ id, title: "Plan B", version: 3, size: 8 }]);
 		expect((await call("bob", "GET", "/api/artifacts")).json.artifacts.filter((a: { kind: string }) => a.kind === "markdown")).toEqual([]);
 		const started = (await call("ada", "POST", "/api/notes", { title: "Untitled" })).json;
-		expect(started).toMatchObject({ title: "Untitled", kind: "markdown", version: 0 });
+		expect(started).toMatchObject({ title: "Untitled", kind: "markdown", version: 1 });
 		expect((await call("ada", "GET", `/api/artifacts/${started.id}`)).json).toMatchObject({ id: started.id, kind: "markdown" });
 		expect((await call("ada", "DELETE", `/api/artifacts/${started.id}`)).json).toEqual({ deleted: true });
 		expect((await call("ada", "GET", `/api/artifacts/${started.id}`)).status).toBe(404);

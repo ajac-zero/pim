@@ -250,6 +250,8 @@ async function viewBrowser(app: App, p: Principal, ws: WebSocket, url: URL): Pro
 class NoteRoom {
 	readonly doc = new Y.Doc();
 	readonly peers = new Map<WebSocket, { id: string; awareness: Uint8Array | null }>();
+	/** Fires when typing has paused, to keep what was written as a version. */
+	pause?: ReturnType<typeof setTimeout>;
 	constructor(readonly ownerId: string, readonly noteId: string) {}
 
 	broadcast(message: Uint8Array, except?: WebSocket) {
@@ -318,6 +320,8 @@ async function openNote(app: App, rooms: Map<string, NoteRoom>, p: Principal, ws
 				for (const update of updates) {
 					await app.identity.authz.enforce(p, "api:write");
 					await app.canvas.applyLive(p.ownerId, noteId, peer.id, update);
+					clearTimeout(joined.pause);
+					joined.pause = setTimeout(() => void app.canvas.keep(p.ownerId, noteId, "person").catch(() => undefined), app.canvas.pauseMs);
 					const fan = encoding.createEncoder();
 					encoding.writeVarUint(fan, SYNC);
 					syncProtocol.writeUpdate(fan, update);
@@ -338,7 +342,14 @@ async function openNote(app: App, rooms: Map<string, NoteRoom>, p: Principal, ws
 	});
 	ws.on("close", () => {
 		joined.peers.delete(ws);
-		if (joined.peers.size === 0) rooms.delete(key);
+		if (joined.peers.size === 0) {
+			rooms.delete(key);
+			// Closing the note keeps what was written, without waiting for a pause.
+			if (joined.pause) {
+				clearTimeout(joined.pause);
+				void app.canvas.keep(p.ownerId, noteId, "person").catch(() => undefined);
+			}
+		}
 	});
 	ws.on("error", () => undefined);
 }

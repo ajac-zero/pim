@@ -114,6 +114,7 @@ const appCard = (ref: { id: string; title: string; kind: string; version: number
 
 /** What the web app reads from a note tool's answer to show the note as a card in the chat that opens it beside the chat: `{ artifact }`, the same shape as an app's, of kind `markdown`. */
 const noteCard = async (app: App, ownerId: string, id: string, note: string): Promise<Result> => {
+	await app.canvas.keep(ownerId, id, "person");
 	const [{ text: body, version }, row] = await Promise.all([app.canvas.read(ownerId, id), app.db.owner(ownerId, async (tx) => (await tx.query("SELECT title FROM pim_app.notes WHERE note_id = $1 AND deleted_at IS NULL", [id])).rows[0])]);
 	return text(JSON.stringify({ artifact: { id, title: String(row?.title ?? ""), kind: "markdown", version, sha256: textDigest(body), size: Buffer.byteLength(body) }, note }));
 };
@@ -368,8 +369,9 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 
 		// Notes and apps.
 		write("note_create", "Create a note a person can open and edit alongside you. The answer is the note's card in the chat, which is how the person sees and opens it; there is no panel for you to open.", Type.Object({ title: S({ minLength: 1 }), text: O(S()) }), async (app, call, a) =>
-			noteCard(app, ownerId, await app.canvas.create(call.p, a.title, a.text ?? ""), "Made it. The person sees it as a card in the chat and opens it beside the chat.")),
+			noteCard(app, ownerId, await app.canvas.create(call.p, a.title, a.text ?? "", "agent"), "Made it. The person sees it as a card in the chat and opens it beside the chat.")),
 		read("note_read", "Read a note: its text and its version.", Type.Object({ id: S() }), async (app, call, a) => {
+			await app.canvas.keep(ownerId, a.id, "person");
 			const n = await app.canvas.read(ownerId, a.id);
 			return text(`version ${n.version}\n${n.text}`);
 		}),
@@ -378,7 +380,7 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 			return noteCard(app, ownerId, a.id, `Saved version ${version}. The person sees the card in the chat and opens the note from it.`);
 		}),
 		read("note_show", "Show the person a note that already exists, such as one from another chat or the one they asked you to open, as the card in this chat that opens it beside the chat. It changes nothing. Find its id with note_list.", Type.Object({ id: S() }), async (app, _call, a) => noteCard(app, ownerId, a.id, "Showed it. The person sees the card in the chat and opens the note from it.")),
-		read("note_list", "Your notes.", Type.Object({}), async (app) => json((await app.db.owner(ownerId, (tx) => tx.query("SELECT note_id, title, version FROM pim_app.notes WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT 200"))).rows)),
+		read("note_list", "Your notes.", Type.Object({}), async (app) => json((await app.db.owner(ownerId, (tx) => tx.query("SELECT note_id, title, kept_version AS version FROM pim_app.notes WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT 200"))).rows)),
 		write("app_create", `Create an app: kind html or jsx, or backend (with a pim.app.json). Files are by path. ${HOW_APPS_RUN}`, Type.Object({ title: S({ minLength: 1 }), kind: Type.Union([Type.Literal("html"), Type.Literal("jsx"), Type.Literal("backend")]), files, message: O(S()) }), async (app, call, a) => appCard(await app.apps.create(call.p, { title: a.title, kind: a.kind, files: a.files, message: a.message }), "Made it. The person sees it in the chat and opens it beside the chat.")),
 		write("app_update", "Change an app. base_version is the version you read; an app that changed since is refused.", Type.Object({ id: S(), base_version: Type.Integer({ minimum: 1 }), title: O(S()), files: O(files), delete_files: O(strings), edits: O(Type.Array(Type.Object({ path: O(S()), find: S(), replace: S() }))), message: O(S()) }), async (app, call, a) =>
 			appCard(await app.apps.update(call.p, a.id, { baseVersion: a.base_version, title: a.title, files: a.files, deleteFiles: a.delete_files, edits: a.edits, message: a.message }), "Saved. The person sees the new version in the chat.")),

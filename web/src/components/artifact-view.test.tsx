@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   createMemoryHistory,
@@ -6,12 +7,18 @@ import {
   createRouter,
   RouterProvider,
 } from "@tanstack/react-router";
+import { cleanup, render, screen } from "@testing-library/react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { artifactReference } from "~/components/artifact";
 import { ArtifactView } from "~/components/artifact-view";
 import type { ArtifactBackend } from "~/lib/pim-api";
 import { artifactBackendQuery, artifactQuery } from "~/lib/queries";
+
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
 
 it("offers a new-chat draft with the artifact reference instead of a change-request form", async () => {
   const client = new QueryClient();
@@ -206,4 +213,82 @@ it("draws the answer of V2's note tools as a note card", () => {
     version: 2,
   });
   expect(artifactReference("No such note")).toBeNull();
+});
+
+/** An artifact at version 280 whose history lists only its latest, opened from a link to version 2. */
+function oldPin(kind: "markdown" | "hosted") {
+  return {
+    id: "a1",
+    title: "Old pin",
+    kind,
+    session: null,
+    version: 280,
+    versions: 1,
+    files: 1,
+    size: 10,
+    sha256: "abc",
+    createdAt: 0,
+    updatedAt: 0,
+    circles: [],
+    history: [
+      {
+        version: 280,
+        source: "person" as const,
+        createdAt: 0,
+        size: 10,
+        sha256: "abc",
+        restoredFrom: null,
+      },
+    ],
+  };
+}
+
+async function openAtOldVersion(kind: "markdown" | "hosted") {
+  const client = new QueryClient();
+  client.setQueryData(artifactQuery("a1").queryKey, oldPin(kind));
+  const root = createRootRoute({
+    component: () => (
+      <ArtifactView
+        artifactId="a1"
+        version={2}
+        onVersion={() => {}}
+        onDeleted={() => {}}
+      />
+    ),
+  });
+  const router = createRouter({
+    routeTree: root.addChildren([
+      createRoute({ getParentRoute: () => root, path: "/" }),
+    ]),
+    history: createMemoryHistory({ initialEntries: ["/"] }),
+  });
+  await router.load();
+  return { client, router };
+}
+
+it("opens a note pinned at a version its history lacks as the live latest", async () => {
+  const { client, router } = await openAtOldVersion("markdown");
+  const html = renderToStaticMarkup(
+    <QueryClientProvider client={client}>
+      <RouterProvider router={router} />
+    </QueryClientProvider>,
+  );
+  expect(html).not.toContain("no version");
+  expect(html).toContain("Write");
+  client.clear();
+});
+
+it("still reports a missing version of an app", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => Response.json(oldPin("hosted"))),
+  );
+  const { client, router } = await openAtOldVersion("hosted");
+  render(
+    <QueryClientProvider client={client}>
+      <RouterProvider router={router} />
+    </QueryClientProvider>,
+  );
+  expect(await screen.findByText(/no version 2/)).toBeDefined();
+  client.clear();
 });

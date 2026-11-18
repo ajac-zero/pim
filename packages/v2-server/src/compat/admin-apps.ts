@@ -29,17 +29,17 @@ const artifactOf = (r: Latest) => ({ id: r.id, title: r.title, kind: kindOut(r.k
 
 /**
  * A note as the web app's markdown app. Notes are live Yjs documents (`pim_app.notes`, kept apart from apps), so the web app opens one here and edits it
- * over `/api/notes/live`; only its latest text is kept as a version, and it is read through the note's own service.
+ * over `/api/notes/live`; its versions are the kept ones (`Canvas.keep`: pauses, closes, agent changes and restores), read through the note's own service.
  */
-const NOTE = "SELECT n.note_id, n.title, n.created_at, COALESCE((SELECT max(u.at) FROM pim_app.note_updates u WHERE u.owner_id = n.owner_id AND u.note_id = n.note_id), n.created_at) AS updated_at FROM pim_app.notes n WHERE n.owner_id = $1 AND n.deleted_at IS NULL";
+const NOTE = "SELECT n.note_id, n.title, n.created_at, COALESCE((SELECT max(u.at) FROM pim_app.note_updates u WHERE u.owner_id = n.owner_id AND u.note_id = n.note_id), n.created_at) AS updated_at, (SELECT count(*)::int FROM pim_app.note_versions v WHERE v.owner_id = n.owner_id AND v.note_id = n.note_id) AS versions FROM pim_app.notes n WHERE n.owner_id = $1 AND n.deleted_at IS NULL";
 
-type NoteRow = { note_id: string; title: string; created_at: Date; updated_at: Date };
+type NoteRow = { note_id: string; title: string; created_at: Date; updated_at: Date; versions: number };
 
 async function noteAs(app: App, p: Principal, row: NoteRow) {
 	const { text, version } = await app.canvas.read(p.ownerId, row.note_id);
 	const size = Buffer.byteLength(text);
 	const sha256 = textDigest(text);
-	return { text, size, sha256, artifact: { id: row.note_id, title: row.title, kind: "markdown", session: null, version, versions: 1, size, files: 1, sha256, createdAt: ms(row.created_at), updatedAt: ms(row.updated_at) } };
+	return { text, size, sha256, artifact: { id: row.note_id, title: row.title, kind: "markdown", session: null, version, versions: Math.max(1, row.versions), size, files: 1, sha256, createdAt: ms(row.created_at), updatedAt: ms(row.updated_at) } };
 }
 
 async function noteOf(app: App, p: Principal, id: string) {
@@ -166,7 +166,8 @@ export function artifactRoutes(): Route[] {
 			await readable(app, p);
 			const note = await noteOf(app, p, params[0]!);
 			if (!note) return ok(await detail(app, p, params[0]!));
-			return ok({ ...note.artifact, circles: [], history: [{ version: note.artifact.version, sha256: note.sha256, size: note.size, source: "agent", restoredFrom: null, createdAt: note.artifact.createdAt }] });
+			const history = (await app.canvas.versions(p.ownerId, params[0]!)).map((v) => ({ version: v.version, sha256: textDigest(v.text), size: Buffer.byteLength(v.text), source: v.source, restoredFrom: v.restoredFrom, createdAt: ms(v.createdAt) }));
+			return ok({ ...note.artifact, versions: history.length, circles: [], history });
 		}),
 		route("PUT", "/api/artifacts/:id", async ({ app, principal, params, json }) => {
 			const p = await principal();
@@ -195,9 +196,14 @@ export function artifactRoutes(): Route[] {
 			await readable(app, p);
 			const note = await noteOf(app, p, params[0]!);
 			if (note) {
-				if (num(params[1]) !== note.artifact.version) throw new NotFoundError("Only the latest version of a note is kept");
-				const { id, title, version } = note.artifact;
-				return ok({ id, title, kind: "markdown", latest: version, version, sha256: note.sha256, size: note.size, source: "agent", restoredFrom: null, createdAt: note.artifact.createdAt, files: [{ path: "README.md", sha256: note.sha256, size: note.size, type: "text/markdown" }], path: "README.md", content: note.text });
+				const { id, title, version: latest } = note.artifact;
+				const kept = (await app.canvas.versions(p.ownerId, id)).find((v) => v.version === num(params[1]));
+				if (!kept) throw new NotFoundError("No such version");
+				// The latest is the live text, which may be a little ahead of the version kept; an older one is what it said then.
+				const body = kept.version === latest ? note.text : kept.text;
+				const sha256 = textDigest(body);
+				const size = Buffer.byteLength(body);
+				return ok({ id, title, kind: "markdown", latest, version: kept.version, sha256, size, source: kept.source, restoredFrom: kept.restoredFrom, createdAt: ms(kept.createdAt), files: [{ path: "README.md", sha256, size, type: "text/markdown" }], path: "README.md", content: body });
 			}
 			const { head, v } = await app.db.owner(p.ownerId, (tx) => ownVersion(tx, p.ownerId, params[0]!, num(params[1])));
 			return ok(versionOf(head, v, url.searchParams.get("path") ?? undefined));
@@ -227,6 +233,12 @@ export function artifactRoutes(): Route[] {
 		route("POST", "/api/artifacts/:id/restore", async ({ app, principal, params, json }) => {
 			const p = await principal();
 			const b = await json();
+			const note = await noteOf(app, p, params[0]!);
+			if (note) {
+				if (typeof b.baseVersion === "number" && b.baseVersion !== note.artifact.version) throw new ConflictError(`The note is at version ${note.artifact.version}, you changed version ${b.baseVersion}; read it again`, "version_conflict");
+				await app.canvas.restore(p, params[0]!, Number(b.version));
+				return ok({ ...(await noteOf(app, p, params[0]!))!.artifact, restored: Number(b.version) });
+			}
 			const latest = (await latestOf(app, p, params[0]!)).latest_version;
 			if (typeof b.baseVersion === "number" && b.baseVersion !== latest) throw new ConflictError(`The app is at version ${latest}, you changed version ${b.baseVersion}; read it again`, "version_conflict");
 			await app.apps.restore(p, params[0]!, Number(b.version));

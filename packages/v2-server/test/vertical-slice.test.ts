@@ -250,7 +250,7 @@ real("the vertical slice", () => {
 		faux.setResponses([fauxAssistantMessage("The coding thread finished.")]);
 		await waitFor("the chat to hear the wake and answer", async () => ((await snapshot()).messages.some((m) => textOf(m).includes("The coding thread finished.")) ? true : undefined), 60_000);
 		const heard = (await snapshot()).messages.filter((m) => m.role === "user").map((m) => textOf(m));
-		expect(heard).toContain(`Coding thread ${threadId} completed. Opened a pull request.`);
+		expect(heard.some((t) => t.startsWith(`[Coding thread ${threadId}] It finished its turn.`) && t.includes("Detail: Opened a pull request.") && t.includes("It last said:\nFixed the test."))).toBe(true);
 		// Its spend is in the cost ledger as a coding thread's, and the sidebar knows the thread.
 		const costs = await waitFor("the spend in the ledger", async () => {
 			const c = (await web.call("GET", "/api/usage/costs?days=1")).json;

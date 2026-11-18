@@ -1,5 +1,6 @@
+import { codingWakeText } from "@pim/shared/coding-wake";
 import { describe, expect, it } from "vitest";
-import { EMPTY_STREAM } from "~/lib/pim-view";
+import { codingNoticeOf, EMPTY_STREAM } from "~/lib/pim-view";
 import {
   applyBusy,
   applyMessage,
@@ -275,5 +276,56 @@ describe("a model request that failed", () => {
     expect(
       streamOf([user(1, "hi"), failedAnswer(2), assistant(3, "ok")]).view.error,
     ).toBeNull();
+  });
+});
+
+describe("a coding thread's wake in a v2 chat", () => {
+  const facts = {
+    threadId: "d3e06eed",
+    state: "idle",
+    spentUsd: 1.5,
+    budgetUsd: 5,
+    origin: "https://pim.example/",
+  } as const;
+
+  it("is read by codingNoticeOf with the state and link, for a completed and a failed thread", () => {
+    const done = codingWakeText({
+      ...facts,
+      outcome: "completed",
+      said: "Opened PR",
+    });
+    expect(codingNoticeOf(done)).toEqual({
+      threadId: "d3e06eed",
+      outcome: "finished its turn",
+      state: "idle",
+      link: "https://pim.example/coding/d3e06eed",
+      said: "Opened PR",
+    });
+    const failed = codingWakeText({
+      ...facts,
+      outcome: "failed",
+      state: "failed",
+      origin: null,
+      detail: "boom",
+    });
+    expect(codingNoticeOf(failed)).toMatchObject({
+      outcome: "stopped with an error",
+      state: "failed",
+      link: "/coding/d3e06eed",
+    });
+    expect(failed).toContain("Detail: boom");
+    expect(codingWakeText({ ...facts, outcome: "cancelled" })).toContain(
+      "It was cancelled.",
+    );
+  });
+
+  it("is drawn as a coding notice card, not as the person's message", () => {
+    const text = codingWakeText({ ...facts, outcome: "completed" });
+    const stream = streamOf([user(1, text)]);
+    expect(stream.view.entries).toHaveLength(1);
+    const entry = stream.view.entries[0] as any;
+    expect(entry.kind).toBe("notice");
+    expect(entry.notice.kind).toBe("coding");
+    expect(entry.notice.coding.state).toBe("idle");
   });
 });

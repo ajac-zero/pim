@@ -348,7 +348,7 @@ export async function startMaintenance(config: ProcessConfig, env: Env, host: Ho
 			await sweepErasures(sweeper, maint, objects).catch((e) => console.error("erasure sweep", e));
 			await trimForgeOutbox(maint).catch((e) => console.error("outbox trim", e));
 		}
-		await deliverForgeWakes({ forge: parts.forge, forgeDb: maint as never, runtime, inbox, onUnroutable: (id, why) => console.warn("wake dropped", id, why) });
+		await deliverForgeWakes({ forge: parts.forge, forgeDb: maint as never, runtime, inbox, publicUrl: env.PIM_PUBLIC_URL, onUnroutable: (id, why) => console.warn("wake dropped", id, why) });
 		await deliverCosts({ forge: parts.forge, forgeDb: maint as never, usage, onUnroutable: (id, why) => console.warn("cost dropped", id, why) });
 		await notifyPass(sweeper, maint, notifier).catch((e) => console.error("notifications", e));
 	};

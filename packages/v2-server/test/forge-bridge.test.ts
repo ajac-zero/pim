@@ -90,8 +90,11 @@ describe("Forge's outbox joined to the runtime's inbox and to Live", () => {
 		expect(await wakes()).toBe(1);
 		const sees = async () => (await readTranscript(stack.runtime, ADA, rig.home, 1)).map(textOf);
 		await waitFor("the agent to answer the wake", async () => ((await sees()).includes("Thanks, I will tell her.") ? true : undefined));
-		const heard = (await sees()).filter((t) => t.startsWith("Coding thread"));
-		expect(heard).toEqual([`Coding thread ${threadId} completed. Opened a pull request.`]);
+		const heard = (await sees()).filter((t) => t.startsWith("[Coding thread"));
+		expect(heard).toHaveLength(1);
+		expect(heard[0]).toContain(`[Coding thread ${threadId}] It finished its turn.\nState: `);
+		expect(heard[0]).toContain("Detail: Opened a pull request.");
+		expect(heard[0]).toContain("It last said:\ndone");
 		// Delivered rows are not delivered again, and the same wake sent again is the same command.
 		expect(await wakes()).toBe(0);
 		await store.locked(threadId, (q) => store.emitCompletionWake(q, { threadId, chatId: chat }, "op-2", "completed", "Opened a pull request."));

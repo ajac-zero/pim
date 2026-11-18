@@ -41,7 +41,9 @@ real("a chat over its life", () => {
 	};
 	const say = async (chat: string, words: string, ...script: unknown[]) => {
 		const id = ++n;
-		faux.setResponses([...script, toolUse(fauxToolCall("send_to_user", { message: `done ${id}` })), fauxAssistantMessage(`ended ${id}`)] as never);
+		// A turn ends by sending its answer, except background work, which may stay silent.
+		const background = words.startsWith("[Scheduled task");
+		faux.setResponses([...script, ...(background ? [] : [toolUse(fauxToolCall("send_to_user", { message: `done ${id}` }))]), fauxAssistantMessage(`ended ${id}`)] as never);
 		expect((await web.call("POST", `/api/sessions/${chat}/messages`, { commandId: `m-${id}`, text: words })).status).toBe(202);
 		await waitFor(`the turn "${words.slice(0, 20)}" to end`, async () => (JSON.stringify(await transcript(chat)).includes(`ended ${id}`) ? true : undefined), 60_000);
 	};
@@ -81,8 +83,8 @@ real("a chat over its life", () => {
 		expect((await web.call("POST", `/api/sessions/${chat}/read`)).status).toBe(200);
 		expect((await listed(chat)).unread).toBe(false);
 		expect((await sidebar()).unread).toBe(false);
-		// Their own message and a turn that sends nothing leave it read; the next reply makes it unread again.
-		await say(chat, "and again");
+		// A background turn that sends nothing leave it read; the next reply makes it unread again.
+		await say(chat, "[Scheduled task: tidy] and again");
 		expect((await listed(chat)).unread).toBe(false);
 		await say(chat, "one more", reply("Here you go."));
 		expect((await listed(chat)).unread).toBe(true);

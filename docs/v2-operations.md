@@ -34,6 +34,56 @@ One Pim image runs one role per container, chosen by `PIM_ROLE`: `gate`, `live`,
 - The Runner, on `SIGTERM` or `POST /drain`, stops claiming work and hands its partition leases back within `PIM_DRAIN_WINDOW_SECONDS` (90).
 - A Runner must refuse to claim work while the newest row of `pim_ops.ops_restore` is not `reconciled`, and must never execute a `pim_ops.external_operations` row whose status is `needs_reconciliation`, nor a `pim_ops.pi_tasks` row with a `hold`.
 
+## Installing and updating
+
+Pim publishes its images, so an instance updates the way a self-hosted app does: it pulls them, and nothing is built from a git checkout. The Compose files and scripts still come from the checkout (`git pull` brings those); the image is what `pim.sh update` changes.
+
+| Image | Built from | Used by |
+| --- | --- | --- |
+| `ghcr.io/ajac-zero/pim` | `deploy/Dockerfile.v2` | every role of the stack |
+| `ghcr.io/ajac-zero/pim-computer` | `deploy/Dockerfile.computer` | the `local-computer` profile |
+
+Both are `linux/amd64` and `linux/arm64`, carry `org.opencontainers.image.version` and `.revision`, and are published by `.github/workflows/publish.yml`. **Channels and tags:** `stable` is the newest release; a tag `vX.Y.Z` on a commit of `main` publishes `X.Y.Z`, `X.Y` and `stable`. `edge` is the newest push to `main` that passed CI, and each such push is also `sha-<first 12 characters of the commit>`. Nothing is published for `pim/*` branches or pull requests.
+
+**First install from the published image.** `init-env.sh` writes `PIM_IMAGE=ghcr.io/ajac-zero/pim:stable` and `PIM_CHANNEL=stable` by default:
+
+```sh
+deploy/compose/init-env.sh https://pim.example.com
+deploy/compose/pim.sh up -d --wait          # pulls the image; migrations run first
+```
+
+**Switching a stack built from source to the published image** (its `.env` has `PIM_IMAGE=pim:v2` or similar): `deploy/compose/pim.sh update stable` backs the stack up, pulls the image, and switches `PIM_IMAGE` to it, keeping the old reference in `PIM_IMAGE_PREVIOUS`; if it fails, the source-built image is put back. Add `PIM_CHANNEL=stable` (or `edge`) to `.env` so later updates need no argument. To keep building from source, leave `PIM_IMAGE` on your own tag and build it as before (`docker build -f deploy/Dockerfile.v2 -t pim:v2 .`); the development overlay and CI's `compose` job do.
+
+**Updating.**
+
+```sh
+deploy/compose/pim.sh update --check        # reports whether a newer image exists for the channel; changes nothing
+deploy/compose/pim.sh update                # the channel in .env (PIM_CHANNEL, default stable)
+deploy/compose/pim.sh update 1.4.2          # a channel (stable, edge), a version (1.4.2, 1.4) or sha-<12 characters>
+```
+
+`update` pulls the image; takes a backup with `scripts/v2-backup/compose-backup.sh` into `PIM_BACKUP_DIR` (default `deploy/compose/backups/`; old ones are not removed) before anything changes, so the stack must be running; writes the image to `PIM_IMAGE` pinned by digest (`ghcr.io/ajac-zero/pim:stable@sha256:…`); and runs `pim.sh up -d --wait`, which runs migrations first. If that or the health wait fails it puts the previous image back, brings the stack up again and exits non-zero. Its last line of output is one JSON object, and the exit status is non-zero for `rolled_back` and `failed` (nothing changed: the pull or backup failed):
+
+```json
+{"event":"pim.update","from":"ghcr.io/ajac-zero/pim:stable@sha256:aaa…","to":"ghcr.io/ajac-zero/pim:stable@sha256:bbb…","result":"updated"}
+```
+
+`result` is `updated`, `unchanged` (the channel still points at the running image) or `rolled_back`. `update --check` prints `{"event":"pim.update.check","channel":…,"current":…,"latest":…,"available":true|false}`. With `PIM_COMPUTER_URL` set, the same update also pulls `pim-computer` and sets `PIM_COMPUTER_IMAGE`; `PIM_REPOSITORY` (default `ghcr.io/ajac-zero/pim`) names the repository to pull from, for a mirror.
+
+**Rollback, and the additive-migration rule.** Migrations cannot be undone: the old image runs against the schema the new one migrated. So **every migration must be additive and compatible with the previous release**: add tables, columns (nullable or with a default) and indexes; never drop or rename a column or table, change a type, or tighten a constraint the previous image writes against in the same release. Do that destructive step in a later release, after no supported image reads the old shape (expand, then contract). A rollback by `update` is therefore safe only for releases that follow the rule; one that cannot (a release that must break it says so in its notes) is rolled back by restoring the backup `update` took: `scripts/v2-backup/compose-restore.sh <backup dir>` after putting `PIM_IMAGE_PREVIOUS` back in `PIM_IMAGE`. To go back by hand to an earlier image, `pim.sh update <version>` works the same way.
+
+**Nightly updates (optional).** `deploy/compose/systemd/pim-update.timer` runs `pim.sh update` at about 03:30 each night. Edit `User`, `WorkingDirectory` and `ExecStart` in `pim-update.service` to the account that owns the checkout (it must be in the `docker` group) and the checkout's path, then:
+
+```sh
+sudo cp deploy/compose/systemd/pim-update.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now pim-update.timer
+systemctl list-timers pim-update; journalctl -u pim-update   # the last line of a run is the JSON result
+```
+
+Follow `stable` for this; `edge` is every push to `main`.
+
+**Making the packages public (once).** The first push of an image to GHCR creates the package **private**, linked to the repository. A package owner has to open github.com → the organisation or user → Packages → `pim` (and `pim-computer`) → Package settings → Change visibility → Public, once, or instances cannot pull without `docker login ghcr.io`. The workflow needs no secret beyond the `GITHUB_TOKEN` it is given (`packages: write`). `workflow_run` workflows run from the default branch, so publishing starts once `publish.yml` is on `main`.
+
 ## Compose (homelab)
 
 A trial on one machine, over plain HTTP on `127.0.0.1:8088` (a browser treats `localhost` as secure, so passkeys work):

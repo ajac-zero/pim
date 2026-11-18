@@ -2,13 +2,13 @@
 # Writes deploy/compose/.env from env.example with every CHANGE_ME replaced by a fresh random value, once: an existing .env is never overwritten,
 # because its keys open what is already stored (PIM_KEK_K1 above all) and every browser's push subscription is bound to the VAPID public key. Back the file up with the database backups.
 #
-#   deploy/compose/init-env.sh https://pim.example.com                  # a public deployment: Caddy gets certificates for that host
-#   deploy/compose/init-env.sh http://localhost:8088 --image pim:v2      # a trial on this machine, plain HTTP on port 8088 (compose.local.yaml)
+#   deploy/compose/init-env.sh https://pim.example.com                  # a public deployment: Caddy gets certificates for that host; the image is the published ghcr.io/ajac-zero/pim:stable
+#   deploy/compose/init-env.sh http://localhost:8088 --image pim:v2      # a trial on this machine, plain HTTP on port 8088 (compose.local.yaml), with an image built from source
 set -eu
 cd "$(dirname "$0")"
 [ -e .env ] && { echo ".env exists; not overwriting it" >&2; exit 1; }
 url="${1:?usage: init-env.sh <public URL> [--image <image>]}"
-image="pim:v2"
+image="ghcr.io/ajac-zero/pim:stable"
 [ "${2:-}" = "--image" ] && image="${3:?}"
 host="$(printf %s "$url" | sed -E 's|^[a-z]+://||; s|/.*$||')"
 name="${host%%:*}"

@@ -29,7 +29,7 @@ real("the default agent host", () => {
 	let ownerId: string;
 	let chatId: string;
 	let n = 0;
-	const faux = fauxProvider({ provider: "faux", models: [{ id: "m" }] });
+	const faux = fauxProvider({ provider: "faux", models: [{ id: "m" }, { id: "m2" }] });
 	const prompts: string[] = [];
 	const sent: { url: string; method: string; headers: Record<string, string>; body: unknown }[] = [];
 	let failNext = false;
@@ -225,6 +225,30 @@ real("the default agent host", () => {
 		expect((await approvalOf(13)).decided_by).not.toBe("majordomo");
 		expect((await web.call("PUT", "/api/settings", { approvalPolicy: "explicit" })).status).toBe(200);
 	}, 360_000);
+
+	it("runs a chat on the model chosen for it as often as the person changes it, and not on another", async () => {
+		const chat = (await web.call("POST", "/api/sessions", { title: "Switching" })).json.id as string;
+		const pin = (id: string | null) => d.stack.admin.query("UPDATE pim_app.conversations SET model = $2 WHERE public_chat_id = $1", [chat, id && JSON.stringify({ provider: "faux", id })]);
+		const modelsRun = async () => {
+			const c = (await d.stack.admin.query("SELECT partition_id, conversation_id FROM pim_runtime.conversation_partitions WHERE public_chat_id = $1", [chat])).rows[0];
+			if (!c) return [];
+			return (await readTranscript(d.stack.runtime, ownerId, c.partition_id, Number(c.conversation_id))).flatMap((e) => ((e as { model?: { role: string; model?: string }[] }).model ?? []).filter((m) => m.role === "assistant").map((m) => m.model));
+		};
+		let sentCount = 0;
+		const ask = async (id: string | null, expected: (string | undefined)[]) => {
+			await pin(id);
+			const word = `reply ${++sentCount}`;
+			faux.setResponses([toolUse(fauxToolCall("send_to_user", { message: word })), fauxAssistantMessage(`ended ${word}`)] as never);
+			expect((await web.call("POST", `/api/sessions/${chat}/messages`, { commandId: `switch-${sentCount}`, text: "hi" })).status).toBe(202);
+			await waitFor(`the turn ${sentCount}`, async () => ((await modelsRun()).length >= expected.length ? true : undefined), 30_000);
+			expect(await modelsRun()).toEqual(expected);
+		};
+		await ask("m2", ["m2", "m2"]);
+		await ask("m", ["m2", "m2", "m", "m"]);
+		await ask("m2", ["m2", "m2", "m", "m", "m2", "m2"]);
+		// A model the catalog cannot run is not a reason to stay on the one before it: the chat falls back to the deployment's default, which is what shows it is not on m2.
+		await ask("gone", ["m2", "m2", "m", "m", "m2", "m2", "m", "m"]);
+	}, 120_000);
 
 	it("asks the model again in a chat whose request failed, and starts a new context at a person's request", async () => {
 		const chat = (await web.call("POST", "/api/sessions", { title: "Retry" })).json.id as string;

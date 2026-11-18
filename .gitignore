@@ -6,4 +6,5 @@ node_modules/
 .amp/portals/*
 docs/deployments/
 deploy/compose/backups/
+deploy/compose/.env
 deploy/compose/.env.tmp

@@ -1,0 +1,83 @@
+# Publishes the Pim images to GHCR (docs/v2-operations.md "Installing and updating"):
+#   - a push to main that passed CI (the CI workflow's run, not a rerun of its checks here): edge and sha-<12 characters>
+#   - a tag vX.Y.Z: X.Y.Z, X.Y and stable
+# It never runs for pim/* branches or pull requests: workflow_run is limited to main, and the job checks the run was a push. workflow_run workflows are read from the default branch.
+name: Publish
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+
+# Images are published one run at a time and in order, so an older commit's `edge` never lands after a newer one's.
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    if: github.event_name == 'push' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: pim
+            dockerfile: deploy/Dockerfile.v2
+          - image: pim-computer
+            dockerfile: deploy/Dockerfile.computer
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          fetch-depth: 0
+      - name: Work out the tags
+        id: meta
+        env:
+          SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+          REF: ${{ github.ref }}
+          REF_NAME: ${{ github.ref_name }}
+          IMAGE: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
+        run: |
+          set -eu
+          image="$(printf %s "$IMAGE" | tr '[:upper:]' '[:lower:]')"
+          if [ "${{ github.event_name }}" = push ]; then
+            # A release is a tag on a commit of main, which is the code CI has passed.
+            git fetch --quiet origin main
+            git merge-base --is-ancestor "$SHA" origin/main || { echo "::error::$REF_NAME is not on main"; exit 1; }
+            version="${REF_NAME#v}"
+            tags="$image:$version,$image:${version%.*},$image:stable"
+          else
+            version="sha-$(printf %s "$SHA" | cut -c1-12)"
+            tags="$image:edge,$image:$version"
+          fi
+          echo "tags=$tags" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: |
+            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
+            org.opencontainers.image.revision=${{ github.event.workflow_run.head_sha || github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}

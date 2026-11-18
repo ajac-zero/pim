@@ -246,9 +246,10 @@ services:
   # What agents run on it (after a person approves each command) runs inside this container as the unprivileged `node` user, with only the `pim-files` volume to write to.
   # A container is not a security sandbox for arbitrary code: do not mount the Docker socket or host paths here you would not give an agent.
   pim-computer:
-    # Its own image (deploy/Dockerfile.computer): Node, computer/ and a headless Chromium, with none of the server. `up --build` makes it.
+    # Its own image (deploy/Dockerfile.computer): Node, computer/ and a headless Chromium, with none of the server. It is pulled from the published image; `up --build` makes it from
+    # this checkout instead (set PIM_COMPUTER_IMAGE=pim-computer:local to keep it). `pim.sh update` sets PIM_COMPUTER_IMAGE to the digest it pulled.
     build: { context: ../.., dockerfile: deploy/Dockerfile.computer }
-    image: pim-computer:local
+    image: ${PIM_COMPUTER_IMAGE:-ghcr.io/ajac-zero/pim-computer:stable}
     profiles: [local-computer]
     restart: unless-stopped
     read_only: true

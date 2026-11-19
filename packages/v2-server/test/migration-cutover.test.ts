@@ -49,14 +49,15 @@ async function legacyDomain(admin: Pool, objects: FsObjectStore, conversation: s
 	await admin.query("INSERT INTO pim_ops.objects (bucket, key, owner_id, size_bytes, sha256, content_type) VALUES ('BLOBS', $1, $2, 4, $3, 'application/pdf')", [`${legacy}/files/f1`, ADA, createHash("sha256").update(bytes).digest("hex")]);
 	const rows: [string, string, unknown][] = [
 		["pim_stored_files", "notes/old.pdf", { path: "notes/old.pdf", id: "f1", type: "application/pdf", bytes: 4, updated_at: at }],
-		["pim_agents", "ag_poet", { id: "ag_poet", name: "Poet", instructions: "Answer in verse.", model: "faux/m", fallbacks: "[]", skills: "[\"Haiku\"]", apps: "[]", contacts: "[]", role: null, description: "", is_default: 0, symbol: "P", color: "blue", created_at: at }],
+		["pim_agents", "ag_poet", { id: "ag_poet", name: "Poet", instructions: "Answer in verse.", model: "faux/m", fallbacks: "[]", skills: "[\"Haiku\"]", apps: "[]", contacts: "[]", role: null, description: "", is_default: 0, symbol: "P", color: "blue", memory_scope: "private", memory_scopes: "[\"s_career\"]", created_at: at }],
 		["pim_agent_icons", "icon1", { agent: "ag_poet", type: "image/png", data: { $b64: PNG.toString("base64") }, updated_at: at }],
 		["pim_skills", "Haiku", { name: "Haiku", created_at: at }],
 		["pim_skill_versions", "Haiku:1", { name: "Haiku", version: 1, description: "Write haiku", instructions: "Five, seven, five.", created_at: at }],
 		["pim_skill_files", "Haiku:1:ref.md", { name: "Haiku", version: 1, path: "ref.md", sha256: sha }],
 		["optmem_log", "1", { id: 1, scope: "everyone", text: "Ada likes tea\nblack, no sugar", date: new Date(at).toISOString() }],
+		["optmem_scopes", "s_career", { key: "s_career", name: "Career", created_at: at }],
 		["pim_goals", "g_5k", { id: "g_5k", title: "Run a 5k", status: "active", steps: "[\"Run 2k\",{\"title\":\"Run 4k\",\"done\":true}]", created_at: at }],
-		["pim_circles", "c_friends", { id: "c_friends", name: "Friends" }],
+		["pim_circles", "c_friends", { id: "c_friends", name: "Friends", memory_scopes: "[\"everyone\"]" }],
 		["pim_circle_members", "c_friends:grace", { circle_id: "c_friends", owner_id: "own_grace" }],
 	];
 	const session = String(conversation);
@@ -145,7 +146,10 @@ real("a cutover rehearsal", () => {
 		expect([await count("SELECT count(*) n FROM pim_app.accounts"), await count("SELECT count(*) n FROM pim_app.conversations"), await count("SELECT count(*) n FROM pim_runtime.entries"), await count("SELECT count(*) n FROM pim_projection.chat_transcript_projection"), await count("SELECT count(*) n FROM pim_forge.forge_threads")]).toEqual(before);
 		// Ada's space came across: agents, skills with their files, memories, goals, circles, shares, apps, notes, and the secrets under the new keys.
 		const as = async <T>(sql: string, args: unknown[] = []) => (await d.stack.admin.query(sql, args)).rows as T[];
-		expect((await as("SELECT instructions, config FROM pim_app.agents WHERE owner_id = $1 AND id = 'ag_poet'", [ADA]))[0]).toMatchObject({ instructions: "Answer in verse.", config: { model: { provider: "faux", id: "m" }, skills: ["Haiku"] } });
+		expect((await as("SELECT instructions, config FROM pim_app.agents WHERE owner_id = $1 AND id = 'ag_poet'", [ADA]))[0]).toMatchObject({ instructions: "Answer in verse.", config: { model: { provider: "faux", id: "m" }, skills: ["Haiku"], memoryScope: "private", memoryScopes: ["s_career"] } });
+		// The person's named memory scopes keep their names, and a circle keeps the scopes it reads.
+		expect(await as("SELECT key, name FROM pim_app.memory_scopes WHERE owner_id = $1", [ADA])).toEqual([{ key: "s_career", name: "Career" }]);
+		expect((await as("SELECT memory_scopes FROM pim_app.circles WHERE owner_id = $1", [ADA]))[0]).toEqual({ memory_scopes: ["everyone"] });
 		// What the person chose for a connector's tool is carried: their own choice as it was, an agent's as on or off (asking meant off), a circle's not at all; the connector keeps its approval policy.
 		expect(await as("SELECT audience, app, tool, permission FROM pim_app.tool_permissions WHERE owner_id = $1 ORDER BY audience", [ADA])).toEqual([{ audience: "agent:ag_1", app: "conn_gmail", tool: "send_email", permission: "off" }, { audience: "owner", app: "conn_gmail", tool: "send_email", permission: "ask" }]);
 		expect(await as("SELECT approval FROM pim_app.connectors WHERE owner_id = $1 AND id = 'conn_gmail'", [ADA])).toEqual([{ approval: "all" }]);

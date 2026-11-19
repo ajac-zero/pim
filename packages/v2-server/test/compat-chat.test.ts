@@ -107,6 +107,46 @@ describe("memory", () => {
 	});
 });
 
+describe("memory scopes of agents", () => {
+	it("lets an agent read its own scope, the named scopes it was given and everyone, and no others", async () => {
+		const owner = await ownerOf(ada);
+		const as = (agentId: string) => ({ kind: "agent", ownerId: owner, agentId }) as never;
+		const career = (await call(ada, "POST", "/api/memory/scopes", { name: "Career" })).body.key as string;
+		const [reader, plain, majordomo] = (await Promise.all(["Reader", "Plain", "Groves"].map(async (name) => (await call(ada, "POST", "/api/agents", { name })).body.id as string))) as [string, string, string];
+		expect((await call(ada, "PUT", `/api/agents/${reader}`, { memoryScopes: ["scope-missing"] })).status).toBe(400);
+		expect((await call(ada, "PUT", `/api/agents/${reader}`, { memoryScopes: [career] })).body).toMatchObject({ memoryScope: `agent-${reader}`, memoryScopes: [career] });
+		// A migrated majordomo keeps its own scope under another name, as v1's was `private`.
+		await stack.admin.query("UPDATE pim_app.agents SET config = config || '{\"memoryScope\": \"private\"}' WHERE id = $1", [majordomo]);
+		for (const [scope, title] of [[career, "Resume"], ["private", "Diary"], ["everyone", "Name"], [`agent-${plain}`, "Plain's"], [`agent-${reader}`, "Reader's"]]) await app.memories.remember(as(reader), scope!, title!, title!);
+		const titles = new Set(["Resume", "Diary", "Name", "Plain's", "Reader's"]);
+		const recalled = async (id: string) => (await app.memories.recall(as(id), (await app.agents.memoryOf(as(id), id)).reads, ".", 100)).map((m) => m.title).filter((t) => titles.has(t)).sort();
+		expect(await recalled(reader)).toEqual(["Name", "Reader's", "Resume"]);
+		expect(await recalled(plain)).toEqual(["Name", "Plain's"]);
+		// The majordomo is the agent the person named, or else the one v1 marked as the default; it reads every scope and writes to its own.
+		await stack.admin.query("UPDATE pim_app.agents SET config = config || '{\"legacy\": {\"isDefault\": true}}' WHERE id = $1", [majordomo]);
+		expect(await recalled(majordomo)).toEqual(["Diary", "Name", "Plain's", "Reader's", "Resume"]);
+		expect((await app.agents.memoryOf(as(majordomo), majordomo)).own).toBe("private");
+		// A chat with no agent is answered by the majordomo, so it reads and writes as the majordomo does.
+		expect((await app.agents.memoryOf(as("pim"), null)).own).toBe("private");
+		// What the Runner shows an agent in its prompt follows the same scopes.
+		const context = async (id: string | null) => {
+			const chat = id ? (await call(ada, "POST", "/api/sessions", { agentId: id, title: "Scopes" })).body.id : null;
+			const c = (await stack.admin.query("SELECT pim_app.runner_context($1, $2) AS c", [owner, chat])).rows[0].c;
+			return { majordomo: c.agent.majordomo as boolean, titles: (c.memories as { title: string }[]).map((m) => m.title).filter((t) => titles.has(t)).sort() };
+		};
+		expect(await context(reader)).toEqual({ majordomo: false, titles: ["Name", "Reader's", "Resume"] });
+		expect(await context(majordomo)).toEqual({ majordomo: true, titles: ["Diary", "Name", "Plain's", "Reader's", "Resume"] });
+		expect(await context(null)).toMatchObject({ majordomo: true });
+		// The memory screen lists who reads each scope, and deleting a named scope stops every agent reading it.
+		const list = (await call(ada, "GET", "/api/memory")).body.scopes as { key: string; readers: string[] }[];
+		expect(list.find((s) => s.key === career)!.readers.sort()).toEqual([majordomo, reader].sort());
+		expect(list.find((s) => s.key === "private")!.readers).toEqual([majordomo]);
+		expect(list.find((s) => s.key === `agent-${plain}`)!.readers.sort()).toEqual([majordomo, plain].sort());
+		expect((await call(ada, "DELETE", `/api/memory/scopes/${career}`)).status).toBe(200);
+		expect((await call(ada, "GET", `/api/agents/${reader}`)).body.memoryScopes).toEqual([]);
+	});
+});
+
 describe("files", () => {
 	it("lists folders from paths, honors conditional writes, and keeps to /workspace", async () => {
 		expect((await call(ada, "PUT", "/api/files/content?path=/workspace/a/b.txt", "hello", { "content-type": "application/octet-stream" })).status).toBe(200);

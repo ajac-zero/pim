@@ -18,11 +18,18 @@ export type Agent = {
 	/** Other agents it may mention and hand work to. */
 	contacts: string[];
 	delegates: string[];
+	/** The scope it writes its memories to and reads: `agent-<id>` unless its config names another (the majordomo of a migrated space writes to `private`). */
+	memoryScope: string;
+	/** The named scopes (`pim_app.memory_scopes`) it also reads. */
+	memoryScopes: string[];
 	adoptedFrom: string | null;
 	createdAt: Date;
 };
 
-export type AgentInput = Partial<Pick<Agent, "name" | "instructions" | "emoji" | "color" | "icon" | "model" | "fallbacks" | "skills" | "apps" | "contacts" | "delegates">>;
+export type AgentInput = Partial<Pick<Agent, "name" | "instructions" | "emoji" | "color" | "icon" | "model" | "fallbacks" | "skills" | "apps" | "contacts" | "delegates" | "memoryScopes">>;
+
+/** Every scope an agent reads: its own, the named ones it was given, and everyone's. */
+export const readScopes = (a: Pick<Agent, "memoryScope" | "memoryScopes">): string[] => [...new Set([a.memoryScope, ...a.memoryScopes, "everyone"])];
 
 const COLOR = /^#[0-9a-fA-F]{6}$|^[a-z]{3,20}$/;
 const strings = (v: unknown, what: string): string[] => {
@@ -40,7 +47,8 @@ const modelRef = (v: unknown, what: string) => {
 const rowToAgent = (r: any): Agent => ({
 	id: r.id, name: r.name, instructions: r.instructions, emoji: r.emoji, color: r.color, icon: r.icon_key,
 	model: r.config.model ?? null, fallbacks: r.config.fallbacks ?? [], skills: r.config.skills ?? [], apps: r.config.apps ?? [],
-	contacts: r.config.contacts ?? [], delegates: r.config.delegates ?? [], adoptedFrom: r.adopted_from, createdAt: r.created_at,
+	contacts: r.config.contacts ?? [], delegates: r.config.delegates ?? [],
+	memoryScope: r.config.memoryScope ?? `agent-${r.id}`, memoryScopes: r.config.memoryScopes ?? [], adoptedFrom: r.adopted_from, createdAt: r.created_at,
 });
 
 /**
@@ -61,6 +69,13 @@ export class Agents {
 			const missing = names.filter((n) => !have.has(n));
 			if (missing.length) throw new BadRequestError(`No such skill: ${missing.join(", ")}`);
 			config.skills = names;
+		}
+		if (input.memoryScopes !== undefined) {
+			const keys = strings(input.memoryScopes, "memoryScopes");
+			const have = new Set((await tx.query("SELECT key FROM pim_app.memory_scopes WHERE key = ANY($1)", [keys])).rows.map((r) => r.key));
+			const missing = keys.filter((k) => !have.has(k));
+			if (missing.length) throw new BadRequestError(`No such memory scope: ${missing.join(", ")}`);
+			config.memoryScopes = keys;
 		}
 		for (const key of ["contacts", "delegates"] as const) {
 			if (input[key] === undefined) continue;
@@ -94,6 +109,24 @@ export class Agents {
 	async list(p: Principal): Promise<Agent[]> {
 		await this.authz.enforce(p, "api:read");
 		return this.db.owner(p.ownerId, async (tx) => (await tx.query("SELECT * FROM pim_app.agents WHERE deleted_at IS NULL ORDER BY created_at")).rows.map(rowToAgent));
+	}
+
+	/**
+	 * Where an agent writes its memories and what it reads. A chat with no agent is answered by the person's majordomo (`pim_app.majordomo_id()`); with none, only
+	 * `everyone` is shared. The majordomo reads every scope there is, as in v1, and still writes to its own.
+	 */
+	async memoryOf(p: Principal, agentId: string | null): Promise<{ own: string; reads: string[] }> {
+		await this.authz.enforce(p, "api:read");
+		return this.db.owner(p.ownerId, async (tx) => {
+			const row = (await tx.query("SELECT *, id = pim_app.majordomo_id() AS majordomo FROM pim_app.agents WHERE deleted_at IS NULL AND id = coalesce($1, pim_app.majordomo_id())", [agentId])).rows[0];
+			if (!row) return { own: "everyone", reads: ["everyone"] };
+			const agent = rowToAgent(row);
+			if (!row.majordomo) return { own: agent.memoryScope, reads: readScopes(agent) };
+			const every = (await tx.query("SELECT config->>'memoryScope' AS own, a.id FROM pim_app.agents a WHERE deleted_at IS NULL")).rows.map((r) => (r.own ?? `agent-${r.id}`) as string);
+			const named = (await tx.query("SELECT key FROM pim_app.memory_scopes")).rows.map((r) => r.key as string);
+			const kept = (await tx.query("SELECT DISTINCT scope FROM pim_app.memories WHERE deleted_at IS NULL")).rows.map((r) => r.scope as string);
+			return { own: agent.memoryScope, reads: [...new Set([...readScopes(agent), ...every, ...named, ...kept])] };
+		});
 	}
 
 	async get(p: Principal, id: string): Promise<Agent> {

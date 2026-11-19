@@ -43,7 +43,7 @@ type ModelRef = { provider: string; id: string };
 type ProviderRow = { id: string; kind: string; config: Record<string, any>; secret: string | null; /** The deployment's own (shared with everyone), named `shared:<id>`, its key sealed for the deployment rather than for the owner. */ shared?: boolean };
 export type RunnerContext = {
 	username: string | null;
-	agent: { id: string; name: string; instructions: string; config: Record<string, any> } | null;
+	agent: { id: string; name: string; instructions: string; config: Record<string, any>; /** The person's majordomo, which reads every scope. */ majordomo?: boolean } | null;
 	skills: { name: string; description: string }[];
 	goals: { id: string; title: string; steps: { title: string; done: boolean }[] }[];
 	memories: { id: string; scope: string; title: string }[];
@@ -424,7 +424,7 @@ export function createAgentHost(options: AgentHostOptions) {
 			}),
 			section("memory", async (input) => {
 				const c = await ctx(input.conversationId);
-				const scopes = c.agent ? `agent-${c.agent.id} and everyone` : "everyone";
+				const scopes = c.agent?.majordomo ? "every scope" : c.agent ? [...new Set([c.agent.config.memoryScope ?? `agent-${c.agent.id}`, ...(c.agent.config.memoryScopes ?? []), "everyone"])].join(", ") : "everyone";
 				return `Your memory (scopes ${scopes}). Save with note, find with recall, read in full with zoom.${c.memories.length ? `\n${c.memories.map((m) => `- [${m.id}] (${m.scope}) ${m.title}`).join("\n")}` : "\nNothing is remembered yet."}`;
 			}),
 			section("room", async (input) => {

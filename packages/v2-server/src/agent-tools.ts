@@ -223,7 +223,6 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 	const strings = Type.Array(Type.String());
 	const anyObject = Type.Record(Type.String(), Type.Any());
 	const files = Type.Record(Type.String(), Type.String());
-	const scopeOf = (call: Call, scope?: string) => scope ?? (call.agentId ? `agent-${call.agentId}` : "everyone");
 
 	const tools: ToolRegistration[] = [
 		tool(
@@ -266,9 +265,9 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 
 		// Memory.
 		write("note", "Save something to remember: a title and the text. It goes to your own memory unless you give a scope such as everyone.", Type.Object({ title: S({ minLength: 1 }), body: S({ minLength: 1 }), scope: O(S()) }), async (app, call, a) =>
-			text(`Remembered as ${await app.memories.remember(call.p, scopeOf(call, a.scope), a.title, a.body)}.`)),
+			text(`Remembered as ${await app.memories.remember(call.p, a.scope ?? (await app.agents.memoryOf(call.p, call.agentId)).own, a.title, a.body)}.`)),
 		read("recall", "Search your memory with a regular expression (case-insensitive) over titles and text.", Type.Object({ pattern: S({ minLength: 1 }), scope: O(S()), limit: O(Type.Integer({ minimum: 1, maximum: 50 })) }), async (app, call, a) => {
-			const scopes = a.scope ? [a.scope] : [...new Set([scopeOf(call), "everyone"])];
+			const scopes = a.scope ? [a.scope] : (await app.agents.memoryOf(call.p, call.agentId)).reads;
 			const found = await app.memories.recall(call.p, scopes, a.pattern, a.limit ?? 20);
 			return text(found.length ? found.map((m) => `[${m.id}] (${m.scope}) ${m.title}`).join("\n") : "Nothing matches.");
 		}),
@@ -277,6 +276,13 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 			return text(`${z.lines.join("\n")}\n(${z.total} lines in all)`);
 		}),
 		write("forget", "Forget a memory.", Type.Object({ id: S() }), async (app, call, a) => (await app.memories.forget(call.p, a.id), text("Forgotten."))),
+		write("create_memory_scope", "Name a shared memory scope, such as Work or Family, for the part of the person's life only some agents should know. It returns the scope's key; save to it with note's scope, and let an agent read it with share_memory_scope.", Type.Object({ name: S({ minLength: 1, maxLength: 40 }) }), async (app, call, a) =>
+			text(`Created the memory scope "${a.name.trim()}" with key ${await app.memories.createScope(call.p, a.name.trim())}.`)),
+		write("share_memory_scope", "Let another agent read a named memory scope, by its key, or with stop no longer read it. An agent always reads its own scope and everyone.", Type.Object({ scope: S(), agent: S(), stop: O(Type.Boolean()) }), async (app, call, a) => {
+			const kept = (await app.agents.get(call.p, a.agent)).memoryScopes.filter((k) => k !== a.scope);
+			const agent = await app.agents.update(call.p, a.agent, { memoryScopes: a.stop ? kept : [...kept, a.scope] });
+			return text(a.stop ? `${agent.name} no longer reads ${a.scope}.` : `${agent.name} reads ${a.scope} from its next step.`);
+		}),
 		write("move_memory", "Move a memory to another scope, such as everyone or another agent's.", Type.Object({ id: S(), scope: S() }), async (app, call, a) => (await app.memories.move(call.p, a.id, a.scope), text(`Moved to ${a.scope}.`))),
 
 		// Skills and goals.

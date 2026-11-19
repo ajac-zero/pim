@@ -7,6 +7,10 @@ import { newId } from "./ids.ts";
 export type Agent = {
 	id: string;
 	name: string;
+	/** What it is for, such as Researcher; the name when it was given none. */
+	role: string;
+	/** One line about it, shown under its name and to the agents that may hand it work. */
+	description: string;
 	instructions: string;
 	emoji: string | null;
 	color: string | null;
@@ -26,7 +30,7 @@ export type Agent = {
 	createdAt: Date;
 };
 
-export type AgentInput = Partial<Pick<Agent, "name" | "instructions" | "emoji" | "color" | "icon" | "model" | "fallbacks" | "skills" | "apps" | "contacts" | "delegates" | "memoryScopes">>;
+export type AgentInput = Partial<Pick<Agent, "name" | "role" | "description" | "instructions" | "emoji" | "color" | "icon" | "model" | "fallbacks" | "skills" | "apps" | "contacts" | "delegates" | "memoryScopes">>;
 
 /** Every scope an agent reads: its own, the named ones it was given, and everyone's. */
 export const readScopes = (a: Pick<Agent, "memoryScope" | "memoryScopes">): string[] => [...new Set([a.memoryScope, ...a.memoryScopes, "everyone"])];
@@ -44,8 +48,14 @@ const modelRef = (v: unknown, what: string) => {
 	return { provider: m.provider, id: m.id };
 };
 
+/** The web app's form calls an agent's emoji its `symbol`. */
+const withSymbol = <T extends AgentInput>(input: T): T => {
+	const { symbol, ...rest } = input as T & { symbol?: string | null };
+	return symbol === undefined || "emoji" in rest ? rest as T : ({ ...rest, emoji: symbol } as T);
+};
+
 const rowToAgent = (r: any): Agent => ({
-	id: r.id, name: r.name, instructions: r.instructions, emoji: r.emoji, color: r.color, icon: r.icon_key,
+	id: r.id, name: r.name, role: (r.role ?? r.config.legacy?.role ?? r.name) as string, description: (r.description || r.config.legacy?.description || "") as string, instructions: r.instructions, emoji: r.emoji, color: r.color, icon: r.icon_key,
 	model: r.config.model ?? null, fallbacks: r.config.fallbacks ?? [], skills: r.config.skills ?? [], apps: r.config.apps ?? [],
 	contacts: r.config.contacts ?? [], delegates: r.config.delegates ?? [],
 	memoryScope: r.config.memoryScope ?? `agent-${r.id}`, memoryScopes: r.config.memoryScopes ?? [], adoptedFrom: r.adopted_from, createdAt: r.created_at,
@@ -90,6 +100,8 @@ export class Agents {
 
 	#check(input: AgentInput) {
 		if (input.name !== undefined && (typeof input.name !== "string" || !input.name.trim() || input.name.length > 60)) throw new BadRequestError("An agent needs a name of up to 60 characters");
+		if (input.role != null && (typeof input.role !== "string" || !input.role.trim() || input.role.length > 60)) throw new BadRequestError("A role is up to 60 characters");
+		if (input.description != null && (typeof input.description !== "string" || input.description.length > 280)) throw new BadRequestError("A description is up to 280 characters");
 		if (input.instructions !== undefined && (typeof input.instructions !== "string" || input.instructions.length > 20_000)) throw new BadRequestError("Instructions are up to 20,000 characters");
 		if (input.color != null && !COLOR.test(input.color)) throw new BadRequestError("color is a #rrggbb value or a color name");
 		if (input.emoji != null && [...String(input.emoji)].length > 4) throw new BadRequestError("emoji is one emoji");
@@ -97,11 +109,12 @@ export class Agents {
 
 	async create(p: Principal, input: AgentInput & { name: string }): Promise<Agent> {
 		await this.authz.enforce(p, "api:write");
+		input = withSymbol(input);
 		this.#check(input);
 		const id = newId("a");
 		return this.db.owner(p.ownerId, async (tx) => {
 			const config = await this.#config(tx, p.ownerId, input);
-			await tx.query("INSERT INTO pim_app.agents (id, owner_id, name, instructions, config, emoji, color, icon_key) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)", [id, p.ownerId, input.name.trim(), input.instructions ?? "", JSON.stringify(config), input.emoji ?? null, input.color ?? null, input.icon ?? null]);
+			await tx.query("INSERT INTO pim_app.agents (id, owner_id, name, instructions, config, emoji, color, icon_key, role, description) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)", [id, p.ownerId, input.name.trim(), input.instructions ?? "", JSON.stringify(config), input.emoji ?? null, input.color ?? null, input.icon ?? null, (input.role ?? input.name).trim(), input.description ?? ""]);
 			return rowToAgent((await tx.query("SELECT * FROM pim_app.agents WHERE id = $1", [id])).rows[0]);
 		});
 	}
@@ -140,6 +153,7 @@ export class Agents {
 
 	async update(p: Principal, id: string, input: AgentInput): Promise<Agent> {
 		await this.authz.enforce(p, "api:write");
+		input = withSymbol(input);
 		this.#check(input);
 		return this.db.owner(p.ownerId, async (tx) => {
 			const cur = (await tx.query("SELECT config FROM pim_app.agents WHERE id = $1 AND deleted_at IS NULL FOR UPDATE", [id])).rows[0];
@@ -147,8 +161,8 @@ export class Agents {
 			if (input.contacts?.includes(id) || input.delegates?.includes(id)) throw new BadRequestError("An agent cannot be its own contact or delegate");
 			const config = await this.#config(tx, p.ownerId, input, cur.config);
 			await tx.query(
-				"UPDATE pim_app.agents SET name = coalesce($2, name), instructions = coalesce($3, instructions), config = $4, emoji = CASE WHEN $5 THEN $6 ELSE emoji END, color = CASE WHEN $7 THEN $8 ELSE color END, icon_key = CASE WHEN $9 THEN $10 ELSE icon_key END, updated_at = now() WHERE id = $1",
-				[id, input.name?.trim() ?? null, input.instructions ?? null, JSON.stringify(config), "emoji" in input, input.emoji ?? null, "color" in input, input.color ?? null, "icon" in input, input.icon ?? null],
+				"UPDATE pim_app.agents SET name = coalesce($2, name), instructions = coalesce($3, instructions), config = $4, emoji = CASE WHEN $5 THEN $6 ELSE emoji END, color = CASE WHEN $7 THEN $8 ELSE color END, icon_key = CASE WHEN $9 THEN $10 ELSE icon_key END, role = coalesce($11, role), description = coalesce($12, description), updated_at = now() WHERE id = $1",
+				[id, input.name?.trim() ?? null, input.instructions ?? null, JSON.stringify(config), "emoji" in input, input.emoji ?? null, "color" in input, input.color ?? null, "icon" in input, input.icon ?? null, input.role?.trim() ?? null, input.description ?? null],
 			);
 			return rowToAgent((await tx.query("SELECT * FROM pim_app.agents WHERE id = $1", [id])).rows[0]);
 		});

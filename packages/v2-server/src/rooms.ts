@@ -7,8 +7,8 @@
  * Who takes a turn: in `mentions` mode, the default, the host answers what the person says to no one in particular and an agent answers what mentions it; everything else is
  * only written into the other conversations, in their context from their next request, without waking them. In `open` mode everything the person says wakes every agent.
  *
- * Not ported: agents waking each other (what an agent posts reaches the host chat, and is written, not delivered as a wake, to the other seats: no one is set off by an agent,
- * so there is no loop to bound), and a model per seat.
+ * Agents wake each other as in v1: what an agent or the host sends reaches the others, and those it mentions (everyone, in an open room) take a turn, up to `MAX_ROOM_DEPTH` turns from the
+ * person's message. A seat's model is the model chosen for its chat (`PUT /api/sessions/:id/room/members/:agent/model`).
  */
 import type { App } from "@pim/v2-app/app";
 import { createChat, requestId, requireChat } from "@pim/v2-app/conversations";
@@ -91,18 +91,54 @@ export async function removeRoomMember(app: App, p: Principal, chatId: string, a
 	});
 }
 
+/** How many turns away from the person's latest message an agent may be woken by another's: a bound v1 did not have, so that two agents mentioning each other do not go on for ever. */
+export const MAX_ROOM_DEPTH = 8;
+
+/** The room a chat speaks in: its host chat, its host agent, the mode, and the agents in the seats. */
+async function roomOf(tx: Tx, hostChat: string) {
+	const host = (await tx.query("SELECT c.room_mode, a.id AS agent_id, coalesce(a.name, 'Pim') AS name FROM pim_app.conversations c LEFT JOIN pim_app.agents a ON a.id = c.agent_id WHERE c.public_chat_id = $1", [hostChat])).rows[0];
+	const members = (await tx.query("SELECT m.member AS id, a.name, m.seat_chat_id FROM pim_app.room_members m JOIN pim_app.agents a ON a.id = m.member WHERE m.public_chat_id = $1 AND m.seat_chat_id IS NOT NULL ORDER BY m.member", [hostChat])).rows;
+	return { open: host?.room_mode === "open", hostId: ((host?.agent_id as string | null) ?? "host"), hostName: (host?.name as string) ?? "Pim", members: members as { id: string; name: string; seat_chat_id: string }[] };
+}
+
 /**
- * What an agent in a room sends: it lands in the host chat as "[From Name]", written without waking the host, and the host chat is unread. Posted under a key (the tool call's),
+ * Tells the others in a room what one of them said, as v1's `posted` did: those it mentions, or everyone in an open room, take a turn, one further from the person's message than the
+ * turn that said it; the rest hear it without being woken, in their context from their next request. `from` is the chat that spoke (a seat, or the host chat), whose own agent is not told.
+ */
+async function tellRoom(tx: Tx, ownerId: string, hostChat: string, from: string, key: string, speaker: { id: string; name: string }, message: string): Promise<void> {
+	const room = await roomOf(tx, hostChat);
+	const named = mentionedAgents(message, [{ id: room.hostId, name: room.hostName }, ...room.members]);
+	const depth = Number((await tx.query("SELECT coalesce(max((payload->>'depth')::int), 0) AS depth FROM (SELECT payload FROM pim_app.accepted_commands WHERE public_chat_id = $1 AND kind = 'user_message' ORDER BY accepted_at DESC LIMIT 1) latest", [from])).rows[0]?.depth ?? 0) + 1;
+	const text = `[From ${speaker.name}]\n${message}`;
+	const hear = (chat: string, who: string) => {
+		const wake = (room.open || named.includes(who)) && depth < MAX_ROOM_DEPTH;
+		return accept(tx, ownerId, `room-heard:${from}:${key}:${who}`.slice(0, 128), chat, wake ? { text, depth, whenBusy: "followUp" } : { text, write: true });
+	};
+	if (from !== hostChat && speaker.id !== room.hostId) await hear(hostChat, room.hostId);
+	for (const m of room.members) if (m.seat_chat_id !== from) await hear(m.seat_chat_id, m.id);
+}
+
+/**
+ * What an agent in a room sends: it lands in the host chat as "[From Name]", where the person reads it, and the other agents hear it too (`tellRoom`). Posted under a key (the tool call's),
  * so a replay posts nothing twice. Returns false for a chat that is not a seat, which has nothing to post to.
  */
 export async function postToRoom(app: App, p: Principal, seatChatId: string, key: string, message: string): Promise<boolean> {
 	await app.identity.authz.enforce(p, "api:write");
 	return app.db.owner(p.ownerId, async (tx) => {
-		const seat = (await tx.query("SELECT c.room_of, a.name FROM pim_app.conversations c LEFT JOIN pim_app.agents a ON a.id = c.agent_id WHERE c.public_chat_id = $1", [seatChatId])).rows[0];
+		const seat = (await tx.query("SELECT c.room_of, c.agent_id, a.name FROM pim_app.conversations c LEFT JOIN pim_app.agents a ON a.id = c.agent_id WHERE c.public_chat_id = $1", [seatChatId])).rows[0];
 		if (!seat?.room_of) return false;
-		await accept(tx, p.ownerId, `room-post:${seatChatId}:${key}`.slice(0, 128), seat.room_of as string, { text: `[From ${seat.name ?? "an agent"}]\n${message}`, write: true });
+		await tellRoom(tx, p.ownerId, seat.room_of as string, seatChatId, key, { id: seat.agent_id as string, name: (seat.name as string) ?? "an agent" }, message);
 		await tx.query("UPDATE pim_app.conversations SET response_at = now(), updated_at = now() WHERE public_chat_id = $1", [seat.room_of]);
 		return true;
+	});
+}
+
+/** What a room's host sends in the host chat reaches the agents in its seats, as what the agents in them send reaches each other and the host; a chat that is not a room's host tells no one. */
+export async function hostSpeaks(app: App, p: Principal, hostChat: string, key: string, message: string): Promise<void> {
+	await app.db.owner(p.ownerId, async (tx) => {
+		const room = await roomOf(tx, hostChat);
+		if (room.members.length === 0) return;
+		await tellRoom(tx, p.ownerId, hostChat, hostChat, key, { id: room.hostId, name: room.hostName }, message);
 	});
 }
 
@@ -111,15 +147,17 @@ export async function roomViews(app: App, ownerId: string, chatIds: readonly str
 	const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 	const ids = chatIds.filter((id) => uuid.test(id));
 	const rows = ids.length === 0 ? [] : await app.db.owner(ownerId, async (tx) => (await tx.query(
-		`SELECT c.public_chat_id::text AS chat, c.room_mode, m.member, a.name, a.model, a.config,
+		`SELECT c.public_chat_id::text AS chat, c.room_mode, m.member, a.name, a.model, a.config, (SELECT s.model FROM pim_app.conversations s WHERE s.public_chat_id = m.seat_chat_id) AS seat_model,
 		        coalesce((SELECT s.busy FROM pim_projection.sidebar_session_projection s WHERE s.chat_id = m.seat_chat_id::text), false) AS busy
 		 FROM pim_app.room_members m JOIN pim_app.conversations c ON c.public_chat_id = m.public_chat_id LEFT JOIN pim_app.agents a ON a.id = m.member AND a.deleted_at IS NULL
 		 WHERE m.public_chat_id = ANY($1::uuid[]) AND c.deleted_at IS NULL ORDER BY m.member`, [ids])).rows);
 	const views = new Map<string, { mode: "mentions" | "open"; members: unknown[] }>();
 	for (const r of rows) {
-		const model = (r.config?.model as { provider: string; id: string } | undefined) ?? { provider: "", id: r.model ?? "" };
+		// The model chosen for this seat alone is over the agent's own.
+		const override = r.seat_model !== null && r.seat_model !== undefined;
+		const model = (override ? (r.seat_model as { provider: string; id: string }) : (r.config?.model as { provider: string; id: string } | undefined)) ?? { provider: "", id: r.model ?? "" };
 		const room = views.get(r.chat) ?? { mode: r.room_mode === "open" ? ("open" as const) : ("mentions" as const), members: [] };
-		room.members.push({ id: r.member, name: r.name ?? r.member, busy: r.busy === true, held: false, error: null, model: { model: { provider: model.provider, id: model.id, name: model.id || "Default model", images: false }, override: false } });
+		room.members.push({ id: r.member, name: r.name ?? r.member, busy: r.busy === true, held: false, error: null, model: { model: { provider: model.provider, id: model.id, name: model.id || "Default model", images: false }, override } });
 		views.set(r.chat, room);
 	}
 	return views;

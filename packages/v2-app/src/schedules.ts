@@ -31,7 +31,10 @@ export function nextCron(spec: string, after: Date): Date | null {
 	return null;
 }
 
-export type ScheduleInput = { kind: "cron" | "at" | "delay"; spec: string; prompt: string; target?: "new_chat" | "same_chat"; chatId?: string; agentId?: string; now?: Date };
+export type ScheduleInput = { kind: "cron" | "at" | "delay"; spec: string; prompt: string; label?: string; target?: "new_chat" | "same_chat"; chatId?: string; agentId?: string; now?: Date; /** Makes the schedule's id the same for the same key, so a replayed call makes one. */ key?: string };
+
+/** What a schedule wakes its agent with. */
+export const scheduledText = (s: { id: string; label: string | null; prompt: string }): string => `[Scheduled task${s.label ? ` "${s.label}"` : ""} ${s.id}] ${s.prompt}`;
 
 /** How late an occurrence may fire. Anything older was missed while nothing was running: it is recorded, never replayed. */
 export const FIRE_GRACE_MS = 5 * 60_000;
@@ -46,10 +49,11 @@ export class Schedules {
 		const now = input.now ?? new Date();
 		const next = input.kind === "cron" ? nextCron(input.spec, now) : input.kind === "at" ? new Date(input.spec) : new Date(now.getTime() + Number(input.spec));
 		if (!next || Number.isNaN(next.getTime())) throw new BadRequestError("That schedule never fires");
-		const id = newId("sc");
+		const id = input.key ? `sc_${createHash("sha256").update(`${p.ownerId}\n${input.key}`).digest("hex").slice(0, 20)}` : newId("sc");
 		await this.db.owner(p.ownerId, async (tx) => {
+			if ((await tx.query("SELECT 1 FROM pim_app.schedules WHERE id = $1", [id])).rowCount) return;
 			await this.quota?.admitNew(tx, p.ownerId, "schedules");
-			await tx.query("INSERT INTO pim_app.schedules (id, owner_id, agent_id, kind, spec, target, chat_id, prompt, next_run_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)", [id, p.ownerId, input.agentId ?? null, input.kind, input.spec, input.target ?? "new_chat", input.chatId ?? null, input.prompt, next]);
+			await tx.query("INSERT INTO pim_app.schedules (id, owner_id, agent_id, kind, spec, target, chat_id, prompt, next_run_at, label) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)", [id, p.ownerId, input.agentId ?? null, input.kind, input.spec, input.target ?? "new_chat", input.chatId ?? null, input.prompt, next, input.label ?? null]);
 			await wake(tx, p.ownerId);
 		});
 		return id;
@@ -88,12 +92,12 @@ export class Schedules {
 				let chatId: string | undefined = s.chat_id ?? undefined;
 				if (s.target === "new_chat") {
 					chatId = createHash("sha256").update(commandId).digest("hex").replace(/^(.{8})(.{4}).(.{3}).(.{3})(.{12}).*$/, "$1-$2-5$3-a$4-$5");
-					await this.conversations.create(principal, { id: chatId, agentId: s.agent_id ?? undefined, title: s.prompt.slice(0, 60), kind: "trigger" }).catch((error) => {
+					await this.conversations.create(principal, { id: chatId, agentId: s.agent_id ?? undefined, title: (s.label ?? s.prompt).slice(0, 60), kind: "trigger" }).catch((error) => {
 						if ((error as { code?: string }).code !== "23505") throw error;
 					});
 				}
 				// A space that has used its day's allowance does not run: the occurrence is recorded as missed, and the schedule moves on.
-				const admission = await this.conversations.admit(principal, { commandId, kind: "trigger_fire", chatId, payload: { text: s.prompt, schedule: s.id } }).catch((error) => {
+				const admission = await this.conversations.admit(principal, { commandId, kind: "trigger_fire", chatId, payload: { text: scheduledText(s), schedule: s.id } }).catch((error) => {
 					if (error instanceof QuotaError) return null;
 					throw error;
 				});
@@ -118,7 +122,7 @@ export class Schedules {
 
 	async list(p: Principal) {
 		await this.authz.enforce(p, "api:read");
-		return this.db.owner(p.ownerId, async (tx) => (await tx.query("SELECT id, kind, spec, target, prompt, next_run_at, enabled FROM pim_app.schedules ORDER BY created_at")).rows.map((r) => ({ id: r.id as string, kind: r.kind as string, spec: r.spec as string, target: r.target as string, prompt: r.prompt as string, nextRunAt: r.next_run_at as Date | null, enabled: r.enabled as boolean })));
+		return this.db.owner(p.ownerId, async (tx) => (await tx.query("SELECT id, kind, spec, target, prompt, label, chat_id, agent_id, next_run_at, enabled FROM pim_app.schedules ORDER BY created_at")).rows.map((r) => ({ id: r.id as string, kind: r.kind as string, spec: r.spec as string, target: r.target as string, prompt: r.prompt as string, label: r.label as string | null, chatId: r.chat_id as string | null, agentId: r.agent_id as string | null, nextRunAt: r.next_run_at as Date | null, enabled: r.enabled as boolean })));
 	}
 
 	async remove(p: Principal, id: string): Promise<void> {

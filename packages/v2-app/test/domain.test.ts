@@ -79,9 +79,9 @@ describe("command admission", () => {
 		expect((await f.app.conversations.admit(u.principal, hand)).result).toEqual(d.result);
 		const [one, two] = d.result!.tasks as { taskId: string; chatId: string }[];
 		// Each task starts in a chat of its own, with its words from the agent that handed it out.
-		const first = (await rowsOf("SELECT payload->>'text' AS text FROM pim_app.accepted_commands WHERE public_chat_id = $1", [one!.chatId])).map((r) => r.text);
+		const first = (await rowsOf("SELECT payload->>'text' AS text FROM pim_app.accepted_commands WHERE public_chat_id = $1 AND kind = 'user_message'", one!.chatId)).map((r) => r.text);
 		expect(first).toEqual(["[From Pim]\ngo"]);
-		const updates = async () => (await rowsOf("SELECT payload->>'text' AS text FROM pim_app.accepted_commands WHERE public_chat_id = $1 AND command_id LIKE 'task-update:%'", [chat])).map((r) => r.text as string);
+		const updates = async () => (await rowsOf("SELECT payload->>'text' AS text FROM pim_app.accepted_commands WHERE public_chat_id = $1 AND command_id LIKE 'task-update:%'", chat)).map((r) => r.text as string);
 		expect(await f.app.conversations.updateTask(u.principal, one!.taskId, "auth-required")).toEqual({ delivered: false });
 		// One of them is done, the other still at work: nothing is told yet.
 		expect(await f.app.conversations.updateTask(u.principal, one!.taskId, "completed", "did one")).toEqual({ delivered: false });
@@ -112,12 +112,12 @@ describe("command admission", () => {
 		await f.app.conversations.settleTask(owner(), one!.taskId);
 		expect((await f.app.conversations.batch(owner(), d.result!.batch as string)).map((t) => [t.status, t.result])).toEqual([["completed", "first part\n\nsecond part"], ["working", null]]);
 		// Nothing is told, and nothing woken, while one is at work; a call that waits is woken, once, when the last is done, and no update is sent in its place.
-		const wakes = async () => (await rowsOf("SELECT payload FROM pim_app.accepted_commands WHERE public_chat_id = $1 AND kind = 'task_wake'", [chat])).map((r) => r.payload.taskId);
+		const wakes = async () => (await rowsOf("SELECT payload FROM pim_app.accepted_commands WHERE public_chat_id = $1 AND kind = 'task_wake'", chat)).map((r) => r.payload.taskId);
 		expect(await wakes()).toEqual([]);
 		await f.app.conversations.settleTask(owner(), two!.taskId, "boom");
 		expect(await wakes()).toEqual([42]);
 		expect((await f.app.conversations.batch(owner(), d.result!.batch as string))[1]).toMatchObject({ status: "failed", result: "It didn't finish: boom." });
-		expect(await rowsOf("SELECT 1 FROM pim_app.accepted_commands WHERE public_chat_id = $1 AND command_id LIKE 'task-update:%'", [chat])).toEqual([]);
+		expect(await rowsOf("SELECT 1 FROM pim_app.accepted_commands WHERE public_chat_id = $1 AND command_id LIKE 'task-update:%'", chat)).toEqual([]);
 		// A task already over is not ended again.
 		await f.app.conversations.settleTask(owner(), two!.taskId);
 		expect((await f.app.conversations.batch(owner(), d.result!.batch as string))[1]!.status).toBe("failed");

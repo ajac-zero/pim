@@ -45,6 +45,15 @@ describe("agents and skills", () => {
 		const u = await mk("agt");
 		const a = await app.agents.create(u.principal, { name: "Scout", instructions: "look around", emoji: "🔭", color: "#336699" });
 		const b = await app.agents.create(u.principal, { name: "Writer" });
+		// What an agent is for: the role is its name until it has one, and the app's form calls the emoji its symbol.
+		expect(b).toMatchObject({ role: "Writer", description: "" });
+		const coach = await app.agents.create(u.principal, { name: "Ada", role: "Coach", description: "Coaches runners", symbol: "🏃" } as never);
+		expect(coach).toMatchObject({ role: "Coach", description: "Coaches runners", emoji: "🏃" });
+		expect(await app.agents.update(u.principal, coach.id, { description: "Coaches everyone" })).toMatchObject({ role: "Coach", description: "Coaches everyone" });
+		await expect(app.agents.update(u.principal, coach.id, { role: " " })).rejects.toMatchObject({ status: 400 });
+		// An agent that came from v1 keeps them under config.legacy until it has its own.
+		await app.db.owner(u.account.ownerId, (tx) => tx.query("INSERT INTO pim_app.agents (id, owner_id, name, instructions, config) VALUES ('a_legacy', $1, 'Old', '', $2)", [u.account.ownerId, JSON.stringify({ legacy: { role: "Researcher", description: "Reads" } })]));
+		expect(await app.agents.get(u.principal, "a_legacy")).toMatchObject({ role: "Researcher", description: "Reads" });
 		await expect(app.agents.update(u.principal, a.id, { contacts: ["a_nope"] })).rejects.toMatchObject({ status: 400 });
 		await expect(app.agents.update(u.principal, a.id, { delegates: [a.id] })).rejects.toMatchObject({ status: 400 });
 		await expect(app.agents.update(u.principal, a.id, { color: "javascript:alert(1)" })).rejects.toMatchObject({ status: 400 });

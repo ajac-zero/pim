@@ -397,12 +397,12 @@ export function connectorToolset(deps: ConnectorToolsDeps): { tools: ToolRegistr
 					: () => withBearer(c, (bearer) => withSession(deps.transport, c.url ?? "", bearer, (rpc) => rpc("tools/call", { name: tool.name, arguments: args.arguments ?? {} }), 30_000));
 				if (readOnly) {
 					const result = await run();
-					return { content: resultContent(result), ...(result?.isError === true ? { isError: true } : {}) };
+					return { output: resultContent(result), ...(result?.isError === true ? { isError: true } : {}) };
 				}
 				// A call with effects, once: its outcome is on the operation, so a replay or a new owner finds it there, and one in flight is reconciled, not made again.
 				const operationId = `connector:${deps.partitionId}:${taskId}`;
 				const op = await deps.ops.begin({ operationId, ownerId: deps.owner, partitionId: PartitionId.parse(deps.partitionId), taskId, toolName: "connector_call", capability: `connector:${c.id}`, idempotencyKey: `pim-${ownerId}-${deps.partitionId}-${taskId}` } as never);
-				if (op.state === "completed") return Array.isArray((op.receipt as any)?.content) ? { content: (op.receipt as any).content } : text(String((op.receipt as any)?.summary ?? "Done."));
+				if (op.state === "completed") return Array.isArray((op.receipt as any)?.content) ? { output: (op.receipt as any).content } : text(String((op.receipt as any)?.summary ?? "Done."));
 				if (op.state === "failed" || op.state === "cancelled") return text(`The call did not go through: ${String((op.receipt as any)?.error ?? op.state)}`, true);
 				if (op.state !== "pending") return text(`The call was started, but what became of it is not known (${op.state}). It was not made again; check with ${c.name} before asking again.`, true);
 				await deps.ops.transition(ownerId, operationId, "running");

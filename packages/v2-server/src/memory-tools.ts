@@ -3,7 +3,7 @@
  * line of at most 280 bytes, recall says when it shows only the newest matches, and the majordomo names the person's shared scopes and, once the person approves, lets other agents read
  * them. Where the scopes are kept is `Memories` and `Agents.memoryOf` in `@pim/v2-app`.
  */
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import type { ToolRegistration } from "@earendil-works/pi-durable";
 import type { App } from "@pim/v2-app/app";
 import type { Principal } from "@pim/v2-contracts/identity";
@@ -11,11 +11,11 @@ import type { Db as RuntimeDb } from "@pim/v2-runtime/db";
 import { rosterOf } from "./agent-team-tools.ts";
 import { askFirst } from "./tool-approval.ts";
 
-type Result = { content: { type: "text"; text: string }[]; isError?: boolean };
+type Result = { output: { type: "text"; text: string }[]; isError?: boolean };
 type Call = { chat: string | null; p: Principal; api: any; agentId: string | null; context: any };
 type Define = (name: string, description: string, parameters: any, run: (app: App, call: Call, args: any) => Promise<Result>) => ToolRegistration;
 
-const text = (s: string, isError = false): Result => ({ content: [{ type: "text", text: s }], ...(isError ? { isError } : {}) });
+const text = (s: string, isError = false): Result => ({ output: [{ type: "text", text: s }], ...(isError ? { isError } : {}) });
 
 /** The longest one memory's title may be, in UTF-8 bytes, as in v1; the body is what a memory says in full, which `zoom` reads. */
 export const TITLE_BYTES = 280;

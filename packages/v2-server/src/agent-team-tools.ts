@@ -2,7 +2,7 @@
  * The tools with which an agent works with the person's other agents, ported from v1 (`src/tasks.ts`, `src/extensions/agents.ts`): `delegate` hands tasks to others, `create_agent` makes
  * a new agent and `update_agent` changes one. Whom an agent may hand a task to, and who the person's agents are, is `pim_app.runner_agents` (migration 0690), which the prompt reads too.
  */
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import type { ToolRegistration } from "@earendil-works/pi-durable";
 import type { App } from "@pim/v2-app/app";
 import { MAX_TASKS, MAX_TASK_DEPTH, TASK_UPDATE, type Roster, type RosterAgent } from "./agent-prompts.ts";
@@ -10,7 +10,7 @@ import { filesPath } from "./computer-tools.ts";
 import type { Principal } from "@pim/v2-contracts/identity";
 import type { Db as RuntimeDb } from "@pim/v2-runtime/db";
 
-type Result = { content: { type: "text"; text: string }[]; isError?: boolean };
+type Result = { output: { type: "text"; text: string }[]; isError?: boolean };
 type Call = { chat: string | null; p: Principal; api: any; agentId: string | null; context: any };
 type Define = (name: string, description: string, parameters: any, run: (app: App, call: Call, args: any) => Promise<Result>) => ToolRegistration;
 
@@ -25,7 +25,7 @@ export type TeamDeps = {
 	write: Define;
 };
 
-const text = (s: string, isError = false): Result => ({ content: [{ type: "text", text: s }], ...(isError ? { isError } : {}) });
+const text = (s: string, isError = false): Result => ({ output: [{ type: "text", text: s }], ...(isError ? { isError } : {}) });
 const json = (v: unknown): Result => text(JSON.stringify(v, null, 1));
 
 const COLORS = ["gray", "red", "orange", "amber", "green", "teal", "blue", "indigo", "violet", "pink"];
@@ -120,7 +120,7 @@ export function teamTools(deps: TeamDeps): ToolRegistration[] {
 			if (a.wait) {
 				const tasks = await app.conversations.batch(ownerId, batch);
 				// Suspended, the call holds nothing: the application wakes it once all its tasks are done, and it runs again to here.
-				if (tasks.some((t) => !TERMINAL.has(t.status))) return { content: [{ type: "text", text: "Waiting for the tasks." }], control: { suspend: true } } as never;
+				if (tasks.some((t) => !TERMINAL.has(t.status))) return { output: [{ type: "text", text: "Waiting for the tasks." }], control: { suspend: true } } as never;
 				await app.conversations.answered(ownerId, batch);
 				return text(tasks.map(waitedAnswer).join("\n\n"));
 			}

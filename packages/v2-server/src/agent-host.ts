@@ -133,7 +133,7 @@ type Price = { input: number; output: number; cacheRead: number; cacheWrite: num
 
 let knownById: Map<string, any> | undefined;
 /** pi-ai's catalog by model id, from the first provider that has each: what a custom endpoint's model is when it serves one the catalog knows. */
-const knownModel = (id: string) => (knownById ??= new Map([anthropicProvider(), currentOpenaiProvider(), googleProvider()].flatMap((p) => (p as unknown as Provider).getModels().map((m: any) => [m.id, m] as const)).reverse())).get(id);
+const knownModel = (id: string) => (knownById ??= new Map([anthropicProvider(), openaiProvider(), googleProvider()].flatMap((p) => (p as unknown as Provider).getModels().map((m: any) => [m.id, m] as const)).reverse())).get(id);
 
 /**
  * The limits and prices of a custom endpoint's model, as v1 settled them: what the person set, then what the server listed, then what pi-ai's catalog knows of that id, then a default;

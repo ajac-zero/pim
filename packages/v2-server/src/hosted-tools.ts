@@ -3,7 +3,7 @@
  * and runs its backend on their computer, where it can do what any program there can, so they approve each deploy. Looking at an app's backend and stopping it need no approval.
  * The tools are made inside `computerTools`, which gives them its approval and once-only-effect machinery and its way to the computer.
  */
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import type { App } from "@pim/v2-app/app";
 import { type AppFiles, binaryValue } from "@pim/v2-app/app-files";
 import { ACCESS_LEVELS, MANIFEST_FILE, parseManifest } from "@pim/v2-app/apps";
@@ -11,7 +11,7 @@ import { computerAppId, runBackend } from "@pim/v2-app/hosted-run";
 import type { Computer } from "@pim/v2-app/relay";
 import type { Principal } from "@pim/v2-contracts/identity";
 
-type Result = { content: { type: string; [key: string]: unknown }[]; isError?: boolean };
+type Result = { output: { type: string; [key: string]: unknown }[]; isError?: boolean };
 type Prepared = { result: Result } | { summary: string };
 
 /** What the tools take of `computerTools`. */
@@ -28,7 +28,7 @@ export type HostedKit = {
 const MAX_FILES = 100;
 const PART = 524_288;
 const EXCLUDED = ["**/node_modules", "**/.git"];
-const text = (s: string, isError = false): Result => ({ content: [{ type: "text", text: s }], ...(isError ? { isError } : {}) });
+const text = (s: string, isError = false): Result => ({ output: [{ type: "text", text: s }], ...(isError ? { isError } : {}) });
 
 const HOW = (root: string) =>
 	`An app with a backend is a folder in the person's files (${root}/…) with a ${MANIFEST_FILE} at its root: {"backend": {"command": "node server.js", "install": "npm ci"}}. command starts the backend, from a copy of the folder, and it must listen on 127.0.0.1 at the port in $PORT; install runs first, in the same copy (a copy has no node_modules or .git, so install what it needs there). The app is its frontend and its backend in one folder: whatever the backend answers at / is the app's page, shown beside the chat. Use relative addresses in the page (fetch("api/items"), not fetch("/api/items")), because it isn't served from the root of an address. The page runs in a sandbox and can reach only its own backend. The backend keeps what it needs in $PIM_APP_DATA, a folder that stays across versions. The folder may hold up to ${MAX_FILES} files. Who may open it is the manifest's "access": "owner" (the default; only the person), "circles" (the people in the circles the person shares it with, who sign in to Pim) or "public" (anyone with the address, signed in or not); the last two work only where this Pim has an address for apps of their own, and the person is told what you give as access when they approve.`;

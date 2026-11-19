@@ -3,7 +3,7 @@
  * agent it is for, which is what puts it in that agent's `your_skills`. Only the person's majordomo writes for another agent, and an agent at work on a task writes none.
  * `install_skill`, from a GitHub folder, stays with the other tools of `./agent-tools.ts`.
  */
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import type { ToolRegistration } from "@earendil-works/pi-durable";
 import type { App } from "@pim/v2-app/app";
 import type { Principal } from "@pim/v2-contracts/identity";
@@ -11,11 +11,11 @@ import type { Db as RuntimeDb } from "@pim/v2-runtime/db";
 import { rosterOf } from "./agent-team-tools.ts";
 import { askFirst } from "./tool-approval.ts";
 
-type Result = { content: { type: "text"; text: string }[]; isError?: boolean };
+type Result = { output: { type: "text"; text: string }[]; isError?: boolean };
 type Call = { chat: string | null; p: Principal; api: any; agentId: string | null; context: any };
 type Define = (name: string, description: string, parameters: any, run: (app: App, call: Call, args: any) => Promise<Result>) => ToolRegistration;
 
-const text = (s: string, isError = false): Result => ({ content: [{ type: "text", text: s }], ...(isError ? { isError } : {}) });
+const text = (s: string, isError = false): Result => ({ output: [{ type: "text", text: s }], ...(isError ? { isError } : {}) });
 
 export function skillTools(deps: { ownerId: string; runtime: RuntimeDb; read: Define }): ToolRegistration[] {
 	// A tool that waits for a person's approval is parked and run again when they decide, so it is one that may be run again: `read` defines such tools.

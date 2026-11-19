@@ -3,18 +3,18 @@
  * and looks at what is open and what the person has selected, so "this function" or "fix this" can be answered. The canvas is in the person's browser: these reach the app that has the
  * chat open through the notices of `app.notices` (the app answers a question with `canvas_answer`), and without one they say so. They need a paired computer, as the files do.
  */
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import type { ToolRegistration } from "@earendil-works/pi-durable";
 import type { App } from "@pim/v2-app/app";
 import { acquireRemote, type RelayBus } from "@pim/v2-app/relay";
 import type { Principal } from "@pim/v2-contracts/identity";
 import { FILES_ROOT, filesPath } from "./computer-tools.ts";
 
-type Result = { content: { type: "text"; text: string }[]; isError?: boolean };
+type Result = { output: { type: "text"; text: string }[]; isError?: boolean };
 type Call = { chat: string | null; p: Principal; api: any; agentId: string | null; context: any };
 type Define = (name: string, description: string, parameters: any, run: (app: App, call: Call, args: any) => Promise<Result>) => ToolRegistration;
 
-const text = (s: string, isError = false): Result => ({ content: [{ type: "text", text: s }], ...(isError ? { isError } : {}) });
+const text = (s: string, isError = false): Result => ({ output: [{ type: "text", text: s }], ...(isError ? { isError } : {}) });
 
 const NO_APP = "No app has this chat open right now, so there is no canvas to look at. The person sees the chat when they open it.";
 /** How long the app has to answer a question about its canvas. */

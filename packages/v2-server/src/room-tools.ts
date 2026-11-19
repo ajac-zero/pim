@@ -2,7 +2,7 @@
  * The tools that go with group chats and with reading other chats, ported from v1 (`src/rooms.ts`, `src/extensions/chats.ts`): the host takes agents out of the chat once they are
  * no longer needed (`remove_from_chat`), an agent that joined later reads what was said before it did (`chat_history`), and any agent reads another of the person's chats (`read_chat`).
  */
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import type { ToolRegistration } from "@earendil-works/pi-durable";
 import type { App } from "@pim/v2-app/app";
 import type { Principal } from "@pim/v2-contracts/identity";
@@ -13,11 +13,11 @@ import { conversationText } from "./compat/utility.ts";
 import { removeRoomMember } from "./rooms.ts";
 import { agentCalled } from "./agent-team-tools.ts";
 
-type Result = { content: { type: "text"; text: string }[]; isError?: boolean };
+type Result = { output: { type: "text"; text: string }[]; isError?: boolean };
 type Call = { chat: string | null; p: Principal; api: any; agentId: string | null; context: any };
 type Define = (name: string, description: string, parameters: any, run: (app: App, call: Call, args: any) => Promise<Result>) => ToolRegistration;
 
-const text = (s: string, isError = false): Result => ({ content: [{ type: "text", text: s }], ...(isError ? { isError } : {}) });
+const text = (s: string, isError = false): Result => ({ output: [{ type: "text", text: s }], ...(isError ? { isError } : {}) });
 
 /** How much of a chat a read keeps: its latest part. */
 const READ_CHAT_CHARS = 48_000;

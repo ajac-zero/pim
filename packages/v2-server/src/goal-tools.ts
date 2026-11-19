@@ -2,16 +2,16 @@
  * The goal tools with v1's parameters and answers (`src/extensions/goals.ts`): a plan of at least one step, `update_goal` that ticks off several steps at once by their 1-based
  * numbers, adds steps, leaves a progress note and changes the status, and `list_goals` by status. The service is `Memories` in `@pim/v2-app`, whose step positions are 0-based.
  */
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import type { ToolRegistration } from "@earendil-works/pi-durable";
 import type { App } from "@pim/v2-app/app";
 import type { Principal } from "@pim/v2-contracts/identity";
 
-type Result = { content: { type: "text"; text: string }[]; isError?: boolean };
+type Result = { output: { type: "text"; text: string }[]; isError?: boolean };
 type Call = { chat: string | null; p: Principal; api: any; agentId: string | null; context: any };
 type Define = (name: string, description: string, parameters: any, run: (app: App, call: Call, args: any) => Promise<Result>) => ToolRegistration;
 
-const text = (s: string, isError = false): Result => ({ content: [{ type: "text", text: s }], ...(isError ? { isError } : {}) });
+const text = (s: string, isError = false): Result => ({ output: [{ type: "text", text: s }], ...(isError ? { isError } : {}) });
 
 /** A goal as the prompt and the tools show it: its steps numbered from 1, the number `update_goal` takes, and its latest progress note. */
 export function describeGoal(goal: { id: string; title: string; steps: { title: string; done: boolean }[] }, latestNote?: string): string {

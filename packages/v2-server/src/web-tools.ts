@@ -2,13 +2,13 @@
  * `fetch_url`, as v1 had it (`src/extensions/web.ts`): a web page comes back as the readable text of it, clipped, with the images the page shows (its preview image first), which a reply's
  * cards may use. Redirects are followed a few hops, and every hop must still be a public address; content that is not text is refused.
  */
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import type { ToolRegistration } from "@earendil-works/pi-durable";
 
-type Result = { content: { type: "text"; text: string }[]; isError?: boolean };
+type Result = { output: { type: "text"; text: string }[]; isError?: boolean };
 type Define = (name: string, description: string, parameters: any, execute: (args: any, api: any, context: any) => Promise<Result>, replay?: "safe" | "unsafe") => ToolRegistration;
 
-const text = (s: string, isError = false): Result => ({ content: [{ type: "text", text: s }], ...(isError ? { isError } : {}) });
+const text = (s: string, isError = false): Result => ({ output: [{ type: "text", text: s }], ...(isError ? { isError } : {}) });
 
 /** How much of a page `fetch_url` returns. */
 export const MAX_PAGE_CHARS = 20_000;

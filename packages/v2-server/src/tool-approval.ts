@@ -7,10 +7,10 @@ import type { App } from "@pim/v2-app/app";
 import type { Principal } from "@pim/v2-contracts/identity";
 import type { Db as RuntimeDb } from "@pim/v2-runtime/db";
 
-type Result = { content: { type: "text"; text: string }[]; isError?: boolean };
+type Result = { output: { type: "text"; text: string }[]; isError?: boolean };
 
 /** What a parked call returns: the Runner suspends the task until the person's decision wakes it. */
-export const WAITING = { content: [{ type: "text", text: "Waiting for a person's approval." }], control: { suspend: true } } as never as Result;
+export const WAITING = { output: [{ type: "text", text: "Waiting for a person's approval." }], control: { suspend: true } } as never as Result;
 
 /** The note the person left with their decision, as a sentence for the agent; empty when there is none. */
 async function noteOf(app: App, ownerId: string, approvalId: string): Promise<string> {
@@ -37,6 +37,6 @@ export async function askFirst(
 	}
 	const signal = (await runtime.read<{ payload: { approved?: boolean; approvalId?: string } }>(ownerId, "SELECT payload FROM pim_runtime.durable_signals WHERE owner_id = $1 AND task_id = $2 AND kind = 'approval' AND payload->>'approvalId' = $3 ORDER BY signal_id DESC LIMIT 1", [ownerId, taskId, filed.id])).rows[0];
 	if (!signal) return WAITING;
-	if (signal.payload.approved !== true) return { content: [{ type: "text", text: `${ask.denied}${await noteOf(app, ownerId, filed.id)}` }], isError: true };
+	if (signal.payload.approved !== true) return { output: [{ type: "text", text: `${ask.denied}${await noteOf(app, ownerId, filed.id)}` }], isError: true };
 	return undefined;
 }

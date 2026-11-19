@@ -4,7 +4,7 @@
  * let a computer source run. An agent works only with its own triggers; the majordomo, with everyone's. What Pim fills in (the spec's version, its owner, its origin chat, its destination)
  * is not the agent's to say, so it cannot make a trigger for another agent, or one that reads as another's.
  */
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import type { ToolRegistration } from "@earendil-works/pi-durable";
 import { FILE_EVENTS, runsOnComputer, type TriggerSpec, TRIGGER_LIFECYCLES } from "@pim/triggers/spec";
 import type { App } from "@pim/v2-app/app";
@@ -16,11 +16,11 @@ import { contextOf, instants, load, sourcesOf, viewOf } from "./compat/chat-trig
 import { askFirst } from "./tool-approval.ts";
 import { recordComputerGrant, sourceConfigHash } from "./computer-triggers.ts";
 
-type Result = { content: { type: "text"; text: string }[]; isError?: boolean };
+type Result = { output: { type: "text"; text: string }[]; isError?: boolean };
 type Call = { chat: string | null; p: Principal; api: any; agentId: string | null; context: any };
 type Define = (name: string, description: string, parameters: any, run: (app: App, call: Call, args: any) => Promise<Result>) => ToolRegistration;
 
-const text = (s: string, isError = false): Result => ({ content: [{ type: "text", text: s }], ...(isError ? { isError } : {}) });
+const text = (s: string, isError = false): Result => ({ output: [{ type: "text", text: s }], ...(isError ? { isError } : {}) });
 const json = (v: unknown): Result => text(JSON.stringify(v, null, 1));
 
 /** What a refusal of a trigger answers an agent: the code and message as JSON, as v1's API did. */

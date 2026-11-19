@@ -189,6 +189,23 @@ describe("withdrawing what hangs on a chat", () => {
 		expect((await f.app.conversations.pending(owner(), chat)).find((c) => c.commandId === "unread")?.state).toBe("rejected");
 	});
 
+	it("puts a finished task back to work when a schedule or an event wakes its chat, so its next answer reaches the agent that asked", async () => {
+		const chat = await f.app.conversations.create(u.principal, {});
+		const task = await f.app.conversations.admit(u.principal, { commandId: "wake-task", kind: "delegate", chatId: chat, payload: { title: "watch" } });
+		const taskId = task.result!.taskId as string;
+		await f.app.conversations.settleTask(owner(), taskId);
+		expect(await f.app.conversations.task(owner(), taskId)).toMatchObject({ status: "completed" });
+		// An event reaches the task's chat: the task works again, and its run is the one that ends it.
+		const woke = await f.app.conversations.admit(u.principal, { commandId: "wake-event", kind: "trigger_fire", chatId: task.chatId!, payload: { text: "[Connector event] new mail" } });
+		expect(await f.app.conversations.task(owner(), taskId)).toMatchObject({ status: "working" });
+		expect((await rows("SELECT wake_request, delivered, result FROM pim_app.tasks WHERE task_id = $1", taskId))[0]).toEqual({ wake_request: woke.piRequestId, delivered: 0, result: null });
+		// A second wake while it works changes nothing, and once it ends again it is over again.
+		await f.app.conversations.admit(u.principal, { commandId: "wake-event-2", kind: "trigger_fire", chatId: task.chatId!, payload: { text: "[Connector event] more mail" } });
+		expect((await rows("SELECT wake_request FROM pim_app.tasks WHERE task_id = $1", taskId))[0].wake_request).toBe(woke.piRequestId);
+		await f.app.conversations.settleTask(owner(), taskId);
+		expect(await f.app.conversations.task(owner(), taskId)).toMatchObject({ status: "completed" });
+	});
+
 	it("stops a canceled task's chat and tells its requester once", async () => {
 		const chat = await f.app.conversations.create(u.principal, {});
 		const task = await f.app.conversations.admit(u.principal, { commandId: "cancel-task", kind: "delegate", chatId: chat, payload: { title: "research" } });

@@ -481,8 +481,6 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 			const made = (await app.schedules.list(call.p)).find((s) => s.id === id);
 			return json({ id, type: kind === "cron" ? "cron" : kind === "at" ? "scheduled" : "delayed", next: made?.nextRunAt?.toISOString() ?? null, ...(kind === "cron" ? { cron: spec } : {}), label: a.label ?? null, instruction: a.instruction, newChat: !here, ...(other ? { agent: other } : {}) });
 		}),
-		read("list_scheduled_tasks", "List your pending scheduled tasks.", Type.Object({}), async (app, call) => json((await app.schedules.list(call.p)).filter((s) => s.enabled && s.nextRunAt).map((s) => ({ id: s.id, type: s.kind === "cron" ? "cron" : s.kind === "at" ? "scheduled" : "delayed", next: s.nextRunAt!.toISOString(), ...(s.kind === "cron" ? { cron: s.spec } : {}), session: s.chatId, label: s.label, instruction: s.prompt, newChat: s.target === "new_chat", ...(s.target === "new_chat" && s.agentId ? { agent: s.agentId } : {}) })))),
-		write("cancel_scheduled_task", "Cancel a scheduled task.", Type.Object({ id: S() }), async (app, call, a) => (await app.schedules.remove(call.p, a.id), text("Cancelled."))),
 		// Notes and apps.
 		write("note_create", "Create a note a person can open and edit alongside you. The answer is the note's card in the chat, which is how the person sees and opens it; there is no panel for you to open.", Type.Object({ title: S({ minLength: 1, maxLength: 200 }), text: O(S()) }), async (app, call, a) =>
 			noteCard(app, ownerId, await app.canvas.create(call.p, a.title, a.text ?? "", "agent"), "Made it. The person sees it as a card in the chat and opens it beside the chat.")),

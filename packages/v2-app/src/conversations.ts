@@ -98,6 +98,14 @@ export class Conversations {
 			} else if (input.kind === "user_message" && chatId) {
 				await resume(tx, chatId);
 				await tx.query("UPDATE pim_app.conversations SET updated_at = now() WHERE public_chat_id = $1", [chatId]);
+			} else if (input.kind === "trigger_fire" && chatId) {
+				// A schedule or an event waking the chat of a finished task puts the task back to work, so that its answer reaches the agent that asked, as v1's did.
+				await tx.query(
+					`UPDATE pim_app.tasks SET status = 'working', result = NULL, wake_request = $2, said = '[]', delivered = 0, waits = false, updated_at = now()
+					 WHERE task_id = (SELECT task_id FROM pim_app.tasks WHERE task_chat = $1 AND status IN ('completed', 'failed', 'canceled') ORDER BY created_at DESC LIMIT 1)
+					   AND NOT EXISTS (SELECT 1 FROM pim_app.tasks WHERE task_chat = $1 AND status IN ('working', 'auth-required'))`,
+					[chatId, piRequestId],
+				);
 			} else if (input.kind === "delegate") {
 				result = await delegateTasks(tx, p, chatId!, input.commandId, payload);
 				chatId = result.taskChatId as string;

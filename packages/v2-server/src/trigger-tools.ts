@@ -7,6 +7,7 @@
 import { Type } from "typebox";
 import type { ToolRegistration } from "@earendil-works/pi-durable";
 import { FILE_EVENTS, runsOnComputer, type TriggerSpec, TRIGGER_LIFECYCLES } from "@pim/triggers/spec";
+import { previewFirings } from "@pim/triggers/time";
 import type { App } from "@pim/v2-app/app";
 import { BadRequestError, PimError } from "@pim/v2-app/errors";
 import type { Principal } from "@pim/v2-contracts/identity";
@@ -114,6 +115,32 @@ function grantSummary(label: string, source: TriggerSpec["source"]): string {
 	}
 }
 
+/** A scheduled task as the model sees it, in v1's shape: its kind, when it is next due, its chat and what it is to do. */
+function describeTask(t: { id: string; label: string; spec: TriggerSpec }, actor: Actor) {
+	const { source } = t.spec;
+	if (source.kind !== "time") throw new Error("A scheduled task is a time trigger");
+	let next: number | null = null;
+	try {
+		next = previewFirings(source, { now: Date.now(), count: 1 }).firings[0]?.at ?? null;
+	} catch {
+		// A clock outside what the time engine takes in has no next firing to show.
+	}
+	const newChat = t.spec.destination.type === "new_chat";
+	return {
+		id: t.id,
+		type: source.schedule === "once" ? "scheduled" : source.schedule,
+		next: next === null ? null : new Date(next).toISOString(),
+		...(source.schedule === "cron" ? { cron: source.expression, ...(source.timeZone === "UTC" ? {} : { timeZone: source.timeZone }) } : {}),
+		...(source.schedule === "interval" ? { intervalSeconds: source.everyMs / 1000 } : {}),
+		session: t.spec.originChatId === "api" ? null : t.spec.originChatId,
+		label: t.label,
+		instruction: t.spec.instruction,
+		newChat,
+		// Named when its chats are with another agent than the one asking.
+		...(newChat && t.spec.owningAgentId !== actor.self ? { agent: t.spec.owningAgentId } : {}),
+	};
+}
+
 export function triggerTools(deps: { ownerId: string; runtime: RuntimeDb; read: Define; write: Define }): ToolRegistration[] {
 	const { ownerId, runtime, read, write } = deps;
 	const S = Type.String;
@@ -174,6 +201,17 @@ export function triggerTools(deps: { ownerId: string; runtime: RuntimeDb; read: 
 			if (e?.name === "CapabilityUnavailableError") return failure(409, "source_not_wired", e.message ?? "It needs a paired computer");
 			throw error;
 		}
+	};
+
+	/** The enabled time triggers the asking agent may see, oldest first. */
+	const timeTriggers = async (app: App, call: Call, actor: Actor) => {
+		const found = [];
+		for (let offset = 0; ; offset += 50) {
+			const page = await app.triggers.list(call.p, { lifecycle: "enabled", sourceKind: "time", limit: 50, offset });
+			found.push(...page);
+			if (page.length < 50) break;
+		}
+		return found.filter((t) => actor.majordomo || t.spec.owningAgentId === actor.self).sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
 	};
 
 	return [
@@ -282,6 +320,30 @@ export function triggerTools(deps: { ownerId: string; runtime: RuntimeDb; read: 
 				}
 				await app.triggers.setLifecycle(call.p, a.id, "deleted");
 				return json({ deleted: true, id: a.id });
+			}),
+		),
+		// Scheduled tasks are the time triggers that are on, as well as what `schedule_task` made: an agent lists and cancels either, its own (the majordomo, everyone's).
+		read("list_scheduled_tasks", "List your pending scheduled tasks.", Type.Object({}), (app, call) =>
+			guarded(async () => {
+				const actor = await actorOf(call.chat);
+				const schedules = (await app.schedules.list(call.p)).filter((s) => s.enabled && s.nextRunAt).map((s) => ({ id: s.id, type: s.kind === "cron" ? "cron" : s.kind === "at" ? "scheduled" : "delayed", next: s.nextRunAt!.toISOString(), ...(s.kind === "cron" ? { cron: s.spec } : {}), session: s.chatId, label: s.label, instruction: s.prompt, newChat: s.target === "new_chat", ...(s.target === "new_chat" && s.agentId ? { agent: s.agentId } : {}) }));
+				return json([...schedules, ...(await timeTriggers(app, call, actor)).map((t) => describeTask(t, actor))]);
+			}),
+		),
+		write("cancel_scheduled_task", "Cancel a scheduled task by its id.", Type.Object({ id: S() }), (app, call, a) =>
+			guarded(async () => {
+				// A time trigger the agent may see goes; anything else is a schedule `schedule_task` made.
+				if (a.id.startsWith("tg_")) {
+					const { row } = await visible(app, call, await actorOf(call.chat), a.id).catch(() => ({ row: undefined }));
+					if (!row || row.spec.source.kind !== "time") return text(`No scheduled task with id ${a.id}.`, true);
+					await app.triggers.setLifecycle(call.p, a.id, "deleted");
+					return text("Cancelled.");
+				}
+				await app.schedules.remove(call.p, a.id).catch((error) => {
+					if (error instanceof PimError && error.status === 404) throw new PimError(404, "not_found", `No scheduled task with id ${a.id}.`);
+					throw error;
+				});
+				return text("Cancelled.");
 			}),
 		),
 		read("list_trigger_runs", "A trigger's runs, newest first, a page at a time, each with what is known of it.", Type.Object({ id: S(), cursor: O(S()), limit: O(Type.Integer({ minimum: 1, maximum: 50 })) }), (app, call, a) =>

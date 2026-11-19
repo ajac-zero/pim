@@ -501,6 +501,14 @@ const agentId = (await d.stack.admin.query("SELECT id FROM pim_app.agents WHERE 
 		expect((await d.stack.admin.query("SELECT kind, prompt, label, target FROM pim_app.schedules")).rows).toEqual([{ kind: "delay", prompt: "Stretch", label: "Stretching", target: "same_chat" }]);
 		expect(JSON.parse((await results("schedule_task")).at(-1)!)).toMatchObject({ type: "delayed", label: "Stretching", instruction: "Stretch", newChat: false });
 		expect(JSON.parse((await results("list_scheduled_tasks")).at(-1)!)).toMatchObject([{ type: "delayed", label: "Stretching", instruction: "Stretch" }]);
+		// A time trigger that is on is a scheduled task too, whoever made it: listed beside what schedule_task made, and cancelled with it.
+		await say("a daily one", toolUse(fauxToolCall("create_trigger", { ...trigger, label: "Daily", source: { kind: "time", schedule: "cron", expression: "30 7 * * *", timeZone: "Europe/Lisbon" }, enabled: true })));
+		const daily = (await d.stack.admin.query("SELECT id FROM pim_app.triggers WHERE title = 'Daily' AND lifecycle = 'enabled'")).rows[0].id as string;
+		await say("what is scheduled", toolUse(fauxToolCall("list_scheduled_tasks", {})));
+		expect(JSON.parse((await results("list_scheduled_tasks")).at(-1)!)).toMatchObject([{ type: "delayed", label: "Stretching" }, { id: daily, type: "cron", cron: "30 7 * * *", timeZone: "Europe/Lisbon", label: "Daily", instruction: "check in", newChat: true, agent: agentId, next: expect.any(String) }]);
+		await say("drop it", toolUse(fauxToolCall("cancel_scheduled_task", { id: daily })));
+		expect((await results("cancel_scheduled_task")).at(-1)).toBe("Cancelled.");
+		expect((await d.stack.admin.query("SELECT lifecycle FROM pim_app.triggers WHERE id = $1", [daily])).rows).toEqual([{ lifecycle: "deleted" }]);
 	}, 120_000);
 
 	/** A turn in a chat of its own that ends with a plain send. */

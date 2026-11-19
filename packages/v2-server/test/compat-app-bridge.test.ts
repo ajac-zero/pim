@@ -19,6 +19,8 @@ describe("an app's bridge and its page", () => {
 	let gate: Server;
 	let model: Server;
 	let mcp: Server;
+	let spotify: Server;
+	let spotifyId = "";
 	let base: string;
 	const asked: string[] = [];
 	let connectorId = "";
@@ -52,6 +54,12 @@ describe("an app's bridge and its page", () => {
 			res.end();
 		});
 		const mcpUrl = await listen(mcp);
+		// Spotify's Web API, as the native connector's tools call it.
+		spotify = createServer((req, res) => {
+			res.setHeader("content-type", "application/json");
+			res.end(JSON.stringify(req.url?.startsWith("/v1/search") && req.headers.authorization === "Bearer spotify-token" ? { tracks: { items: [{ name: "Fado", uri: "spotify:track:1", duration_ms: 1000, artists: [{ name: "Ana" }], album: { name: "Lisboa" } }] } } : {}));
+		});
+		const spotifyUrl = await listen(spotify);
 		process.env.PIM_CONNECTOR_ALLOW_PRIVATE = "1";
 		app = new App(connectApp(stack.url("gate"), 6), new MemoryObjectStore());
 		const ada = await app.identity.register({ username: "ada", bootstrap: await app.identity.issueClaim("bootstrap", null, 3_600_000) });
@@ -63,11 +71,18 @@ describe("an app's bridge and its page", () => {
 		await app.connectors.recordDiscovery(ada.ownerId, connector.id, [{ name: "read", annotations: { readOnlyHint: true } }, { name: "write" }]);
 		await app.connectors.setEnabledTools(principal, connector.id, ["read", "write"]);
 		connectorId = connector.id;
-		gate = createGate(app, { first: [...bridgeRoutes({ PIM_AI_GATEWAY_URL: modelUrl, PIM_AI_GATEWAY_MODELS: "m", PIM_DEFAULT_MODEL: "gateway/m", PIM_CONNECTOR_ALLOW_PRIVATE: "1" }), ...adminCompatRoutes] });
+		// A native connector: Pim's own client of the service, with the person's credential and no MCP server behind it.
+		const native = await app.connectors.create(principal, { kind: "native", name: "Spotify" });
+		await app.db.owner(ada.ownerId, (tx) => tx.query("UPDATE pim_app.connectors SET app_ref = 'spotify/spotify', status = 'connected' WHERE id = $1", [native.connector.id]));
+		await app.connectors.setCredential(ada.ownerId, native.connector.id, JSON.stringify({ access_token: "spotify-token", token_type: "Bearer" }));
+		await app.connectors.recordDiscovery(ada.ownerId, native.connector.id, [{ name: "search", annotations: { readOnlyHint: true } }, { name: "play" }]);
+		await app.connectors.setEnabledTools(principal, native.connector.id, ["search", "play"]);
+		spotifyId = native.connector.id;
+		gate = createGate(app, { first: [...bridgeRoutes({ PIM_SPOTIFY_API_URL: `${spotifyUrl}/v1`, PIM_AI_GATEWAY_URL: modelUrl, PIM_AI_GATEWAY_MODELS: "m", PIM_DEFAULT_MODEL: "gateway/m", PIM_CONNECTOR_ALLOW_PRIVATE: "1" }), ...adminCompatRoutes] });
 		base = await listen(gate);
 	}, 120_000);
 	afterAll(async () => {
-		for (const s of [gate, model, mcp]) await new Promise<void>((r) => s?.close(() => r()));
+		for (const s of [gate, model, mcp, spotify]) await new Promise<void>((r) => s?.close(() => r()));
 		await app?.db.end();
 		await stack?.drop();
 	});
@@ -147,6 +162,16 @@ describe("an app's bridge and its page", () => {
 		// Bob has no connectors, so he finds nothing to call.
 		const mine = (await call("bob", "POST", "/api/apps", { title: "Mine", kind: "html", files: html("b") })).json.id;
 		expect((await bridge("bob", mine, 1, "tools.call", { name: "read" })).status).toBe(404);
+	});
+
+	it("calls a native connector's tool too, with the person's credential, once it is granted", async () => {
+		const id = (await call("ada", "POST", "/api/apps", { title: "Songs", kind: "html", files: html("s") })).json.id;
+		const name = `${spotifyId}/search`;
+		expect((await bridge("ada", id, 1, "tools.call", { name, input: { query: "fado" } })).json).toEqual({ needs: { capability: `tool:${name}`, label: "Spotify: search" } });
+		// `play` has effects, so it asks first and a page can't use it.
+		expect((await bridge("ada", id, 1, "tools.call", { name: `${spotifyId}/play` })).json).toMatchObject({ error: "tool_not_on" });
+		await call("ada", "POST", `/api/artifacts/${id}/versions/1/grants`, { capability: `tool:${name}` });
+		expect((await bridge("ada", id, 1, "tools.call", { name, input: { query: "fado" } })).json).toEqual({ value: "- Fado by Ana · Lisboa [spotify:track:1]" });
 	});
 
 	it("shows an HTML app and a JSX app as sandboxed pages with the bridge, and refuses a JSX app that cannot run", async () => {

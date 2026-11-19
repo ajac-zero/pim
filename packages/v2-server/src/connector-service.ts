@@ -15,7 +15,7 @@ import { BadRequestError, NotFoundError } from "@pim/v2-app/errors";
 import { openString } from "@pim/v2-app/crypto";
 import { mcpFetchTools, parseCredential, refresh, type Transport } from "./connector-tools.ts";
 import { type CustomApp } from "./compat/admin-gallery.ts";
-import { ApiError } from "./native/http.ts";
+import { ApiError, AuthRefused } from "./native/http.ts";
 import { endpointsOf, type Env, missingSettings, nativeApp, type NativeApp, offeredNativeApps } from "./native/native.ts";
 import { authorizeUrl, type Bundle, bundleOf, discover, GrantGone, newVerifier, probe, registerClient, tokenRequest } from "./native/oauth-client.ts";
 import { POPULAR_APPS } from "./native/popular-apps.ts";
@@ -248,6 +248,21 @@ export class ConnectorService {
 		if (!row) throw new BadRequestError(`${native.name} isn't connected.`);
 		const { bundle, update } = await this.#open(p.ownerId, row);
 		return run(input, { bearer: bundle.access_token, bundle, endpoints: endpointsOf(this.env), fetch: this.transport.fetch, env: this.env, update });
+	}
+
+	/** A native connector's tool, called for an app on the person's behalf (the bridge checked the grant and that the tool is On): its credential renewed first, its answer as text. */
+	async callTool(ownerId: string, connectorId: string, tool: string, input: Record<string, unknown>): Promise<string> {
+		const row = (await this.#rows(ownerId)).find((r) => r.id === connectorId && r.kind === "native");
+		const native = row ? nativeApp(row.app_ref ?? "") : undefined;
+		const run = native?.tools.find((t) => t.name === tool);
+		if (!row || !native || !run) throw new NotFoundError(`No connector tool ${connectorId}/${tool}`);
+		const { bundle } = await this.#open(ownerId, row);
+		try {
+			return await run.execute(input, { bearer: bundle.access_token, bundle, endpoints: endpointsOf(this.env), fetch: this.transport.fetch });
+		} catch (error) {
+			if (error instanceof AuthRefused) throw new BadRequestError(`${native.name} refused the connection's credential; connect it again in Connectors.`);
+			throw error;
+		}
 	}
 
 	/** Which tools ask first by default: those that do not declare themselves read-only (`writes`), every tool (`all`), or none. */

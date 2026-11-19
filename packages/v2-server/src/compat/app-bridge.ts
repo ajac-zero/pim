@@ -17,6 +17,7 @@ import { publicUrl } from "../agent-tools.ts";
 import { type ConnectorRow, McpAuthError, type McpTool, type PermissionRow, parseCredential, resolvePermission, resultText, type Transport, withSession } from "../connector-tools.ts";
 import { digestOf, ok } from "./admin-util.ts";
 import { askModel } from "./app-model.ts";
+import { ConnectorService } from "../connector-service.ts";
 import { framePage } from "./app-frame.ts";
 import { num, ownVersion, publishedCopy, readable, sharedLatest } from "./admin-apps.ts";
 
@@ -79,7 +80,7 @@ type ToolFound = { connector: ConnectorRow; tool: McpTool; capability: string; l
 async function toolFor(app: App, ownerId: string, name: unknown): Promise<ToolFound> {
 	if (typeof name !== "string" || name === "") throw new BadRequestError("pim.tools.call needs a tool name");
 	const { rows, perms } = await app.db.owner(ownerId, async (tx) => ({
-		rows: (await tx.query("SELECT id, kind, name, url, status, credential, discovered_tools, enabled_tools, approval FROM pim_app.connectors WHERE url IS NOT NULL")).rows,
+		rows: (await tx.query("SELECT id, kind, name, url, status, credential, discovered_tools, enabled_tools, approval FROM pim_app.connectors WHERE url IS NOT NULL OR kind = 'native'")).rows,
 		perms: (await tx.query("SELECT audience, app, tool, permission FROM pim_app.tool_permissions WHERE audience = 'owner'")).rows as PermissionRow[],
 	}));
 	const found: ToolFound[] = [];
@@ -127,9 +128,9 @@ export function createBridge(app: App, env: Env, fetcher: typeof fetch = fetch):
 				const input = args.input ?? {};
 				if (typeof input !== "object" || input === null || Array.isArray(input)) throw new BadRequestError("A tool's input must be an object");
 				const { connector } = t;
-				// Native connectors (Gmail, Drive, Spotify) are called through their own clients in the Runner, not over MCP; apps reach MCP servers only.
-				if (!connector.url) throw new PimError(501, "not_supported", `An app cannot call ${connector.name}'s tools yet; ask the agent instead.`);
-				const url = connector.url;
+				// A native connector (Gmail, Drive, Spotify) is Pim's own client of the service, not an MCP server: its tool runs here with the person's credential.
+				if (connector.kind === "native") return { value: await new ConnectorService(app, env, transport).callTool(p.ownerId, connector.id, t.tool.name, input as Record<string, unknown>) };
+				const url = connector.url!;
 				const bearer = connector.credential ? parseCredential(await openString(app.crypto, connector.credential, `connector:${p.ownerId}/${connector.id}`)).bearer : null;
 				try {
 					const result: any = await withSession(transport, url, bearer, (rpc) => rpc("tools/call", { name: t.tool.name, arguments: input }), 30_000);

@@ -3,7 +3,7 @@ import { Authorizer } from "./authz.ts";
 import type { Db } from "./db.ts";
 import { BadRequestError } from "./errors.ts";
 
-export type CallRecord = { id: string; runKind: "chat" | "background" | "coding_thread"; chatId?: string; provider?: string; model?: string; inputTokens: number; outputTokens: number; cacheReadTokens?: number; cacheWriteTokens?: number; agentId?: string; costMicroUsd: number; at?: Date };
+export type CallRecord = { id: string; runKind: "chat" | "background" | "coding_thread" | "scheduled" | "trigger" | "task"; chatId?: string; provider?: string; model?: string; inputTokens: number; outputTokens: number; cacheReadTokens?: number; cacheWriteTokens?: number; agentId?: string; /** The coding thread a `coding_thread` call was for. */ threadId?: string; costMicroUsd: number; at?: Date };
 
 /**
  * The cost ledger: one row per model call, whether a chat turn, background work (compaction, titles, summaries) or a coding thread's own calls.
@@ -16,8 +16,8 @@ export class Usage {
 	async record(ownerId: string, call: CallRecord): Promise<boolean> {
 		if (![call.inputTokens, call.outputTokens, call.costMicroUsd, call.cacheReadTokens ?? 0, call.cacheWriteTokens ?? 0].every((n) => Number.isInteger(n) && n >= 0)) throw new BadRequestError("Counts are whole numbers, never negative");
 		return this.db.owner(ownerId, async (tx) =>
-			!!(await tx.query("INSERT INTO pim_app.model_calls (id, owner_id, run_kind, public_chat_id, provider, model, input_tokens, output_tokens, cost_microusd, at, cache_read_tokens, cache_write_tokens, agent_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) ON CONFLICT DO NOTHING", [
-				call.id, ownerId, call.runKind, call.chatId ?? null, call.provider ?? null, call.model ?? null, call.inputTokens, call.outputTokens, call.costMicroUsd, call.at ?? new Date(), call.cacheReadTokens ?? 0, call.cacheWriteTokens ?? 0, call.agentId ?? null,
+			!!(await tx.query("INSERT INTO pim_app.model_calls (id, owner_id, run_kind, public_chat_id, provider, model, input_tokens, output_tokens, cost_microusd, at, cache_read_tokens, cache_write_tokens, agent_id, thread_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) ON CONFLICT DO NOTHING", [
+				call.id, ownerId, call.runKind, call.chatId ?? null, call.provider ?? null, call.model ?? null, call.inputTokens, call.outputTokens, call.costMicroUsd, call.at ?? new Date(), call.cacheReadTokens ?? 0, call.cacheWriteTokens ?? 0, call.agentId ?? null, call.threadId ?? null,
 			])).rowCount,
 		);
 	}

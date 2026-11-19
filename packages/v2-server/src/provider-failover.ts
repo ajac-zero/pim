@@ -9,6 +9,7 @@ import { type Models, createAssistantMessageEventStream } from "@earendil-works/
 import type { AssistantMessage, AssistantMessageEvent } from "@earendil-works/pi-ai";
 import { isContextOverflow } from "@earendil-works/pi-ai/utils/overflow";
 import { isUsageLimitError, limitCooldown, type LimitState } from "./usage-limits.ts";
+import { type CallDetail, type FailedAttempt, keepCall, SLOW_CALL_MS, trackAttempt } from "./call-details.ts";
 
 export type ModelRef = { provider: string; id: string };
 
@@ -42,7 +43,7 @@ export type CooldownStore = {
 	save(ownerId: string, provider: string, id: string, untilMs: number, reason: string): Promise<void>;
 };
 
-export function createFailover(options: { now?: (() => number) | undefined; cooldowns?: Partial<Cooldowns> | undefined; stallMs?: number | undefined; store?: CooldownStore | undefined; syncMs?: number | undefined; subscription?: ((ownerId: string, provider: string) => boolean) | undefined } = {}) {
+export function createFailover(options: { now?: (() => number) | undefined; cooldowns?: Partial<Cooldowns> | undefined; stallMs?: number | undefined; store?: CooldownStore | undefined; syncMs?: number | undefined; subscription?: ((ownerId: string, provider: string) => boolean) | undefined; /** Told what happened to a request that an admin reading diagnostics would want to find: a model that failed over, a cooldown, a request that failed for good or was slow. Never throws into the request. */ event?: ((ownerId: string, kind: string, detail: Record<string, unknown>) => void) | undefined } = {}) {
 	const stallMs = options.stallMs ?? DEFAULT_STREAM_STALL_MS;
 	const now = options.now ?? Date.now;
 	const cooldowns = { ...DEFAULT_COOLDOWNS, ...options.cooldowns };
@@ -56,10 +57,18 @@ export function createFailover(options: { now?: (() => number) | undefined; cool
 		syncedAt.set(ownerId, now());
 		for (const [key, end] of await options.store.load(ownerId).catch(() => new Map<string, number>())) if (end > (until.get(`${ownerId}\u0000${key}`) ?? 0)) until.set(`${ownerId}\u0000${key}`, end);
 	};
+	const tell = (ownerId: string, kind: string, detail: Record<string, unknown>) => {
+		try {
+			options.event?.(ownerId, kind, detail);
+		} catch {
+			// A log must not break what it describes.
+		}
+	};
 	/** What a subscription's usage limits in a row did to each model's cooldown, to make the next one longer. */
 	const limits = new Map<string, LimitState>();
 	const cool = (ownerId: string, m: ModelRef, ms: number, reason: string) => {
 		const end = now() + ms;
+		tell(ownerId, "provider_cooldown", { provider: m.provider, model: m.id, until: new Date(end).toISOString(), reason: reason.slice(0, 300) });
 		until.set(refKey(ownerId, m.provider, m.id), end);
 		void options.store?.save(ownerId, m.provider, m.id, end, reason).catch(() => {});
 	};
@@ -111,6 +120,13 @@ export function createFailover(options: { now?: (() => number) | undefined; cool
 		},
 	};
 
+	/** The request ended with `message`: what was seen of it is left for the ledger, and a failure or a slow one is told. */
+	function finished(ownerId: string, message: AssistantMessage, detail: CallDetail, failures: FailedAttempt[]) {
+		keepCall(ownerId, message, { ...detail, failures });
+		if (message.stopReason === "error") tell(ownerId, "model_call_failed", { provider: message.provider, model: message.model, latencyMs: detail.latencyMs, error: detail.error ?? "", tryingNext: false });
+		else if (detail.latencyMs >= SLOW_CALL_MS) tell(ownerId, "slow_model_call", { provider: message.provider, model: message.model, latencyMs: detail.latencyMs });
+	}
+
 	async function candidates(models: Models, ownerId: string, model: any): Promise<any[]> {
 		const seen = new Set<string>([`${model.provider}/${model.id}`]);
 		const list: any[] = [model];
@@ -128,6 +144,8 @@ export function createFailover(options: { now?: (() => number) | undefined; cool
 		const signal = (rest[1] as { signal?: AbortSignal } | undefined)?.signal;
 		await sync(ownerId);
 		const list = await candidates(models, ownerId, model);
+		/** The attempts that failed and went on to the next model, which the request's own record then carries. */
+		const failures: FailedAttempt[] = [];
 		for (let i = 0; i < list.length; i++) {
 			const current = list[i];
 			const last = i === list.length - 1 || signal?.aborted === true;
@@ -139,7 +157,8 @@ export function createFailover(options: { now?: (() => number) | undefined; cool
 			const forward = () => inner.abort(signal?.reason);
 			if (signal?.aborted) forward();
 			else signal?.addEventListener("abort", forward, { once: true });
-			const events = call(current, rest[0], { ...(rest[1] as object | undefined), signal: inner.signal }, ...rest.slice(2));
+			const attempt = trackAttempt(current, rest[0], rest[1], now);
+			const events = call(current, rest[0], { ...attempt.options, signal: inner.signal }, ...rest.slice(2));
 			const iterator = events[Symbol.asyncIterator]();
 			let stalled: AssistantMessage | undefined;
 			for (;;) {
@@ -176,10 +195,14 @@ export function createFailover(options: { now?: (() => number) | undefined; cool
 			if (stalled && !failed) {
 				// Nothing more can be retried: content was shown, or the caller stopped the request. The chat ends with the error, not with a stream that never finishes.
 				if (!shown) for (const e of held) out.push(e);
+				finished(ownerId, stalled, attempt.finish(stalled), failures);
 				out.push({ type: "error", reason: stalled.stopReason as "error" | "aborted", error: stalled } as AssistantMessageEvent);
 				return;
 			}
 			if (failed) {
+				const detail = attempt.finish(failed);
+				failures.push({ provider: current.provider, model: current.id, detail });
+				tell(ownerId, "model_call_failed", { provider: current.provider, model: current.id, latencyMs: detail.latencyMs, error: detail.error ?? "", tryingNext: true });
 				coolFor(ownerId, current, failed, failureKind(failed) === "auth" ? "auth" : "transient");
 				continue;
 			}
@@ -188,6 +211,7 @@ export function createFailover(options: { now?: (() => number) | undefined; cool
 			const message = await events.result();
 			const kind = failureKind(message);
 			if (kind && !shown) coolFor(ownerId, current, message, kind);
+			finished(ownerId, message, attempt.finish(message), failures);
 			out.end(message);
 			return;
 		}

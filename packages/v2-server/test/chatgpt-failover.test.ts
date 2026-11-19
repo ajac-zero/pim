@@ -236,6 +236,12 @@ real("Sign in with ChatGPT and provider failover", () => {
 		expect((await d.stack.admin.query("SELECT until > now() + interval '4 minutes' AS long FROM pim_runtime.provider_cooldowns WHERE ref = $1", [`openai/${MODEL}`])).rows[0]).toEqual({ long: true });
 		const calls = (await d.stack.admin.query("SELECT provider, model FROM pim_app.model_calls")).rows;
 		expect(calls).toContainEqual({ provider: "faux", model: "m" });
+		// The attempt that failed is a call too, with the provider's own words, for the chat it was; the call that answered has how long it took and how large it was; and the event log heard of both.
+		const failed = (await d.stack.admin.query("SELECT provider, stop_reason, error, public_chat_id, latency_ms, request FROM pim_app.model_calls WHERE stop_reason = 'error'")).rows;
+		expect(failed[0]).toMatchObject({ provider: "openai", stop_reason: "error", error: expect.stringMatching(/429|rate|usage/i), public_chat_id: expect.any(String) });
+		expect(failed[0].request).toHaveProperty("phases");
+		expect((await d.stack.admin.query("SELECT stop_reason, latency_ms, prompt_bytes, tool_count, run_kind FROM pim_app.model_calls WHERE provider = 'faux' AND stop_reason = 'toolUse'")).rows[0]).toMatchObject({ latency_ms: expect.any(Number), prompt_bytes: expect.any(Number), tool_count: expect.any(Number), run_kind: "chat" });
+		expect((await d.stack.admin.query("SELECT DISTINCT kind FROM pim_app.diagnostic_events")).rows.map((r) => r.kind)).toEqual(expect.arrayContaining(["model_call_failed", "provider_cooldown"]));
 	}, 90_000);
 
 	it("holds a run that has nowhere else to go on the plan's usage limit, and goes on by itself when the limit resets", async () => {

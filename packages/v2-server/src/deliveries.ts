@@ -14,6 +14,7 @@ export async function deliverCosts(deps: { forge: Forge; forgeDb: Queryable; usa
 			await deps.usage.record(owner.data, {
 				id: `coding:${row.dedupeKey}`,
 				runKind: "coding_thread",
+				threadId: cost.threadId,
 				inputTokens: Math.max(0, Math.round(cost.tokensIn ?? 0)),
 				outputTokens: Math.max(0, Math.round(cost.tokensOut ?? 0)),
 				costMicroUsd: Math.max(0, Math.round(cost.costUsd * 1_000_000)),

@@ -78,15 +78,16 @@ async function setComputeQuota(app: App, subject: ["user" | "deployment", string
 const dollars = (micro: unknown) => Number(micro) / 1_000_000;
 type Spend = { key: string | null; costUsd: number };
 
-/** What model calls cost over the last `days` days, in the usage screen's shape. A call that cost nothing and used tokens is counted as unpriced. */
+/** What model calls cost over the last `days` days, in the usage screen's shape. A call that cost nothing and used tokens is counted as unpriced; a call that failed is a call and an error. */
 async function costs(app: App, p: Principal, days: number) {
 	await app.identity.authz.enforce(p, "api:read");
 	return app.db.owner(p.ownerId, async (tx) => {
 		const since = `(now() AT TIME ZONE 'UTC')::date - ${days - 1}`;
 		const rows = (await tx.query(
 			`SELECT to_char(m.at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day, m.run_kind, m.provider || '/' || m.model AS model, c.agent_id,
-			        count(*)::int AS calls, sum(m.output_tokens)::bigint AS output, sum(m.cost_microusd)::bigint AS cost,
-			        count(*) FILTER (WHERE m.cost_microusd = 0 AND m.input_tokens + m.output_tokens > 0)::int AS unpriced
+			        count(*)::int AS calls, sum(m.input_tokens)::bigint AS input, sum(m.output_tokens)::bigint AS output, sum(m.cache_read_tokens)::bigint AS cache_read, sum(m.cache_write_tokens)::bigint AS cache_write,
+			        sum(m.cost_microusd)::bigint AS cost, count(*) FILTER (WHERE m.cost_microusd = 0 AND m.input_tokens + m.output_tokens > 0)::int AS unpriced,
+			        count(*) FILTER (WHERE m.stop_reason IN ('error', 'aborted'))::int AS errors
 			 FROM pim_app.model_calls m LEFT JOIN pim_app.conversations c ON c.public_chat_id = m.public_chat_id
 			 WHERE m.at >= ${since} GROUP BY 1, 2, 3, 4 ORDER BY 1`)).rows;
 		const spend = (list: typeof rows, key: "agent_id" | "model" | "run_kind"): Spend[] => {
@@ -94,22 +95,29 @@ async function costs(app: App, p: Principal, days: number) {
 			for (const r of list) sums.set(r[key] ?? null, (sums.get(r[key] ?? null) ?? 0) + dollars(r.cost));
 			return [...sums].map(([k, costUsd]) => ({ key: k, costUsd })).sort((a, b) => b.costUsd - a.costUsd);
 		};
+		const sum = (list: typeof rows, f: (r: (typeof rows)[number]) => number) => list.reduce((n, r) => n + f(r), 0);
+		/** The share of what the model read that came from the cache (v1's `ratio`), or null when it read nothing. */
+		const ratio = (list: typeof rows) => {
+			const read = sum(list, (r) => Number(r.cache_read));
+			const all = sum(list, (r) => Number(r.input)) + read + sum(list, (r) => Number(r.cache_write));
+			return all > 0 ? read / all : null;
+		};
 		const byDay = [...Map.groupBy(rows, (r) => r.day as string)].map(([day, list]) => ({
-			day, costUsd: list.reduce((n, r) => n + dollars(r.cost), 0), calls: list.reduce((n, r) => n + r.calls, 0), cacheHitRatio: null,
+			day, costUsd: sum(list, (r) => dollars(r.cost)), calls: sum(list, (r) => r.calls), cacheHitRatio: ratio(list),
 			byAgent: spend(list, "agent_id"), byModel: spend(list, "model"), byRunKind: spend(list, "run_kind"),
 		}));
-		const total = (f: (r: (typeof rows)[number]) => number) => rows.reduce((n, r) => n + f(r), 0);
-		const output = total((r) => Number(r.output));
+		const output = sum(rows, (r) => Number(r.output));
+		/** The dearest chats or coding threads: their calls, how deep the longest turn went and how large a request was on average. */
 		const top = async (kind: "chat" | "coding_thread") =>
 			(await tx.query(
-				`SELECT ${kind === "chat" ? "public_chat_id::text" : "NULL"} AS id, sum(cost_microusd)::bigint AS cost, count(*)::int AS calls FROM pim_app.model_calls
-				 WHERE at >= ${since} AND run_kind ${kind === "chat" ? "<> 'coding_thread' AND public_chat_id IS NOT NULL" : "= 'coding_thread' AND false"} GROUP BY 1 ORDER BY 2 DESC LIMIT 20`)).rows
-				.map((r) => ({ id: r.id as string, costUsd: dollars(r.cost), calls: r.calls as number, turns: 0, avgPromptBytes: 0 }));
-		const totalCostUsd = dollars(total((r) => Number(r.cost)));
+				`SELECT ${kind === "chat" ? "public_chat_id::text" : "thread_id"} AS id, sum(cost_microusd)::bigint AS cost, count(*)::int AS calls, coalesce(max(turn_index), 0)::int AS turns, coalesce(avg(prompt_bytes), 0) AS prompt
+				 FROM pim_app.model_calls WHERE at >= ${since} AND ${kind === "chat" ? "run_kind <> 'coding_thread' AND public_chat_id IS NOT NULL" : "run_kind = 'coding_thread' AND thread_id IS NOT NULL"} GROUP BY 1 ORDER BY 2 DESC, 3 DESC LIMIT 20`)).rows
+				.map((r) => ({ id: r.id as string, costUsd: dollars(r.cost), calls: r.calls as number, turns: r.turns as number, avgPromptBytes: Math.round(Number(r.prompt)) }));
+		const totalCostUsd = sum(rows, (r) => dollars(r.cost));
 		return {
 			days, since: new Date(Date.now() - (days - 1) * 86_400_000).toISOString().slice(0, 10), priceVersion: "ledger", totalCostUsd,
-			unpricedCalls: total((r) => r.unpriced), calls: total((r) => r.calls), errors: 0,
-			costPer1kOutputTokens: output > 0 ? (totalCostUsd / output) * 1000 : null, cacheHitRatio: null, byDay,
+			unpricedCalls: sum(rows, (r) => r.unpriced), calls: sum(rows, (r) => r.calls), errors: sum(rows, (r) => r.errors),
+			costPer1kOutputTokens: output > 0 ? (totalCostUsd / output) * 1000 : null, cacheHitRatio: ratio(rows), byDay,
 			topChats: await top("chat"), topCodingThreads: await top("coding_thread"),
 		};
 	});

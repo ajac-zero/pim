@@ -45,6 +45,7 @@ import { DESCRIBE_WORK, runUtility } from "./compat/utility.ts";
 import { Progress } from "./progress.ts";
 import { priceOf } from "./model-prices.ts";
 import { withTypedTools } from "./typed-schemas.ts";
+import { type KeptCall, takeCall } from "./call-details.ts";
 import { fallbackMaxTokens } from "@pim/v2-app/web-providers";
 import { memoryLinesOf, offeredModels } from "./deployment.ts";
 import { type VisitBrief, visitMemory, visitPreamble } from "./visit-brief.ts";
@@ -347,6 +348,8 @@ export function createAgentHost(options: AgentHostOptions) {
 		cooldowns: options.cooldowns,
 		subscription: (ownerId, provider) => provider === "openai" && planOwners.has(ownerId),
 		stallMs: options.stallMs?.stream,
+		// What an admin reading diagnostics would look for goes into the person's event log (`pim_app.diagnostic_events`).
+		event: (ownerId, kind, detail) => void db.read(ownerId, "SELECT pim_app.record_diagnostic_event($1, $2, $3)", [ownerId, kind, JSON.stringify(detail)]).catch(() => {}),
 		// Every Runner reads and writes the same cooldowns, so a model one of them found down is skipped by all.
 		store: {
 			load: async (ownerId) => new Map((await db.read<{ ref: string; ms: string }>(ownerId, "SELECT ref, (extract(epoch FROM until) * 1000)::bigint AS ms FROM pim_runtime.provider_cooldowns WHERE owner_id = $1 AND until > now()", [ownerId])).rows.map((r) => [r.ref, Number(r.ms)])),
@@ -518,14 +521,23 @@ export function createAgentHost(options: AgentHostOptions) {
 		return key;
 	};
 
-	/** One model call into the owner's ledger, with what it was for: its tokens by tier, its price, the chat and the agent it ran as. A call that used nothing is not a row. */
-	const recordCall = async (ownerId: string, kind: "chat" | "background", chat: string | null, agent: string | null, id: string, message: any, model: any): Promise<void> => {
+	/**
+	 * One model call into the owner's ledger, with what it was for: its tokens by tier, its price, the chat and the agent it ran as, and what the failover saw of it (how long it took, how it
+	 * ended, the provider's error, where its time went, and how large it was). A call that used nothing is not a row, unless it failed: a failed call is one too.
+	 */
+	const recordCall = async (ownerId: string, kind: "chat" | "background", chat: string | null, agent: string | null, id: string, message: any, model: any, seen?: KeptCall): Promise<void> => {
 		const usage = message?.usage;
-		if (!usage || !(usage.input > 0 || usage.output > 0 || usage.cacheRead > 0 || usage.cacheWrite > 0)) return;
+		const failed = message?.stopReason === "error" || message?.stopReason === "aborted";
+		const used = !!usage && (usage.input > 0 || usage.output > 0 || usage.cacheRead > 0 || usage.cacheWrite > 0);
+		if (!used && !failed) return;
 		const whole = (n: unknown) => Math.round(typeof n === "number" && Number.isFinite(n) ? n : 0);
-		await db
-			.read(ownerId, "SELECT pim_app.record_model_call($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)", [ownerId, id, kind, chat, message?.provider ?? model?.provider ?? null, message?.model ?? model?.id ?? null, whole(usage.input), whole(usage.output), whole((usage.cost?.total ?? 0) * 1_000_000), whole(usage.cacheRead), whole(usage.cacheWrite), agent])
-			.catch(() => {});
+		const write = (rowId: string, provider: string | null, name: string | null, tokens: any, detail: Record<string, unknown> | null) =>
+			db
+				.read(ownerId, "SELECT pim_app.record_model_call($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)", [ownerId, rowId, detail?.runKind && kind === "chat" ? detail.runKind : kind, chat, provider, name, whole(tokens?.input), whole(tokens?.output), whole((tokens?.cost?.total ?? 0) * 1_000_000), whole(tokens?.cacheRead), whole(tokens?.cacheWrite), agent, detail ? JSON.stringify(detail) : null])
+				.catch(() => {});
+		await write(id, message?.provider ?? model?.provider ?? null, message?.model ?? model?.id ?? null, usage, seen ? { ...seen, failures: undefined } : failed ? { stopReason: message.stopReason, error: String(message.errorMessage ?? "").slice(0, 4000) } : null);
+		// The attempts that failed before this request went to the next model are calls too.
+		for (const [n, attempt] of (seen?.failures ?? []).entries()) await write(`${id}_f${n}`, attempt.provider, attempt.model, undefined, { ...attempt.detail, runKind: seen!.runKind });
 	};
 
 	/** Each model request of a chat is recorded when it settles, with the chat and the agent it ran as; the id is the request's own, so a replayed hook records it once. */
@@ -534,7 +546,7 @@ export function createAgentHost(options: AgentHostOptions) {
 			async afterResponse(message: any, api: any) {
 				const chat = await publicChatId(ownerId, api.conversationId).catch(() => null);
 				const agent = chat ? ((await readContext(ownerId, chat).catch(() => undefined))?.agent?.id ?? null) : null;
-				await recordCall(ownerId, "chat", chat, agent, `mc_c${api.conversationId}_t${String(api.taskId)}_${message?.timestamp ?? ""}`, message, undefined);
+				await recordCall(ownerId, "chat", chat, agent, `mc_c${api.conversationId}_t${String(api.taskId)}_${message?.timestamp ?? ""}`, message, undefined, takeCall(ownerId, message));
 			},
 		} as never);
 

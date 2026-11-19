@@ -291,6 +291,22 @@ describe("usage and per-space limits", () => {
 		expect(report.byDay[0].byRunKind).toEqual([{ key: "chat", costUsd: 0.03 }, { key: "background", costUsd: 0 }]);
 		expect(report.byDay[0].byModel.map((m: { key: string }) => m.key)).toEqual(["gateway/m", "gateway/free"]);
 		expect((await call(bob, "GET", "/api/usage/costs")).body.calls).toBe(0);
+
+		// What the ledger keeps of how calls went: the cache's share of what was read, calls that failed, how deep a chat's turns went and how large its requests were, a coding thread's own calls, and what a call was for.
+		const owner = await ownerOf(ada);
+		const chat = (await call(ada, "POST", "/api/sessions", { agentId: agent, title: "Costly" })).body.id as string;
+		await app.usage.record(owner, { id: "mc3", runKind: "scheduled", chatId: chat, provider: "gateway", model: "m", inputTokens: 1000, outputTokens: 100, cacheReadTokens: 1000, costMicroUsd: 10_000 });
+		await app.usage.record(owner, { id: "mc4", runKind: "scheduled", chatId: chat, provider: "gateway", model: "m", inputTokens: 0, outputTokens: 0, costMicroUsd: 0 });
+		await app.usage.record(owner, { id: "mc5", runKind: "coding_thread", threadId: "th1", inputTokens: 500, outputTokens: 50, costMicroUsd: 20_000 });
+		await stack.admin.query("UPDATE pim_app.model_calls SET stop_reason = 'stop', turn_index = 5, prompt_bytes = 300 WHERE id = 'mc3'");
+		await stack.admin.query("UPDATE pim_app.model_calls SET stop_reason = 'error', turn_index = 2 WHERE id = 'mc4'");
+		const more = (await call(ada, "GET", "/api/usage/costs?days=7")).body;
+		expect(more).toMatchObject({ calls: 5, errors: 1, totalCostUsd: expect.closeTo(0.06, 6) });
+		expect(more.cacheHitRatio).toBeCloseTo(1000 / (1000 + 10 + 1000 + 500 + 1000), 6);
+		expect(more.byDay[0].cacheHitRatio).toBeCloseTo(more.cacheHitRatio, 6);
+		expect(more.byDay[0].byRunKind.map((k: { key: string }) => k.key).sort()).toEqual(["background", "chat", "coding_thread", "scheduled"]);
+		expect(more.topChats).toEqual([expect.objectContaining({ id: chat, calls: 2, turns: 5, avgPromptBytes: 300 })]);
+		expect(more.topCodingThreads).toEqual([{ id: "th1", costUsd: 0.02, calls: 1, turns: 0, avgPromptBytes: 0 }]);
 	});
 });
 
@@ -455,9 +471,9 @@ describe("a chat's activity and the diagnostics of how its turns went", () => {
 		expect((await call(ada, "GET", "/api/admin/diagnostics?kind=turns")).body.items).toMatchObject([{ chat, in_progress: true }]);
 
 		const calls = (await call(ada, "GET", "/api/admin/diagnostics?kind=model_calls")).body;
-		expect(calls.totals).toMatchObject({ errors: 1 });
+		expect(calls.totals.errors).toBeGreaterThanOrEqual(1);
 		expect(calls.totals.calls).toBeGreaterThanOrEqual(2);
-		const failure = calls.failures.find((f: any) => f.stop_reason === "error");
+		const failure = calls.failures.find((f: any) => f.stop_reason === "error" && f.latency_ms === 125_000);
 		expect(failure).toMatchObject({ why: "stopped with error", provider: "gw", model: "m1", latency_ms: 125_000, request: { phases: { headersMs: 125_000 } } });
 		// The provider's words keep their ids and their words, but not an address or an email.
 		expect(failure.error).toBe("529 overloaded at [address]/v1/messages for [email] with max_tokens");
@@ -746,5 +762,64 @@ describe("joining, API tokens and the deployment screen", () => {
 		const problems = Object.fromEntries((shown.variables as { name: string; problem: string | null }[]).filter((v) => v.problem).map((v) => [v.name, v.problem]));
 		expect(Object.keys(problems).sort()).toEqual(["PIM_APPROVAL_POLICY", "PIM_MAX_ACCOUNTS", "PIM_MEMORY_LINES"]);
 		expect((shown.variables as { name: string; value: string | null }[]).find((v) => v.name === "PIM_IMAGE_MODEL")?.value).toBe("off");
+	});
+});
+
+describe("the agents' rules and the majordomo", () => {
+	let rules: Server;
+	let origin = "";
+	const call = async (token: string, method: string, path: string, body?: unknown) => {
+		const res = await fetch(origin + path, { method, headers: { authorization: `Bearer ${token}`, ...(body === undefined ? {} : { "content-type": "application/json" }) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+		const text = await res.text();
+		return { status: res.status, body: text.startsWith("{") ? JSON.parse(text) : text };
+	};
+	beforeAll(async () => {
+		process.env.PIM_AI_GATEWAY_MODELS = "u1,u2";
+		rules = createGate(app, { first: [...bootRoutes, ...modelRoutes(process.env)] });
+		await new Promise<void>((resolve) => rules.listen(0, "127.0.0.1", resolve));
+		origin = `http://127.0.0.1:${(rules.address() as { port: number }).port}`;
+	});
+	afterAll(() => {
+		rules?.close();
+		delete process.env.PIM_AI_GATEWAY_MODELS;
+	});
+
+	it("keeps the majordomo's role and refuses to delete it, and gives each agent a name and a role of its own", async () => {
+		const [major] = (await call(bob, "GET", "/api/agents")).body.agents as { id: string; role: string; majordomo: boolean }[];
+		expect(major).toMatchObject({ majordomo: true, role: "Majordomo" });
+		expect((await call(bob, "DELETE", `/api/agents/${major!.id}`)).status).toBe(400);
+		expect((await call(bob, "PUT", `/api/agents/${major!.id}`, { name: "Jeeves", role: "Researcher" })).body).toMatchObject({ name: "Jeeves", role: "Majordomo" });
+		const first = await call(bob, "POST", "/api/agents", { name: "Dora", role: "Researcher" });
+		expect(first).toMatchObject({ status: 201, body: { name: "Dora", role: "Researcher" } });
+		expect((await call(bob, "POST", "/api/agents", { name: "dora", role: "Editor" })).status).toBe(409);
+		expect((await call(bob, "POST", "/api/agents", { name: "Grace", role: " researcher " })).status).toBe(409);
+		expect((await call(bob, "POST", "/api/agents", { name: "Rocket", symbol: "rocket", color: "indigo" })).body).toMatchObject({ symbol: "rocket", color: "indigo" });
+		expect((await call(bob, "POST", "/api/agents", { name: "Runner", symbol: "🏃🏃" })).status).toBe(400);
+		expect((await call(bob, "DELETE", `/api/agents/${first.body.id}`)).status).toBeLessThan(300);
+	});
+
+	it("takes only connectors this Pim offers and fallback models that are choices", async () => {
+		expect((await call(bob, "POST", "/api/agents", { name: "Cal", apps: ["custom/nope"] })).status).toBe(400);
+		expect((await call(bob, "POST", "/api/agents", { name: "Cal", apps: [{ name: "Cal", url: "https://plain.test/mcp" }] })).status).toBe(400);
+		expect((await call(bob, "POST", "/api/agents", { name: "Cal", fallbacks: [{ provider: "nowhere", id: "nope" }] })).status).toBe(400);
+		const made = await call(bob, "POST", "/api/agents", { name: "Cal", fallbacks: [{ provider: "gateway", id: "u2" }] });
+		expect(made).toMatchObject({ status: 201, body: { fallbacks: [{ provider: "gateway", id: "u2" }] } });
+		expect((await call(bob, "PUT", `/api/agents/${made.body.id}/fallbacks`, { models: [{ provider: "nowhere", id: "nope" }] })).status).toBe(400);
+		expect((await call(bob, "PUT", `/api/agents/${made.body.id}/fallbacks`, { models: [{ provider: "gateway", id: "u1" }] })).body).toMatchObject({ fallbacks: [{ provider: "gateway", id: "u1" }] });
+		expect((await call(bob, "PUT", "/api/model/fallbacks", { models: [{ provider: "nowhere", id: "nope" }] })).status).toBe(400);
+		expect((await call(bob, "PUT", "/api/model/fallbacks", { models: [{ provider: "gateway", id: "u2" }] })).body).toMatchObject({ models: [{ provider: "gateway", id: "u2" }] });
+		expect((await call(bob, "PUT", "/api/model/fallbacks", { models: [] })).body).toEqual({ models: [] });
+	});
+
+	it("starts the majordomo's first chat only for a name, a title and a language it accepts, and greets in that language", async () => {
+		const owner = (await stack.admin.query("SELECT owner_id FROM pim_app.accounts WHERE username = 'bob'")).rows[0]?.owner_id as string | undefined;
+		for (const bad of [{ yourName: "Ana\nSouza" }, { yourName: "x".repeat(81) }, { locale: "Spanish!" }, { title: "x".repeat(101) }]) expect((await call(bob, "POST", "/api/majordomo", bad)).status).toBe(400);
+		expect((await call(bob, "GET", "/api/majordomo")).body).toMatchObject({ introduced: false });
+		const started = (await call(bob, "POST", "/api/majordomo", { yourName: "Anita", locale: "es", title: "Te damos la bienvenida, Anita" })).body;
+		expect(started).toMatchObject({ introduced: true, session: expect.any(String) });
+		const sent = (await stack.admin.query("SELECT payload->>'text' AS text FROM pim_app.accepted_commands WHERE public_chat_id = $1 AND kind = 'user_message'", [started.session])).rows[0]?.text as string;
+		expect(sent).toContain('Their name is Anita.');
+		expect(sent).toContain('"es"');
+		expect(owner).toBeTruthy();
 	});
 });

@@ -43,7 +43,7 @@ x-pim: &pim
     OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
     OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT: ${OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT:-false}
     PIM_METRICS_PORT: "9464"
-    # The proxy sets the client address and this secret on every request; roles answer only requests that carry it (the celld precedent, deploy/celld/caddy/Caddyfile).
+    # The proxy sets the client address and this secret on every request; roles answer only requests that carry it.
     PIM_INGRESS_SECRET: ${PIM_INGRESS_SECRET:?}
   depends_on: &pim-deps
     migrator: { condition: service_completed_successfully }

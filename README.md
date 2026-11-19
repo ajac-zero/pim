@@ -45,33 +45,31 @@ Pim is [pi](https://github.com/earendil-works/pi), the agent harness it runs on,
 
 ## Self-host it
 
-Pim is one server application, written to the Workers and Durable Objects APIs: a Worker that serves everyone, and a Durable Object with its own database for each person's space.
+Pim is one server application, from one container image, on PostgreSQL, NATS and any S3-compatible object store. Each person's space is their own rows in the database, kept apart by row-level security, so one stack serves everyone you invite.
 
-- **Today, on Cloudflare.** The easiest and best supported path: deploy it to your own Cloudflare account in a few clicks.
+- **Docker Compose**, for a machine at home or a small server: `deploy/compose/init-env.sh https://pim.example.com` writes a `.env` with random secrets and keys, and `deploy/compose/pim.sh up -d --wait` starts the whole stack (Caddy with its own certificate, PostgreSQL, PgBouncer, NATS, SeaweedFS object storage, the migrator and Pim's roles). Updating, backing up and restoring are one command each. See [Running Pim](docs/v2-operations.md#compose-homelab).
+- **Kubernetes**, for more: Kustomize manifests with CloudNativePG, a Runner that scales and drains, and Prometheus alerts and a Grafana dashboard. See [Kubernetes](docs/v2-operations.md#kubernetes).
 
-  [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/ajac-zero/pim)
+To try it on your machine first, `node scripts/v2-dev/preview.mjs` (after `pnpm install`) starts a Pim at `http://localhost:8787` with a stand-in model and a passkey-free sign-in, on a private PostgreSQL, NATS and S3 server, with no Docker and no account anywhere.
 
-- **Next, anywhere.** The aim is a Pim that runs entirely off Cloudflare: on your own machines with [celld](https://celld.dev), which runs the same APIs, keeping its state in any S3-compatible bucket, with the models of your choice. A beta for one node at home, [Pim on celld](docs/celld.md), is there to try; it hasn't been checked with real sign-in providers or connectors yet.
-
-To try it on your machine first, `pnpm install && pnpm preview` starts a Pim at `http://localhost:8787` with a stand-in model, to look around without a Cloudflare account.
+Coming from the Cloudflare version of Pim (the git tag `v1-final`)? [Cutover from the Cloudflare deployment](docs/v2-operations.md#cutover-from-the-cloudflare-deployment) moves everyone's data to the new stack.
 
 ## Models
 
 Each person picks the model for their chats, from those the Pim offers:
 
-- **Workers AI**, the default on Cloudflare, and any model in AI Gateway's catalog
 - **Your ChatGPT plan** (Plus or Pro), with its included usage
 - **Anthropic, OpenAI, Google Gemini, OpenRouter, DeepSeek, Mistral AI, Groq and xAI**, with an API key
-- **Local models** on llama.cpp, LM Studio, Ollama or vLLM, and any other server that speaks OpenAI's chat completions
-
-A Pim on Cloudflare can reach only servers on the public internet; one on your own machines can reach the models running beside it.
+- **The deployment's own model**, an OpenAI-compatible gateway the admin names in `.env`, shared by everyone
+- **Local models** on llama.cpp, LM Studio, Ollama or vLLM, and any other server that speaks OpenAI's chat completions, which Pim reaches from the machine it runs on
 
 ## Learn more
 
-- [How Pim works](docs/reference.md): deploying, the API, memory, models, connectors, agents and sharing
-- [Running a Pim for several people](docs/instance.md), and [on celld](docs/celld.md) (beta)
-- [Apps](docs/apps.md) and [extensions](docs/extensions.md)
+- [How Pim works](docs/reference.md): the setup, the API, memory, models, connectors, agents and sharing
+- [Running Pim](docs/v2-operations.md): install, update, back up, observe
+- [Running a Pim for several people](docs/instance.md)
+- [Apps](docs/apps.md) and [what Pim is built from](docs/extensions.md)
 
-To work on Pim, `pnpm check` runs the type checks, lint and tests, as CI does.
+To work on Pim, [AGENTS.md](AGENTS.md) describes the repository, and `pnpm check` runs the type checks, lint and tests, as CI does.
 
 Pim is released under the [Functional Source License, Version 1.1, ALv2 Future License](LICENSE) (FSL-1.1-ALv2). You can use, modify and self-host Pim for any purpose, including inside a company, except offering it as a competing commercial service. Each release becomes available under the Apache License 2.0 two years after it is published.

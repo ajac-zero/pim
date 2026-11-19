@@ -2,7 +2,7 @@
 
 A coding thread's workspace starts from one image (Node, pnpm, Yarn, git, build tools and the coding CLIs). Most repositories need more: a Go repository needs Go to run `go vet` and its tests. Before a thread's first turn, Pim reads the repository's checkout, installs the toolchains and dependencies it pins, and tells the coding agent which commands check its work. This is always on: there is no flag, setting or variable. It happens inside the thread's own workspace, so nothing is built on the host, and it is part of the thread's environment ([reference.md](reference.md#workspaces-for-coding-threads)), so its result is kept in the person's snapshot and the next thread starts from it.
 
-The code is [`packages/coding/src/repo-environment.ts`](../packages/coding/src/repo-environment.ts) (detection, the steps, and what the agent is told) and `#prepareEnvironment` in [`src/coding/thread-do.ts`](../src/coding/thread-do.ts) (running the steps, the snapshot and the status).
+The code is [`packages/coding/src/repo-environment.ts`](../packages/coding/src/repo-environment.ts) (detection, the steps, and what the agent is told) and `prepareEnvironment` in [`packages/v2-forge/src/environment.ts`](../packages/v2-forge/src/environment.ts) (running the steps, the snapshot and the status).
 
 ## What is read
 
@@ -37,7 +37,7 @@ A repository with nothing to install and no setup script has no environment (`st
 
 ## The environment phase in the transcript
 
-What the environment did is shown at the start of the thread's transcript, as notices before the agent's first message ([`src/coding/environment-phase.ts`](../src/coding/environment-phase.ts)). The restore, each provisioning step (a skipped one too) and the setup script are one notice each: `Environment setup: exit 0, 1.2 s`, the command after `$ `, and the end of what it printed: control characters removed, credentials redacted, at most its last 2048 characters, with a line saying how much was cut. A restore or a build ends with `Environment: restored from a snapshot` or `Environment: ready`. The same record is in the thread's log (`environment.started`, `environment.step`, …; [coding-api.md](coding-api.md#events)).
+What the environment did is shown at the start of the thread's transcript, as notices before the agent's first message. The restore, each provisioning step (a skipped one too) and the setup script are one notice each: `Environment setup: exit 0, 1.2 s`, the command after `$ `, and the end of what it printed: control characters removed, credentials redacted, at most its last 2048 characters, with a line saying how much was cut. A restore or a build ends with `Environment: restored from a snapshot` or `Environment: ready`. The same record is in the thread's log (`environment.started`, `environment.step`, …; [coding-api.md](coding-api.md#events)).
 
 ## When the setup fails
 
@@ -102,8 +102,8 @@ A name counts as a check when it is `test`, `tests`, `check`, `lint`, `vet`, `ty
 - **Some managers.** Poetry, Pipenv, Conda, Gradle, Maven and Bundler projects get no dependency install (Poetry is noted), and Java, Ruby and the rest are installed only when mise configuration or a dev container feature names them. A `package.json` without a lockfile installs nothing.
 - **Downloads need the egress allowlist.** mise fetches toolchains from `mise-versions.jdx.dev`, `dl.google.com` and `go.dev` (Go), `sum.golang.org`, `nodejs.org`, `static.rust-lang.org`, and GitHub's releases (`github.com`, `api.github.com`, `objects.githubusercontent.com`, `release-assets.githubusercontent.com`) for Python, uv, Bun and most other tools; these are on every workspace's allowlist, as are the package registries dependency steps use (npm, PyPI, crates.io, Go's proxy and the `storage.googleapis.com` it redirects module downloads to). The allowlist is fixed by Pim's deployment, not set per repository or user. A tool hosted elsewhere fails its step. Without a network, every step fails, is recorded, and the thread goes on with the image's tools.
 - **The CLIs share the PATH.** mise's shims come first for the coding CLIs too, so a repository that pins a very old Node runs the Node-based CLI wrappers with it.
-- **Every backend runs it.** Cloudflare Containers keeps no environment snapshots, so each thread provisions and runs the setup script in place and keeps no snapshot.
-- **Not tested against a live sandbox.** The Worker's tests run the steps in the in-memory workspace. The steps themselves were run for real with mise 2026.10.4 for Go, pnpm, requirements files, uv, Rust and a mise repository, and the Go, pnpm and mise ones in the workspace image as its user, after which a command with only the image's PATH found the pinned versions; but not under gVisor or behind the egress proxy, so the allowlist above is what mise is documented to reach, not what a live run was seen to need.
+- **Every backend runs it.** A backend that keeps no environment snapshots has each thread provision and run the setup script in place and keep no snapshot.
+- **Not tested against a live sandbox.** The tests run the steps in the in-memory workspace. The steps themselves were run for real with mise 2026.10.4 for Go, pnpm, requirements files, uv, Rust and a mise repository, and the Go, pnpm and mise ones in the workspace image as its user, after which a command with only the image's PATH found the pinned versions; but not under gVisor or behind the egress proxy, so the allowlist above is what mise is documented to reach, not what a live run was seen to need.
 
 ### Git access inside a thread
 

@@ -1,4 +1,4 @@
-// The Cloudflare Sandbox backend for coding workspaces. A workspace is one sandbox (a container behind a Durable Object) per coding session, reached through `SandboxLike`, a structural subset of the `@cloudflare/sandbox` client. This module deliberately imports nothing from `@cloudflare/*`: the Worker passes in `(sessionId) => getSandbox(env.Sandbox, sessionId)`, so nothing here runs, or is billed, until an owner adds the Sandbox binding. See docs/coding-cloudflare-sandbox.md.
+// The Cloudflare Sandbox backend for coding workspaces. A workspace is one sandbox (a container behind a Durable Object) per coding session, reached through `SandboxLike`, a structural subset of the `@cloudflare/sandbox` client. This module deliberately imports nothing from `@cloudflare/*`: the Worker passes in `(sessionId) => getSandbox(env.Sandbox, sessionId)`, so nothing here runs, or is billed, until an owner adds the Sandbox binding. The v2 server does not use it.
 
 import { egressPolicy, resumeOrCreate, unsupportedEgress, unsupportedSuspend } from "./egress";
 import {
@@ -47,7 +47,7 @@ export type CloudflareSandboxOptions = {
 	sandboxFor: (sessionId: string) => SandboxLike;
 	/** Turns snapshots on, through the sandbox's directory backups. `ttlSeconds` is how long a backup is kept. Without it `capabilities.snapshot` is false. */
 	backup?: { ttlSeconds?: number };
-	/** Turns the egress allowlist on: called when a workspace is created with the hostnames it may reach, it must install an outbound handler on the sandbox that refuses every other hostname (the design is in docs/coding-cloudflare-sandbox.md). Without it `capabilities.egressAllowlist` is false and `spec.egress` is not enforced. */
+	/** Turns the egress allowlist on: called when a workspace is created with the hostnames it may reach, it must install an outbound handler on the sandbox that refuses every other hostname. Without it `capabilities.egressAllowlist` is false and `spec.egress` is not enforced. */
 	applyEgress?: (sandbox: SandboxLike, allow: string[]) => Promise<void>;
 	/** The most workspaces at once, 2 when absent. */
 	maxConcurrent?: number;

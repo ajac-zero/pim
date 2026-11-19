@@ -1,4 +1,4 @@
-// These run in Node, not in workerd, because they start real processes: the apps' backends on pim-computer.
+// These start real processes: the apps' backends on pim-computer.
 import { Buffer } from "node:buffer";
 import * as fs from "node:fs/promises";
 import * as net from "node:net";

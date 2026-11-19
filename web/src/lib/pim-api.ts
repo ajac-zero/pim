@@ -360,7 +360,7 @@ export type InstalledExtension = {
 
 export type Extensions = {
   extensions: InstalledExtension[];
-  /** The logo at the top of the sidebar (`logo` in `pim.config.ts`); null for Pim's own mark. */
+  /** The logo at the top of the sidebar; null for Pim's own mark. */
   logo: string | null;
 };
 

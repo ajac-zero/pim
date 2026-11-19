@@ -10,13 +10,13 @@ The conformance suite (`packages/coding/src/orb/conformance.ts`) checks the cont
 
 ## Amp over HTTPS
 
-`AmpHttpOrbClient` (`packages/coding/src/orb/amp-http.ts`) uses only fetch from the Worker/DO to Amp's **internal** HTTPS API (`POST https://ampcode.com/api/internal?<method>`), the one the Amp CLI itself uses. Amp's documented `/api/v2` rejects the `sgamp_` access token with 401, so it is not used. The client never starts a CLI, opens a WebSocket, or holds a sandbox slot. The **workspace Amp harness is retired**; `harness: "amp"` now defaults to agent-hosted Orbs (amp-http) with no sandbox slot. Old threads that used the workspace Amp harness remain readable. See [coding-amp.md](coding-amp.md) for legacy information.
+`AmpHttpOrbClient` (`packages/coding/src/orb/amp-http.ts`) uses only fetch, from the Forge worker, to Amp's **internal** HTTPS API (`POST https://ampcode.com/api/internal?<method>`), the one the Amp CLI itself uses. Amp's documented `/api/v2` rejects the `sgamp_` access token with 401, so it is not used. The client never starts a CLI, opens a WebSocket, or holds a sandbox slot. The **workspace Amp harness is retired**; `harness: "amp"` now defaults to agent-hosted Orbs (amp-http) with no sandbox slot. Old threads that used the workspace Amp harness remain readable. See [coding-amp.md](coding-amp.md) for legacy information.
 
 Every call sends only `Authorization: Bearer <token>` and `content-type: application/json`, with body `{"method","params"}`, and gets `{"ok":true,"result"}`, `{"ok":false,"error":{"code","message"}}`, or `{"status","message"}` for 400/401. The base URL is `https://ampcode.com` unless `baseUrl` is given.
 
 | Orb call | Amp method |
 | --- | --- |
-| start | `resolveProjectByRepositoryURLs` (cached per repository URL, in memory and DO storage), then `createRemoteExecutorThread` |
+| start | `resolveProjectByRepositoryURLs` (cached per repository URL), then `createRemoteExecutorThread` |
 | state, messages | `getThreadTail` (state reads 1 message; the transcript 200, or 20 if the response is over the 2 MB cap; message text is truncated to 8000 chars; non-text blocks become `[type]` markers) |
 | steer | `sendMessageToThread` |
 | stop (archive) | `archiveThread` with `{thread, archived: true}` |
@@ -34,7 +34,7 @@ Start resolves the project (creating nothing), then a durable reservation preced
 
 Amp has no caller idempotency key. After a network failure, a 5xx, or a crash before the handle is saved, Pim **cannot know whether creation succeeded**. It refuses to create again under that key and asks the person to check Amp. This trades automatic recovery of an ambiguous start for never double-starting. Definitive rejections (authentication, rate limit, `ok:false`, other 4xx) can be retried. A saved handle is returned on retries, including after eviction.
 
-The DO alarm polls every 30 seconds. A missing state keeps polling; `working` is running; `idle` ends the turn only after working was seen or a 60-second creation grace period. Unknown states are logged and treated as still working. Approval means needs-attention on Amp. Amp may retry its own errors, so an error must persist for two minutes before Pim fails the turn. Progress and retry backoff survive eviction. 429/5xx and network errors back off with a bounded attempt count and honor Retry-After; ambiguous creation is never resent.
+The Forge worker polls every 30 seconds. A missing state keeps polling; `working` is running; `idle` ends the turn only after working was seen or a 60-second creation grace period. Unknown states are logged and treated as still working. Approval means needs-attention on Amp. Amp may retry its own errors, so an error must persist for two minutes before Pim fails the turn. Progress and retry backoff survive eviction. 429/5xx and network errors back off with a bounded attempt count and honor Retry-After; ambiguous creation is never resent.
 
 ### Steering and archiving
 
@@ -66,6 +66,6 @@ The deployment factory registers Amp HTTP; tests can inject another client. A th
 
 ## Verification
 
-`test/coding-orb-amp-http.test.ts` is a contract test against recorded fixtures (`test/fixtures/amp-internal/*.json`, written from the verified shapes, tokens redacted): exact URLs, headers and bodies, state mapping, defensive transcript mapping, error cases and token redaction. It also runs the conformance suite (`stopHalts: false`, since archiving may not halt a run). `test/coding-orb-thread.test.ts` covers slot-free placement, polling, eviction, the shared Connect credential and auth rejection.
+`packages/coding/test/orb-amp-http.test.ts` is a contract test against recorded fixtures (`packages/coding/test/support/amp-internal/*.json`, written from the verified shapes, tokens redacted): exact URLs, headers and bodies, state mapping, defensive transcript mapping, error cases and token redaction. It also runs the conformance suite (`stopHalts: false`, since archiving may not halt a run). `packages/v2-forge/test/amp.test.ts` covers slot-free placement, polling, eviction, the shared Connect credential and auth rejection.
 
 The fixtures are not recordings of live traffic; whether archiving halts a running agent, and the full set of `lastKnownAgentState` values, are unverified.

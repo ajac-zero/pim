@@ -1,4 +1,4 @@
-// These run in Node, not in workerd: they watch a real folder.
+// These watch a real folder.
 import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";

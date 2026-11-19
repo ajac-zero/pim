@@ -96,7 +96,7 @@ docker run --rm --entrypoint claude pim-workspace:local --version   # 2.1.311 (C
 
 `up.sh` rebuilds the images the compose file builds, `pim-workspace:local` from `../workspace-agentd` included (its `workspace-image` service, which the manager waits for), and recreates the containers whose image changed, leaving the egress proxy alone unless it changed. `git pull` brings the change once it is on the branch the checkout follows; before that, `git fetch origin && git checkout review/coding-s5-codex`. Workspaces that already exist keep the image they were made with; a thread gets the new one with its next workspace. If `ALLOWED_IMAGES` pins the image by digest, put the new digest there.
 
-To move to a newer Codex, change `CODEX_VERSION`, rebuild, and check `codex exec --help` for the flags above, the trust behavior (a repository's `.codex/config.toml` MCP server must not start), and a run's JSONL against `packages/coding/src/harness/codex.ts` and `test/fixtures/codex/`.
+To move to a newer Codex, change `CODEX_VERSION`, rebuild, and check `codex exec --help` for the flags above, the trust behavior (a repository's `.codex/config.toml` MCP server must not start), and a run's JSONL against `packages/coding/src/harness/codex.ts` and `packages/coding/test/support/codex/`.
 
 ## Not yet verified
 

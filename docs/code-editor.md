@@ -56,4 +56,4 @@ At most 8 files, 24 changed lines of 160 characters each for each, and about 4,0
 | Server | `src/space/sockets.ts` (`watchFile`, `fileEvent`, `canvasAsk`), `src/space/conversations.ts` (`#fileChanges`), `src/computer.ts` (`watch`, `unwatch`, `onFileEvent`), `src/file-changes.ts`, `src/extensions/canvas.ts` |
 | Computer | `computer/pim-computer.ts` (the `watch`, `unwatch` and `unwatch_all` calls, `file_changed` and `watch_error` events) |
 | App | `web/src/lib/file-session.ts`, `use-file-session.ts`, `pim-client.ts` (`watchFile`, `listenCanvas`), `canvas-live.ts`, `components/file-view.tsx`, `file-editor.tsx` |
-| Tests | `test/computer.test.ts` ("the code editor canvas"), `test/computer-watch.node.test.ts`, `web/src/lib/file-session.test.ts` |
+| Tests | `packages/v2-server/test/canvas-tools.test.ts`, `computer/test/computer-watch.test.ts`, `web/src/lib/file-session.test.ts` |

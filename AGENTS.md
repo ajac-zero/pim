@@ -1,51 +1,55 @@
 # Working on Pim
 
-Pim is one Cloudflare Worker (`src/`) that serves the API, passkey sign-in and the web app (`web/`, React). Each person's space is held by a Durable Object `Pim` (`src/pim.ts`) running on pi-durable; what it does for a space is in the collaborators of `src/space/`, which `Pim` hosts and which never import it. The README pitches the product; `docs/reference.md` explains how it works and its vocabulary. Use the same words: Pim is the platform; a space is one person's own part of it; an agent is what people chat with; a template is an agent shared through the gallery; an app is what an agent builds that people use, with every version kept; a connector is a service an agent works with, such as Gmail. The canvas is the pane beside a chat where files and apps open as tabs; a file's tab is a code editor (`docs/code-editor.md`).
+Pim is one self-hosted server (`packages/v2-server`, from one image, with one role per process) on PostgreSQL, NATS and S3, with the web app (`web/`, React). Each person's space is the rows of one owner under row-level security; the agents run on pi-durable stored in PostgreSQL (`packages/v2-runtime`). The Cloudflare Worker version (v1) was removed from this branch; the git tag `v1-final` is its last commit. The README pitches the product; `docs/reference.md` explains how it works and its vocabulary, and `docs/v2-operations.md` how it is run. Use the same words: Pim is the platform; a space is one person's own part of it; an agent is what people chat with; a template is an agent shared through the gallery; an app is what an agent builds that people use, with every version kept; a connector is a service an agent works with, such as Gmail. The canvas is the pane beside a chat where files and apps open as tabs; a file's tab is a code editor (`docs/code-editor.md`).
 
 ## Packages
 
-`packages/*` are internal pnpm workspace packages (`private`, source-first: their `exports` point at `.ts`, so Vite, Wrangler's esbuild and Vitest read them with no build step). One Worker and one `Pim` Durable Object per space remain; the packages are how its parts are kept apart.
+`packages/*` are internal pnpm workspace packages (`private`, source-first: their `exports` point at `.ts`, so Vite, tsx and Vitest read them with no build step). `@pim/v2-server` runs them together; the others are how its parts are kept apart. Outside `packages/`: `web/` (the web app), `computer/` (`pim-computer`, `pim-host` and the triggers runtime that run on people's machines), `displayd/`, `sandbox-manager/` and `workspace-agentd/` (standalone daemons), `deploy/` (Compose, Kubernetes, observability) and `scripts/`.
 
-- `@pim/shared` (`packages/shared`): what the Worker, the web app and the other packages share and that needs no Cloudflare runtime: locales, themes and Pim's own theme data, transcript projection, base64url, HTTP routing, credential redaction, the coding harnesses' disclosures, Standard Webhooks signing.
+- `@pim/shared` (`packages/shared`): what the server, the web app and the other packages share and that needs no server runtime: locales, themes and Pim's own theme data, transcript projection, the Live client, base64url, HTTP routing, credential redaction, the coding harnesses' disclosures, Standard Webhooks signing.
 - `@pim/ui-lang`: the `ui` block language, with its own unit, limits and fuzz tests.
-- `@pim/triggers`: the triggers engine, store, spec, conditions, time scheduler, API contract and connector ingress. Pim's gated action and tools over it stay in `src/triggers/`.
-- `@pim/coding`: the coding subsystem that needs no Worker: workspaces, harnesses, orbs, the git broker, the vault, tools, pools and the scheduler's queue. The Durable Objects (`CodingThreadDO`, `CodingSchedulerDO`) and the code that reaches bindings (`src/coding/`, including `vault/worker.ts` and `git-broker/worker.ts`) stay in `src/`. Its `test/support/` holds fixtures and fakes the Worker's tests import too.
-- `@pim/v2-live`: v2 live delivery: PostgreSQL projections, the live event log and the `Live` WebSocket service. Its tests start a private PostgreSQL and NATS when installed (`packages/v2-live/README.md`).
-- `@pim/v2-server`: the integration of the v2 packages: what joins the runtime and Forge to Live and Forge's wakes to the runtime's inboxes, the migrations that span workstreams (band 0600), and the end-to-end tests against real PostgreSQL and NATS. CI installs both (`packages/v2-runtime/scripts/ensure-postgres.sh`, `packages/v2-server/scripts/ensure-nats.sh`) and sets `PIM_V2_REQUIRE_INFRA` so a missing binary fails instead of skipping.
+- `@pim/triggers`: the triggers spec, conditions, validation and time scheduler, and pim-computer's protocol, which v2 uses; and the Cloudflare version's engine, store and ingress, which it keeps but does not run (`docs/triggers.md`).
+- `@pim/coding`: the coding subsystem that needs no server: workspaces, harnesses, orbs, the git broker, the vault, tools and pools. Its `test/support/` holds fixtures and fakes that Forge's tests use too.
+- `@pim/v2-contracts`: the seams the v2 packages share (identity, authorization, the runtime, live and forge seams, platform interfaces, process roles) and the foundation migration. It imports nothing from Pim.
+- `@pim/v2-runtime`: pi-durable's PostgreSQL storage, conversation-family partitions under fenced leases, and the Runner.
+- `@pim/v2-app`: the application: accounts, passkeys, the Gate HTTP API, agents, conversations, approvals, memory, apps, objects, Canvas and Relay. Its migrations are `0200`–`0299`.
+- `@pim/v2-live`: live delivery: PostgreSQL projections, the live event log and the `Live` WebSocket service. Its tests start a private PostgreSQL and NATS when installed (`packages/v2-live/README.md`).
+- `@pim/v2-forge`: coding threads: the pool scheduler, harness ports, grants, the git broker and the model gateway.
+- `@pim/v2-ops`: migration from the Cloudflare version (with the fence Worker, `src/fence-worker/`, the one place that still runs in workerd), backup and restore, observability and deployment checks.
+- `@pim/v2-server`: the integration of the packages: what joins the runtime and Forge to Live and Forge's wakes to the runtime's inboxes, the compatibility routes the web app calls (`src/compat/`), the agent's tools, the migrations that span workstreams (`0600`–`0799`), and the end-to-end tests against real PostgreSQL and NATS. CI installs both (`packages/v2-runtime/scripts/ensure-postgres.sh`, `packages/v2-server/scripts/ensure-nats.sh`) and sets `PIM_V2_REQUIRE_INFRA` so a missing binary fails instead of skipping.
 
-A package imports only `@pim/shared` (besides npm packages), never `src/` or `web/`, and no `cloudflare:` module; each package's boundary test checks it. `web/` imports only `@pim/shared` and `@pim/ui-lang`. Import a package by its subpath, such as `@pim/coding/workspace/types`.
+A package imports `@pim/shared` and, for the v2 packages, `@pim/v2-contracts` (besides npm packages), never `web/`, and no `cloudflare:` module (only the fence Worker has them); each package's boundary test checks it. `web/` imports only `@pim/shared` and `@pim/ui-lang`. Import a package by its subpath, such as `@pim/coding/workspace/types`. `packages/v2-ops/src/fence-worker/wrangler.jsonc` is the fence Worker's configuration, written by hand and checked by its test; its types are `workerd-runtime.d.ts` (the runtime, shared by the packages that name Cloudflare's types such as `SqlStorage`) and `packages/v2-ops/worker-configuration.d.ts` (its bindings), both generated by `wrangler types` (from `packages/v2-ops`: `pnpm exec wrangler types -c src/fence-worker/wrangler.jsonc ../../workerd-runtime.d.ts --include-env=false`, and `... worker-configuration.d.ts --include-runtime=false`).
 
 ## Checks
 
-Run them one at a time. An orb has 2 CPUs and 3 GB of memory, and parallel runs next to the preview and a browser have run out of memory; `pnpm test` is the exception, running its three stages side by side — use `pnpm test:serial` where even that doesn't fit.
+Run them one at a time. An orb has 2 CPUs and 3 GB of memory, and parallel runs next to the preview and a browser have run out of memory; `pnpm test` is the exception, running its stages side by side — use `pnpm test:serial` where even that doesn't fit.
 
 ```sh
-pnpm exec vitest run test/goals.test.ts   # one file of Worker tests, while iterating
+pnpm exec vitest run computer/test/displays.test.ts   # one file of the root's Node tests, while iterating
 pnpm --filter pim-web test                # the web app's tests (seconds)
 pnpm --filter @pim/ui-lang test           # a package's own tests, in seconds: also @pim/shared, @pim/triggers, @pim/coding
 pnpm test:packages                        # every package's tests
 pnpm test:packages:v2-server              # only @pim/v2-server, whose files run in parallel (PIM_V2_TEST_WORKERS, default 2)
 pnpm typecheck                            # the root, each package and the web app
 pnpm lint                                 # Biome, for web/; `pnpm --filter pim-web format` fixes formatting
-pnpm test                                 # every test but the Worker's (v1's), its stages at once
+pnpm test                                 # every test, its stages at once
 pnpm check                                # typecheck, lint and test, as CI does
 ```
 
-Worker tests run in workerd against `test/worker.ts`: the real Worker, with pi-ai's faux model in place of Workers AI. Tests script the model with `faux.setResponses(...)`, and every scripted response must be used. Vitest has three projects (`vitest.config.ts`): `worker` (workerd, no Chrome), `browser` (only `test/browser.test.ts`, which drives a local Chrome in place of Browser Run through the `BROWSER` binding; `node scripts/install-test-browser.mjs` puts it where wrangler looks, which `.agents/setup` runs), and `node` (`test/*.node.test.ts`: what needs no workerd and no package, such as what starts real processes; a package's own pure tests are in `packages/*/test/`). A test that touches neither `cloudflare:test`, `cloudflare:workers` nor `./worker` is a `*.node.test.ts`; `pairTestComputer({ browser: true })` is for the browser project alone. The standalone daemons (`displayd/`, `sandbox-manager/`, `workspace-agentd/`) use `node --test`: `pnpm test:daemons`. Every test's `afterEach` in `test/helpers.ts` and `test/people-support.ts` puts the test Worker's shared state back (`resetTestWorkerState` in `test/worker.ts`), so add a new such global there. Helpers are in `test/helpers.ts`. Extend an existing test file before adding one. `pnpm test:live` reaches real third-party servers and is opt-in. The `worker` and `browser` projects test v1, the Cloudflare Worker, which is no longer deployed and is kept only until v2 reaches feature parity: neither CI, `pnpm test` nor `pnpm test:changed` runs them; `pnpm exec vitest run --project worker` does.
-
-After editing `wrangler.jsonc`, run `pnpm types` to regenerate `worker-configuration.d.ts`.
+The root's Node tests (`vitest.config.ts`) are `computer/test/*.test.ts`, which start real processes to test what runs on a person's machine, and `scripts/*.test.ts`: the import rules (`architecture.test.ts`), `pnpm test:changed`'s choices, and the coverage matrix. A package's own tests are in `packages/*/test/`; the v2 packages' run against a real PostgreSQL (and, where they need it, NATS, an S3 server and real processes), each file in a database of its own copied from a template. v2-server tests script the model with pi-ai's faux provider (`faux.setResponses(...)`, and every scripted response must be used); see `packages/v2-server/test/support/`. Extend an existing test file before adding one. The standalone daemons (`displayd/`, `sandbox-manager/`, `workspace-agentd/`) use `node --test`: `pnpm test:daemons`.
 
 ## Testing
 
 Cut the wall-clock you spend waiting for tests. While iterating, run the one file that covers your change, or `pnpm test:changed`, plus any other file that covers it; never run tests in the background and poll for them with sleep. The full suite runs in GitHub CI on the pushed branch (`.github/workflows/ci.yml`), and CI is the authority for whether it passes: don't run it locally just to check a fix. After fixing one failing file, rerun only that file, and the files that cover a change to shared code.
 
 ```sh
-pnpm exec vitest run test/goals.test.ts   # one file, while iterating
+pnpm exec vitest run computer/test/displays.test.ts   # one file, while iterating
+(cd packages/v2-server && pnpm exec vitest run test/hostops.test.ts)   # one file of a package
 pnpm test:changed                         # what a diff since origin/main reaches
 # the full suite: GitHub CI, on the pushed branch
 ```
 
-`pnpm test:changed` (`scripts/test-changed.mjs`) diffs against origin/main, or HEAD~1 without it, and runs the whole suite when `package.json`, `pnpm-lock.yaml` or any vitest, wrangler or tsconfig config changed, or when nothing maps to a test; otherwise it runs vitest's own `--changed` over the root project's Node tests, the web app's tests too when `web/`, `@pim/shared` or `@pim/ui-lang` changed, each changed package's own tests (all of them for `@pim/shared`), and the daemons' tests when one of them changed. CI runs every job on every change, side by side, in under two minutes; the Compose smoke test (`.github/workflows/compose.yml`) runs after a push to `main`.
+`pnpm test:changed` (`scripts/test-changed.mjs`) diffs against origin/main, or HEAD~1 without it, and runs the whole suite when `package.json`, `pnpm-lock.yaml` or any vitest or tsconfig config changed, or when nothing maps to a test; otherwise it runs vitest's own `--changed` over the root's Node tests, the web app's tests too when `web/`, `@pim/shared` or `@pim/ui-lang` changed, each changed package's own tests (all of them for `@pim/shared`), and the daemons' tests when one of them changed. CI runs every job on every change, side by side, in under two minutes; the Compose smoke test (`.github/workflows/compose.yml`) runs after a push to `main`.
 
 ## Running Pim
 
@@ -58,12 +62,13 @@ Use the preview. `amp orb services ensure` starts it (`.amp/services.yaml`, `scr
 
 For UI changes, follow `web/DESIGN.md`. Sign in with `agent-browser` through the portal link or `http://localhost:8787/__dev/sign-in/ada`, set the viewport to 2x (`agent-browser set viewport 1280 800 2`), and inspect screenshots of every state you changed. `.agents/setup` installs Inter so screenshots look right.
 
-Never run `pnpm dev` or `pnpm deploy` here: `wrangler dev` uses the remote Workers AI binding, which needs a Cloudflare login and bills that account. `docs/deployments/` is private and not in the repository. A deployment's own settings aren't in `wrangler.jsonc`: they are variables set in the Cloudflare dashboard, with defaults in `src/deployment.ts`. Tests set theirs in `vitest.config.ts`, and the preview in `wrangler.preview.jsonc`.
+`docs/deployments/` is private and not in the repository. A deployment's own settings are variables in its `.env` (`deploy/compose/env.example`), read by `packages/v2-server/src/deployment.ts` and `loadProcessConfig` (`@pim/v2-contracts/platform`); the v2-server tests set theirs in `packages/v2-server/vitest.config.ts` and its test stack, and the preview in `scripts/v2-dev/preview.mjs`. Don't run the Compose stack in an orb: use the preview.
 
 ## Code and docs
 
-- Worker code in `src/` uses tabs; `web/` uses 2 spaces and Biome. Follow each file's style.
-- In code the older names remain: an app is still an artifact (`src/artifacts.ts`, `pim_artifact_*`, `/api/artifacts`) and a connector is still an app (`DirectoryApp`, `src/extensions/app-directory.ts`, `/api/app-directory`). Renaming the code and the API is a later change.
-- Comments and docs are plain prose about what something is for, in full sentences, as in `src/pim.ts` and `docs/`. Update the README or `docs/` when behavior they describe changes.
-- A tool with effects outside the conversation is a gated action (`src/extensions/approvals.ts`), so it runs only after approval. New apps, abilities and widgets are extensions listed in `pim.config.ts` (`docs/extensions.md`).
+- Code in `packages/` and `computer/` uses tabs; `web/` uses 2 spaces and Biome. Follow each file's style.
+- In code the older names remain: an app is still an artifact (`packages/v2-app/src/apps.ts`, `/api/artifacts`) and a connector is still an app (`DirectoryApp`, `/api/app-directory`). Renaming the code and the API is a later change.
+- Comments and docs are plain prose about what something is for, in full sentences, as in `packages/v2-server/src/roles.ts` and `docs/`. Update the README or `docs/` when behavior they describe changes. `docs/architecture/` holds the design history and specs: `v2-inventory-coverage.md` there is generated by `node scripts/v2-coverage/build.mjs` from `scripts/v2-coverage/rules.mjs` and checked by a test.
+- A tool with effects outside the conversation asks first: list its action in `NEEDS_APPROVAL` (`packages/v2-app/src/authz.ts`) and use `askFirst` (`packages/v2-server/src/tool-approval.ts`), so it runs only after approval. Tools are defined as the other `*-tools.ts` files in `packages/v2-server/src/` do and registered in `agent-host.ts` (`docs/extensions.md`).
+- A new migration takes the lowest unused number of its package's band (`ls packages/<package>/migrations` first), and is additive and compatible with the previous release (`docs/v2-operations.md`, "Installing and updating").
 - Commit messages are one short sentence in the imperative about what changes for people, such as "Let agents rename themselves and other agents through chat".

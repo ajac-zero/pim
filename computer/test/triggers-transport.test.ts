@@ -1,11 +1,9 @@
 // pim-computer's triggers host, in Node: how pim-computer gets and loads it, and runs nothing without it; and over a fake socket, with fake launchers on a fake clock for the protocol and the grants, the real runtime and spool in a temporary folder, and a few tiny real children for what only a real process group shows. Nothing here opens a socket or reaches the network.
 import { type ChildProcess, spawn } from "node:child_process";
-import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { grantScopeHash as spaceGrantScope, PROTOCOL as SPACE_PROTOCOL, runtimeIdOf, sourceConfigHash as spaceConfigHash, TRIGGERS_ENVELOPE as SPACE_ENVELOPE } from "@pim/triggers/computer";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Link, loadTriggers, TRIGGERS_MODULES } from "../pim-computer";
 import type { ChildEvents, ChildExit, OwnedChild } from "../triggers-adapters/poll";
@@ -627,23 +625,5 @@ describe("triggers in pim-computer, on real children", () => {
 			bystander?.kill();
 			await host.close();
 		}
-	});
-});
-
-describe("triggers in pim-computer, against the space's side", () => {
-	it("computes the same digests, runtime id and envelope as the space's @pim/triggers/computer", () => {
-		const sources: ComputerSource[] = [
-			{ kind: "stream", command: "tail -F log | jq -c .", cwd: null },
-			{ kind: "poll", command: "./price.sh", cwd: "/srv", intervalMs: 300_000, deadlineMs: 30_000 },
-			{ kind: "process", handle: "proc-1", expiresAt: T0 + 3_600_000 },
-			{ kind: "file", path: "/home/ada/inbox", events: ["created", "deleted"], recursive: true },
-		];
-		for (const source of sources) expect(sourceConfigHash(source)).toBe(spaceConfigHash(source));
-		const scope = { space: OWNER, runtimeId: BINDING.runtimeId, triggerId: "watch", sourceId: "watch#3", configHash: sourceConfigHash(sources[0]!), grantRef: "approval-9" };
-		expect(grantScopeHash(scope)).toBe(spaceGrantScope(scope));
-		expect(runtimeIdOf(createHash("sha256").update(TOKEN).digest("hex"))).toBe(BINDING.runtimeId);
-		expect(runtimeIdOf(null)).toBeNull();
-		expect(TRIGGERS_ENVELOPE).toBe(SPACE_ENVELOPE);
-		expect(PROTOCOL).toBe(SPACE_PROTOCOL);
 	});
 });

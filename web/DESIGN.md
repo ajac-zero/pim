@@ -41,7 +41,7 @@ Semantic colors, used only for their meaning:
 
 A theme chooses colors and may choose bundled fonts and an icon set. Every theme has a light and a dark mode. People pick both in Settings, under General → Appearance, where each theme previews its colors, typography and icons in the current mode.
 
-- **Tokyo Night** (the default in `pim.config.ts`): "Night" navy for dark mode and the "Day" palette for light mode, with text darkened for contrast. Its blue is the primary.
+- **Tokyo Night** (the default): "Night" navy for dark mode and the "Day" palette for light mode, with text darkened for contrast. Its blue is the primary.
 - **Pixel:** Tokyo Night's palettes with Pixeloid Sans (regular and bold) for interface text, Pixeloid Mono for code, and pixel-outline icons. Other themes keep system fonts and Lucide icons unless they explicitly choose another bundled style.
 - **Gronk:** neutral grays, with a near-black primary in light mode that inverts to near-white in dark mode. User bubbles stay near the canvas in both modes.
 - **Classics:** Catppuccin (Latte / Mocha), Solarized, Gruvbox (medium), Rosé Pine (Dawn / Main), One (Light / Dark), Everforest (medium), Nord (a light mode built from its Snow Storm palette), Dracula (Alucard / Dracula), and Ayu (Light / Mirage). Each uses the official palette, adjusted only in lightness where a pair missed contrast; each theme's header comment lists its deviations.
@@ -52,7 +52,7 @@ Parody themes like Gronk and Moose are playful nods to apps that inspired Pim. G
 
 In every theme the sidebar is one step off the canvas, bubbles and fills are one step from the canvas, and body text on the canvas and in bubbles meets WCAG AA contrast (4.5:1). Bubble fills stay within 2:1 contrast of the canvas rather than using the primary action's solid color.
 
-Themes are data an extension brings (see [docs/extensions.md](../docs/extensions.md#themes)); Pim's own are the `pim.themes` extension in [`src/extensions/themes/`](../src/extensions/themes/), one file each. To add one, copy a file there, give every token a value in `light` and `dark`, name its Shiki code themes, and list it in that folder's `index.ts`. When Shiki ships only a dark code theme, make the light one by recoloring it: map each of its colors (`web/src/lib/themes.test.ts` checks none is left). Agent colors should take the theme's own hues, and none should match the primary, since "no color" means primary.
+Themes are data (see [docs/extensions.md](../docs/extensions.md#themes)); Pim's own are in [`packages/shared/src/theme-data/`](../packages/shared/src/theme-data/), one file each. To add one, copy a file there, give every token a value in `light` and `dark`, name its Shiki code themes, and list it in that folder's `index.ts`. When Shiki ships only a dark code theme, make the light one by recoloring it: map each of its colors (`web/src/lib/themes.test.ts` checks none is left). Agent colors should take the theme's own hues, and none should match the primary, since "no color" means primary.
 
 ## Agent icons
 

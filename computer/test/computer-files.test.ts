@@ -1,4 +1,4 @@
-// These run in Node, not in workerd, whose file system keeps no modes and no inodes.
+// These run against the real file system, which keeps modes and inodes.
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";

@@ -98,7 +98,7 @@ The runtime drops an adapter's health until the observer is installed, by design
 
 ## Tests
 
-`test/triggers-adapters.node.test.ts`, in Node, about 5 seconds:
+`computer/test/triggers-adapters.test.ts`, in Node, about 5 seconds:
 
 - A fake clock, launcher and provider for timing (anchored cadence, jitter, late wakes), one child at a time, deadlines and the SIGTERM, SIGKILL, unreaped sequence, output bounds, retained and refused emissions, pause and resume, stop and abort races, `stop`'s bound against the runtime's, start's refusals, receipts and changed intents against the pinned intent, unknown outcomes, slow reads and liveness checks across expiry, a provider that never answers, answers after stop or abort, and read failures.
 - Tiny real children through `NodeChildLauncher`, with its signals watched: exit statuses through the leader, leftovers killed by the leader's own `kill -9 0` with no signal from the launcher, nothing sent once a leader is reaped, a leader killed from outside reported as `cleaned: false` with its leftover not signalled, and an adapter that then polls, emits and reports nothing more through many intervals, pause and resume, and stop, the environment kept to its list, a group killed at the deadline and on stop while a bystander process lives on, stderr kept out of reports and the console.

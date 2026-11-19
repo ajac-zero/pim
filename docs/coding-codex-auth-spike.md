@@ -1,14 +1,14 @@
 # Spike: can Pim's ChatGPT sign-in log Codex CLI in?
 
-The question is whether the tokens from Pim's own "Sign in with ChatGPT" ([`src/chatgpt.ts`](../src/chatgpt.ts)) could be written to `~/.codex/auth.json`, so the unmodified Codex CLI in a person's workspace uses their ChatGPT plan without a login of its own.
+The question is whether the tokens from Pim's own "Sign in with ChatGPT" ([`packages/v2-app/src/chatgpt.ts`](../packages/v2-app/src/chatgpt.ts)) could be written to `~/.codex/auth.json`, so the unmodified Codex CLI in a person's workspace uses their ChatGPT plan without a login of its own.
 
-**The answer is no.** Codex's ChatGPT mode uses tokens from another OAuth client, with other scopes, for another backend, and it refreshes them with that client. Pim's tokens are for `https://api.openai.com/v1` and refresh only with the client issued to Pim. The recommended path is for Codex to log itself in inside the person's sandbox with `codex login --device-auth`, and for the vault ([`src/coding/vault`](../src/coding/vault)) to keep the `auth.json` that results.
+**The answer is no.** Codex's ChatGPT mode uses tokens from another OAuth client, with other scopes, for another backend, and it refreshes them with that client. Pim's tokens are for `https://api.openai.com/v1` and refresh only with the client issued to Pim. The recommended path is for Codex to log itself in inside the person's sandbox with `codex login --device-auth`, and for the vault ([`packages/v2-forge/src/vault.ts`](../packages/v2-forge/src/vault.ts)) to keep the `auth.json` that results.
 
 This comes from reading code and public docs only: openai/codex `main` at `e54a5713` (2026-11-09) and OpenAI's docs as of the same date. No real tokens were read or used, and no live calls were made.
 
 ## The two flows side by side
 
-| | Codex CLI, ChatGPT mode | Pim (`src/chatgpt.ts`, SIWC) |
+| | Codex CLI, ChatGPT mode | Pim (`packages/v2-app/src/chatgpt.ts`, SIWC) |
 | --- | --- | --- |
 | Client | `app_EMoamEEZ73f0CkXaXp7hrann`, fixed (`codex-rs/login/src/auth/manager.rs` L1894-1902) | `dynamic_agent_client` at first, then the client issued to Pim's agent, `ext_agent_host_id` |
 | Issuer | `https://auth.openai.com` | `https://auth.openai.com` |

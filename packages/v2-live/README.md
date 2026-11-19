@@ -6,9 +6,9 @@ The package implements the seams of `@pim/v2-contracts` (`origin/pim/v2-canonica
 
 ## Why the app shows "Connecting…" and feels slow when five or more threads run
 
-Read from the code at `30818438` (`main`). These are mechanisms visible in the code, not a measurement; no load test was run against the real Worker, so the relative weight of each is unknown.
+Read from the code at `30818438` (`main`). These are mechanisms visible in the code, not a measurement; no load test was run against the real Worker (the Cloudflare version, since removed), so the relative weight of each is unknown.
 
-**On the server (`src/space/sockets.ts`, `src/pim.ts`):**
+**On the server (the Cloudflare version's `src/space/sockets.ts` and `src/pim.ts`, at the git tag `v1-final`):**
 
 1. **One Durable Object serves everything for a person.** Chat sockets, notes (Yjs), the computer's connection, the desktop and browser streams, file watches, every REST route (`/api/*`) and every running agent's model loop share one `Pim` object's single-threaded event loop and one SQLite storage. A socket's `onConnect` (`sockets.ts:onConnect` → `watch`) has to wait its turn behind whatever that loop is doing. "Connecting…" is the client waiting for that turn.
 2. **Streaming is a storage transaction.** pi-durable commits each partial of a streaming message and each tool output chunk (`partialIntervalMs: 250`, `src/pim.ts:717`), about four transactions a second per streaming conversation, each handled on that same loop. Five running threads are about twenty commits a second, plus tool and result commits, before any request is served.

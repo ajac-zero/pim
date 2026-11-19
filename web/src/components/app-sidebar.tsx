@@ -504,7 +504,7 @@ function RailItem({
 }
 
 /**
- * The deployment's logo (`logo` in `pim.config.ts`), or Pim's own mark, at the
+ * The deployment's logo, or Pim's own mark, at the
  * top of the rail. It goes nowhere; hovering it shows which Pim this is.
  */
 function SidebarLogo() {

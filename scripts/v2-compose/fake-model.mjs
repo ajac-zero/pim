@@ -44,4 +44,4 @@ createServer(async (req, res) => {
 	else if (last.role === "tool") call("send_to_user", { message: `Tool result: ${textOf(last).slice(0, 400)}` });
 	else call("send_to_user", { message: `Echo: ${text}` });
 	res.end("data: [DONE]\n\n");
-}).listen(9000, () => console.log("fake model on 9000"));
+}).listen(Number(process.env.PORT ?? 9000), () => console.log(`fake model on ${process.env.PORT ?? 9000}`));

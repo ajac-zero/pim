@@ -11,7 +11,7 @@ export const MAX_TOKENS = 20;
 export const SESSION_MS = 30 * 24 * 3600_000;
 
 /** `guestOf` makes a guest account of a live bot's link (`Guests.liveBot` has checked it): allowed whatever the registration mode, with no invite. */
-export type Registration = { username: string; invite?: string; address?: string; bootstrap?: string; now?: Date; guestOf?: { botId: string; host: string }; /** The account is `pending` until its first passkey (`activate`), and lapses after a day without one. */ pending?: boolean };
+export type Registration = { username: string; invite?: string; address?: string; bootstrap?: string; now?: Date; guestOf?: { botId: string; host: string }; /** The account is `pending` until its first passkey (`activate`), and lapses after a day without one. */ pending?: boolean; /** Joins whatever the registration policy says and without the bootstrap claim: the development sign-in's (`PIM_DEV_SIGN_IN`), never a route of a deployment. */ trusted?: boolean };
 export type ConsumerKind = "computer" | "host" | "mcp_client" | "mcp_grant" | "mcp_refresh";
 const CONSUMER_PREFIX: Record<ConsumerKind, string> = { computer: "pimc_", host: "pimh_", mcp_client: "pimmc_", mcp_grant: "pimmg_", mcp_refresh: "pimmr_" };
 
@@ -41,8 +41,10 @@ export class Identity {
 		const first = !guest && (await this.db.anonymous(async (tx) => (await tx.query("SELECT NOT EXISTS (SELECT 1 FROM pim_app.accounts) AS first")).rows[0].first as boolean));
 		const stored = await this.db.anonymous(async (tx) => (await tx.query("SELECT value FROM pim_app.instance_settings WHERE key = 'registration_open'")).rows[0]?.value === true);
 		const policy = registrationPolicy(this.env(), stored);
-		const spendsInvite = !first && !guest && policy.mode === "invite";
-		if (guest) {
+		const spendsInvite = !first && !guest && policy.mode === "invite" && !input.trusted;
+		if (input.trusted) {
+			// The development sign-in makes the account without a claim code or an invite.
+		} else if (guest) {
 			// A bot's link is open to anyone while it is live, whatever the registration mode; the cap and the per-address limit still hold.
 		} else if (first) {
 			if (!input.bootstrap) throw new RefusedError("This Pim needs its bootstrap claim code to create the first account", "bootstrap_required");
@@ -54,11 +56,11 @@ export class Identity {
 		await this.db.owner(ownerId, async (tx) => {
 			// Counting and taking a place is one step, whoever else registers at the same moment.
 			await tx.query("SELECT pg_advisory_xact_lock(hashtext('pim_app.registration'))");
-			if (input.address) {
+			if (input.address && !input.trusted) {
 				const recent = (await tx.query("SELECT count(*)::int AS n FROM pim_app.registration_attempts WHERE address = $1 AND at > $2", [input.address, new Date(now.getTime() - 24 * 3600_000)])).rows[0].n as number;
 				if (recent >= policy.perAddressPerDay) throw new PimError(429, "rate_limited", "Too many registrations from this network today. Try again tomorrow.");
 			}
-			if (!first && policy.maxAccounts !== null && (await tx.query("SELECT count(*)::int AS n FROM pim_app.accounts WHERE status <> 'deleted'")).rows[0].n >= policy.maxAccounts) throw new PimError(503, "full", "This Pim is full for now. Ask the person who runs it.");
+			if (!first && !input.trusted && policy.maxAccounts !== null && (await tx.query("SELECT count(*)::int AS n FROM pim_app.accounts WHERE status <> 'deleted'")).rows[0].n >= policy.maxAccounts) throw new PimError(503, "full", "This Pim is full for now. Ask the person who runs it.");
 			try {
 				await tx.query("INSERT INTO pim_app.usernames (username, owner_id) VALUES ($1, $2)", [username, ownerId]);
 			} catch (error) {

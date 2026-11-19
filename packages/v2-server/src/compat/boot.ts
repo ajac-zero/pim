@@ -217,6 +217,23 @@ export const bootRoutes: Route[] = [
 		const body = { account, username: account.username, role: account.role, setup: setup.code, setupExpiresAt: setup.expiresAt.toISOString(), recoveryCodes };
 		return b.session === true ? ok(body, 201, { "set-cookie": setCookie(sessionCookieName(secure), await session(), 30 * 24 * 3600, secure) }) : ok(body, 201);
 	}),
+	// The development sign-in, as v1's preview had it (`/__dev/sign-in/<username>?returnTo=/path&bot=<id>`): makes the account when it is new (the first is the admin; `bot` makes a new account a
+	// guest of that shared bot) and sets the session cookie. Only where `PIM_DEV_SIGN_IN=1` (`scripts/v2-dev/preview.mjs`); anywhere else the path does not exist.
+	route("GET", "/__dev/sign-in/:username", async ({ app, params, url, secure }) => {
+		if (process.env.PIM_DEV_SIGN_IN !== "1") throw new NotFoundError();
+		const username = decodeURIComponent(params[0]!).toLowerCase();
+		let ownerId = (await app.db.anonymous(async (tx) => (await tx.query("SELECT owner_id FROM pim_app.accounts WHERE username = $1 AND status = 'active'", [username])).rows[0]))?.owner_id as string | undefined;
+		if (!ownerId) {
+			const botId = url.searchParams.get("bot");
+			const bot = botId ? await app.guests.liveBot(botId) : null;
+			const account = await app.identity.register({ username, trusted: true, ...(bot ? { guestOf: { botId: bot.id, host: bot.host } } : {}) });
+			ownerId = account.ownerId;
+			if (bot) await app.guests.enroll(ownerId, bot.id);
+			else await app.agents.adoptDefault({ kind: "user", ownerId: account.ownerId, role: account.role, sessionId: "dev" });
+		}
+		const returnTo = url.searchParams.get("returnTo") ?? "/";
+		return { status: 302, headers: { location: returnTo.startsWith("/") && !returnTo.startsWith("//") ? returnTo : "/", "set-cookie": setCookie(sessionCookieName(secure), await app.identity.createSession(ownerId), 30 * 24 * 3600, secure) } };
+	}),
 	// The account in v1's shape: usage today and for the last 30 days, from the cost ledger; v2 sets no per-person limits and meters no sandbox minutes here.
 	route("GET", "/api/account", async ({ app, principal }) => {
 		const p = await principal();

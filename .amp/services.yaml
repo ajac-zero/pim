@@ -1,8 +1,8 @@
 services:
-  # The local preview (wrangler.preview.jsonc, preview/worker.ts): the real Worker with a stand-in
-  # model and no Cloudflare account. It rebuilds the web app and reloads the Worker on changes.
+  # The development preview of v2 (scripts/v2-dev/preview.mjs): a private PostgreSQL, nats-server, an S3 server, the stand-in model and one Pim process that runs every
+  # role, with the dev sign-in route turned on (PIM_DEV_SIGN_IN=1). State persists in .wrangler/state-v2-dev; the web app is rebuilt when web/src changes.
   preview:
-    command: pnpm preview
+    command: node scripts/v2-dev/preview.mjs
     port: 8787
     health: /health
     portal:

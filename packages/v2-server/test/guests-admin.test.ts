@@ -333,4 +333,28 @@ real("guests, circles and the admin's majordomo", () => {
 		expect((await results(host, "admin_write_approved")).at(-1)).toMatch(/"status": 403/);
 		expect((await d.stack.admin.query("SELECT status FROM pim_app.accounts WHERE username = 'anibal'")).rows[0].status).toBe("active");
 	}, 300_000);
+
+	it("has a development sign-in only where PIM_DEV_SIGN_IN is on, which makes the account, gives it the default agent and joins a bot's guests", async () => {
+		const open = (path: string) => fetch(`${base(gate)}${path}`, { redirect: "manual", headers: { "x-pim-ingress-secret": d.ingressSecret } });
+		expect((await open("/__dev/sign-in/devvy")).status).toBe(404);
+		process.env.PIM_DEV_SIGN_IN = "1";
+		try {
+			const made = await open("/__dev/sign-in/devvy?returnTo=/settings");
+			expect(made.status).toBe(302);
+			expect(made.headers.get("location")).toBe("/settings");
+			const cookie = made.headers.get("set-cookie")!.split(";")[0]!;
+			const me = await fetch(`${base(gate)}/api/account`, { headers: { cookie, "x-pim-ingress-secret": d.ingressSecret } });
+			expect(await me.json()).toMatchObject({ username: "devvy", role: "member", status: "active" });
+			// Signing in again is the same account; a returnTo that leaves the site is not followed.
+			expect((await open("/__dev/sign-in/devvy?returnTo=//evil.example")).headers.get("location")).toBe("/");
+			expect((await d.stack.admin.query("SELECT count(*)::int AS n FROM pim_app.accounts WHERE username = 'devvy'")).rows[0].n).toBe(1);
+			// With a bot, a new account is its guest.
+			const shared = (await host.web.call("PUT", `/api/agents/${agentId}/bot`, { tools: [] })).json.id as string;
+			const guestCookie = (await open(`/__dev/sign-in/devguest?bot=${shared}`)).headers.get("set-cookie")!.split(";")[0]!;
+			expect(await (await fetch(`${base(gate)}/api/account`, { headers: { cookie: guestCookie, "x-pim-ingress-secret": d.ingressSecret } })).json()).toMatchObject({ role: "guest" });
+			await host.web.call("DELETE", `/api/agents/${agentId}/bot`);
+		} finally {
+			delete process.env.PIM_DEV_SIGN_IN;
+		}
+	}, 60_000);
 });

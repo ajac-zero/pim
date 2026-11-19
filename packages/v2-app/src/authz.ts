@@ -14,8 +14,13 @@ const GUEST_DENIED = /^(admin:|coding:|computer:|token:|mcp:|app:deploy|trigger:
 const AGENT_SCOPES = ["api:*", "app:*", "coding:*", "computer:*", "trigger:*", "http:*", "connector:*", "skill:*"];
 /** Coding actions: the permission an admin's CodingGrant must list. */
 const CODING_ACTIONS = new Set<string>(CODING_PERMISSIONS);
-/** Coding actions, an HTTP request that writes, deploying an app's backend onto a personal computer, what an agent does there (a shell command, deleting a file, acting in the desktop, sending a form in its browser), a skill installed from outside Pim, and a connector's tool that asks, have effects outside Pim that a person approves each time unless a StandingApproval covers them. */
-const NEEDS_APPROVAL = new Set<string>(["coding:push", "coding:pr", "coding:merge", "app:deploy", "http:request", "computer:shell", "computer:file_delete", "computer:desktop", "computer:browser_submit", "connector:call", "skill:install"]);
+/**
+ * Coding actions, an HTTP request that writes, deploying an app's backend onto a personal computer, a skill installed from outside Pim, and a
+ * connector's tool that asks, have effects outside Pim that a person approves each time unless a StandingApproval covers them. What an agent
+ * does on the person's computer (a shell command, deleting a file, acting in the desktop, sending a form in its browser) is its own to do, so
+ * it runs without asking.
+ */
+const NEEDS_APPROVAL = new Set<string>(["coding:push", "coding:pr", "coding:merge", "app:deploy", "http:request", "connector:call", "skill:install"]);
 
 export const principalId = (p: Principal): string => {
 	switch (p.kind) {

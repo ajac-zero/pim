@@ -100,20 +100,15 @@ real("an agent on a paired computer", () => {
 		expect((await fetch(`${base(gate)}/pim-computer.ts`)).status).toBe(200);
 	}, 120_000);
 
-	it("runs a shell command after a person approves it, and reads, writes and edits files on the real daemon", async () => {
+	it("runs a shell command without asking, and reads, writes and edits files on the real daemon", async () => {
 		startDaemon();
 		await connected(true);
 		expect((await web.call("GET", "/api/computer")).json.computer).toMatchObject({ agent: expect.stringContaining("pim-computer"), root: expect.any(String) });
 		writeFileSync(join(root, "hello.txt"), "line one\nline two\n");
 
 		const end = await ask("run a command", toolUse(fauxToolCall("shell", { command: "echo from-the-computer > made.txt; cat hello.txt" })), toolUse(fauxToolCall("file_read", { path: "/workspace/made.txt" })), toolUse(fauxToolCall("send_to_user", { message: "Done." })));
-		const approval = await waitFor("the approval to be filed", async () => (await d.stack.admin.query("SELECT id, tool, args FROM pim_app.approvals WHERE state = 'waiting'")).rows[0], 60_000);
-		expect(approval.tool).toBe("computer:shell");
-		expect(approval.args).toMatchObject({ command: "echo from-the-computer > made.txt; cat hello.txt" });
-		// Nothing ran before the decision.
-		expect(existsSync(join(root, "made.txt"))).toBe(false);
-		expect((await web.call("POST", `/api/approvals/${approval.id}/decision`, { approve: true })).status).toBe(200);
 		await end();
+		expect((await d.stack.admin.query("SELECT count(*)::int AS n FROM pim_app.approvals")).rows[0].n).toBe(0);
 		expect(readFileSync(join(root, "made.txt"), "utf8")).toBe("from-the-computer\n");
 		expect((await results("shell"))[0]).toMatch(/Exit code 0[\s\S]*line one/);
 		expect((await results("file_read"))[0]).toContain("from-the-computer");
@@ -213,14 +208,7 @@ real("an agent on a paired computer", () => {
 		expect(note).toContain(`/workspace/photo.jpg (${photo.length} bytes; scaled down to fit)`);
 	}, 120_000);
 
-	it("does nothing when the person declines, and goes unavailable when the computer leaves", async () => {
-		const end = await ask("remove it", toolUse(fauxToolCall("shell", { command: "touch declined.txt" })), toolUse(fauxToolCall("send_to_user", { message: "Ok." })));
-		const approval = await waitFor("the approval to be filed", async () => (await d.stack.admin.query("SELECT id FROM pim_app.approvals WHERE state = 'waiting'")).rows[0], 60_000);
-		expect((await web.call("POST", `/api/approvals/${approval.id}/decision`, { approve: false })).status).toBe(200);
-		await end();
-		expect(existsSync(join(root, "declined.txt"))).toBe(false);
-		expect((await results("shell")).at(-1)).toMatch(/did not approve/);
-
+	it("goes unavailable when the computer leaves", async () => {
 		daemon?.kill("SIGKILL");
 		await connected(false);
 		const started = Date.now();
@@ -231,7 +219,7 @@ real("an agent on a paired computer", () => {
 		expect((await d.stack.admin.query("SELECT count(*)::int AS n FROM pim_app.approvals WHERE state = 'waiting'")).rows[0].n).toBe(0);
 	}, 180_000);
 
-	it("looks at the desktop of a computer with a Cua desktop and no displayd, and waits for a person before acting on it", async () => {
+	it("looks at the desktop of a computer with a Cua desktop and no displayd, and acts on it without asking", async () => {
 		const asked: { name: string; arguments: Record<string, unknown> }[] = [];
 		const spacesd = createServer((req, res) => {
 			let body = "";
@@ -255,13 +243,8 @@ real("an agent on a paired computer", () => {
 			// Looking runs at once, on the one desktop the chats share.
 			await (await ask("look", toolUse(fauxToolCall("desktop_look", {}))))();
 			expect((await results("desktop_look")).at(-1)).toContain("get_desktop_state done");
-			// Acting is filed first and does nothing until it is approved.
-			const end = await ask("click", toolUse(fauxToolCall("desktop_act", { action: "click", pid: 7, x: 5, y: 6 })));
-			const approval = await waitFor("the approval to be filed", async () => (await d.stack.admin.query("SELECT id, tool FROM pim_app.approvals WHERE state = 'waiting'")).rows[0], 60_000);
-			expect(approval.tool).toBe("computer:desktop");
-			expect(asked.map((a) => a.name)).toEqual(["get_desktop_state"]);
-			expect((await web.call("POST", `/api/approvals/${approval.id}/decision`, { approve: true })).status).toBe(200);
-			await end();
+			// Acting runs at once too.
+			await (await ask("click", toolUse(fauxToolCall("desktop_act", { action: "click", pid: 7, x: 5, y: 6 }))))();
 			expect(asked.map((a) => a.name)).toEqual(["get_desktop_state", "click"]);
 			expect(asked[1]!.arguments).toMatchObject({ pid: 7, x: 5, y: 6 });
 		} finally {
@@ -331,15 +314,10 @@ real("an agent on a paired computer", () => {
 			const end2 = await ask("follow the link", toolUse(fauxToolCall("browser_click", { ref: await ref("Go next") })));
 			await end2();
 			expect((await results("browser_click")).at(-1)).toContain("Next page");
-			// A button of a form that posts is not: it is filed, shown as the page names it, and nothing is sent until it is approved.
+			// So is a button of a form that posts: it is sent at once.
 			await (await ask("shop again", toolUse(fauxToolCall("browser_open", { url }))))();
-			const end3 = await ask("buy", toolUse(fauxToolCall("browser_click", { ref: await ref("Buy now") })));
-			const approval = await waitFor("the approval to be filed", async () => (await d.stack.admin.query("SELECT id, tool, args FROM pim_app.approvals WHERE state = 'waiting'")).rows[0], 60_000);
-			expect(approval.tool).toBe("computer:browser_submit");
-			expect(approval.args.summary).toMatch(/click the button “Buy now”/);
-			expect(posts).toHaveLength(0);
-			expect((await web.call("POST", `/api/approvals/${approval.id}/decision`, { approve: true })).status).toBe(200);
-			await end3();
+			await (await ask("buy", toolUse(fauxToolCall("browser_click", { ref: await ref("Buy now") }))))();
+			expect((await d.stack.admin.query("SELECT count(*)::int AS n FROM pim_app.approvals WHERE tool = 'computer:browser_submit'")).rows[0].n).toBe(0);
 			expect(posts).toEqual(["/buy"]);
 			expect((await results("browser_click")).at(-1)).toContain("Ordered");
 		} finally {

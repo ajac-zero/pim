@@ -327,7 +327,7 @@ export function computerTools(deps: ComputerToolDeps, kit: ComputerToolKit): Too
 			}
 			return text(`Edited ${a.path}.`);
 		}, "unsafe"),
-		tool("file_delete", `Delete a file or folder. A person approves it first, unless they have said it may go ahead. ${WHERE}`, Type.Object({ path: Type.String(), recursive: Type.Optional(Type.Boolean()) }), async (a, api) => {
+		tool("file_delete", `Delete a file or folder. ${WHERE}`, Type.Object({ path: Type.String(), recursive: Type.Optional(Type.Boolean()) }), async (a, api) => {
 			const bad = confined(a.path);
 			if (bad) return bad;
 			if (a.path === FILES_ROOT) return text(`${FILES_ROOT} itself can't be deleted.`, true);
@@ -341,7 +341,7 @@ export function computerTools(deps: ComputerToolDeps, kit: ComputerToolKit): Too
 		}),
 		tool(
 			"shell",
-			`Run a command on the person's computer, in a bash login shell, as the user pim-computer runs as there. ${FILES_ROOT} exists only for the file tools: in the shell it is a real folder elsewhere, $PIM_WORKSPACE, where the shell starts, so ${FILES_ROOT}/uploads/a.pdf is $PIM_WORKSPACE/uploads/a.pdf there, or uploads/a.pdf from the start. A person approves each command first, unless they have said commands may go ahead.`,
+			`Run a command on the person's computer, in a bash login shell, as the user pim-computer runs as there. ${FILES_ROOT} exists only for the file tools: in the shell it is a real folder elsewhere, $PIM_WORKSPACE, where the shell starts, so ${FILES_ROOT}/uploads/a.pdf is $PIM_WORKSPACE/uploads/a.pdf there, or uploads/a.pdf from the start.`,
 			Type.Object({ command: Type.String({ minLength: 1 }), cwd: Type.Optional(Type.String({ description: `A folder under ${FILES_ROOT}.` })), timeout_seconds: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_COMMAND_MS / 1000 })) }),
 			async (a, api) => {
 				const bad = confined(a.cwd);
@@ -386,7 +386,7 @@ export function computerTools(deps: ComputerToolDeps, kit: ComputerToolKit): Too
 	tools.push(
 		tool("desktop_look", `See the person's computer's desktop: a screenshot, with its windows, each with its app's pid and window_id. ${DESKTOP_ABOUT}`, Type.Object({}), (_a, api) => driver(api, "get_desktop_state", {})),
 		tool("desktop_read", "Read a window of an app: its elements from the accessibility tree, each numbered [N], with the snapshot id their element_token starts with. Give a `query` to list only matching elements. Without a pid, lists the running apps.", Type.Object({ pid: Type.Optional(Pid), window_id: Type.Optional(Type.Integer()), query: Type.Optional(Type.String()) }), (a, api) => (a.pid === undefined ? driver(api, "list_apps", {}) : driver(api, "get_window_state", a))),
-		tool("desktop_act", `Act in an app on the person's computer's desktop: open apps, click, type, press keys, scroll. A person approves each action first, unless they have said it may go ahead. ${DESKTOP_ABOUT}`, DesktopAct, async (a, api) => {
+		tool("desktop_act", `Act in an app on the person's computer's desktop: open apps, click, type, press keys, scroll. ${DESKTOP_ABOUT}`, DesktopAct, async (a, api) => {
 			const { action, foreground, ...rest } = a;
 			const thread = (await deps.chatOf(api.conversationId)) ?? String(api.conversationId);
 			return gated(api, {
@@ -482,21 +482,21 @@ export function computerTools(deps: ComputerToolDeps, kit: ComputerToolKit): Too
 			});
 		}),
 		tool("browser_close", "Close your window when you're done with it; what's signed in there stays.", Type.Object({}), async (_a, api) => (await browse(api, (chat) => browser.close(chat)), text("Your window is closed."))),
-		tool("browser_click", "Click a link, button or other element on your window's page, by its number, and read the page it leads to. Clicking a button that belongs to a form may send it, so that asks a person first (a form that says method=\"get\" only loads a page, and does not).", ClickArgs, (a, api) =>
+		tool("browser_click", "Click a link, button or other element on your window's page, by its number, and read the page it leads to.", ClickArgs, (a, api) =>
 			submitting(api, "browser_click", { ref: a.ref }, async (chat) => {
 				const element = await browser.describe(chat, a.ref);
 				if (!element) return { result: NOT_FOUND(a.ref) };
 				if (!element.submits) return { result: text(describePage(await browser.click(chat, a.ref))) };
 				return { summary: `On ${element.host}, click ${element.label}` };
 			}, async (chat) => describePage(await browser.click(chat, a.ref)))),
-		tool("browser_type", "Type into a field on your window's page, by its number, replacing what it held, and press Enter after if `submit`, or choose an option in a list by its text; then read the page. Pressing Enter in a field that sends a form asks a person first. Never type passwords or payment details: the person does that when they take over.", TypeArgs, (a, api) =>
+		tool("browser_type", "Type into a field on your window's page, by its number, replacing what it held, and press Enter after if `submit`, or choose an option in a list by its text; then read the page. Never type passwords or payment details: the person does that when they take over.", TypeArgs, (a, api) =>
 			submitting(api, "browser_type", { ref: a.ref, text: a.text, submit: a.submit === true }, async (chat) => {
 				const element = await browser.describe(chat, a.ref);
 				if (!element) return { result: NOT_FOUND(a.ref) };
 				if (!a.submit || element.enterLoads) return { result: text(describePage(await browser.type(chat, a.ref, a.text, a.submit === true))) };
 				return { summary: element.role === "list" ? `On ${element.host}, choose “${a.text}” in ${element.label} and press Enter` : `On ${element.host}, type “${a.text}” into ${element.label} and press Enter` };
 			}, async (chat) => describePage(await browser.type(chat, a.ref, a.text, a.submit === true)))),
-		tool("browser_upload", "Upload files from the person's files to a file field on your window's page, by its number; then read the page. A person approves it first.", UploadArgs, async (a, api) => {
+		tool("browser_upload", "Upload files from the person's files to a file field on your window's page, by its number; then read the page.", UploadArgs, async (a, api) => {
 			const bad = confined(...a.paths);
 			if (bad) return bad;
 			return submitting(api, "browser_upload", { ref: a.ref, paths: a.paths }, async (chat) => {

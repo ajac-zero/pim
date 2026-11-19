@@ -170,7 +170,11 @@ real("the default agent host", () => {
 		expect(new Set((await rows("SELECT public_chat_id, run_kind FROM pim_app.model_calls WHERE run_kind = 'chat'")).map((r) => r.public_chat_id))).toEqual(new Set([chatId]));
 		const priced = (await web.call("GET", `/api/sessions/${chatId}/cost`)).json;
 		expect(priced.models).toEqual([expect.objectContaining({ provider: "faux", model: "m" })]);
-		expect((await web.call("GET", `/api/sessions/${chatId}/activity`)).json.steps.length).toBeGreaterThanOrEqual(5);
+		// The chat's latest turn, step by step, read from its transcript: each model call with how long the ledger says it took, and each tool call with how long it ran.
+		const steps = (await web.call("GET", `/api/sessions/${chatId}/activity`)).json.steps as { kind: string; ms: number | null; model?: string; name?: string }[];
+		expect(steps.length).toBeGreaterThanOrEqual(4);
+		expect(steps.filter((step) => step.kind === "model").every((step) => typeof step.ms === "number" && step.model === "faux/m")).toBe(true);
+		expect(steps.some((step) => step.kind === "tool" && typeof step.ms === "number")).toBe(true);
 	}, 120_000);
 
 	it("answers note_edit and note_show with the note's card, and shows a note without changing it", async () => {

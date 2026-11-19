@@ -412,7 +412,7 @@ export function connectorToolset(deps: ConnectorToolsDeps): { tools: ToolRegistr
 					const content = resultContent(result);
 					// What the model was shown is kept on the operation, pictures included, so a replay shows the same.
 					await deps.ops.transition(ownerId, operationId, result?.isError === true ? "failed" : "completed", result?.isError === true ? { error: summary } : { summary, ...(content.some((part) => part.type === "image") ? { content } : {}) });
-					return { content, ...(result?.isError === true ? { isError: true } : {}) };
+					return { output: content, ...(result?.isError === true ? { isError: true } : {}) };
 				} catch (error) {
 					const message = error instanceof Error ? error.message : String(error);
 					await deps.ops.transition(ownerId, operationId, "needs_reconciliation", { error: message });

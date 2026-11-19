@@ -281,7 +281,7 @@ export async function startRunner(config: ProcessConfig, env: Env, host: Host, h
 	metrics.leasesHeld.collect(() => metrics.leasesHeld.set(runner.residents.length, { service: "runner" }));
 	// The majordomo reviews approvals for people whose policy says so; it needs the application's services and the person's models.
 	const settler = app ? startTaskSettler({ pool: runtimePool, db, app, onError: (e) => console.error("task settler", e) }) : undefined;
-	const reviews = host_ && app ? startApprovalReviews({ pool: runtimePool, app, host: host_, defaultPolicy: env.PIM_APPROVAL_POLICY ?? "majordomo", onError: (e) => console.error("approval review", e) }) : undefined;
+	const reviews = host_ && app ? startApprovalReviews({ pool: runtimePool, app, host: host_, defaultPolicy: env.PIM_APPROVAL_POLICY || "majordomo", onError: (e) => console.error("approval review", e) }) : undefined;
 	let started = false;
 	let stopped = false;
 	const tryStart = async () => {

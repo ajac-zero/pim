@@ -120,7 +120,7 @@ const redactHeaders = (headers: Record<string, string> | undefined) => Object.fr
 /** The person's time zone (Settings), else the deployment's `PIM_TIME_ZONE`, else UTC. */
 export async function timeZoneOf(runtime: RuntimeDb, ownerId: string): Promise<string> {
 	const chosen = await runtime.read<{ z: string | null }>(ownerId, "SELECT pim_app.runner_time_zone($1) AS z", [ownerId]).then((r) => r.rows[0]?.z ?? null, () => null);
-	return chosen ?? process.env.PIM_TIME_ZONE ?? "UTC";
+	return chosen ?? (process.env.PIM_TIME_ZONE || "UTC");
 }
 
 /** What the web app reads from an app tool's answer to show the app as a card in the chat that opens in the canvas: `{ artifact }`, an app with a backend being `hosted` there. */

@@ -100,7 +100,7 @@ export class Approvals {
 		// The person's approval policy. `auto` approves what is not answered within the timeout (30 seconds unless they set another); `majordomo` has the majordomo review it
 		// (`reviewApprovals`, in the Runner). An explicit action, one a person must always answer for (a tool its connector marks destructive), ignores both.
 		const settings = new Map((await this.db.owner(p.ownerId, async (tx) => (await tx.query("SELECT key, value FROM pim_app.owner_settings WHERE key IN ('settings.approvalPolicy', 'settings.approvalTimeoutSeconds')")).rows)).map((r) => [r.key as string, r.value as unknown]));
-		const policy = (settings.get("settings.approvalPolicy") as string | undefined) ?? process.env.PIM_APPROVAL_POLICY ?? "majordomo";
+		const policy = (settings.get("settings.approvalPolicy") as string | undefined) ?? (process.env.PIM_APPROVAL_POLICY || "majordomo");
 		const auto = policy === "auto" && !input.explicit;
 		const seconds = settings.get("settings.approvalTimeoutSeconds");
 		const timeoutMs = auto ? (typeof seconds === "number" && seconds > 0 ? seconds : 30) * 1000 : input.timeoutMs;

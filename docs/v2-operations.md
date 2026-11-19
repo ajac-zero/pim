@@ -107,6 +107,16 @@ No Kubernetes, Temporal, Cloudflare or AWS service is involved. The core stack r
 
 The Gate serves the web app (`web/dist`, built into the image) and answers the v1 web app's routes through `packages/v2-server/src/compat/`, which are tried before the Gate's own routes. What the web app asks for and v2 does not have yet answers as empty or 501, never with invented data: see the deferred list in `docs/architecture/v2-implementation-status.md`.
 
+### Deployment settings
+
+A deployment is set with variables in `deploy/compose/.env` (`env_file` gives every one of them to every role; each is listed, with what it does, in `deploy/compose/env.example`). Settings → Deployment (the admin's) shows what Pim read, with a problem beside any variable it could not read; a variable that cannot be read counts as its default, except caps and limits, which count as 0 so that a typo never lifts them. An empty variable is unset.
+
+- **Joining.** `PIM_REGISTRATION` is `invite` (the default), `open` or `closed`; `PIM_MAX_ACCOUNTS` caps the accounts that are not deleted; `PIM_REGISTRATIONS_PER_ADDRESS` (3) is how many accounts one address makes in a day. Unset, `PIM_REGISTRATION` is whatever the admin's switch says (`POST /api/admin/registration`, `{"open": true}`); set, it decides and the switch is refused. The first account, the admin's, needs the setup link in the Gate's log (`POST /auth/setup-link`) whatever the mode. A registration nobody makes a passkey for lapses after a day and gives back its username, its invite and its place under the cap; its setup code lasts the day.
+- **Usernames** are 3 to 32 lowercase letters, digits and single hyphens between them, and not one of about seventy reserved names (`admin`, `support`, `pim`, `api`, ...). Names made before this rule keep working; a name is never given to a second person once its account has lived.
+- **Sign-in providers** are `PIM_GOOGLE_CLIENT_ID` and `_SECRET`, `PIM_GITHUB_CLIENT_ID` and `_SECRET`, and `PIM_OIDC_ISSUER`, `_CLIENT_ID`, `_CLIENT_SECRET` and `_NAME`. A provider with only some of them stays off and Settings says what is missing.
+- **Models:** `PIM_DEFAULT_MODEL`, `PIM_MODELS` (the allow-list: of the gateway's models, people may choose these and the default), `PIM_UTILITY_MODEL`, `PIM_MEMORY_MODEL`, `PIM_IMAGE_MODEL` and `PIM_MEMORY_LINES`. The limits are `PIM_LIMIT_*` and the rate limits `PIM_RATE_*`.
+- **Email** is not built: `PIM_EMAIL_FROM` is read so that Settings shows it, and email is shown as unavailable.
+
 ## A computer on the same machine
 
 A personal computer is how agents get a shell, files, a browser and a desktop: `computer/pim-computer.ts` dials out to the stack's public address (`/api/computer/connect`, WebSocket) with a `pimc_` token and answers the Relay's calls. It is **outside the control-plane security boundary**: it runs arbitrary commands, so it never gets a database, NATS, object-store, key-ring or control-plane credential, and nothing in the stack trusts it beyond what its own owner's space may do. Two ways to run one beside the stack; both pair the same way.

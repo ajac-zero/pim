@@ -145,7 +145,7 @@ const SETTINGS: Record<string, (v: unknown) => boolean> = {
 async function readSettings(app: App, ownerId: string) {
 	const rows = await app.db.owner(ownerId, async (tx) => (await tx.query("SELECT key, value FROM pim_app.owner_settings WHERE key LIKE 'settings.%'")).rows);
 	const own = Object.fromEntries(rows.map((r) => [r.key.slice("settings.".length), r.value]).filter(([k]) => k in SETTINGS));
-	const settings = { timeZone: process.env.PIM_TIME_ZONE ?? "UTC", approvalPolicy: process.env.PIM_APPROVAL_POLICY ?? "majordomo", deviceAlerts: "important", approvalTimeoutSeconds: null as number | null, ...own };
+	const settings = { timeZone: process.env.PIM_TIME_ZONE || "UTC", approvalPolicy: process.env.PIM_APPROVAL_POLICY || "majordomo", deviceAlerts: "important", approvalTimeoutSeconds: null as number | null, ...own };
 	// Only the auto policy times out: what it waits before approving is what the person set, else 30 seconds.
 	return { ...settings, approvalTimeoutSeconds: settings.approvalPolicy === "auto" ? (own.approvalTimeoutSeconds as number | null | undefined) || 30 : null };
 }

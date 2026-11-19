@@ -110,7 +110,7 @@ export function DeploymentSection() {
         )}
       </Group>
       <Group title={t("deploymentModels")}>
-        {row("PIM_MODEL", "deploymentModel", settings.model)}
+        {row("PIM_DEFAULT_MODEL", "deploymentModel", settings.model)}
         {row(
           "PIM_MODELS",
           "deploymentOtherModels",

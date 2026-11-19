@@ -357,4 +357,17 @@ real("guests, circles and the admin's majordomo", () => {
 			delete process.env.PIM_DEV_SIGN_IN;
 		}
 	}, 60_000);
+	it("stops a suspended person's agent at its next model request, so a turn under way does not go on", async () => {
+		faux.setResponses([
+			async () => {
+				await d.stack.admin.query("UPDATE pim_app.accounts SET status = 'suspended' WHERE owner_id = $1", [bob.ownerId]);
+				return toolUse(fauxToolCall("current_time", {}));
+			},
+			toolUse(fauxToolCall("send_to_user", { message: "never sent" })),
+		] as never);
+		expect((await bob.web.call("POST", `/api/sessions/${bob.chat}/messages`, { commandId: "suspend-1", text: "think for a while" })).status).toBe(202);
+		await waitFor("the refusal", async () => ((await transcript(bob)).includes("This account is suspended") ? true : undefined), 60_000);
+		expect(await transcript(bob)).not.toContain("never sent");
+		await d.stack.admin.query("UPDATE pim_app.accounts SET status = 'active' WHERE owner_id = $1", [bob.ownerId]);
+	}, 90_000);
 });

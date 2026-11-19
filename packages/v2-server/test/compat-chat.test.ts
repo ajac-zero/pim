@@ -13,10 +13,14 @@ import { planAnswer, NAME_CHAT, nameChatsFromFirstMessage } from "../src/compat/
 import { webApproval } from "../src/compat/boot.ts";
 import { chatRoutes } from "../src/compat/chat.ts";
 import { apiClientRoutes } from "../src/compat/api-clients.ts";
+import { accountRoutes } from "../src/compat/chat-account.ts";
+import { bootRoutes } from "../src/compat/boot.ts";
+import { screenRoutes } from "../src/compat/admin-screens.ts";
 import { diagnosticsRoutes } from "../src/compat/diagnostics.ts";
 import { usageRoutes } from "../src/compat/usage.ts";
 import { modelRoutes } from "../src/compat/model.ts";
 import { snapshotRoutes } from "../src/gate-extras.ts";
+import { uiBlockIds } from "@pim/ui-lang";
 import { createStack, type Stack } from "./support/stack.ts";
 
 let stack: Stack;
@@ -180,15 +184,28 @@ describe("triggers", () => {
 });
 
 describe("ui-block state", () => {
-	it("is saved over the version last read, and a submitted block stays as submitted", async () => {
+	it("is saved over the version last read and only as its block allows, and a submitted block stays as submitted", async () => {
 		const { rows } = await stack.admin.query("SELECT owner_id FROM pim_app.accounts WHERE username = 'ada'");
-		await stack.admin.query("INSERT INTO pim_projection.chat_transcript_projection (owner_id, stream_kind, chat_id, entry_id, position, message, partition_id, commit_seq, projection_version) VALUES ($1,'chat','c','m1',1,'{}','00000000-0000-0000-0000-000000000001',1,1)", [rows[0].owner_id]);
-		const put = (token: string, version: number, submitted = false) => call(token, "PUT", "/api/messages/m1/ui-state/b", { version, state: { v: version }, submitted });
+		// The message holds one block, a slider; a block's state is kept only as its program allows.
+		const source = '<slider name="v" min={0} max={9}/>\n<form id="f"><checkbox name="c"/></form>';
+		const message = { id: "m1", role: "assistant", timestamp: 1, parts: [{ type: "tool-call", id: "c1", name: "send_to_user", arguments: { message: `Try:\n\`\`\`ui\n${source}\n\`\`\`` } }] };
+		await stack.admin.query("INSERT INTO pim_projection.chat_transcript_projection (owner_id, stream_kind, chat_id, entry_id, position, message, partition_id, commit_seq, projection_version) VALUES ($1,'chat','c','m1',1,$2,'00000000-0000-0000-0000-000000000001',1,1)", [rows[0].owner_id, JSON.stringify(message)]);
+		const block = uiBlockIds([source])[0]!;
+		const put = (token: string, version: number, submitted = false, values: Record<string, number> = { v: version }) => call(token, "PUT", `/api/messages/m1/ui-state/${block}`, { version, state: { values }, submitted });
+		// A block the message does not hold, a value its slider cannot take and a state over 32 KB are refused; a block with no form submitted is not submitted.
+		expect((await call(ada, "PUT", "/api/messages/m1/ui-state/nope", { version: 0, state: { values: { v: 1 } } })).status).toBe(404);
+		expect((await put(ada, 0, false, { v: 99 })).status).toBe(400);
+		expect((await call(ada, "PUT", `/api/messages/m1/ui-state/${block}`, { version: 0, state: { values: { v: 1 }, junk: "x".repeat(40_000) } })).status).toBe(400);
+		expect((await put(ada, 0, true)).status).toBe(400);
 		expect((await put(ada, 0)).body).toMatchObject({ version: 1, submitted: false });
 		expect((await put(ada, 0)).status).toBe(409);
-		expect((await put(ada, 1, true)).body).toMatchObject({ version: 2, submitted: true });
-		expect((await put(ada, 2)).status).toBe(409);
-		expect((await call(ada, "GET", "/api/messages/m1/ui-state")).body.blocks.b).toMatchObject({ version: 2, submitted: true });
+		expect((await put(ada, 1)).body).toMatchObject({ version: 2, submitted: false });
+		expect((await put(ada, 1)).status).toBe(409);
+		expect((await call(ada, "GET", "/api/messages/m1/ui-state")).body.blocks[block]).toMatchObject({ version: 2, submitted: false, state: { values: { v: 1 } } });
+		// A submitted form is kept as it was submitted, and the block can't be changed after it.
+		const sent = { values: { v: 1 }, submitted: { f: { values: { "f.c": true }, graded: {} } } };
+		expect((await call(ada, "PUT", `/api/messages/m1/ui-state/${block}`, { version: 2, state: sent, submitted: true })).body).toMatchObject({ version: 3, submitted: true });
+		expect((await put(ada, 3)).status).toBe(409);
 		expect((await put(bob, 0)).status).toBe(404);
 	});
 });
@@ -539,5 +556,88 @@ describe("a chat's own model", () => {
 		expect((await call(bob, "PUT", `/api/sessions/${chat}/model`, { provider: "gateway", id: "u1" })).status).toBe(404);
 		await call(ada, "PUT", `/api/sessions/${chat}/model`, { provider: null, id: null });
 		expect((await context()).chat_model).toBeNull();
+	});
+});
+
+describe("a group chat's room", () => {
+	it("takes its mode from the person, and runs each agent besides the host on a model chosen for its seat alone", async () => {
+		const owner = (await stack.admin.query("SELECT owner_id FROM pim_app.accounts WHERE username = 'ada'")).rows[0].owner_id as string;
+		const guest = (await call(ada, "POST", "/api/agents", { name: "Coach", role: "Coach", description: "Coaches" })).body;
+		expect(guest).toMatchObject({ role: "Coach", description: "Coaches" });
+		const chat = (await call(ada, "POST", "/api/sessions", { agentId: agent, title: "Room" })).body.id as string;
+		// A chat with one agent is no room: it has no mode, and its agents have no seats.
+		expect((await call(ada, "PUT", `/api/sessions/${chat}/room`, { mode: "open" })).status).toBe(404);
+		expect((await call(ada, "PUT", `/api/sessions/${chat}/room/members/${guest.id}/model`, { provider: "gateway", id: "u1" })).status).toBe(404);
+		expect((await call(ada, "POST", `/api/sessions/${chat}/room/members`, { agent: guest.id })).status).toBe(201);
+		expect((await call(ada, "PUT", `/api/sessions/${chat}/room`, { mode: "sideways" })).status).toBe(400);
+		expect((await call(ada, "PUT", `/api/sessions/${chat}/room`, { mode: "open" })).body.room).toMatchObject({ mode: "open" });
+		expect((await call(bob, "PUT", `/api/sessions/${chat}/room`, { mode: "mentions" })).status).toBe(404);
+		const member = async () => (await call(ada, "GET", "/api/sessions")).body.sessions.find((s: { id: string }) => s.id === chat).room.members[0];
+		expect(await member()).toMatchObject({ id: guest.id, model: { override: false } });
+		expect((await call(ada, "PUT", `/api/sessions/${chat}/room/members/${guest.id}/model`, { provider: "gateway", id: "nope" })).status).toBe(400);
+		expect((await call(ada, "PUT", `/api/sessions/${chat}/room/members/${guest.id}/model`, { provider: "gateway", id: "u1" })).body).toMatchObject({ model: { provider: "gateway", id: "u1" } });
+		// The seat is a chat of its own, so its model is the one the Runner reads for it; the host's is untouched.
+		const seat = (await stack.admin.query("SELECT seat_chat_id FROM pim_app.room_members WHERE public_chat_id = $1", [chat])).rows[0].seat_chat_id as string;
+		expect((await stack.admin.query("SELECT pim_app.runner_context($1, $2) AS c", [owner, seat])).rows[0].c.chat_model).toEqual({ provider: "gateway", id: "u1" });
+		expect((await stack.admin.query("SELECT pim_app.runner_context($1, $2) AS c", [owner, chat])).rows[0].c.chat_model).toBeNull();
+		expect(await member()).toMatchObject({ model: { model: { provider: "gateway", id: "u1" }, override: true } });
+		expect((await call(ada, "PUT", `/api/sessions/${chat}/room/members/${guest.id}/model`, { provider: null, id: null })).status).toBe(200);
+		expect(await member()).toMatchObject({ model: { override: false } });
+	});
+});
+
+describe("joining, API tokens and the deployment screen", () => {
+	let people: Server;
+	let origin: string;
+	const env = { PIM_REGISTRATIONS_PER_ADDRESS: "7", PIM_MAX_ACCOUNTS: "lots", PIM_MODELS: "u1", PIM_MEMORY_LINES: "4", PIM_IMAGE_MODEL: "off", PIM_APPROVAL_POLICY: "sometimes" };
+	const ask = async (token: string | null, method: string, path: string, body?: unknown) => {
+		const res = await fetch(origin + path, { method, headers: { ...(token ? { authorization: `Bearer ${token}` } : {}), ...(body === undefined ? {} : { "content-type": "application/json" }) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+		const text = await res.text();
+		return { status: res.status, body: text.startsWith("{") ? JSON.parse(text) : text };
+	};
+	beforeAll(async () => {
+		people = createGate(app, { first: [...bootRoutes, ...accountRoutes(), ...screenRoutes(env)] });
+		await new Promise<void>((resolve) => people.listen(0, "127.0.0.1", resolve));
+		origin = `http://127.0.0.1:${(people.address() as { port: number }).port}`;
+	});
+	afterAll(() => void people?.close());
+
+	it("makes a registration pending until its first passkey, with the default agent already its own, and refuses names that look official", async () => {
+		const agentId = (await call(ada, "POST", "/api/agents", { name: "Buddy", instructions: "Be kind", role: "Friend", description: "Says hello", emoji: "🙂" })).body.id;
+		expect((await ask(ada, "PUT", "/api/admin/default-agent", { agent: agentId })).status).toBe(200);
+		const invite = await app.identity.createInvite((await app.identity.authenticate(ada)) as never);
+		expect((await ask(null, "POST", "/auth/register", { username: "support", invite })).status).toBe(400);
+		const joined = await ask(null, "POST", "/auth/register", { username: "newcomer", invite });
+		expect(joined.status).toBe(201);
+		expect(joined.body).toMatchObject({ account: { status: "pending" }, role: "member", setup: expect.any(String), recoveryCodes: expect.any(Array) });
+		const owner = joined.body.account.ownerId as string;
+		// Not yet theirs to act in, but their space already holds a copy of the agent the admin chose.
+		const copies = await app.db.owner(owner, async (tx) => (await tx.query("SELECT name, role, description, emoji FROM pim_app.agents WHERE adopted_from IS NOT NULL AND deleted_at IS NULL")).rows);
+		expect(copies).toEqual([{ name: "Buddy", role: "Friend", description: "Says hello", emoji: "🙂" }]);
+		// A client without a browser asks for the session and starts active.
+		const scripted = await ask(null, "POST", "/auth/register", { username: "scripty", invite: await app.identity.createInvite((await app.identity.authenticate(ada)) as never), session: true });
+		expect(scripted.body.account.status).toBe("active");
+		await ask(ada, "DELETE", "/api/admin/default-agent");
+	});
+
+	it("lists API tokens imported from v1, requires a name, and revokes any of them", async () => {
+		const me = (await app.identity.authenticate(bob)) as { ownerId: string };
+		await app.identity.importLegacyToken(me.ownerId, "old phone", "legacy-hash-1");
+		expect((await ask(bob, "POST", "/auth/tokens", {})).status).toBe(400);
+		expect((await ask(bob, "POST", "/auth/tokens", { name: "  " })).status).toBe(400);
+		const made = (await ask(bob, "POST", "/auth/tokens", { name: "laptop" })).body;
+		const listed = (await ask(bob, "GET", "/auth/tokens")).body.tokens as { id: string; name: string }[];
+		expect(listed.map((t) => t.name).sort()).toEqual(["laptop", "old phone"]);
+		const legacy = listed.find((t) => t.name === "old phone")!;
+		expect((await ask(bob, "DELETE", `/auth/tokens/${legacy.id}`)).status).toBe(200);
+		expect(((await ask(bob, "GET", "/auth/tokens")).body.tokens as { id: string }[]).map((t) => t.id)).toEqual([made.id]);
+	});
+
+	it("shows what the deployment's variables say, and what could not be read, never a made-up value", async () => {
+		const shown = (await ask(ada, "GET", "/api/admin/deployment")).body;
+		expect(shown.settings).toMatchObject({ registration: "open", registrationsPerAddress: 7, maxAccounts: 0, models: ["u1"], memoryLines: 96, imageModel: null, utilityModel: null, approvalPolicy: "majordomo" });
+		const problems = Object.fromEntries((shown.variables as { name: string; problem: string | null }[]).filter((v) => v.problem).map((v) => [v.name, v.problem]));
+		expect(Object.keys(problems).sort()).toEqual(["PIM_APPROVAL_POLICY", "PIM_MAX_ACCOUNTS", "PIM_MEMORY_LINES"]);
+		expect((shown.variables as { name: string; value: string | null }[]).find((v) => v.name === "PIM_IMAGE_MODEL")?.value).toBe("off");
 	});
 });

@@ -392,9 +392,9 @@ export function createAgentHost(options: AgentHostOptions) {
 
 	/** Where an owner's images are drawn: their ChatGPT images sign-in, and the endpoints `PIM_IMAGE_MODEL` can name. `PIM_IMAGE_MODEL=off` has no `generate_image`. */
 	const imageSources = (ownerId: string): ToolDeps["images"] =>
-		env.PIM_IMAGE_MODEL === "off"
+		env.PIM_IMAGE_MODEL?.trim() === "off"
 			? undefined
-			: { model: env.PIM_IMAGE_MODEL, codex: () => (options.crypto ? new CodexImagesClient(db, options.crypto, ownerId, env, { fetch: options.fetch, now }) : undefined), endpoints: () => imageEndpoints(db, options.crypto, env, ownerId) };
+			: { model: env.PIM_IMAGE_MODEL?.trim() || undefined, codex: () => (options.crypto ? new CodexImagesClient(db, options.crypto, ownerId, env, { fetch: options.fetch, now }) : undefined), endpoints: () => imageEndpoints(db, options.crypto, env, ownerId) };
 
 	/**
 	 * Enforces delivery: a request that owes the person a reply (`deliveryOwed`) gets a reminder when the agent stops without `send_to_user`, and after two the run fails with

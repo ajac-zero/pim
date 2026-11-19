@@ -10,12 +10,12 @@ import { validateToolArguments } from "@earendil-works/pi-ai";
 import { defineTool, type PromptSection, type ToolRegistration } from "@earendil-works/pi-durable";
 import type { App } from "@pim/v2-app/app";
 import type { Tool as DiscoveredTool, ToolFetcher } from "@pim/v2-app/connectors";
-import { openString, sealString } from "@pim/v2-app/crypto";
 import { choiceChanged, toolDefinition } from "@pim/v2-app/tool-permissions";
 import { PartitionId, type Principal } from "@pim/v2-contracts/identity";
 import type { EnvelopeCrypto } from "@pim/v2-contracts/platform";
 import type { ExternalOperations } from "@pim/v2-runtime/external";
 import { AuthRefused } from "./native/http.ts";
+import { CredentialRenewals, type OAuthBundle, parseCredential, runtimeStore, SignInLost } from "./connector-credential.ts";
 import { recordResult } from "./tool-approval.ts";
 import { endpointsOf, type Env, nativeApp } from "./native/native.ts";
 import type { Db as RuntimeDb } from "@pim/v2-runtime/db";
@@ -28,9 +28,16 @@ export type PermissionRow = { audience: string; app: string; tool: string; permi
 
 export const agentAudience = (agentId: string) => `agent:${agentId}`;
 
+/** The connectors an agent works with: the list on the agent that answers a chat (the majordomo when the chat has none of its own, the agent a task was handed to in a task's chat). */
+export async function chatApps(runtime: RuntimeDb, ownerId: string, chat: string | null): Promise<{ agent: string | null; apps: string[] }> {
+	return (await runtime.read<{ r: { agent: string | null; apps: string[] } }>(ownerId, "SELECT pim_app.runner_chat_apps($1, $2) AS r", [ownerId, chat])).rows[0]!.r;
+}
+
+/** Whether an agent lists a connector: by its id, by the directory entry it connects (`google/gmail`), or by its name, as the Connectors screen shows which agents have it. */
+export const listsConnector = (apps: readonly string[], c: Pick<ConnectorRow, "id" | "name" | "appRef">): boolean => apps.includes(c.id) || (c.appRef != null && apps.includes(c.appRef)) || apps.includes(c.name);
+
 /** Whether a tool must ask first under its connector's approval policy. */
 export function needsApproval(tool: Pick<McpTool, "annotations">, approval: Approval): boolean {
-	if (tool.annotations?.destructiveHint === true) return true;
 	if (approval === "all") return true;
 	if (approval === "none") return false;
 	return tool.annotations?.readOnlyHint !== true;
@@ -38,12 +45,12 @@ export function needsApproval(tool: Pick<McpTool, "annotations">, approval: Appr
 
 /**
  * A tool's permission for an owner: their choice, or else off until the tool is enabled, then the connector's policy (a read-only tool runs, any other asks). A tool
- * the connector marks destructive never runs without asking. One agent's switch can only turn it off. A choice is tied to the tool's definition when it was made: a connector
+ * the connector marks destructive is off until the person switches it On (or Ask), and then runs as they said, as in v1. One agent's switch can only turn it off. A choice is tied to the tool's definition when it was made: a connector
  * that changed a tool the person let run gets it asked about again (`changed`), and an agent's switch for it is off, until they choose anew.
  */
 export function resolvePermission(connector: Pick<ConnectorRow, "id" | "enabledTools" | "approval">, tool: McpTool, permissions: readonly PermissionRow[], agentId?: string, definition: string | null = toolDefinition(tool)) {
 	const row = (audience: string) => permissions.find((p) => p.audience === audience && p.app === connector.id && p.tool === tool.name) ?? null;
-	const fallback: Permission = connector.enabledTools.includes(tool.name) ? (needsApproval(tool, connector.approval) ? "ask" : "on") : "off";
+	const fallback: Permission = connector.enabledTools.includes(tool.name) && tool.annotations?.destructiveHint !== true ? (needsApproval(tool, connector.approval) ? "ask" : "on") : "off";
 	const owner = row("owner");
 	const agent = agentId ? row(agentAudience(agentId)) : null;
 	const ownerChanged = choiceChanged(owner, definition, true);
@@ -51,26 +58,13 @@ export function resolvePermission(connector: Pick<ConnectorRow, "id" | "enabledT
 	const chosen = owner?.permission ?? null;
 	const agentChosen = agent?.permission ?? null;
 	const base: Permission = ownerChanged ? "ask" : (chosen ?? fallback);
-	let permission: Permission = agentChosen === "off" || agentChanged ? "off" : base;
-	if (tool.annotations?.destructiveHint === true && permission === "on") permission = "ask";
+	const permission: Permission = agentChosen === "off" || agentChanged ? "off" : base;
 	return { permission, default: fallback, chosen, agentChosen, changed: ownerChanged || agentChanged };
 }
 
 // ---- credentials ----
 
-export type OAuthBundle = { access_token: string; refresh_token?: string; expires_at?: number; token_endpoint?: string; client_id?: string; client_secret?: string };
-/** A stored credential is a bearer token, or a JSON object of an OAuth sign-in that can be refreshed. */
-export function parseCredential(stored: string): { bearer: string; bundle: OAuthBundle | null } {
-	if (stored.startsWith("{")) {
-		try {
-			const b = JSON.parse(stored) as OAuthBundle;
-			if (typeof b.access_token === "string") return { bearer: b.access_token, bundle: b };
-		} catch {
-			// A token that merely begins with a brace is a bearer.
-		}
-	}
-	return { bearer: stored, bundle: null };
-}
+export { type OAuthBundle, parseCredential };
 
 /**
  * Where an MCP server's sign-in takes refresh tokens, found the way the MCP authorization spec says: the server's protected-resource metadata names its authorization server
@@ -94,16 +88,6 @@ export async function discoverTokenEndpoint(serverUrl: string, transport: Transp
 		if (typeof metadata?.token_endpoint === "string") return metadata.token_endpoint;
 	}
 	return null;
-}
-
-export async function refresh(bundle: OAuthBundle, fetcher: typeof fetch, now: number): Promise<OAuthBundle | null> {
-	if (!bundle.refresh_token || !bundle.token_endpoint) return null;
-	const body = new URLSearchParams({ grant_type: "refresh_token", refresh_token: bundle.refresh_token, ...(bundle.client_id ? { client_id: bundle.client_id } : {}), ...(bundle.client_secret ? { client_secret: bundle.client_secret } : {}) });
-	const response = await fetcher(bundle.token_endpoint, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" }, body, signal: AbortSignal.timeout(15_000), redirect: "manual" });
-	if (!response.ok) return null;
-	const t = (await response.json().catch(() => null)) as { access_token?: string; refresh_token?: string; expires_in?: number } | null;
-	if (!t?.access_token) return null;
-	return { ...bundle, access_token: t.access_token, refresh_token: t.refresh_token ?? bundle.refresh_token, ...(t.expires_in ? { expires_at: now + t.expires_in * 1000 } : {}) };
 }
 
 // ---- the MCP client (streamable HTTP) ----
@@ -268,34 +252,26 @@ export function connectorToolset(deps: ConnectorToolsDeps): { tools: ToolRegistr
 	const { ownerId, runtime, crypto } = deps;
 	const listed = new Map<string, { at: number; tools: Promise<McpTool[]> }>();
 
-	/** The credential, opened; an OAuth one that has expired is refreshed first and the new one kept sealed. */
-	async function credentialOf(c: ConnectorRow, force = false): Promise<{ bearer: string | null; bundle: OAuthBundle | null }> {
-		if (!c.credential) return { bearer: null, bundle: null };
-		if (!crypto) throw new Error("This Runner has no keys (PIM_KEK_<id> and PIM_KEK_CURRENT), so it cannot open a connector's credential.");
-		const { bearer, bundle } = parseCredential(await openString(crypto, c.credential, `connector:${ownerId}/${c.id}`));
-		if (bundle && (force || (bundle.expires_at !== undefined && bundle.expires_at <= deps.now() + 30_000))) {
-			// A credential brought from another Pim holds no token endpoint: find it from the server's address (checked like any address the server names).
-			let endpoint = bundle.token_endpoint ?? null;
-			if (!endpoint && bundle.refresh_token) {
-				endpoint = await discoverTokenEndpoint(c.url ?? "", deps.transport).catch(() => null);
-				if (endpoint && !deps.transport.allowPrivate) endpoint = await deps.transport.check(endpoint).then(() => endpoint, () => null);
-			}
-			const renewed = await refresh(endpoint ? { ...bundle, token_endpoint: endpoint } : bundle, deps.transport.fetch, deps.now()).catch(() => null);
-			if (renewed) {
-				const sealed = await sealString(crypto, JSON.stringify(renewed), `connector:${ownerId}/${c.id}`);
-				await runtime.read(ownerId, "SELECT pim_app.runner_set_connector_credential($1, $2, $3)", [ownerId, c.id, sealed]);
-				return { bearer: renewed.access_token, bundle: renewed };
-			}
-		}
-		return { bearer, bundle };
-	}
-	/** Runs with the credential; a service that refuses it gets the renewed one once. */
+	const renewals = new CredentialRenewals({
+		crypto,
+		store: runtimeStore(runtime),
+		fetch: deps.transport.fetch,
+		now: deps.now,
+		// A credential brought from another Pim holds no token endpoint: find it from the server's address (checked like any address the server names).
+		endpoint: async (url, bundle) => {
+			if (!bundle.refresh_token) return null;
+			const found = await discoverTokenEndpoint(url, deps.transport).catch(() => null);
+			return found && !deps.transport.allowPrivate ? await deps.transport.check(found).then(() => found, () => null) : found;
+		},
+	});
+	/** Runs with the credential, opened and renewed if it has expired; a service that refuses it gets the renewed one once. A sign-in the service revoked ends the call, and the person must connect again. */
 	async function withCredential<T>(c: ConnectorRow, run: (credential: { bearer: string | null; bundle: OAuthBundle | null }) => Promise<T>): Promise<T> {
+		const first = await renewals.open(ownerId, c);
 		try {
-			return await run(await credentialOf(c));
+			return await run(first);
 		} catch (error) {
 			if (!(error instanceof AuthRefused)) throw error;
-			return run(await credentialOf(c, true));
+			return run(await renewals.open(ownerId, { ...c, credential: first.sealed }, true));
 		}
 	}
 	const withBearer = <T>(c: ConnectorRow, run: (bearer: string | null) => Promise<T>): Promise<T> => withCredential(c, (credential) => run(credential.bearer));
@@ -316,9 +292,9 @@ export function connectorToolset(deps: ConnectorToolsDeps): { tools: ToolRegistr
 	};
 
 	type Offered = { connector: ConnectorRow; tool: McpTool; permission: Permission };
-	/** Every tool the owner has not switched off. A server that cannot be reached offers nothing this time. */
-	async function offered(agentId: string | undefined): Promise<{ offered: Offered[]; unreachable: string[] }> {
-		const [cs, perms] = await Promise.all([connectors(), permissions()]);
+	/** Every tool of the connectors the agent lists that the owner has not switched off. A server that cannot be reached offers nothing this time. */
+	async function offered(agentId: string | undefined, apps: readonly string[]): Promise<{ offered: Offered[]; unreachable: string[] }> {
+		const [cs, perms] = await Promise.all([connectors().then((all) => all.filter((c) => listsConnector(apps, c))), permissions()]);
 		const unreachable: string[] = [];
 		const out: Offered[] = [];
 		await Promise.all(cs.map(async (c) => {
@@ -334,6 +310,8 @@ export function connectorToolset(deps: ConnectorToolsDeps): { tools: ToolRegistr
 		out.sort((a, b) => a.connector.name.localeCompare(b.connector.name) || a.tool.name.localeCompare(b.tool.name));
 		return { offered: out, unreachable };
 	}
+	/** The connectors the chat's agent lists. */
+	const appsOf = async (conversationId: number | string): Promise<string[]> => (await chatApps(runtime, ownerId, await deps.chatOf(conversationId))).apps;
 	const agentOf = async (conversationId: number | string): Promise<string | undefined> => {
 		if (!deps.app) return undefined;
 		const p = await deps.principalOf(deps.app, await deps.chatOf(conversationId));
@@ -347,7 +325,7 @@ export function connectorToolset(deps: ConnectorToolsDeps): { tools: ToolRegistr
 		parameters: Type.Object({ connector: Type.Optional(Type.String()), query: Type.Optional(Type.String()), offset: Type.Optional(Type.Integer({ minimum: 0 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50 })) }),
 		replay: "safe",
 		async execute(args: { connector?: string; query?: string; offset?: number; limit?: number }, api: any) {
-			const { offered: all, unreachable } = await offered(await agentOf(api.conversationId));
+			const { offered: all, unreachable } = await offered(await agentOf(api.conversationId), await appsOf(api.conversationId));
 			if (all.length === 0) return text(unreachable.length ? `No tools are available: ${unreachable.join(", ")} could not be reached.` : "You have no connector tools. The person can connect a service and switch its tools on in Settings, or you can find one with find_connector.");
 			const wanted = (args.query ?? "").toLowerCase().split(/\s+/).filter(Boolean);
 			const tools = all.filter((o) => (!args.connector || o.connector.id === args.connector || o.connector.name.toLowerCase() === args.connector.toLowerCase()) && wanted.every((w) => `${o.connector.name} ${o.tool.name} ${o.tool.description ?? ""}`.toLowerCase().includes(w)));
@@ -369,9 +347,10 @@ export function connectorToolset(deps: ConnectorToolsDeps): { tools: ToolRegistr
 		async execute(args: { connector: string; tool: string; arguments?: Record<string, unknown> }, api: any) {
 			try {
 				const agentId = await agentOf(api.conversationId);
-				const [cs, perms] = await Promise.all([connectors(), permissions()]);
+				const [cs, perms, apps] = await Promise.all([connectors(), permissions(), appsOf(api.conversationId)]);
 				const c = cs.find((x) => x.id === args.connector);
 				if (!c) return text(`There is no connected service ${args.connector}.`, true);
+				if (!listsConnector(apps, c)) return text(`You don't work with ${c.name}: it is not one of your connectors.`, true);
 				const tool = (await toolsOf(c)).find((t) => t.name === args.tool);
 				if (!tool) return text(`${c.name} has no tool ${args.tool}.`, true);
 				const { permission } = resolvePermission(c, tool, perms, agentId);
@@ -437,7 +416,8 @@ export function connectorToolset(deps: ConnectorToolsDeps): { tools: ToolRegistr
 		key: "connectors",
 		async render(input: { conversationId: number | string }) {
 			const agentId = await agentOf(input.conversationId).catch(() => undefined);
-			const { offered: tools } = await offered(agentId).catch(() => ({ offered: [] as Offered[] }));
+			const apps = await appsOf(input.conversationId).catch(() => [] as string[]);
+			const { offered: tools } = await offered(agentId, apps).catch(() => ({ offered: [] as Offered[] }));
 			if (tools.length === 0) return undefined;
 			const shown = tools.slice(0, 60);
 			return `Tools of the person's connected services, called with connector_call (connector, tool, arguments); connector_tools shows what each takes, and finds a tool by connector or query.\n${shown.map((o) => `- ${o.connector.name} (${o.connector.id}) ${o.tool.name}${o.permission === "ask" ? " [asks first]" : ""}${o.tool.description ? `: ${o.tool.description.slice(0, 160)}` : ""}`).join("\n")}${tools.length > shown.length ? `\n… and ${tools.length - shown.length} more tools: find them with connector_tools (connector, query, offset).` : ""}`;

@@ -196,6 +196,9 @@ real("native and OAuth connectors", () => {
 		origin = `http://127.0.0.1:${d.gatePort}`;
 		process.env.PIM_PUBLIC_URL = origin;
 		chatId = (await web.call("POST", "/api/sessions", { title: "Work" })).json.id;
+		// The majordomo answers this chat, and works with the connectors these tests connect (a server connected by its address is listed by its name).
+		const majordomo = (await web.call("GET", "/api/majordomo")).json.agent.id as string;
+		expect((await web.call("PUT", `/api/agents/${majordomo}`, { apps: ["google/gmail", "google/drive", "spotify/spotify", "Lookup"] })).status).toBe(200);
 		runner = await start(d, "runner", { pollMs: 40, providers: () => [faux.provider] }, { PIM_DEFAULT_MODEL: "faux/m", PIM_APP_DATABASE_URL: stack.url("gate"), ...keys });
 	}, 180_000);
 	afterAll(async () => {
@@ -493,8 +496,10 @@ real("native and OAuth connectors", () => {
 		expect(await health(repoB)).toMatchObject({ health: "configuration_error", health_detail: "No such project" });
 	}, 120_000);
 	it("lets an agent find, connect, add and remove connectors, asking the person before it changes anything", async () => {
-		const newAgent = async (name: string) => (await web.call("POST", "/api/agents", { name, description: `${name} helps`, instructions: `You are ${name}.`, apps: [], contacts: [] })).json.id as string;
-		const [boss, helper] = [await newAgent("Boss"), await newAgent("Helper")];
+		const newAgent = async (name: string, apps: string[] = []) => (await web.call("POST", "/api/agents", { name, description: `${name} helps`, instructions: `You are ${name}.`, apps, contacts: [] })).json.id as string;
+		// An agent connects only the connectors it lists.
+		const listed = ["google/drive", "spotify/spotify"];
+		const [boss, helper] = [await newAgent("Boss"), await newAgent("Helper", listed)];
 		await d.stack.admin.query("INSERT INTO pim_app.owner_settings (owner_id, key, value) VALUES ($1, 'majordomo', to_jsonb($2::text)) ON CONFLICT (owner_id, key) DO UPDATE SET value = to_jsonb($2::text)", [ownerId, boss]);
 		const bossChat = (await web.call("POST", "/api/sessions", { title: "Boss", agentId: boss })).json.id as string;
 		const helperChat = (await web.call("POST", "/api/sessions", { title: "Helper", agentId: helper })).json.id as string;
@@ -518,7 +523,7 @@ real("native and OAuth connectors", () => {
 		const appsOf = async (id: string) => (await d.stack.admin.query("SELECT config->'apps' AS apps FROM pim_app.agents WHERE id = $1", [id])).rows[0].apps as string[];
 
 		// Finding, listing and connecting need no approval: the person is only given a link to sign in at.
-		await turn(helperChat, [fauxToolCall("find_connector", { connector: "spotify" }), fauxToolCall("list_connectors", {}), fauxToolCall("connect_connector", { connector: "google/drive" }), fauxToolCall("connect_connector", { connector: "spotify/spotify" }), fauxToolCall("connect_connector", { connector: "nonesuch" })]);
+		await turn(helperChat, [fauxToolCall("find_connector", { connector: "spotify" }), fauxToolCall("list_connectors", {}), fauxToolCall("connect_connector", { connector: "google/drive" }), fauxToolCall("connect_connector", { connector: "spotify/spotify" }), fauxToolCall("connect_connector", { connector: "nonesuch" }), fauxToolCall("connect_connector", { connector: "google/gmail" })]);
 		expect((await resultsIn(helperChat, "find_connector"))[0]).toMatch(/- Spotify \[id: spotify\/spotify\] \(connected\)/);
 		expect(JSON.parse((await resultsIn(helperChat, "list_connectors"))[0]!)).toEqual(expect.arrayContaining([expect.objectContaining({ app: "spotify/spotify", state: "ready", tools: ["now_playing", "search", "play", "pause"] })]));
 		// The calls of one turn run side by side: what each answered is found by what it says, not by its place.
@@ -531,17 +536,18 @@ real("native and OAuth connectors", () => {
 		expect((await signIn(link!)).json).toContain("Google Drive is connected");
 		expect(find(/Spotify/)).toMatch(/^Spotify is already connected/);
 		expect(find(/nonesuch/)).toMatch(/offers no connector nonesuch/);
+		expect(find(/google\/gmail/)).toMatch(/^This agent doesn't work with google\/gmail; its connectors are Google Drive, Spotify\. /);
 
 		// Changing the agent's connectors asks first, every time, and nothing changes before the person says yes.
 		const lookup = (await web.call("POST", "/api/admin/apps", { name: "Lookup two", url: `${standOrigin}/mcp`, description: "Looks things up" })).json.app.id as string;
 		await turn(helperChat, [fauxToolCall("manage_connectors", { add: [lookup] })], { tool: "connector:manage", approve: false });
 		expect((await resultsIn(helperChat, "manage_connectors"))[0]).toMatch(/did not approve/);
-		expect(await appsOf(helper)).toEqual([]);
+		expect(await appsOf(helper)).toEqual(listed);
 		await turn(helperChat, [fauxToolCall("manage_connectors", { add: [lookup] })], { tool: "connector:manage", approve: true });
 		expect((await resultsIn(helperChat, "manage_connectors"))[1]).toMatch(/Helper's connectors are updated[\s\S]*Lookup two needs the person to sign in\. Give them this link: http:\/\/127\.0\.0\.1:\d+\/mcpas\/authorize/);
-		expect(await appsOf(helper)).toEqual([lookup]);
+		expect(await appsOf(helper)).toEqual([...listed, lookup]);
 		await turn(helperChat, [fauxToolCall("manage_connectors", { remove: [lookup] })], { tool: "connector:manage", approve: true });
-		expect(await appsOf(helper)).toEqual([]);
+		expect(await appsOf(helper)).toEqual(listed);
 
 		// Only the majordomo adds a connector to this Pim, with the person's yes, and it is then one of its connectors.
 		await turn(helperChat, [fauxToolCall("add_custom_connector", { name: "Mine", url: `${standOrigin}/mcp` })]);

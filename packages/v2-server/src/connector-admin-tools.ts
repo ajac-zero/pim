@@ -12,7 +12,7 @@ import { OwnerId, type Principal } from "@pim/v2-contracts/identity";
 import type { Db as RuntimeDb } from "@pim/v2-runtime/db";
 import { rosterOf } from "./agent-team-tools.ts";
 import { type CustomApp, CUSTOM_APPS_KEY, customApps } from "./compat/admin-gallery.ts";
-import type { Transport } from "./connector-tools.ts";
+import { chatApps, type Transport } from "./connector-tools.ts";
 import { ConnectorService, type DirectoryApp } from "./connector-service.ts";
 import type { Env } from "./native/native.ts";
 import { askFirst, recordResult } from "./tool-approval.ts";
@@ -97,12 +97,18 @@ export function connectorAdminTools(deps: { ownerId: string; runtime: RuntimeDb;
 			if (connections.length === 0) return text("Nothing is connected. Find a connector with find_connector, then connect it with connect_connector.");
 			return text(JSON.stringify(connections.map((c) => ({ id: c.id, name: c.name, ...(c.app ? { app: c.app } : {}), state: c.state, ...(c.error ? { error: c.error } : {}), tools: c.tools.map((t) => t.name) })), null, 1));
 		}),
-		write("connect_connector", "Connect a connector this Pim offers that isn't connected yet, giving you its tools. If the person must sign in first, you get a link to give them. Find a connector's id with find_connector.", Type.Object({ connector: S({ description: "The connector's id or name, as find_connector or list_connectors gives it." }) }), async (app, _call, a) => {
+		write("connect_connector", "Connect a connector this Pim offers that isn't connected yet, giving you its tools. If the person must sign in first, you get a link to give them. Find a connector's id with find_connector.", Type.Object({ connector: S({ description: "The connector's id or name, as find_connector or list_connectors gives it." }) }), async (app, call, a) => {
 			if (!origin()) return noAddress;
 			const directory = await directoryOf(app);
 			const wanted = String(a.connector).trim().toLowerCase();
 			const entry = directory.find((d) => d.ref.toLowerCase() === wanted) ?? directory.find((d) => d.name.toLowerCase() === wanted);
 			const existing = (await service(app).list(person, directory)).find((c) => c.id === a.connector || (entry ? c.app === entry.ref : c.name.toLowerCase() === wanted));
+			// An agent connects only the connectors it lists, as in v1: another is added to its list first (manage_connectors), with the person's approval.
+			const { apps } = await chatApps(runtime, ownerId, call.chat);
+			if ((entry || existing) && !(entry && apps.includes(entry.ref)) && !(existing && (apps.includes(existing.id) || apps.includes(existing.name)))) {
+				const names = directory.filter((d) => apps.includes(d.ref)).map((d) => d.name).join(", ");
+				return text(`This agent doesn't work with ${a.connector}${names ? `; its connectors are ${names}` : ""}. If manage_connectors is available, request adding it there by its id from find_connector; approval adds and connects it. Otherwise the person can add it in Your agents.`, true);
+			}
 			if (existing?.state === "ready") return text(`${existing.name} is already connected. Its tools: ${existing.tools.map((t) => t.name).join(", ") || "none"}.`);
 			if (!entry) return text(`This Pim offers no connector ${a.connector}. Use find_connector for a connector's id${directory.length ? "" : "; this Pim offers none yet, and its admin can add one"}.`, true);
 			const result = await service(app).connect(person, origin(), { ref: entry.ref, name: entry.name, url: entry.url }, directory);

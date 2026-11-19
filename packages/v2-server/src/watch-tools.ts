@@ -7,6 +7,8 @@ import { Type } from "typebox";
 import { defineTool, type ToolRegistration } from "@earendil-works/pi-durable";
 import type { Principal } from "@pim/v2-contracts/identity";
 import { BadRequestError } from "@pim/v2-app/errors";
+import type { Db as RuntimeDb } from "@pim/v2-runtime/db";
+import { chatApps, listsConnector } from "./connector-tools.ts";
 import { connectorOf, connectorSession, listEvents, newWatchSecret, subscribe, unsubscribe, type WatchDeps } from "./watches.ts";
 
 type Result = { output: { type: "text"; text: string }[]; isError?: boolean };
@@ -16,30 +18,34 @@ const iso = (d: Date | null) => (d ? d.toISOString() : null);
 
 export type WatchToolDeps = {
 	ownerId: string;
+	runtime: RuntimeDb;
 	/** The application, keys and transport, as the Runner has them; absent where the Runner has no application database. */
 	watch: () => WatchDeps | undefined;
 	chatOf(conversationId: number | string): Promise<string | null>;
 	principalOf(chat: string | null): Promise<Principal | undefined>;
 };
 
-type Row = { id: string; name: string; url: string | null; status: string; credential: string | null };
+type Row = { id: string; name: string; url: string | null; status: string; credential: string | null; app_ref: string | null };
 
 export function watchTools(deps: WatchToolDeps): ToolRegistration[] {
 	const { ownerId } = deps;
 	const noApp = () => text("This Runner has no application database (PIM_APP_DATABASE_URL), so it cannot do that.", true);
 	/** The connectors an agent can ask for events: MCP servers that are connected. */
-	const servers = async (w: WatchDeps): Promise<Row[]> => (await w.app.db.owner(ownerId, async (tx) => (await tx.query("SELECT id, name, url, status, credential FROM pim_app.connectors WHERE url IS NOT NULL AND status = 'connected' ORDER BY created_at")).rows)) as Row[];
+	const servers = async (w: WatchDeps): Promise<Row[]> => (await w.app.db.owner(ownerId, async (tx) => (await tx.query("SELECT id, name, url, status, credential, app_ref FROM pim_app.connectors WHERE url IS NOT NULL AND status = 'connected' ORDER BY created_at")).rows)) as Row[];
+	/** Whether the chat's agent works with the connector: the connectors an agent lists are the only ones it may hear events of, as in v1. */
+	const works = async (conversationId: number | string, c: { id: string; name: string; app_ref?: string | null }) => listsConnector((await chatApps(deps.runtime, ownerId, await deps.chatOf(conversationId))).apps, { id: c.id, name: c.name, appRef: c.app_ref ?? null });
 
 	const listEventsTool = defineTool({
 		name: "list_connector_events",
 		description: "List the events connected connectors can notify you about, with the arguments each accepts.",
 		parameters: Type.Object({}),
 		replay: "safe",
-		async execute() {
+		async execute(_args: unknown, api: any) {
 			const w = deps.watch();
 			if (!w) return noApp();
 			const out: unknown[] = [];
-			await Promise.all((await servers(w)).map(async (c) => {
+			const apps = (await chatApps(deps.runtime, ownerId, await deps.chatOf(api.conversationId))).apps;
+			await Promise.all((await servers(w)).filter((c) => listsConnector(apps, { id: c.id, name: c.name, appRef: c.app_ref })).map(async (c) => {
 				try {
 					const full = await connectorOf(w.app, ownerId, c.id);
 					for (const e of await connectorSession(w, ownerId, full!, (rpc) => listEvents(rpc))) out.push({ connector: c.id, service: c.name, event: e.name, description: e.description, arguments: e.inputSchema ?? {} });
@@ -70,7 +76,7 @@ export function watchTools(deps: WatchToolDeps): ToolRegistration[] {
 			if (!p || !chat) return text("Watches belong to a chat, and this is not one.", true);
 			const refused = (why: string, name = a.connector) => text(`Could not watch ${name} for "${a.event}": ${why}`, true);
 			const c = await connectorOf(w.app, ownerId, a.connector);
-			if (!c?.url || c.status !== "connected") return text(`No connected connector ${a.connector}. See list_connector_events.`, true);
+			if (!c?.url || c.status !== "connected" || !(await works(api.conversationId, c))) return text(`No connector named ${a.connector} among the connectors you work with. See list_connector_events.`, true);
 			let events;
 			try {
 				events = await connectorSession(w, ownerId, c, (rpc) => listEvents(rpc));

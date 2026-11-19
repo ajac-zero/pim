@@ -13,7 +13,8 @@ import type { App } from "@pim/v2-app/app";
 import type { Tool } from "@pim/v2-app/connectors";
 import { BadRequestError, NotFoundError } from "@pim/v2-app/errors";
 import { openString } from "@pim/v2-app/crypto";
-import { mcpFetchTools, parseCredential, refresh, type Transport } from "./connector-tools.ts";
+import { appStore, CredentialRenewals, SignInLost } from "./connector-credential.ts";
+import { mcpFetchTools, parseCredential, type Transport } from "./connector-tools.ts";
 import { type CustomApp } from "./compat/admin-gallery.ts";
 import { ApiError, AuthRefused } from "./native/http.ts";
 import { endpointsOf, type Env, missingSettings, nativeApp, type NativeApp, offeredNativeApps } from "./native/native.ts";
@@ -70,7 +71,7 @@ export class ConnectorService {
 			app: r.app_ref && directory.some((d) => d.ref === r.app_ref) ? r.app_ref : null,
 			name: r.name,
 			url: r.url ?? "",
-			state: r.status === "auth_required" ? "authenticating" : r.status === "connected" ? "ready" : r.error ? "failed" : "ready",
+			state: r.status === "auth_required" ? (r.auth_url ? "authenticating" : "failed") : r.status === "connected" ? "ready" : r.error ? "failed" : "ready",
 			error: r.error ?? (r.app_ref && !directory.some((d) => d.ref === r.app_ref) ? "This Pim no longer offers it." : null),
 			authUrl: r.status === "auth_required" ? r.auth_url : null,
 			approval: r.approval,
@@ -220,20 +221,28 @@ export class ConnectorService {
 		if (native && credential) await this.#revoke(native, parseCredential(credential).bundle ?? { access_token: credential });
 	}
 
+	/** An account being erased: every native connection's grant is revoked at its service, if it can be, and whether or not that works the erasure goes on. */
+	async revokeAll(ownerId: string): Promise<void> {
+		for (const row of await this.#rows(ownerId)) {
+			const native = row.kind === "native" ? nativeApp(row.app_ref ?? "") : undefined;
+			if (!native?.revokeUrl || !row.credential) continue;
+			const stored = await openString(this.app.crypto, row.credential, `connector:${ownerId}/${row.id}`).catch(() => null);
+			if (stored) await this.#revoke(native, parseCredential(stored).bundle ?? { access_token: stored });
+		}
+	}
+
 	// ---- a connector's own actions, for the person in their browser ----
 
-	/** The credential, renewed if it is about to expire, and what to call to change it. */
+	/** The credential, renewed if it is about to expire (one renewal at a time, written over only the credential it began from: `connector-credential.ts`), and what to call to change it. */
 	async #open(ownerId: string, row: Row): Promise<{ bundle: Bundle; update: (change: (b: Record<string, unknown>) => Record<string, unknown>) => Promise<void> }> {
-		const aad = `connector:${ownerId}/${row.id}`;
-		const stored = row.credential ? await openString(this.app.crypto, row.credential, aad) : null;
-		const parsed = stored ? parseCredential(stored).bundle : null;
-		if (!parsed) throw new BadRequestError("Connect it first.");
-		let bundle: Bundle = parsed;
-		if (bundle.expires_at !== undefined && bundle.expires_at <= this.now() + 60_000) {
-			const renewed = await refresh(bundle as never, this.transport.fetch, this.now());
-			if (!renewed) throw new BadRequestError("The sign-in expired. Connect it again from Connectors.");
-			bundle = renewed as Bundle;
-			await this.app.connectors.setCredential(ownerId, row.id, JSON.stringify(bundle));
+		if (!row.credential || !parseCredential(await openString(this.app.crypto, row.credential, `connector:${ownerId}/${row.id}`)).bundle) throw new BadRequestError("Connect it first.");
+		const renewals = new CredentialRenewals({ crypto: this.app.crypto, store: appStore(this.app), fetch: this.transport.fetch, now: this.now, leadMs: 60_000 });
+		let bundle: Bundle;
+		try {
+			bundle = (await renewals.open(ownerId, row)).bundle as Bundle;
+		} catch (error) {
+			if (error instanceof SignInLost) throw new BadRequestError("The sign-in expired. Connect it again from Connectors.");
+			throw error;
 		}
 		return { bundle, update: async (change) => { bundle = change(bundle) as Bundle; await this.app.connectors.setCredential(ownerId, row.id, JSON.stringify(bundle)); } };
 	}

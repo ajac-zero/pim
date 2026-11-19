@@ -9,15 +9,15 @@ import { Type } from "typebox";
 import { defineTool, type ToolRegistration } from "@earendil-works/pi-durable";
 import type { App } from "@pim/v2-app/app";
 import type { Boundary, GuestConnector } from "@pim/v2-app/guests";
-import { openString, sealString } from "@pim/v2-app/crypto";
 import { toolDefinition } from "@pim/v2-app/tool-permissions";
 import { sniffImage } from "@pim/v2-app/objects";
 import { OwnerId, PartitionId, type Principal } from "@pim/v2-contracts/identity";
 import type { EnvelopeCrypto } from "@pim/v2-contracts/platform";
 import type { ExternalOperations } from "@pim/v2-runtime/external";
 import type { Db as RuntimeDb } from "@pim/v2-runtime/db";
-import { listTools, McpAuthError, type McpTool, parseCredential, refresh, resultText, type Transport, withSession } from "./connector-tools.ts";
+import { CredentialRenewals, runtimeStore } from "./connector-credential.ts";
 import { type ImageSources, IMAGE_EXTENSIONS, pickImageModel } from "./image-tools.ts";
+import { listTools, McpAuthError, type McpTool, resultText, type Transport, withSession } from "./connector-tools.ts";
 
 type Result = { output: { type: "text"; text: string }[]; isError?: boolean };
 const text = (s: string, isError = false): Result => ({ output: [{ type: "text", text: s }], ...(isError ? { isError } : {}) });
@@ -59,26 +59,14 @@ export function guestToolset(deps: GuestToolsDeps): ToolRegistration[] {
 	const listed = new Map<string, { at: number; tools: Promise<McpTool[]> }>();
 	const noApp = () => text("This Runner has no application database (PIM_APP_DATABASE_URL), so it cannot reach anyone's space.", true);
 
-	async function bearerOf(b: Boundary, c: GuestConnector, force = false): Promise<string | null> {
-		if (!c.credential) return null;
-		if (!deps.crypto) throw new Error("This Runner has no keys (PIM_KEK_<id> and PIM_KEK_CURRENT), so it cannot open a connector's credential.");
-		const context = `connector:${b.host}/${c.id}`;
-		const { bearer, bundle } = parseCredential(await openString(deps.crypto, c.credential, context));
-		if (bundle && (force || (bundle.expires_at !== undefined && bundle.expires_at <= deps.now() + 30_000))) {
-			const renewed = await refresh(bundle, deps.transport.fetch, deps.now()).catch(() => null);
-			if (renewed) {
-				await runtime.read(b.host, "SELECT pim_app.runner_set_connector_credential($1, $2, $3)", [b.host, c.id, await sealString(deps.crypto, JSON.stringify(renewed), context)]);
-				return renewed.access_token;
-			}
-		}
-		return bearer;
-	}
+	const renewals = new CredentialRenewals({ crypto: deps.crypto, store: runtimeStore(runtime), fetch: deps.transport.fetch, now: deps.now });
 	async function withBearer<T>(b: Boundary, c: GuestConnector, run: (bearer: string | null) => Promise<T>): Promise<T> {
+		const first = await renewals.open(b.host, { id: c.id, name: c.name, url: c.url, credential: c.credential });
 		try {
-			return await run(await bearerOf(b, c));
+			return await run(first.bearer);
 		} catch (error) {
 			if (!(error instanceof McpAuthError)) throw error;
-			return run(await bearerOf(b, c, true));
+			return run((await renewals.open(b.host, { id: c.id, name: c.name, url: c.url, credential: first.sealed }, true)).bearer);
 		}
 	}
 	const toolsOf = (b: Boundary, c: GuestConnector): Promise<McpTool[]> => {

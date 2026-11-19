@@ -17,7 +17,8 @@ import type { EnvelopeCrypto } from "@pim/v2-contracts/platform";
 import type { TriggerHealth } from "@pim/triggers/spec";
 import { newSecret, verifyWebhook } from "@pim/shared/webhook";
 import { AuthRefused } from "./native/http.ts";
-import { McpAuthError, parseCredential, refresh, type Transport, withSession } from "./connector-tools.ts";
+import { appStore, CredentialRenewals } from "./connector-credential.ts";
+import { McpAuthError, type Transport, withSession } from "./connector-tools.ts";
 
 export type WatchDeps = { app: App; crypto: EnvelopeCrypto; transport: Transport; publicUrl: string | undefined; now: () => number };
 
@@ -28,35 +29,22 @@ export const RENEW_MARGIN_MS = 10 * 60_000;
 
 export type Rpc = (method: string, params?: unknown) => Promise<any>;
 
-type ConnectorRecord = { id: string; name: string; url: string | null; status: string; credential: string | null; event_key: string };
+type ConnectorRecord = { id: string; name: string; url: string | null; status: string; credential: string | null; event_key: string; app_ref?: string | null };
 
 export async function connectorOf(app: App, ownerId: string, id: string): Promise<ConnectorRecord | undefined> {
-	return app.db.owner(ownerId, async (tx) => (await tx.query("SELECT id, name, url, status, credential, event_key FROM pim_app.connectors WHERE id = $1", [id])).rows[0] as ConnectorRecord | undefined);
+	return app.db.owner(ownerId, async (tx) => (await tx.query("SELECT id, name, url, status, credential, event_key, app_ref FROM pim_app.connectors WHERE id = $1", [id])).rows[0] as ConnectorRecord | undefined);
 }
 
-/** The owner's connector, called over MCP: its credential opened with the key ring, an OAuth one renewed when it is about to expire or the server refuses it. */
+/** The owner's connector, called over MCP: its credential opened with the key ring, an OAuth one renewed when it is about to expire or the server refuses it (`connector-credential.ts`). */
 export async function connectorSession<T>(deps: WatchDeps, ownerId: string, c: ConnectorRecord, run: (rpc: Rpc) => Promise<T>): Promise<T> {
 	if (!c.url) throw new Error(`${c.name} is not an MCP server.`);
-	const aad = `connector:${ownerId}/${c.id}`;
-	const bearerOf = async (force: boolean): Promise<string | null> => {
-		if (!c.credential) return null;
-		const { bearer, bundle } = parseCredential(await openString(deps.crypto, c.credential, aad));
-		if (bundle && (force || (bundle.expires_at !== undefined && bundle.expires_at <= deps.now() + 30_000))) {
-			const renewed = await refresh(bundle, deps.transport.fetch, deps.now()).catch(() => null);
-			if (renewed) {
-				const sealed = await sealString(deps.crypto, JSON.stringify(renewed), aad);
-				await deps.app.db.owner(ownerId, (tx) => tx.query("UPDATE pim_app.connectors SET credential = $2 WHERE id = $1", [c.id, sealed]));
-				c = { ...c, credential: sealed };
-				return renewed.access_token;
-			}
-		}
-		return bearer;
-	};
+	const renewals = new CredentialRenewals({ crypto: deps.crypto, store: appStore(deps.app), fetch: deps.transport.fetch, now: deps.now });
+	const first = await renewals.open(ownerId, c);
 	try {
-		return await withSession(deps.transport, c.url, await bearerOf(false), run, 30_000);
+		return await withSession(deps.transport, c.url, first.bearer, run, 30_000);
 	} catch (error) {
 		if (!(error instanceof McpAuthError || error instanceof AuthRefused)) throw error;
-		return withSession(deps.transport, c.url, await bearerOf(true), run, 30_000);
+		return withSession(deps.transport, c.url, (await renewals.open(ownerId, { ...c, credential: first.sealed }, true)).bearer, run, 30_000);
 	}
 }
 

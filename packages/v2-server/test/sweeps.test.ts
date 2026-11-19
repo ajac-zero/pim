@@ -3,6 +3,9 @@ import pg from "pg";
 import { App } from "@pim/v2-app/app";
 import { connect as connectApp } from "@pim/v2-app/db";
 import { MemoryObjectStore } from "@pim/v2-app/objects";
+import { appStore, runtimeStore } from "../src/connector-credential.ts";
+import { ConnectorService } from "../src/connector-service.ts";
+import { notifyPass } from "../src/notifier.ts";
 import { sweepApprovals, sweepErasures, tickSchedules, tickTriggers, trimForgeOutbox } from "../src/sweeps.ts";
 import { createStack, type Stack } from "./support/stack.ts";
 
@@ -92,6 +95,67 @@ describe("maintenance sweeps", () => {
 		expect(await rows(owner)).toBe(adaRows);
 		expect(await sweepErasures(maintenance, maintPool, store)).toEqual([]);
 		await objects.db.end();
+	});
+
+	it("revokes a deleted account's Gmail grant at Google before erasing it, and an account still there keeps its grant", async () => {
+		const store = new MemoryObjectStore();
+		const objects = new App(connectApp(stack.url("gate"), 2), store);
+		await objects.identity.setRegistrationOpen({ kind: "user", ownerId: owner, role: "admin", sessionId: "s" } as never, true);
+		const grants: { who: string; owner: string }[] = [];
+		const connectGmail = async (username: string) => {
+			const account = await objects.identity.register({ username });
+			const person = { kind: "user", ownerId: account.ownerId, role: "member", sessionId: `s-${username}` } as never;
+			const { connector } = await objects.connectors.create(person, { kind: "native", name: "Gmail" });
+			await objects.db.owner(account.ownerId, (tx) => tx.query("UPDATE pim_app.connectors SET app_ref = 'google/gmail' WHERE id = $1", [connector.id]));
+			await objects.connectors.setCredential(account.ownerId, connector.id, JSON.stringify({ access_token: "access", refresh_token: `${username}-refresh` }));
+			grants.push({ who: `${username}-refresh`, owner: account.ownerId });
+			return { account, person };
+		};
+		const [carol, dave] = [await connectGmail("carol"), await connectGmail("dave")];
+		const revoked: string[] = [];
+		const fetcher = (async (url: string, init: RequestInit) => {
+			revoked.push(`${url} ${init.body}`);
+			return new Response(null, { status: 200 });
+		}) as unknown as typeof fetch;
+		const service = new ConnectorService(objects, { PIM_GOOGLE_REVOKE_URL: "https://google.test/revoke" }, { fetch: fetcher, allowPrivate: true, check: async (u) => new URL(u) });
+		await objects.identity.deleteSelf(carol.person);
+		expect(await sweepErasures(maintenance, maintPool, store, 5, (who) => service.revokeAll(who))).toEqual([carol.account.ownerId]);
+		expect(revoked).toEqual(["https://google.test/revoke token=carol-refresh"]);
+		expect(dave.account.ownerId).not.toBe(carol.account.ownerId);
+		// Google not answering does not stop the erasure.
+		const failing = new ConnectorService(objects, { PIM_GOOGLE_REVOKE_URL: "https://google.test/revoke" }, { fetch: (async () => { throw new Error("down"); }) as unknown as typeof fetch, allowPrivate: true, check: async (u) => new URL(u) });
+		await objects.identity.deleteSelf(dave.person);
+		expect(await sweepErasures(maintenance, maintPool, store, 5, (who) => failing.revokeAll(who))).toEqual([dave.account.ownerId]);
+		await objects.db.end();
+	});
+
+	it("writes a renewed credential only over the one it read, marks a lost sign-in, and tells the person once", async () => {
+		const ada = { kind: "user", ownerId: owner, role: "admin", sessionId: "s" } as never;
+		const { connector } = await gate.connectors.create(ada, { kind: "native", name: "Drive" });
+		await gate.connectors.setCredential(owner, connector.id, JSON.stringify({ access_token: "one" }));
+		const sealed = async () => (await stack.admin.query("SELECT credential FROM pim_app.connectors WHERE id = $1", [connector.id])).rows[0].credential as string | null;
+		const first = (await sealed())!;
+		for (const store of [appStore(gate), runtimeStore(stack.runtime)]) {
+			expect(await store.current(owner, connector.id)).toBe(await sealed());
+			expect(await store.current(owner, "cn_missing")).toBeUndefined();
+			// A renewal that began on another credential writes nothing.
+			expect(await store.replace(owner, connector.id, "sealed:other", "sealed:renewed")).toBe(false);
+			expect(await store.lose(owner, connector.id, "sealed:other", "Sign in again")).toBe(false);
+			expect(await sealed()).toBe(first);
+		}
+		expect(await appStore(gate).replace(owner, connector.id, first, "sealed:next")).toBe(true);
+		expect(await sealed()).toBe("sealed:next");
+		expect(await runtimeStore(stack.runtime).lose(owner, connector.id, "sealed:next", "Sign in again: Token has been expired or revoked.")).toBe(true);
+		expect((await stack.admin.query("SELECT credential, status, auth_url, error FROM pim_app.connectors WHERE id = $1", [connector.id])).rows[0]).toEqual({ credential: null, status: "auth_required", auth_url: null, error: "Sign in again: Token has been expired or revoked." });
+		const connectors = await new ConnectorService(gate, {}, { fetch, allowPrivate: true, check: async (u) => new URL(u) }).list(ada, []);
+		expect(connectors.find((c) => c.id === connector.id)).toMatchObject({ state: "failed", authUrl: null });
+		// The person is told, once.
+		const options = { vapid: null, subject: "mailto:x@example.test", allowPrivate: true };
+		expect(await notifyPass(maintenance, maintPool, options as never)).toBeGreaterThanOrEqual(1);
+		const told = (await stack.admin.query("SELECT title FROM pim_app.notifications WHERE owner_id = $1 AND id LIKE $2", [owner, `connector-${connector.id}-%`])).rows;
+		expect(told).toEqual([{ title: "Drive needs you to sign in again" }]);
+		await notifyPass(maintenance, maintPool, options as never);
+		expect((await stack.admin.query("SELECT count(*)::int AS n FROM pim_app.notifications WHERE owner_id = $1 AND id LIKE $2", [owner, `connector-${connector.id}-%`])).rows[0].n).toBe(1);
 	});
 
 	it("fires a due schedule and a due time trigger once each, from the owners that have them, into chats of their own", async () => {

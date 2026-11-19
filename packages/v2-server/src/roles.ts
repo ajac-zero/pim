@@ -34,6 +34,7 @@ import { deliverForgeWakes } from "./forge-wakes.ts";
 import { codingAdminRoutes, forgeAuthenticator, forgeRoutes, projectedTranscripts, snapshotRoutes } from "./gate-extras.ts";
 import { mcpFetchTools } from "./connector-tools.ts";
 import { publicUrl } from "./agent-tools.ts";
+import { ConnectorService } from "./connector-service.ts";
 import { reconcileWatches, renewDue } from "./watches.ts";
 import type { Host } from "./host.ts";
 import { serveSays } from "./live-says.ts";
@@ -362,6 +363,8 @@ export async function startMaintenance(config: ProcessConfig, env: Env, host: Ho
 	sweeper.triggers.chatBusy = chatBusyOf(sweeper);
 	const notifier = { vapid: vapidFromEnv(env), subject: env.PIM_VAPID_SUBJECT || config.publicUrl, allowPrivate: env.PIM_PUSH_ALLOW_PRIVATE === "1" };
 	const keys = keyringFromProcessEnv(env);
+	// An erased account's native connectors' grants are revoked at their providers first, which needs the keys that opened them.
+	const grants = keys ? new ConnectorService(new App(app, objects, { crypto: keys, env }), env, { fetch, allowPrivate: env.PIM_CONNECTOR_ALLOW_PRIVATE === "1", check: publicUrl }) : undefined;
 	let lastRenewal = 0;
 	let lastUpdateCheck = 0;
 	const pass = async () => {
@@ -389,7 +392,7 @@ export async function startMaintenance(config: ProcessConfig, env: Env, host: Ho
 		}
 		if (Date.now() - lastTrim > 60_000) {
 			lastTrim = Date.now();
-			await sweepErasures(sweeper, maint, objects).catch((e) => console.error("erasure sweep", e));
+			await sweepErasures(sweeper, maint, objects, 5, grants ? (owner) => grants.revokeAll(owner) : undefined).catch((e) => console.error("erasure sweep", e));
 			await trimForgeOutbox(maint).catch((e) => console.error("outbox trim", e));
 		}
 		await deliverForgeWakes({ forge: parts.forge, forgeDb: maint as never, runtime, inbox, publicUrl: env.PIM_PUBLIC_URL, onUnroutable: (id, why) => console.warn("wake dropped", id, why) });

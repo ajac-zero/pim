@@ -99,13 +99,16 @@ const ERASED_SCHEMAS = ["pim_runtime", "pim_projection", "pim_forge"];
 /**
  * Erases the accounts their owners (or an admin) deleted. A deleting account is already gone to every surface (410); this removes what it held, in
  * the order that lets a failure be tried again: its objects (images, app files, uploads), its rows in the runtime, the projections and Forge, and last
- * the application's own (`purgeOwner`), which also marks the account `deleted`, so an account that is still `deleting` is one not yet fully erased.
+ * the application's own (`purgeOwner`), which also marks the account `deleted`, so an account that is still `deleting` is one not yet fully erased. `beforeErasing` runs
+ * first, for what must be undone elsewhere while the rows still say what it is (the native connectors' grants, revoked at their providers; best effort).
  * Returns the owners finished. Gitea repositories and workspaces Forge made are not reached from here.
  */
-export async function sweepErasures(app: App, pool: Pool, objects: ObjectStore, limit = 5): Promise<string[]> {
+export async function sweepErasures(app: App, pool: Pool, objects: ObjectStore, limit = 5, beforeErasing?: (ownerId: string) => Promise<void>): Promise<string[]> {
 	const owners = (await app.db.anonymous(async (tx) => (await tx.query("SELECT owner_id FROM pim_app.accounts WHERE status = 'deleting' ORDER BY status_changed_at LIMIT $1", [limit])).rows)).map((r) => r.owner_id as string);
 	const done: string[] = [];
 	for (const owner of owners) {
+		// What leaves the platform first, while the account's connectors can still be read: its grants at other services (Gmail's, Drive's) are revoked, so erasing a person leaves nothing of theirs valid there.
+		await beforeErasing?.(owner).catch((error) => console.error("erasure: revoking grants", owner, error));
 		const keys = (await app.db.owner(owner, async (tx) => (await tx.query("SELECT key FROM pim_app.objects")).rows)).map((r) => r.key as string);
 		for (const key of keys) await objects.delete(key);
 		const client = await pool.connect();

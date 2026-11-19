@@ -36,7 +36,13 @@ export type AgentInput = Partial<Pick<Agent, "name" | "role" | "description" | "
 /** Every scope an agent reads: its own, the named ones it was given, and everyone's. */
 export const readScopes = (a: Pick<Agent, "memoryScope" | "memoryScopes">): string[] => [...new Set([a.memoryScope, ...a.memoryScopes, "everyone"])];
 
-const COLOR = /^#[0-9a-fA-F]{6}$|^[a-z]{3,20}$/;
+/** The colors behind an agent's icon, as v1 had them. */
+export const AGENT_COLORS = ["gray", "red", "orange", "amber", "green", "teal", "blue", "indigo", "violet", "pink"];
+/** An agent's icon: the name of one the app draws (`rocket`), or one emoji (a sequence the Unicode set of recommended emoji lists, so `🏃🏽‍♀️` is one and `🏃🏃` is two). */
+const ICON_NAME = /^[a-z][a-z0-9-]{0,39}$/;
+const ONE_EMOJI = new RegExp("^\\p{RGI_Emoji}$", "v");
+/** What an agent's role is for the majordomo, whatever it is named. */
+export const MAJORDOMO_ROLE = "Majordomo";
 const strings = (v: unknown, what: string): string[] => {
 	if (v === undefined) return [];
 	if (!Array.isArray(v) || v.some((x) => typeof x !== "string")) throw new BadRequestError(`${what} must be a list of names`);
@@ -104,16 +110,37 @@ export class Agents {
 		if (input.role != null && (typeof input.role !== "string" || !input.role.trim() || input.role.length > 60)) throw new BadRequestError("A role is up to 60 characters");
 		if (input.description != null && (typeof input.description !== "string" || input.description.length > 280)) throw new BadRequestError("A description is up to 280 characters");
 		if (input.instructions !== undefined && (typeof input.instructions !== "string" || input.instructions.length > 20_000)) throw new BadRequestError("Instructions are up to 20,000 characters");
-		if (input.color != null && !COLOR.test(input.color)) throw new BadRequestError("color is a #rrggbb value or a color name");
-		if (input.emoji != null && [...String(input.emoji)].length > 4) throw new BadRequestError("emoji is one emoji");
+		if (input.color != null && !AGENT_COLORS.includes(input.color)) throw new BadRequestError(`color must be one of ${AGENT_COLORS.join(", ")}, or null`);
+		if (input.emoji != null && !(typeof input.emoji === "string" && (ICON_NAME.test(input.emoji) || ONE_EMOJI.test(input.emoji)))) throw new BadRequestError("symbol must be an icon's name, such as rocket, or one emoji, or null");
 	}
 
-	async create(p: Principal, input: AgentInput & { name: string }): Promise<Agent> {
+	/** Whether this is the person's majordomo: the agent they named (`owner_settings.majordomo`), or else the one v1 marked as the default (as `pim_app.majordomo_id()` says). */
+	async #isMajordomo(tx: Tx, id: string): Promise<boolean> {
+		const named = (await tx.query("SELECT a.id FROM pim_app.owner_settings s JOIN pim_app.agents a ON a.id = s.value #>> '{}' WHERE s.key = 'majordomo' AND a.deleted_at IS NULL")).rows[0]?.id as string | undefined;
+		if (named) return named === id;
+		return (await tx.query("SELECT id FROM pim_app.agents WHERE deleted_at IS NULL AND config->'legacy'->>'isDefault' = 'true' ORDER BY created_at LIMIT 1")).rows[0]?.id === id;
+	}
+
+	/** Each of the person's agents has a name and a role of its own, whatever the case, so neither they nor the app mistake one for another. `self` is the agent being changed. */
+	async #unique(tx: Tx, name: string | undefined, role: string | undefined, self: string | null): Promise<void> {
+		if (name !== undefined) {
+			const taken = (await tx.query("SELECT coalesce(role, config->'legacy'->>'role', name) AS role FROM pim_app.agents WHERE deleted_at IS NULL AND lower(btrim(name)) = lower($1) AND id IS DISTINCT FROM $2", [name, self])).rows[0];
+			if (taken) throw new ConflictError(`You already have an agent named ${name}: ${taken.role}. Each agent has a name of its own.`, "agent_name_taken");
+		}
+		if (role !== undefined) {
+			const taken = (await tx.query("SELECT name FROM pim_app.agents WHERE deleted_at IS NULL AND lower(btrim(coalesce(role, config->'legacy'->>'role', name))) = lower($1) AND id IS DISTINCT FROM $2", [role, self])).rows[0];
+			if (taken) throw new ConflictError(`You already have an agent for the role ${role}: ${taken.name}. Each agent has a role of its own.`, "agent_role_taken");
+		}
+	}
+
+	/** `starter` is the majordomo as it is first made: its role is fixed, so it is not held to another agent having had the role first. */
+	async create(p: Principal, input: AgentInput & { name: string }, options: { starter?: boolean } = {}): Promise<Agent> {
 		await this.authz.enforce(p, "api:write");
 		input = withSymbol(input);
 		this.#check(input);
 		const id = newId("a");
 		return this.db.owner(p.ownerId, async (tx) => {
+			await this.#unique(tx, input.name.trim(), options.starter ? undefined : (input.role ?? input.name).trim(), null);
 			const config = await this.#config(tx, p.ownerId, input);
 			await tx.query("INSERT INTO pim_app.agents (id, owner_id, name, instructions, config, emoji, color, icon_key, role, description) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)", [id, p.ownerId, input.name.trim(), input.instructions ?? "", JSON.stringify(config), input.emoji ?? null, input.color ?? null, input.icon ?? null, (input.role ?? input.name).trim(), input.description ?? ""]);
 			return rowToAgent((await tx.query("SELECT * FROM pim_app.agents WHERE id = $1", [id])).rows[0]);
@@ -160,6 +187,10 @@ export class Agents {
 			const cur = (await tx.query("SELECT config FROM pim_app.agents WHERE id = $1 AND deleted_at IS NULL FOR UPDATE", [id])).rows[0];
 			if (!cur) throw new NotFoundError("No such agent");
 			if (input.contacts?.includes(id) || input.delegates?.includes(id)) throw new BadRequestError("An agent cannot be its own contact or delegate");
+			// The majordomo keeps its role whatever it is named or asked to be.
+			const majordomo = await this.#isMajordomo(tx, id);
+			if (majordomo) input = { ...input, role: MAJORDOMO_ROLE };
+			await this.#unique(tx, input.name?.trim(), majordomo ? undefined : input.role?.trim(), id);
 			const config = await this.#config(tx, p.ownerId, input, cur.config);
 			await tx.query(
 				"UPDATE pim_app.agents SET name = coalesce($2, name), instructions = coalesce($3, instructions), config = $4, emoji = CASE WHEN $5 THEN $6 ELSE emoji END, color = CASE WHEN $7 THEN $8 ELSE color END, icon_key = CASE WHEN $9 THEN $10 ELSE icon_key END, role = coalesce($11, role), description = coalesce($12, description), updated_at = now() WHERE id = $1",
@@ -173,6 +204,7 @@ export class Agents {
 	async remove(p: Principal, id: string): Promise<void> {
 		await this.authz.enforce(p, "api:write");
 		await this.db.owner(p.ownerId, async (tx) => {
+			if (await this.#isMajordomo(tx, id)) throw new BadRequestError("Your majordomo can't be deleted: it is there to stay. You can rename it and set how it works.");
 			if (!(await tx.query("UPDATE pim_app.agents SET deleted_at = now() WHERE id = $1 AND deleted_at IS NULL", [id])).rowCount) throw new NotFoundError("No such agent");
 			// What was published of it is taken down with it: its template leaves the gallery and its bot's link is off.
 			await tx.query("DELETE FROM pim_app.templates WHERE owner_id = $1 AND agent_id = $2", [p.ownerId, id]);

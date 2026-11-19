@@ -8,9 +8,13 @@
  */
 import type { Principal } from "@pim/v2-contracts/identity";
 import type { App } from "@pim/v2-app/app";
-import type { Agent as V2Agent } from "@pim/v2-app/agents";
-import { BadRequestError, ForbiddenError, NotFoundError, PimError } from "@pim/v2-app/errors";
+import { MAJORDOMO_ROLE, type Agent as V2Agent } from "@pim/v2-app/agents";
+import { BadRequestError, ConflictError, ForbiddenError, NotFoundError, PimError } from "@pim/v2-app/errors";
 import { usageReport, computeReport } from "./usage.ts";
+import { customApps } from "./admin-gallery.ts";
+import { requireChoices } from "./model.ts";
+import { ConnectorService } from "../connector-service.ts";
+import { MAX_APPS } from "../connector-admin-tools.ts";
 import { fromAnotherSite, ok, route, sessionCookieName, setCookie, type Route } from "@pim/v2-app/http";
 import { newId } from "@pim/v2-app/ids";
 import { LOCALES } from "@pim/shared/locales";
@@ -63,7 +67,8 @@ export async function majordomoOf(app: App, p: Principal): Promise<V2Agent> {
 	const id = (await setting(app, p.ownerId, "majordomo")) as string | undefined;
 	if (id) {
 		const agent = await app.agents.get(p, id).catch(() => null);
-		if (agent) return agent;
+		// A majordomo made before its role was fixed has it now.
+		if (agent) return agent.role === MAJORDOMO_ROLE ? agent : await app.agents.update(p, id, {}).catch(() => agent);
 	}
 	// A space migrated from v1 has its majordomo already: the agent v1 marked as the default (kept by the promotion in its config), already introduced.
 	const legacy = await app.db.owner(p.ownerId, async (tx) => (await tx.query("SELECT id FROM pim_app.agents WHERE deleted_at IS NULL AND config->'legacy'->>'isDefault' = 'true' ORDER BY created_at LIMIT 1")).rows[0]?.id as string | undefined);
@@ -74,11 +79,46 @@ export async function majordomoOf(app: App, p: Principal): Promise<V2Agent> {
 	}
 	// One made, as v1 made its starter: it keeps this name until the person names it.
 	// The app asks for it from several places at once: the first to name it wins, and the others' agents are removed.
-	const agent = await app.agents.create(p, { name: "Pim", instructions: "" });
+	// A name the person already gave one of their agents is not taken from it.
+	let agent: V2Agent | undefined;
+	for (let n = 1; !agent && n < 20; n++) {
+		agent = await app.agents.create(p, { name: n === 1 ? "Pim" : `Pim ${n}`, instructions: "", role: MAJORDOMO_ROLE }, { starter: true }).catch((error) => {
+			if (error instanceof ConflictError) return undefined;
+			throw error;
+		});
+	}
+	if (!agent) throw new ConflictError("Your majordomo could not be given a name of its own.");
 	const won = await app.db.owner(p.ownerId, async (tx) => (await tx.query("INSERT INTO pim_app.owner_settings (owner_id, key, value) VALUES ($1,'majordomo',$2) ON CONFLICT (owner_id, key) DO NOTHING", [p.ownerId, JSON.stringify(agent.id)])).rowCount === 1);
 	if (won) return agent;
 	await app.agents.remove(p, agent.id);
 	return majordomoOf(app, p);
+}
+
+/** How the first chat starts, as the app gives it, checked: a name of one line of up to 80 characters, a title of up to 100, a language tag. */
+function majordomoStart(body: Record<string, unknown>): { yourName: string | null; locale: string | null; title: string | null } {
+	const line = (value: unknown, field: string, max: number): string | null => {
+		if (value === undefined || value === null) return null;
+		if (typeof value !== "string" || /[\r\n]/.test(value) || value.trim().length > max) throw new BadRequestError(`${field} must be one line of at most ${max} characters`);
+		return value.trim() || null;
+	};
+	const locale = body.locale ?? null;
+	if (locale !== null && (typeof locale !== "string" || !/^[a-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$/.test(locale))) throw new BadRequestError("locale must be a language tag, such as en or es");
+	return { yourName: line(body.yourName, "yourName", 80), locale: locale as string | null, title: line(body.title, "title", 100) };
+}
+
+/**
+ * What a person may give an agent through the app that must be real, as v1 checked it: its connectors are ones this Pim offers (a directory entry, or one of the person's own connections
+ * by its id or name), at most as many as an agent may list, and its fallback models are ones the person can choose.
+ */
+async function checkAgentInput(app: App, p: Principal, body: Record<string, unknown>): Promise<void> {
+	if (body.apps !== undefined) {
+		if (!Array.isArray(body.apps) || body.apps.some((x) => typeof x !== "string")) throw new BadRequestError("Each connector must be a connector's id, such as custom/notes");
+		if (new Set(body.apps).size > MAX_APPS) throw new BadRequestError(`An agent works with up to ${MAX_APPS} connectors`);
+		const known = new Set([...new ConnectorService(app, process.env, { fetch, allowPrivate: false, check: async (u) => new URL(u) }).directory(await customApps(app)).map((d) => d.ref), ...(await app.connectors.list(p)).flatMap((c) => [c.id, c.name])]);
+		const unknown = (body.apps as string[]).find((ref) => !known.has(ref));
+		if (unknown !== undefined) throw new BadRequestError(`This Pim offers no connector ${unknown}`);
+	}
+	if (body.fallbacks !== undefined) body.fallbacks = await requireChoices(process.env, app, p, body.fallbacks);
 }
 
 // ---- the majordomo's preferences: lines of its instructions, as v1 writes them (src/majordomo.ts) ----
@@ -273,21 +313,23 @@ export const bootRoutes: Route[] = [
 	route("POST", "/api/majordomo", async ({ app, principal, json }) => {
 		// The first time the person opens Pim: their majordomo's first chat, which it starts by introducing itself.
 		const p = await principal();
-		const body = await json();
+		// Refused in any part, nothing starts.
+		const start = majordomoStart(await json());
 		const agent = await majordomoOf(app, p);
 		const known = (await setting(app, p.ownerId, "majordomo_chat")) as string | undefined;
 		if ((await setting(app, p.ownerId, "majordomo_introduced")) === true && known) return ok({ ...(await majordomoState(app, p)), session: known });
 		await putSetting(app, p.ownerId, "majordomo_introduced", true);
-		const yourName = typeof body.yourName === "string" && body.yourName.trim() && !/[\r\n]/.test(body.yourName) ? body.yourName.trim().slice(0, 80) : (((await setting(app, p.ownerId, "your_name")) as string | undefined) ?? null);
+		const yourName = start.yourName ?? (((await setting(app, p.ownerId, "your_name")) as string | undefined) ?? null);
 		if (yourName) {
 			await putSetting(app, p.ownerId, "your_name", yourName);
 			await app.memories.remember(p, "everyone", "Their name", `Their name is ${yourName}.`).catch(() => undefined);
 		}
-		const title = typeof body.title === "string" && body.title.trim() ? body.title.trim().slice(0, 100) : yourName ? `Welcome, ${yourName}` : "Welcome";
+		const title = start.title ?? (yourName ? `Welcome, ${yourName}` : "Welcome");
 		const session = await app.conversations.create(p, { agentId: agent.id, title });
 		await putSetting(app, p.ownerId, "majordomo_chat", session);
 		// The app hides a message that starts with INTRODUCTION, as v1 sent it.
-		const text = `${INTRODUCTION} The person just joined.${yourName ? ` Their name is ${yourName}.` : ""} You are their majordomo, and this is your first conversation with them: greet them${yourName ? " by name" : ""} in a few short sentences, say you're their majordomo and what you're for, and ask ${yourName ? "what they'd like to call you" : "what you should call them"}.`;
+		const language = start.locale && !start.locale.startsWith("en") ? ` Their app is in the language with the code "${start.locale}": write to them in it.` : "";
+		const text = `${INTRODUCTION} The person just joined.${yourName ? ` Their name is ${yourName}.` : ""}${language} You are their majordomo, and this is your first conversation with them: greet them${yourName ? " by name" : ""} in a few short sentences, say you're their majordomo and what you're for, and ask ${yourName ? "what they'd like to call you" : "what you should call them"}.`;
 		await app.conversations.admit(p, { commandId: newId("cmd"), kind: "user_message", chatId: session, payload: { text } }).catch((error) => console.warn("the majordomo's introduction failed", error));
 		return ok({ ...(await majordomoState(app, p)), session });
 	}),
@@ -303,12 +345,21 @@ export const bootRoutes: Route[] = [
 	// An agent made or edited in the app's form: it names an agent's emoji `symbol`, and wants the answer in the shape its pages draw.
 	route("POST", "/api/agents", async ({ app, principal, json }) => {
 		const p = await principal();
-		const created = await app.agents.create(p, (await json()) as never);
+		const body = await json();
+		await checkAgentInput(app, p, body);
+		const created = await app.agents.create(p, body as never);
 		return ok(webAgent(created, (await majordomoOf(app, p)).id), 201);
 	}),
 	route("PUT", "/api/agents/:id", async ({ app, principal, params, json }) => {
 		const p = await principal();
-		const updated = await app.agents.update(p, params[0]!, (await json()) as never);
+		const body = await json();
+		await checkAgentInput(app, p, body);
+		const updated = await app.agents.update(p, params[0]!, body as never);
+		return ok(webAgent(updated, (await majordomoOf(app, p)).id));
+	}),
+	route("PUT", "/api/agents/:id/fallbacks", async ({ app, principal, params, json }) => {
+		const p = await principal();
+		const updated = await app.agents.update(p, params[0]!, { fallbacks: await requireChoices(process.env, app, p, (await json()).models ?? []) });
 		return ok(webAgent(updated, (await majordomoOf(app, p)).id));
 	}),
 

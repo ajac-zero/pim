@@ -54,6 +54,60 @@ export async function everyoneModels(app: any, p: any, env: Env): Promise<ModelR
 	return found;
 }
 
+const setting = (app: any, ownerId: string, key: string): Promise<ModelRef | null> => app.db.owner(ownerId, async (tx: any) => (await tx.query("SELECT value FROM pim_app.owner_settings WHERE key = $1", [key])).rows[0]?.value ?? null);
+
+/** What the person can choose from, and what they have chosen. */
+export async function modelSettings(env: Env, app: any, p: any) {
+	const chatgpt = await app.chatgpt.status(p);
+	const all = await app.providers.list(p);
+	// What an admin shares is everyone's, and is `shared:<id>` to the catalog whoever's row it is; an admin's own list does not repeat it.
+	const providers = all.filter((r: any) => r.config.shared !== true);
+	const shared = await app.providers.shared(p);
+	const choices: ReturnType<typeof describe>[] = [];
+	const add = (m: ReturnType<typeof describe>) => choices.some((c) => same(c, m)) || choices.push(m);
+	const fallback = parse(env.PIM_DEFAULT_MODEL);
+	const known = (r: ModelRef) => Object.values(CATALOGS).flatMap((c) => c.models()).find((m) => m.provider === r.provider && m.id === r.id);
+	if (fallback) add(known(fallback) ? describe(known(fallback)!) : { provider: fallback.provider, id: fallback.id, name: fallback.id, images: false } as never);
+	if (chatgpt.connected) for (const m of CATALOGS.openai!.models()) add(describe(m));
+	for (const row of providers) {
+		const kind = row.config.builtin ?? row.kind;
+		if (row.hasKey && row.config.builtin && kind !== "openai") for (const m of CATALOGS[kind]?.models() ?? []) if (!row.config.chosen || row.config.chosen.includes(m.id)) add(describe(m));
+		if (row.kind === "openai_compatible" && Array.isArray(row.config.models)) for (const m of row.config.models) add({ provider: `${OWN}${row.id}`, id: m.id, name: m.name ?? m.id, images: m.images === true } as never);
+	}
+	// The providers the admin shared with everyone: their models, by the name the Runner's catalog gives them.
+	for (const shared of ((await app.db.anonymous(async (tx: any) => (await tx.query("SELECT pim_app.instance_provider_models() AS p")).rows[0]?.p)) ?? []) as { id: string; models: { id: string; name?: string; images?: boolean }[] }[]) for (const m of shared.models) add({ provider: shared.id, id: m.id, name: m.name ?? m.id, images: m.images === true } as never);
+	for (const row of shared) {
+		const kind = row.config.builtin ?? row.kind;
+		if (row.hasKey && row.config.builtin && kind !== "openai") for (const m of CATALOGS[kind]?.models() ?? []) if (!row.config.chosen || row.config.chosen.includes(m.id)) add(describe(m));
+		if (row.kind === "openai_compatible" && Array.isArray(row.config.models)) for (const m of row.config.models) add({ provider: `${SHARED}${row.id}`, id: m.id, name: m.name ?? m.id, images: m.images === true } as never);
+	}
+	if (env.PIM_AI_GATEWAY_URL) for (const id of offeredModels(env)) add({ provider: "gateway", id, name: id, images: false } as never);
+	const info = (r: ModelRef | null) => (r ? (choices.find((c) => same(c, r)) ?? null) : null);
+	const chosen = await setting(app, p.ownerId, "model");
+	const utilitySaved = await setting(app, p.ownerId, "model_utility");
+	const utility = utilitySaved && { provider: providers.some((r: any) => r.id === utilitySaved.provider) ? `${OWN}${utilitySaved.provider}` : utilitySaved.provider, id: utilitySaved.id };
+	const defaults = info(fallback) ?? choices[0] ?? { provider: "", id: "", name: "No model", images: false };
+	return {
+		model: info(chosen && { provider: providers.some((r: any) => r.id === chosen.provider) ? `${OWN}${chosen.provider}` : chosen.provider, id: chosen.id }) ?? defaults,
+		default: defaults,
+		choices,
+		workersAi: false,
+		utility: { model: info(utility), default: null, choices },
+		chatgpt: { ...chatgpt, error: null },
+		chatgptImages: await new CodexImagesSignIn(app, env).status(p),
+		providers: [...providers.map((row: any) => ({ ...toWebProvider(row), provider: `${OWN}${row.id}` })), ...shared.map((row: any) => ({ ...toWebProvider(row), shared: true, provider: `${SHARED}${row.id}` }))],
+	};
+}
+
+/** Fallback models, as given: a list of `{ provider, id }`, each one of the models the person can choose (v1 refused any other). Answers them as given. */
+export async function requireChoices(env: Env, app: any, p: any, models: unknown): Promise<ModelRef[]> {
+	if (!Array.isArray(models) || models.length > 20 || models.some((m) => typeof m?.provider !== "string" || typeof m?.id !== "string")) throw new BadRequestError("models is a list of { provider, id }");
+	const { choices } = await modelSettings(env, app, p);
+	const refused = (models as ModelRef[]).find((m) => !choices.some((c) => same(c, m)));
+	if (refused) throw new PimError(400, "bad_request", `${refused.provider}/${refused.id} is not one of the choices`);
+	return (models as ModelRef[]).map((m) => ({ provider: m.provider, id: m.id }));
+}
+
 export function modelRoutes(env: Env): Route[] {
 	// What the Gate's checks of a provider's form need of pi-ai, which `@pim/v2-app` does not depend on.
 	providerCatalog.builtin = (id) => CATALOGS[id]?.models().map((m) => m.id);
@@ -61,49 +115,7 @@ export function modelRoutes(env: Env): Route[] {
 		const m = knownModel(id);
 		return m && { contextWindow: m.contextWindow, maxTokens: m.maxTokens, images: Array.isArray(m.input) && m.input.includes("image"), reasoning: m.reasoning === true };
 	};
-	const setting = (app: any, ownerId: string, key: string): Promise<ModelRef | null> => app.db.owner(ownerId, async (tx: any) => (await tx.query("SELECT value FROM pim_app.owner_settings WHERE key = $1", [key])).rows[0]?.value ?? null);
-
-	async function settings(app: any, p: any) {
-		const chatgpt = await app.chatgpt.status(p);
-		const all = await app.providers.list(p);
-		// What an admin shares is everyone's, and is `shared:<id>` to the catalog whoever's row it is; an admin's own list does not repeat it.
-		const providers = all.filter((r: any) => r.config.shared !== true);
-		const shared = await app.providers.shared(p);
-		const choices: ReturnType<typeof describe>[] = [];
-		const add = (m: ReturnType<typeof describe>) => choices.some((c) => same(c, m)) || choices.push(m);
-		const fallback = parse(env.PIM_DEFAULT_MODEL);
-		const known = (r: ModelRef) => Object.values(CATALOGS).flatMap((c) => c.models()).find((m) => m.provider === r.provider && m.id === r.id);
-		if (fallback) add(known(fallback) ? describe(known(fallback)!) : { provider: fallback.provider, id: fallback.id, name: fallback.id, images: false } as never);
-		if (chatgpt.connected) for (const m of CATALOGS.openai!.models()) add(describe(m));
-		for (const row of providers) {
-			const kind = row.config.builtin ?? row.kind;
-			if (row.hasKey && row.config.builtin && kind !== "openai") for (const m of CATALOGS[kind]?.models() ?? []) if (!row.config.chosen || row.config.chosen.includes(m.id)) add(describe(m));
-			if (row.kind === "openai_compatible" && Array.isArray(row.config.models)) for (const m of row.config.models) add({ provider: `${OWN}${row.id}`, id: m.id, name: m.name ?? m.id, images: m.images === true } as never);
-		}
-		// The providers the admin shared with everyone: their models, by the name the Runner's catalog gives them.
-		for (const shared of ((await app.db.anonymous(async (tx: any) => (await tx.query("SELECT pim_app.instance_provider_models() AS p")).rows[0]?.p)) ?? []) as { id: string; models: { id: string; name?: string; images?: boolean }[] }[]) for (const m of shared.models) add({ provider: shared.id, id: m.id, name: m.name ?? m.id, images: m.images === true } as never);
-		for (const row of shared) {
-			const kind = row.config.builtin ?? row.kind;
-			if (row.hasKey && row.config.builtin && kind !== "openai") for (const m of CATALOGS[kind]?.models() ?? []) if (!row.config.chosen || row.config.chosen.includes(m.id)) add(describe(m));
-			if (row.kind === "openai_compatible" && Array.isArray(row.config.models)) for (const m of row.config.models) add({ provider: `${SHARED}${row.id}`, id: m.id, name: m.name ?? m.id, images: m.images === true } as never);
-		}
-		if (env.PIM_AI_GATEWAY_URL) for (const id of offeredModels(env)) add({ provider: "gateway", id, name: id, images: false } as never);
-		const info = (r: ModelRef | null) => (r ? (choices.find((c) => same(c, r)) ?? null) : null);
-		const chosen = await setting(app, p.ownerId, "model");
-		const utilitySaved = await setting(app, p.ownerId, "model_utility");
-		const utility = utilitySaved && { provider: providers.some((r: any) => r.id === utilitySaved.provider) ? `${OWN}${utilitySaved.provider}` : utilitySaved.provider, id: utilitySaved.id };
-		const defaults = info(fallback) ?? choices[0] ?? { provider: "", id: "", name: "No model", images: false };
-		return {
-			model: info(chosen && { provider: providers.some((r: any) => r.id === chosen.provider) ? `${OWN}${chosen.provider}` : chosen.provider, id: chosen.id }) ?? defaults,
-			default: defaults,
-			choices,
-			workersAi: false,
-			utility: { model: info(utility), default: null, choices },
-			chatgpt: { ...chatgpt, error: null },
-			chatgptImages: await new CodexImagesSignIn(app, env).status(p),
-			providers: [...providers.map((row: any) => ({ ...toWebProvider(row), provider: `${OWN}${row.id}` })), ...shared.map((row: any) => ({ ...toWebProvider(row), shared: true, provider: `${SHARED}${row.id}` }))],
-		};
-	}
+	const settings = (app: any, p: any) => modelSettings(env, app, p);
 
 	/** Stores a choice after checking it is one of the choices; `own:<id>` is kept as the Runner's provider id. */
 	async function choose(app: any, p: any, key: string, body: Record<string, any>): Promise<{ model: unknown }> {
@@ -169,6 +181,14 @@ export function modelRoutes(env: Env): Route[] {
 			const refs = await app.providers.fallbacks(p);
 			const { choices } = await settings(app, p);
 			return ok({ models: refs.map((r: ModelRef) => choices.find((c) => same(c, r)) ?? { ...r, name: r.id, images: false }) });
+		}),
+		// The space's fallbacks are models the person can choose (an agent's own are checked the same way: `boot.ts`).
+		route("PUT", "/api/model/fallbacks", async ({ app, principal, json }) => {
+			const p = await principal();
+			await app.identity.authz.enforce(p, "api:write");
+			const models = await requireChoices(env, app, p, (await json()).models);
+			const { choices } = await settings(app, p);
+			return ok({ models: (await app.providers.setFallbacks(p, models)).map((r: ModelRef) => choices.find((c) => same(c, r)) ?? { ...r, name: r.id, images: false }) });
 		}),
 		route("GET", "/api/providers/built-in", async ({ app, principal }) => {
 			await app.identity.authz.enforce(await principal(), "api:read");

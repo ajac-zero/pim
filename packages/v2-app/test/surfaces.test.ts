@@ -44,7 +44,7 @@ const body = (o: unknown) => JSON.stringify(o);
 describe("agents and skills", () => {
 	it("keeps contacts and delegates inside the space, drops deleted agents from them, and versions skills", async () => {
 		const u = await mk("agt");
-		const a = await app.agents.create(u.principal, { name: "Scout", instructions: "look around", emoji: "🔭", color: "#336699" });
+		const a = await app.agents.create(u.principal, { name: "Scout", instructions: "look around", emoji: "🔭", color: "blue" });
 		const b = await app.agents.create(u.principal, { name: "Writer" });
 		// What an agent is for: the role is its name until it has one, and the app's form calls the emoji its symbol.
 		expect(b).toMatchObject({ role: "Writer", description: "" });
@@ -52,6 +52,20 @@ describe("agents and skills", () => {
 		expect(coach).toMatchObject({ role: "Coach", description: "Coaches runners", emoji: "🏃" });
 		expect(await app.agents.update(u.principal, coach.id, { description: "Coaches everyone" })).toMatchObject({ role: "Coach", description: "Coaches everyone" });
 		await expect(app.agents.update(u.principal, coach.id, { role: " " })).rejects.toMatchObject({ status: 400 });
+		// An icon is a name the app draws or one emoji, in one of ten colors; anything else is refused.
+		expect(await app.agents.update(u.principal, coach.id, { symbol: "rocket", color: "violet" } as never)).toMatchObject({ emoji: "rocket", color: "violet" });
+		expect(await app.agents.update(u.principal, coach.id, { symbol: "🏃🏽‍♀️" } as never)).toMatchObject({ emoji: "🏃🏽‍♀️" });
+		for (const symbol of ["🏃🏃", "hi there", "a😀", "<svg>", "Rocket"]) await expect(app.agents.update(u.principal, coach.id, { symbol } as never), symbol).rejects.toMatchObject({ status: 400 });
+		await expect(app.agents.update(u.principal, coach.id, { color: "#ff0000" })).rejects.toMatchObject({ status: 400 });
+		// Each agent has a name and a role of its own, whatever the case; renaming leaves the role.
+		await expect(app.agents.create(u.principal, { name: "ada", role: "Editor" })).rejects.toMatchObject({ status: 409 });
+		await expect(app.agents.create(u.principal, { name: "Grace", role: " coach " })).rejects.toMatchObject({ status: 409 });
+		const editor = await app.agents.create(u.principal, { name: "Grete", role: "Editor" });
+		await expect(app.agents.update(u.principal, editor.id, { name: "ADA" })).rejects.toMatchObject({ status: 409 });
+		await expect(app.agents.update(u.principal, editor.id, { role: "COACH" })).rejects.toMatchObject({ status: 409 });
+		expect(await app.agents.update(u.principal, editor.id, { description: "Edits" })).toMatchObject({ role: "Editor" });
+		expect(await app.agents.update(u.principal, editor.id, { name: "Gretchen" })).toMatchObject({ name: "Gretchen", role: "Editor" });
+		await app.agents.remove(u.principal, editor.id);
 		// An agent that came from v1 keeps them under config.legacy until it has its own.
 		await app.db.owner(u.account.ownerId, (tx) => tx.query("INSERT INTO pim_app.agents (id, owner_id, name, instructions, config) VALUES ('a_legacy', $1, 'Old', '', $2)", [u.account.ownerId, JSON.stringify({ legacy: { role: "Researcher", description: "Reads" } })]));
 		expect(await app.agents.get(u.principal, "a_legacy")).toMatchObject({ role: "Researcher", description: "Reads" });
@@ -59,7 +73,7 @@ describe("agents and skills", () => {
 		await expect(app.agents.update(u.principal, a.id, { delegates: [a.id] })).rejects.toMatchObject({ status: 400 });
 		await expect(app.agents.update(u.principal, a.id, { color: "javascript:alert(1)" })).rejects.toMatchObject({ status: 400 });
 		const updated = await app.agents.update(u.principal, a.id, { contacts: [b.id], delegates: [b.id], model: { provider: "openai", id: "gpt-6.1-sol" }, emoji: null });
-		expect(updated).toMatchObject({ contacts: [b.id], delegates: [b.id], model: { provider: "openai", id: "gpt-6.1-sol" }, emoji: null, color: "#336699" });
+		expect(updated).toMatchObject({ contacts: [b.id], delegates: [b.id], model: { provider: "openai", id: "gpt-6.1-sol" }, emoji: null, color: "blue" });
 
 		const skill = await app.agents.createSkill(u.principal, { name: "research", body: "# v1", files: { "notes/readme.md": "hi" } });
 		expect(skill.version).toBe(1);
@@ -100,13 +114,13 @@ describe("agents and skills", () => {
 
 describe("what an adopted agent keeps", () => {
 	it("copies the role, description, look, connectors and the agents that come with it, for the default agent and a used template", async () => {
-		const scout = await app.agents.create(admin.principal, { name: "Scout", role: "Researcher", description: "Finds things out", instructions: "search", emoji: "🔎", color: "#336699", apps: ["gmail"] });
-		const boss = await app.agents.create(admin.principal, { name: "Boss", role: "Lead", description: "Runs the team", instructions: "lead", emoji: "👑", color: "#aa3300", apps: ["calendar"], contacts: [scout.id] });
+		const scout = await app.agents.create(admin.principal, { name: "Scout", role: "Researcher", description: "Finds things out", instructions: "search", emoji: "🔎", color: "teal", apps: ["gmail"] });
+		const boss = await app.agents.create(admin.principal, { name: "Boss", role: "Lead", description: "Runs the team", instructions: "lead", emoji: "👑", color: "red", apps: ["calendar"], contacts: [scout.id] });
 		const { id } = await app.sharing.publishTemplate(admin.principal, boss.id);
 		await app.agents.setDefaultTemplate(admin.principal, id);
 		const u = await mk("heir");
 		const copy = await app.agents.adoptDefault(u.principal);
-		expect(copy).toMatchObject({ name: "Boss", role: "Lead", description: "Runs the team", emoji: "👑", color: "#aa3300", apps: ["calendar"], adoptedFrom: id });
+		expect(copy).toMatchObject({ name: "Boss", role: "Lead", description: "Runs the team", emoji: "👑", color: "red", apps: ["calendar"], adoptedFrom: id });
 		const mine = await app.agents.list(u.principal);
 		const helper = mine.find((a) => a.name === "Scout")!;
 		expect(helper).toMatchObject({ role: "Researcher", description: "Finds things out", emoji: "🔎", apps: ["gmail"] });
@@ -116,7 +130,7 @@ describe("what an adopted agent keeps", () => {
 		const other = await mk("user2x");
 		const used = await app.sharing.useTemplate(other.principal, id);
 		expect((await app.agents.list(other.principal)).filter((a) => a.name === "Scout")).toHaveLength(1);
-		expect(used).toMatchObject({ role: "Lead", description: "Runs the team", color: "#aa3300" });
+		expect(used).toMatchObject({ role: "Lead", description: "Runs the team", color: "red" });
 	});
 
 	it("keeps a template's id when its agent is published again, and takes what was published down with the agent", async () => {

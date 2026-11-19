@@ -954,7 +954,7 @@ const agentId = (await d.stack.admin.query("SELECT id FROM pim_app.agents WHERE 
 		expect((await resultsIn(chat, "http_request"))[0]).toBe(`200 text/plain\n${"y".repeat(8_000)}\n[... 1000 more characters]`);
 	}, 180_000);
 	it("makes triggers from a typed draft, keeps an agent to its own, refuses a stale edit, and asks the person before a computer source runs", async () => {
-		const [ann, bob] = [await newAgent("Ann", "Works"), await newAgent("Bob", "Also works")];
+		const [ann, bob] = [await newAgent("Anya", "Works"), await newAgent("Bobby", "Also works")];
 		const [annChat, bobChat] = [(await web.call("POST", "/api/sessions", { title: "Ann", agentId: ann })).json.id as string, (await web.call("POST", "/api/sessions", { title: "Bob", agentId: bob })).json.id as string];
 		let turns = 0;
 		/** Starts a turn that calls `calls` and then answers; what it returns waits for the answer, which a tool that waits for the person delays. */

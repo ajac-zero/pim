@@ -335,6 +335,16 @@ export class Sharing {
 			usage: await take("SELECT to_char(at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day, count(*)::int AS requests, sum(input_tokens)::bigint AS input, sum(output_tokens)::bigint AS output FROM pim_app.model_calls WHERE at >= now() - interval '90 days' GROUP BY 1 ORDER BY 1"),
 			apps: await take("SELECT a.id, a.title, a.kind, a.latest_version, (SELECT jsonb_agg(jsonb_build_object('version', v.version, 'files', v.files) ORDER BY v.version) FROM pim_app.artifact_versions v WHERE v.artifact_id = a.id) AS versions FROM pim_app.artifacts a WHERE a.owner_id = $1", [p.ownerId]),
 			circles: await take("SELECT id, name, members FROM pim_app.circles WHERE owner_id = $1", [p.ownerId]),
+			// What the server's own tables hold (their migrations make them; the application alone has none), and what other people's spaces and the account's sign-ins say of this one.
+			notes: await take("SELECT note_id AS id, title, version, created_at FROM pim_app.notes WHERE deleted_at IS NULL ORDER BY created_at"),
+			appData: await take("SELECT app_key AS app, scope, key, value, updated_at FROM pim_app.app_data ORDER BY app_key, scope, key").catch(() => []),
+			files: await take("SELECT key, content_type, size, created_at FROM pim_app.objects WHERE purpose = 'file' AND deleted_at IS NULL ORDER BY created_at"),
+			notifications: await take("SELECT id, kind, public_chat_id AS chat, title, body, created_at, read_at FROM pim_app.notifications ORDER BY created_at").catch(() => []),
+			guestActivity: await take("SELECT at, username, audience, tool, outcome, summary FROM pim_app.guest_activity ORDER BY id DESC LIMIT 500").catch(() => []),
+			sharedWithMe: await take("SELECT c.owner_id AS owner, a.username, c.name AS circle FROM pim_app.circles c JOIN pim_app.accounts a ON a.owner_id = c.owner_id WHERE $1 = ANY (c.members) AND c.owner_id <> $1", [p.ownerId]),
+			passkeys: await take("SELECT name, created_at, last_used_at FROM pim_app.passkeys ORDER BY created_at"),
+			identities: await take("SELECT provider, label, created_at, last_used_at FROM pim_app.oidc_identities ORDER BY created_at"),
+			tokens: await take("SELECT name, scopes, created_at, last_used_at FROM pim_app.api_tokens WHERE revoked_at IS NULL ORDER BY created_at"),
 			connectors: await take("SELECT id, kind, name, url, enabled_tools FROM pim_app.connectors"),
 			providers: await take("SELECT id, kind, config FROM pim_app.providers"),
 		};

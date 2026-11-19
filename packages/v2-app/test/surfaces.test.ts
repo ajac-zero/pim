@@ -343,6 +343,23 @@ describe("triggers", () => {
 		await expect(app.triggers.runs(u.principal, t.id)).rejects.toMatchObject({ status: 404 });
 	});
 
+	it("holds at most maxPendingEvents firings waiting for a Runner, skips the rest, and makes a trigger once for one Idempotency key", async () => {
+		const u = await mk("trigq");
+		const agent = await app.agents.create(u.principal, { name: "Queue" });
+		const spec = { version: 1, owningAgentId: agent.id, originChatId: "api", label: "Events", instruction: "look", source: { kind: "connector_event", connectorId: "c1", event: "ticket", arguments: {} }, condition: null, destination: { type: "new_chat" }, delivery: { maxPendingEvents: 2 }, authorizationRef: null };
+		const t = await app.triggers.create(u.principal, { spec, key: "k1" });
+		expect((await app.triggers.create(u.principal, { spec, key: "k1" })).id).toBe(t.id); // the same key and request: the trigger made the first time
+		await expect(app.triggers.create(u.principal, { spec: { ...spec, label: "Other" }, key: "k1" })).rejects.toMatchObject({ code: "idempotency_conflict" });
+		await app.triggers.setLifecycle(u.principal, t.id, "enabled");
+		// No Runner takes the firings off the inbox here: the third finds it full and is recorded as skipped, with no chat made for it.
+		const fired = [];
+		for (const n of [1, 2, 3, 3]) fired.push(await app.triggers.fireOccurrence(u.account.ownerId, t.id, `e${n}`, { event: "ticket" }));
+		expect(fired).toEqual([true, true, true, true]);
+		const runs = await app.triggers.runs(u.principal, t.id);
+		expect(runs.map((r) => [r.id.split(":").at(-1), r.phase, r.detail.reason ?? null]).sort()).toEqual([["e1", "fired", null], ["e2", "fired", null], ["e3", "skipped", "pending_full"]]);
+		expect((await app.db.owner(u.account.ownerId, (tx) => tx.query("SELECT count(*)::int AS n FROM pim_app.conversations WHERE kind = 'trigger'"))).rows[0]!.n).toBe(2);
+	});
+
 	it("needs a computer grant for a computer trigger, and a paired computer for the grant", async () => {
 		const u = await mk("trigc");
 		const agent = await app.agents.create(u.principal, { name: "Watcher" });
@@ -567,13 +584,16 @@ describe("export and deletion", () => {
 		await app.connectors.create(u.principal, { kind: "custom_mcp", name: "C", url: "https://c.example.com/mcp", credential: "cred-secret" });
 		await app.memories.remember(u.principal, "everyone", "a memory", "body");
 		await app.agents.create(u.principal, { name: "Exported" });
-		const token = await app.identity.createToken(u.principal as Principal, { name: "t", scopes: ["*"] }).catch(() => null);
-		void token;
+		await app.identity.createToken(u.principal as Principal, { name: "t", scopes: ["*"] });
+		const circle = await app.sharing.createCircle(admin.principal, "Export friends");
+		await app.sharing.addMember(admin.principal, circle.id, "exporty");
 		const res = await u.http("/api/account/export");
 		const text = await res.text();
 		expect(res.headers.get("content-disposition")).toContain("pim-export.json");
 		const data = JSON.parse(text);
 		expect(data).toMatchObject({ account: { username: "exporty" }, memories: [{ title: "a memory" }], agents: [{ name: "Exported" }], connectors: [{ name: "C" }], providers: [{ kind: "openai" }] });
+		// What the account holds beyond its chats: the sign-ins by name and use (never the secrets), and the spaces shared with it.
+		expect(data).toMatchObject({ notes: [], files: [], notifications: [], appData: [], guestActivity: [], passkeys: [], identities: [], tokens: [{ name: "t", scopes: ["*"] }], sharedWithMe: [{ username: "boss", circle: "Export friends" }] });
 		for (const secret of ["sk-export-secret", "cred-secret", "pimenc", "token_hash", "pims_", "event_secret", u.token]) expect(text).not.toContain(secret);
 		expect((await u.http("/api/export")).status).toBe(200);
 		// Another person's export holds none of this.

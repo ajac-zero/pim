@@ -24,12 +24,14 @@ real("a chat over its life", () => {
 	let app: App;
 	let ownerId: string;
 	let n = 0;
-	// A modest context window, so that two long messages are over pi's compaction threshold (the window less 16,384 reserved tokens) with something old enough to summarise
-	// (pi keeps about the last 20,000 tokens verbatim).
-	const faux = fauxProvider({ provider: "faux", models: [{ id: "m", contextWindow: 32_000 }] });
+	// A modest context window, so that the second of two long messages (each about 40,000 tokens) is over pi's compaction threshold (the window less 16,384 reserved tokens), with something
+	// old enough to summarise (pi keeps about the last 20,000 tokens verbatim), and the first is not over the background threshold (32,768 tokens lower), which would have it summarised sooner.
+	// The agent's own prompt, about 24,000 tokens, counts in each: a bigger prompt moves these limits.
+	const faux = fauxProvider({ provider: "faux", models: [{ id: "m", contextWindow: 116_000 }] });
 	const prompts: string[] = [];
 	const toolUse = (...calls: ReturnType<typeof fauxToolCall>[]) => fauxAssistantMessage(calls, { stopReason: "toolUse" });
-	const reply = (message: string) => toolUse(fauxToolCall("send_to_user", { message }));
+	// A reply that does not end the turn: the turn ends with the send `say` adds.
+	const reply = (message: string) => toolUse(fauxToolCall("send_to_user", { message, complete: false }));
 	/** A response that notes every message it was asked with. */
 	const asked = (build: () => ReturnType<typeof fauxAssistantMessage>) => (ctx: { messages?: unknown[] }) => (prompts.push(JSON.stringify(ctx.messages ?? [])), build());
 
@@ -43,7 +45,15 @@ real("a chat over its life", () => {
 		const id = ++n;
 		// A turn ends by sending its answer, except background work, which may stay silent.
 		const background = words.startsWith("[Scheduled task");
-		faux.setResponses([...script, ...(background ? [] : [toolUse(fauxToolCall("send_to_user", { message: `done ${id}` }))]), fauxAssistantMessage(`ended ${id}`)] as never);
+		// What the model is asked for decides the answer: pi's own request to summarise a chat (compaction starts when the prompt and the chat pass its thresholds, which a longer prompt moves) is answered
+		// with the summary, and every other request takes the next of the script, then the send that ends the turn.
+		const queue: unknown[] = [...script, ...(background ? [] : [toolUse(fauxToolCall("send_to_user", { message: `done ${id}` }))])];
+		const answer = (ctx: { messages?: unknown[] }) => {
+			if (JSON.stringify(ctx.messages?.[0] ?? "").includes("context summarization assistant")) return fauxAssistantMessage("SUMMARY: the person sent alpha words and beta words.");
+			const next = queue.shift() ?? fauxAssistantMessage(`ended ${id}`);
+			return typeof next === "function" ? (next as (c: unknown) => unknown)(ctx) : next;
+		};
+		faux.setResponses(Array(40).fill(answer) as never);
 		expect((await web.call("POST", `/api/sessions/${chat}/messages`, { commandId: `m-${id}`, text: words })).status).toBe(202);
 		await waitFor(`the turn "${words.slice(0, 20)}" to end`, async () => ((background ? JSON.stringify(await transcript(chat)).includes(`ended ${id}`) : sentAndAnswered(await transcript(chat), `done ${id}`)) ? true : undefined), 60_000);
 	};
@@ -90,7 +100,7 @@ real("a chat over its life", () => {
 		expect((await listed(chat)).unread).toBe(true);
 		expect((await sidebar()).unread).toBe(true);
 		// Acknowledging an earlier reply does not read this newer one, and a bad value is refused; acknowledging this one does, and answers the chat as it is then.
-		const newer = (await listed(chat)).responseAt as number;
+		const newer = new Date((await listed(chat)).responseAt).getTime();
 		expect((await web.call("POST", `/api/sessions/${chat}/read`, { responseAt: newer - 5_000 })).json).toMatchObject({ id: chat, unread: true });
 		expect((await listed(chat)).unread).toBe(true);
 		expect((await web.call("POST", `/api/sessions/${chat}/read`, { responseAt: -1 })).status).toBe(400);
@@ -104,10 +114,10 @@ real("a chat over its life", () => {
 
 	it("compacts a chat that outgrew the model's context in place, and the next turn runs on the summary", async () => {
 		const chat = (await web.call("POST", "/api/sessions", { title: "Long" })).json.id;
-		const filler = (word: string) => Array.from({ length: 10_000 }, (_, i) => `${word}${i}`).join(" ");
+		const filler = (word: string) => Array.from({ length: 15_000 }, (_, i) => `${word}${i}`).join(" ");
 		await say(chat, `first: ${filler("alpha")}`, reply("Noted the first."));
-		// The second message is over the threshold: pi summarises before answering, with the model, so its summary is the first scripted response.
-		await say(chat, `second: ${filler("beta")}`, fauxAssistantMessage("SUMMARY: the person sent alpha words and beta words."), reply("Noted the second."));
+		// The second message is over the threshold: pi summarises before answering, with the model.
+		await say(chat, `second: ${filler("beta")}`, reply("Noted the second."));
 		const entries = await transcript(chat);
 		const kinds = entries.map((e) => e.kind);
 		expect(kinds.some((k) => k.includes("compaction"))).toBe(true);

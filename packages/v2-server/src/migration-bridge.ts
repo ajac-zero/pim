@@ -594,8 +594,10 @@ async function promoteDomain(pool: Pool, owner: string, options: PromoteOptions,
 			bump(d, "memories", r.rowCount ?? 0);
 		}
 		for (const g of goals) {
-			const status = /done|complete/i.test(String(g.status)) ? "done" : /drop|abandon|cancel/i.test(String(g.status)) ? "dropped" : "active";
-			const r = await c.query("INSERT INTO pim_app.goals (id, owner_id, title, status, created_at) VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING", [g.id, owner, g.title, status, ms(g.created_at)]);
+			const status = /done|complete/i.test(String(g.status)) ? "done" : /drop|abandon|cancel/i.test(String(g.status)) ? "dropped" : /paus/i.test(String(g.status)) ? "paused" : "active";
+			// The progress notes the agent kept, each with when it was written.
+			const notes = (parseJson(g.notes, []) as { at?: unknown; text?: unknown }[]).flatMap((n) => (typeof n?.text === "string" ? [{ at: Number(n.at) || Date.now(), text: n.text }] : []));
+			const r = await c.query("INSERT INTO pim_app.goals (id, owner_id, title, status, notes, created_at) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING", [g.id, owner, g.title, status, JSON.stringify(notes), ms(g.created_at)]);
 			if (!r.rowCount) continue;
 			bump(d, "goals");
 			for (const [i, step] of (parseJson(g.steps, []) as unknown[]).entries()) {

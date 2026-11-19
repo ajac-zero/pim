@@ -100,7 +100,7 @@ export class Approvals {
 		// The person's approval policy. `auto` approves what is not answered within the timeout (30 seconds unless they set another); `majordomo` has the majordomo review it
 		// (`reviewApprovals`, in the Runner). An explicit action, one a person must always answer for (a tool its connector marks destructive), ignores both.
 		const settings = new Map((await this.db.owner(p.ownerId, async (tx) => (await tx.query("SELECT key, value FROM pim_app.owner_settings WHERE key IN ('settings.approvalPolicy', 'settings.approvalTimeoutSeconds')")).rows)).map((r) => [r.key as string, r.value as unknown]));
-		const policy = (settings.get("settings.approvalPolicy") as string | undefined) ?? process.env.PIM_APPROVAL_POLICY ?? "explicit";
+		const policy = (settings.get("settings.approvalPolicy") as string | undefined) ?? process.env.PIM_APPROVAL_POLICY ?? "majordomo";
 		const auto = policy === "auto" && !input.explicit;
 		const seconds = settings.get("settings.approvalTimeoutSeconds");
 		const timeoutMs = auto ? (typeof seconds === "number" && seconds > 0 ? seconds : 30) * 1000 : input.timeoutMs;
@@ -119,12 +119,12 @@ export class Approvals {
 		});
 	}
 
-	/** A person decides. An agent cannot approve its own request. A late decision after a timeout is a conflict. */
-	async decide(p: Principal, approvalId: string, approve: boolean): Promise<void> {
+	/** A person decides, and may leave a note the agent reads with the decision. An agent cannot approve its own request. A late decision after a timeout is a conflict. */
+	async decide(p: Principal, approvalId: string, approve: boolean, note?: string): Promise<void> {
 		await this.authz.enforce(p, "approval:decide");
 		const by = p.kind === "user" ? p.sessionId : p.kind === "token" ? p.tokenId : p.kind;
 		const n = await this.db.owner(p.ownerId, async (tx) =>
-			(await tx.query("UPDATE pim_app.approvals SET state = $2, decided_by = $3, decided_at = now() WHERE id = $1 AND state = 'waiting'", [approvalId, approve ? "approved" : "denied", `${p.kind}:${by}`])).rowCount,
+			(await tx.query("UPDATE pim_app.approvals SET state = $2, decided_by = $3, decided_at = now(), args = args || $4::jsonb WHERE id = $1 AND state = 'waiting'", [approvalId, approve ? "approved" : "denied", `${p.kind}:${by}`, JSON.stringify(note?.trim() ? { note: note.trim().slice(0, 1000) } : {})])).rowCount,
 		);
 		if (!n) throw new ConflictError("That approval is not waiting", "approval_closed");
 	}

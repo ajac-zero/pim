@@ -11,7 +11,7 @@ import type { Process } from "../src/main.ts";
 import { readTranscript, waitFor } from "../../v2-runtime/test/support/rig.ts";
 import { Client } from "./support/client.ts";
 import { type Deployment, base, start, startS3 } from "./support/processes.ts";
-import { createStack, describeWith, freePort, hasNats, startNats } from "./support/stack.ts";
+import { createStack, describeWith, freePort, hasNats, startNats, sentAndAnswered } from "./support/stack.ts";
 
 const real = describeWith(hasNats());
 
@@ -45,7 +45,7 @@ real("a chat over its life", () => {
 		const background = words.startsWith("[Scheduled task");
 		faux.setResponses([...script, ...(background ? [] : [toolUse(fauxToolCall("send_to_user", { message: `done ${id}` }))]), fauxAssistantMessage(`ended ${id}`)] as never);
 		expect((await web.call("POST", `/api/sessions/${chat}/messages`, { commandId: `m-${id}`, text: words })).status).toBe(202);
-		await waitFor(`the turn "${words.slice(0, 20)}" to end`, async () => (JSON.stringify(await transcript(chat)).includes(`ended ${id}`) ? true : undefined), 60_000);
+		await waitFor(`the turn "${words.slice(0, 20)}" to end`, async () => ((background ? JSON.stringify(await transcript(chat)).includes(`ended ${id}`) : sentAndAnswered(await transcript(chat), `done ${id}`)) ? true : undefined), 60_000);
 	};
 	const listed = async (chat: string) => (await web.call("GET", "/api/sessions")).json.sessions.find((s: { id: string }) => s.id === chat);
 
@@ -89,6 +89,15 @@ real("a chat over its life", () => {
 		await say(chat, "one more", reply("Here you go."));
 		expect((await listed(chat)).unread).toBe(true);
 		expect((await sidebar()).unread).toBe(true);
+		// Acknowledging an earlier reply does not read this newer one, and a bad value is refused; acknowledging this one does, and answers the chat as it is then.
+		const newer = (await listed(chat)).responseAt as number;
+		expect((await web.call("POST", `/api/sessions/${chat}/read`, { responseAt: newer - 5_000 })).json).toMatchObject({ id: chat, unread: true });
+		expect((await listed(chat)).unread).toBe(true);
+		expect((await web.call("POST", `/api/sessions/${chat}/read`, { responseAt: -1 })).status).toBe(400);
+		expect((await web.call("POST", `/api/sessions/${chat}/read`, { responseAt: newer })).json).toMatchObject({ id: chat, unread: false });
+		expect((await listed(chat)).unread).toBe(false);
+		await say(chat, "and again", reply("Once more."));
+		expect((await listed(chat)).unread).toBe(true);
 		// Reading is the person's own: another owner's read of this chat finds nothing.
 		expect((await web.call("POST", `/api/sessions/00000000-0000-4000-8000-000000000000/read`)).status).toBe(404);
 	}, 160_000);

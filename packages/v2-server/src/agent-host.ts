@@ -270,9 +270,12 @@ export function createAgentHost(options: AgentHostOptions) {
 		catalogs.set(ownerId, holder);
 		return holder.through;
 	}
+	/** The owners whose `openai` runs on their ChatGPT plan, a subscription whose usage limit is left until it resets (`./usage-limits.ts`). */
+	const planOwners = new Set<string>();
 	const failover = createFailover({
 		now,
 		cooldowns: options.cooldowns,
+		subscription: (ownerId, provider) => provider === "openai" && planOwners.has(ownerId),
 		stallMs: options.stallMs?.stream,
 		// Every Runner reads and writes the same cooldowns, so a model one of them found down is skipped by all.
 		store: {
@@ -332,6 +335,8 @@ export function createAgentHost(options: AgentHostOptions) {
 		}
 		// An owner signed in with ChatGPT runs `openai` on the plan: its sealed credential is read and refreshed live, not opened once.
 		const plan = options.crypto && (await db.read<{ s: string | null }>(ownerId, "SELECT pim_app.runner_chatgpt($1) AS s", [ownerId]).then((r) => r.rows[0]?.s, () => null)) ? chatgptCredentialStore(db, options.crypto, ownerId, chatgptOptions) : undefined;
+		if (plan) planOwners.add(ownerId);
+		else planOwners.delete(ownerId);
 		const builtin = (kind: string) => rows.find((r) => r.kind === kind && keys.has(r.id));
 		const credentials = {
 			async read(providerId: string) {

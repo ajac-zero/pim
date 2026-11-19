@@ -81,7 +81,7 @@ export class Memories {
 
 	async listGoals(p: Principal) {
 		await this.authz.enforce(p, "api:read");
-		return this.db.owner(p.ownerId, async (tx) => (await tx.query("SELECT g.id, g.title, g.status, (SELECT coalesce(jsonb_agg(jsonb_build_object('position', s.position, 'title', s.title, 'done', s.done) ORDER BY s.position), '[]') FROM pim_app.goal_steps s WHERE s.goal_id = g.id) AS steps FROM pim_app.goals g ORDER BY g.created_at DESC")).rows.map((r) => ({ id: r.id as string, title: r.title as string, status: r.status as string, steps: r.steps as { position: number; title: string; done: boolean }[] })));
+		return this.db.owner(p.ownerId, async (tx) => (await tx.query("SELECT g.id, g.title, g.status, g.notes, (SELECT coalesce(jsonb_agg(jsonb_build_object('position', s.position, 'title', s.title, 'done', s.done) ORDER BY s.position), '[]') FROM pim_app.goal_steps s WHERE s.goal_id = g.id) AS steps FROM pim_app.goals g ORDER BY g.created_at DESC")).rows.map((r) => ({ id: r.id as string, title: r.title as string, status: r.status as string, notes: r.notes as { at: number; text: string }[], steps: r.steps as { position: number; title: string; done: boolean }[] })));
 	}
 
 	async getGoal(p: Principal, id: string) {
@@ -90,12 +90,21 @@ export class Memories {
 		return goal;
 	}
 
-	/** `update_goal`: the title, the status and the steps (replaced as a list; a step that keeps its title keeps its done mark). */
-	async updateGoal(p: Principal, id: string, input: { title?: string; status?: "active" | "done" | "dropped"; steps?: string[] }) {
+	/**
+	 * `update_goal`: the title, the status (active, paused, done or dropped, which v1 called abandoned), the steps (replaced as a list; a step that keeps its title keeps its done mark),
+	 * steps added to the end, and a progress note, which is kept with when it was written.
+	 */
+	async updateGoal(p: Principal, id: string, input: { title?: string; status?: string; steps?: string[]; addSteps?: string[]; note?: string }) {
 		await this.authz.enforce(p, "api:write");
-		if (input.status !== undefined && !["active", "done", "dropped"].includes(input.status)) throw new BadRequestError("status is active, done or dropped");
+		const status = input.status === "abandoned" ? "dropped" : input.status;
+		if (status !== undefined && !["active", "paused", "done", "dropped"].includes(status)) throw new BadRequestError("status is active, paused, done or dropped");
 		await this.db.owner(p.ownerId, async (tx) => {
-			if (!(await tx.query("UPDATE pim_app.goals SET title = coalesce($2, title), status = coalesce($3, status) WHERE id = $1", [id, input.title ?? null, input.status ?? null])).rowCount) throw new NotFoundError("No such goal");
+			const note = input.note?.trim() ? JSON.stringify([{ at: Date.now(), text: input.note.trim().slice(0, 2000) }]) : "[]";
+			if (!(await tx.query("UPDATE pim_app.goals SET title = coalesce($2, title), status = coalesce($3, status), notes = notes || $4::jsonb WHERE id = $1", [id, input.title ?? null, status ?? null, note])).rowCount) throw new NotFoundError("No such goal");
+			if (input.addSteps?.length) {
+				const next = (await tx.query("SELECT coalesce(max(position) + 1, 0)::int AS n FROM pim_app.goal_steps WHERE goal_id = $1", [id])).rows[0].n as number;
+				for (const [i, title] of input.addSteps.entries()) await tx.query("INSERT INTO pim_app.goal_steps (goal_id, owner_id, position, title) VALUES ($1,$2,$3,$4)", [id, p.ownerId, next + i, title]);
+			}
 			if (input.steps) {
 				const old = new Map((await tx.query("SELECT title, done FROM pim_app.goal_steps WHERE goal_id = $1", [id])).rows.map((r) => [r.title as string, r.done as boolean]));
 				await tx.query("DELETE FROM pim_app.goal_steps WHERE goal_id = $1", [id]);

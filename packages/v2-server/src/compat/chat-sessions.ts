@@ -26,7 +26,7 @@ const chatId = (id: string) => {
 };
 
 /** The chat as the app's `Session`. */
-async function sessionView(app: App, p: Principal, id: string) {
+export async function sessionView(app: App, p: Principal, id: string) {
 	return app.db.owner(p.ownerId, async (tx) => {
 		const r = (await tx.query(
 			`SELECT c.public_chat_id, c.title, c.created_at, c.updated_at, c.response_at, c.read_at, c.archived_at, c.agent_id, a.name AS agent_name,
@@ -285,6 +285,17 @@ export function sessionRoutes(env: Record<string, string | undefined> = process.
 			const id = chatId(params[0]!);
 			await addRoomMember(app, p, id, String((await json()).agent ?? ""));
 			return ok({ room: await roomView(app, p, id) }, 201);
+		}),
+		// How the agents of a group chat take turns: when mentioned (the default), or whenever the person speaks.
+		route("PUT", "/api/sessions/:id/room", async ({ app, principal, params, json }) => {
+			const p = await principal();
+			await app.identity.authz.enforce(p, "api:write");
+			const id = chatId(params[0]!);
+			const mode = (await json()).mode;
+			if (mode !== "mentions" && mode !== "open") throw new BadRequestError("mode is mentions or open");
+			const changed = await app.db.owner(p.ownerId, async (tx) => (await tx.query("UPDATE pim_app.conversations SET room_mode = $2 WHERE public_chat_id = $1 AND deleted_at IS NULL AND room_of IS NULL AND EXISTS (SELECT 1 FROM pim_app.room_members WHERE public_chat_id = $1)", [id, mode])).rowCount);
+			if (!changed) throw new NotFoundError("This chat is not a group chat");
+			return ok({ room: await roomView(app, p, id) });
 		}),
 		route("DELETE", "/api/sessions/:id/room/members/:agent", async ({ app, principal, params }) => {
 			const p = await principal();

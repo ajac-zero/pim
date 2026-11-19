@@ -36,6 +36,8 @@ export function envFor(d: Deployment, role: "gate" | "live" | "runner" | "forge"
 		PIM_DRAIN_WINDOW_SECONDS: "1",
 		// One test person polls the Gate far faster than a person does; the API rate limit has its own test (limits-providers.test.ts).
 		PIM_RATE_API: "1000000",
+		// A deployment's default is that the person's majordomo answers approvals; these tests answer them by hand, and the ones about the majordomo's review choose that policy themselves.
+		PIM_APPROVAL_POLICY: "explicit",
 		...extra,
 	};
 }

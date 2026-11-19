@@ -102,10 +102,35 @@ export function modelRoutes(env: Env): Route[] {
 			await app.identity.authz.enforce(p, "api:write");
 			const body = await json();
 			const now = await settings(app, p);
-			const found = body.provider === null || body.provider === undefined ? null : now.choices.find((c) => c.provider === body.provider && c.id === body.id);
-			if (found === undefined) throw new PimError(400, "bad_request", "That model is not one of the choices");
+			// Null, or an empty model, clears the chat's own choice: it follows its agent's again.
+			const clears = body.model === null || body.model === "" || body.provider === null || (body.provider === undefined && body.id === undefined && body.model === undefined);
+			const hint = `Send {provider, id} of one of GET /model's choices (for example {"provider":"own:ai-gateway","id":"claude-sonnet-5-5"}), or {model:"<provider>/<id>"}.`;
+			let found: { provider: string; id: string; name: string; images: boolean } | null | undefined = null;
+			if (!clears) {
+				if (typeof body.provider === "string" && typeof body.id === "string") found = now.choices.find((c) => c.provider === body.provider && c.id === body.id);
+				else if (typeof body.model === "string") {
+					// The longest provider the string starts with, since a model id may hold "/" too; a bare id is the default's, or the one choice that has it.
+					const text = body.model;
+					const provider = [...new Set(now.choices.map((c) => c.provider))].filter((candidate) => text.startsWith(`${candidate}/`)).sort((a, b) => b.length - a.length)[0];
+					const withId = now.choices.filter((c) => c.id === text);
+					found = provider ? now.choices.find((c) => c.provider === provider && c.id === text.slice(provider.length + 1)) : now.default.id === text ? now.default : withId.length === 1 ? withId[0] : undefined;
+				} else found = undefined;
+				if (found === undefined) throw new PimError(400, "bad_request", `That model is not one of the choices. ${hint}`);
+			}
 			const changed = await app.db.owner(p.ownerId, async (tx: any) => (await tx.query("UPDATE pim_app.conversations SET model = $2 WHERE public_chat_id::text = $1 AND deleted_at IS NULL", [params[0]!, found && JSON.stringify({ provider: found.provider, id: found.id })])).rowCount);
 			if (!changed) throw new NotFoundError("No such chat");
+			return ok({ model: found ?? now.model, override: found });
+		}),
+		// The model of an agent besides the host in a group chat, for this chat alone: that agent's seat is a chat of its own, so it is the seat's model; null follows the agent's again.
+		route("PUT", "/api/sessions/:id/room/members/:agent/model", async ({ app, principal, params, json }) => {
+			const p = await principal();
+			await app.identity.authz.enforce(p, "api:write");
+			const body = await json();
+			const now = await settings(app, p);
+			const found = body.provider === null || body.provider === undefined ? null : now.choices.find((c) => c.provider === body.provider && c.id === body.id);
+			if (found === undefined) throw new PimError(400, "bad_request", "That model is not one of the choices");
+			const changed = await app.db.owner(p.ownerId, async (tx: any) => (await tx.query("UPDATE pim_app.conversations SET model = $3 WHERE deleted_at IS NULL AND public_chat_id = (SELECT seat_chat_id FROM pim_app.room_members WHERE public_chat_id::text = $1 AND member = $2)", [params[0]!, params[1]!, found && JSON.stringify({ provider: found.provider, id: found.id })])).rowCount);
+			if (!changed) throw new NotFoundError("That agent is not in this chat");
 			return ok({ model: found ?? now.model });
 		}),
 		// The saved fallbacks are bare `{ provider, id }` (the cutover carries them so); the web app lists them by name.

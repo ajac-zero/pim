@@ -8,6 +8,7 @@
 import { type Models, createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import type { AssistantMessage, AssistantMessageEvent } from "@earendil-works/pi-ai";
 import { isContextOverflow } from "@earendil-works/pi-ai/utils/overflow";
+import { isUsageLimitError, limitCooldown, type LimitState } from "./usage-limits.ts";
 
 export type ModelRef = { provider: string; id: string };
 
@@ -20,7 +21,8 @@ export const DEFAULT_COOLDOWNS: Cooldowns = { transientMs: 30_000, authMs: 120_0
 
 export function failureKind(message: AssistantMessage): "transient" | "auth" | null {
 	if (message.stopReason !== "error" || !message.errorMessage || isContextOverflow(message)) return null;
-	if (TRANSIENT.test(message.errorMessage)) return "transient";
+	// A plan that says its usage is used up is as unavailable as one that is overloaded: the request goes to the next model.
+	if (TRANSIENT.test(message.errorMessage) || isUsageLimitError(message.errorMessage)) return "transient";
 	return AUTH.test(message.errorMessage) ? "auth" : null;
 }
 
@@ -40,7 +42,7 @@ export type CooldownStore = {
 	save(ownerId: string, provider: string, id: string, untilMs: number, reason: string): Promise<void>;
 };
 
-export function createFailover(options: { now?: (() => number) | undefined; cooldowns?: Partial<Cooldowns> | undefined; stallMs?: number | undefined; store?: CooldownStore | undefined; syncMs?: number | undefined } = {}) {
+export function createFailover(options: { now?: (() => number) | undefined; cooldowns?: Partial<Cooldowns> | undefined; stallMs?: number | undefined; store?: CooldownStore | undefined; syncMs?: number | undefined; subscription?: ((ownerId: string, provider: string) => boolean) | undefined } = {}) {
 	const stallMs = options.stallMs ?? DEFAULT_STREAM_STALL_MS;
 	const now = options.now ?? Date.now;
 	const cooldowns = { ...DEFAULT_COOLDOWNS, ...options.cooldowns };
@@ -54,10 +56,27 @@ export function createFailover(options: { now?: (() => number) | undefined; cool
 		syncedAt.set(ownerId, now());
 		for (const [key, end] of await options.store.load(ownerId).catch(() => new Map<string, number>())) if (end > (until.get(`${ownerId}\u0000${key}`) ?? 0)) until.set(`${ownerId}\u0000${key}`, end);
 	};
+	/** What a subscription's usage limits in a row did to each model's cooldown, to make the next one longer. */
+	const limits = new Map<string, LimitState>();
 	const cool = (ownerId: string, m: ModelRef, ms: number, reason: string) => {
 		const end = now() + ms;
 		until.set(refKey(ownerId, m.provider, m.id), end);
 		void options.store?.save(ownerId, m.provider, m.id, end, reason).catch(() => {});
+	};
+
+	/**
+	 * How long a failed model is skipped. A subscription's usage limit (the ChatGPT plan) is left until it resets, when the error says when, or for a backoff that grows with each limit in a
+	 * row, as in v1; anything else for the short cooldowns of a transient or refused request.
+	 */
+	const coolFor = (ownerId: string, m: ModelRef, message: AssistantMessage, kind: "transient" | "auth") => {
+		if (kind === "transient" && options.subscription?.(ownerId, m.provider) && isUsageLimitError(message.errorMessage)) {
+			const key = refKey(ownerId, m.provider, m.id);
+			const next = limitCooldown(limits.get(key), message.errorMessage, now());
+			limits.set(key, next);
+			cool(ownerId, m, next.until - now(), message.errorMessage ?? "");
+			return;
+		}
+		cool(ownerId, m, kind === "auth" ? cooldowns.authMs : cooldowns.transientMs, message.errorMessage ?? "");
 	};
 
 	return {
@@ -155,14 +174,14 @@ export function createFailover(options: { now?: (() => number) | undefined; cool
 				return;
 			}
 			if (failed) {
-				cool(ownerId, current, failureKind(failed) === "auth" ? cooldowns.authMs : cooldowns.transientMs, failed.errorMessage ?? "");
+				coolFor(ownerId, current, failed, failureKind(failed) === "auth" ? "auth" : "transient");
 				continue;
 			}
 			if (!shown) for (const e of held) out.push(e);
 			// A final failure of a model that was already tried still cools it for the next request.
 			const message = await events.result();
 			const kind = failureKind(message);
-			if (kind && !shown) cool(ownerId, current, kind === "auth" ? cooldowns.authMs : cooldowns.transientMs, message.errorMessage ?? "");
+			if (kind && !shown) coolFor(ownerId, current, message, kind);
 			out.end(message);
 			return;
 		}

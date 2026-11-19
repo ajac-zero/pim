@@ -31,8 +31,8 @@ export function webAgent(a: V2Agent & { updatedAt?: Date }, majordomoId: string 
 	return {
 		id: a.id,
 		name: a.name,
-		role: "",
-		description: "",
+		role: a.role,
+		description: a.description,
 		instructions: a.instructions,
 		apps: a.apps,
 		skills: a.skills,
@@ -145,7 +145,7 @@ const SETTINGS: Record<string, (v: unknown) => boolean> = {
 async function readSettings(app: App, ownerId: string) {
 	const rows = await app.db.owner(ownerId, async (tx) => (await tx.query("SELECT key, value FROM pim_app.owner_settings WHERE key LIKE 'settings.%'")).rows);
 	const own = Object.fromEntries(rows.map((r) => [r.key.slice("settings.".length), r.value]).filter(([k]) => k in SETTINGS));
-	const settings = { timeZone: process.env.PIM_TIME_ZONE ?? "UTC", approvalPolicy: process.env.PIM_APPROVAL_POLICY ?? "explicit", deviceAlerts: "important", approvalTimeoutSeconds: null as number | null, ...own };
+	const settings = { timeZone: process.env.PIM_TIME_ZONE ?? "UTC", approvalPolicy: process.env.PIM_APPROVAL_POLICY ?? "majordomo", deviceAlerts: "important", approvalTimeoutSeconds: null as number | null, ...own };
 	// Only the auto policy times out: what it waits before approving is what the person set, else 30 seconds.
 	return { ...settings, approvalTimeoutSeconds: settings.approvalPolicy === "auto" ? (own.approvalTimeoutSeconds as number | null | undefined) || 30 : null };
 }
@@ -154,7 +154,7 @@ async function readSettings(app: App, ownerId: string) {
 const STATUS: Record<string, "pending" | "approved" | "denied"> = { waiting: "pending", approved: "approved", timed_out_approved: "approved", denied: "denied", timed_out_denied: "denied" };
 export const webApproval = (r: any) => {
 	// The runtime's bookkeeping (task, call, policy resource) is not what the person reads.
-	const { taskId: _task, callId, resource: _resource, review, explicit: _explicit, requestedBy, guestOwner: _g, guestChat: _c, ...args } = (r.args ?? {}) as Record<string, unknown>;
+	const { taskId: _task, callId, resource: _resource, review, explicit: _explicit, requestedBy, guestOwner: _g, guestChat: _c, note, result, ...args } = (r.args ?? {}) as Record<string, unknown>;
 	const reviewed = review as { status?: string; note?: string } | undefined;
 	const brief = typeof args.summary === "string" ? args.summary : Object.entries(args).slice(0, 3).map(([k, v]) => `${k}: ${typeof v === "string" ? v : JSON.stringify(v)}`.slice(0, 120)).join(", ");
 	return {
@@ -165,8 +165,9 @@ export const webApproval = (r: any) => {
 		args,
 		summary: brief ? `${r.tool} — ${brief}` : r.tool,
 		status: STATUS[r.state] ?? "pending",
-		note: null,
-		result: null,
+		// What the person said with their decision, and what the action returned once it ran.
+		note: typeof note === "string" ? note : r.decided_by === "majordomo" && reviewed?.note ? reviewed.note : null,
+		result: typeof result === "string" ? result : null,
 		createdAt: ms(r.created_at),
 		decidedAt: ms(r.decided_at),
 		callId: typeof callId === "string" ? callId : null,
@@ -267,6 +268,18 @@ export const bootRoutes: Route[] = [
 		return ok({ agents: [...agents].sort((a, b) => Number(b.id === majordomo.id) - Number(a.id === majordomo.id)).map((a) => webAgent(a, majordomo.id)) });
 	}),
 
+	// An agent made or edited in the app's form: it names an agent's emoji `symbol`, and wants the answer in the shape its pages draw.
+	route("POST", "/api/agents", async ({ app, principal, json }) => {
+		const p = await principal();
+		const created = await app.agents.create(p, (await json()) as never);
+		return ok(webAgent(created, (await majordomoOf(app, p)).id), 201);
+	}),
+	route("PUT", "/api/agents/:id", async ({ app, principal, params, json }) => {
+		const p = await principal();
+		const updated = await app.agents.update(p, params[0]!, (await json()) as never);
+		return ok(webAgent(updated, (await majordomoOf(app, p)).id));
+	}),
+
 	route("GET", "/api/settings", async ({ app, principal }) => ok(await readSettings(app, (await principal()).ownerId))),
 	route("PUT", "/api/settings", async ({ app, principal, json }) => {
 		const p = await principal();
@@ -294,10 +307,11 @@ export const bootRoutes: Route[] = [
 		return ok(found);
 	}),
 	...(["approve", "deny"] as const).map((decision) =>
-		route("POST", `/api/approvals/:id/${decision}`, async ({ app, principal, params }) => {
-			// `{ always: true }` (remember the tool) is the tool-permissions work's; a plain decision is the approval's own.
+		route("POST", `/api/approvals/:id/${decision}`, async ({ app, principal, params, json }) => {
+			// `{ always: true }` (remember the tool) is the tool-permissions work's; a plain decision is the approval's own, with the note the person gave it.
 			const p = await principal();
-			await app.approvals.decide(p, params[0]!, decision === "approve");
+			const note = ((await json().catch(() => ({}))) as { note?: unknown }).note;
+			await app.approvals.decide(p, params[0]!, decision === "approve", typeof note === "string" ? note : undefined);
 			const [found] = await approvalsOf(app, p.ownerId, "WHERE id = $1", [params[0]]);
 			return ok(found);
 		}),

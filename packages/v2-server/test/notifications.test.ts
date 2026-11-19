@@ -230,6 +230,25 @@ describe("replies and mentions", () => {
 	});
 });
 
+describe("reading a chat", () => {
+	it("reads it only as far as the reply the person saw, so a slow acknowledgement never hides a newer reply", async () => {
+		const ada = people.ada!;
+		const at = Date.now() - 60_000;
+		const before = (await gate.db.owner(ada.ownerId, async (tx) => (await tx.query("SELECT response_at, read_at FROM pim_app.conversations WHERE public_chat_id = $1", [ada.chat])).rows[0]));
+		await gate.db.owner(ada.ownerId, (tx) => tx.query("UPDATE pim_app.conversations SET response_at = to_timestamp($2::double precision / 1000), read_at = NULL WHERE public_chat_id = $1", [ada.chat, at]));
+		expect((await call(ada.token, "POST", `/api/sessions/${ada.chat}/read`, { responseAt: at - 5_000 })).body).toMatchObject({ id: ada.chat, unread: true });
+		expect((await call(ada.token, "POST", `/api/sessions/${ada.chat}/read`, { responseAt: -1 })).status).toBe(400);
+		expect((await call(ada.token, "POST", `/api/sessions/${ada.chat}/read`, { responseAt: "now" })).status).toBe(400);
+		expect((await call(ada.token, "POST", `/api/sessions/${ada.chat}/read`, { responseAt: at })).body).toMatchObject({ id: ada.chat, unread: false });
+		// A newer reply is unread again, and a call with no responseAt reads everything.
+		await gate.db.owner(ada.ownerId, (tx) => tx.query("UPDATE pim_app.conversations SET response_at = now() WHERE public_chat_id = $1", [ada.chat]));
+		expect((await call(ada.token, "POST", `/api/sessions/${ada.chat}/read`, { responseAt: at })).body).toMatchObject({ unread: true });
+		expect((await call(ada.token, "POST", `/api/sessions/${ada.chat}/read`)).body).toMatchObject({ unread: false });
+		// The chat is left as it was for the notifications after this.
+		await gate.db.owner(ada.ownerId, (tx) => tx.query("UPDATE pim_app.conversations SET response_at = $2, read_at = $3 WHERE public_chat_id = $1", [ada.chat, before.response_at, before.read_at]));
+	});
+});
+
 describe("a push that cannot be sent now", () => {
 	it("stays queued across passes (and so a restart) until it is sent, and a subscription the service says is gone is forgotten", async () => {
 		const ada = people.ada!;

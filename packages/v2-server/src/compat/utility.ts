@@ -222,3 +222,52 @@ export async function nameOneUntitled(app: App, env: Env, p: Principal, chats: r
 	const title = await Promise.race([titleChat(app, env, p, chat.id).catch((error) => (console.warn(`naming chat ${chat.id} failed`, error), null)), new Promise<null>((resolve) => setTimeout(() => resolve(null), 8000))]);
 	return title ? { id: chat.id, title } : null;
 }
+
+/** A chat's first name: the start of the first thing the person said, until the utility model names it (v1's `clipTitle`): its first line, at most 80 characters. */
+export function clipTitle(text: string): string {
+	const first = text.trim().split(/\r?\n/)[0]!.trim();
+	return first.length > 80 ? `${first.slice(0, 79).trimEnd()}…` : first;
+}
+
+const FORK_TITLE = / \(fork #\d+\)$/;
+
+/**
+ * Gives a chat a name when its person says the first thing in it, as v1 did. The chat is titled at once from what they said, and, with a utility model chosen, named from it in the
+ * background in place of that, unless they renamed it meanwhile. A fork keeps the title it was given ("Trip (fork #2)") until its first message, which names it anew for where it went,
+ * from what was said before it and that message. Without a utility model the first words stay as the title.
+ */
+export function nameChatsFromFirstMessage(app: App, env: Env): void {
+	const admit = app.conversations.admit.bind(app.conversations);
+	const warn = (chat: string, error: unknown) => console.warn(JSON.stringify({ event: "pim.title", chat, error: String(error).slice(0, 300) }));
+	app.conversations.admit = async (p, input) => {
+		const admitted = await admit(p, input);
+		const text = typeof input.payload?.text === "string" ? input.payload.text : "";
+		if (input.kind !== "user_message" || admitted.duplicate || !admitted.chatId || text.trim() === "" || input.payload?.retry === true || input.payload?.write === true) return admitted;
+		const chat = admitted.chatId;
+		const naming = await titleFromFirstMessage(app, p, chat, text).catch((error) => (warn(chat, error), null));
+		if (naming) void nameInBackground(app, env, p, chat, naming).catch((error) => warn(chat, error));
+		return admitted;
+	};
+}
+
+/** Titles a chat that has none from what its person said, and says what the utility model is to name it from, in place of that title; null when the chat keeps the name it has. */
+async function titleFromFirstMessage(app: App, p: Principal, chatId: string, text: string): Promise<{ current: string; conversation: string } | null> {
+	const chat = (await app.db.owner(p.ownerId, async (tx) => (await tx.query("SELECT title, kind, room_of FROM pim_app.conversations WHERE public_chat_id = $1 AND deleted_at IS NULL", [chatId])).rows[0])) as { title: string | null; kind: string; room_of: string | null } | undefined;
+	// A visit is a chat in someone else's space, and a seat in a room is not a chat of its own.
+	if (!chat || chat.kind === "visit" || chat.room_of !== null) return null;
+	const said = `Person: ${text.slice(0, 2_000)}`;
+	if (!chat.title?.trim()) {
+		const current = clipTitle(text);
+		const set = await app.db.owner(p.ownerId, async (tx) => (await tx.query("UPDATE pim_app.conversations SET title = $2 WHERE public_chat_id = $1 AND (title IS NULL OR title = '')", [chatId, current])).rowCount);
+		return set ? { current, conversation: said } : null;
+	}
+	if (!FORK_TITLE.test(chat.title)) return null;
+	const before = await chatConversation(app, p, chatId, 6_000);
+	return { current: chat.title, conversation: before === "" ? said : `${before}\n\n${said}` };
+}
+
+async function nameInBackground(app: App, env: Env, p: Principal, chatId: string, { current, conversation }: { current: string; conversation: string }): Promise<void> {
+	const title = await runUtility(app, env, p, NAME_CHAT, conversation);
+	if (title === null) return;
+	await app.db.owner(p.ownerId, (tx) => tx.query("UPDATE pim_app.conversations SET title = $3 WHERE public_chat_id = $1 AND title = $2", [chatId, current, clipTitle(title)]));
+}

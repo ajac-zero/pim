@@ -17,6 +17,9 @@ const uuidFrom = (seed: string): string => {
 };
 export const requestId = (ownerId: string, commandId: string) => `pimreq_${createHash("sha256").update(`${ownerId}\n${commandId}`).digest("hex").slice(0, 32)}`;
 
+/** How long a chat can be idle before it is archived by age. */
+const ARCHIVE_AFTER_MS = 14 * 86_400_000;
+
 const TASK_NEXT: Record<string, string[]> = {
 	working: ["auth-required", "completed", "failed", "canceled"],
 	"auth-required": ["working", "completed", "failed", "canceled"],
@@ -90,16 +93,14 @@ export class Conversations {
 				await denyWaiting(tx, p.ownerId, chatId!, "Its chat was stopped.");
 			} else if (input.kind === "unarchive") {
 				await resume(tx, chatId!);
+				// Listed again by hand: it is not archived again by age for two weeks.
+				await tx.query("UPDATE pim_app.conversations SET updated_at = now() WHERE public_chat_id = $1", [chatId]);
 			} else if (input.kind === "user_message" && chatId) {
 				await resume(tx, chatId);
 				await tx.query("UPDATE pim_app.conversations SET updated_at = now() WHERE public_chat_id = $1", [chatId]);
 			} else if (input.kind === "delegate") {
-				result = await delegateTask(tx, p, chatId!, input.commandId, payload);
+				result = await delegateTasks(tx, p, chatId!, input.commandId, payload);
 				chatId = result.taskChatId as string;
-				// The task chat starts working: its first message, in its own chat and stable under a retry of this command. (The runtime's `task_wake` resumes a pi task by number; it is not a message.)
-				const wakeId = `${input.commandId}:wake`;
-				await tx.query("INSERT INTO pim_app.accepted_commands (owner_id, command_id, kind, public_chat_id, pi_request_id, payload) VALUES ($1,$2,'user_message',$3,$4,$5)", [p.ownerId, wakeId, chatId, requestId(p.ownerId, wakeId), JSON.stringify({ text: String(payload.text ?? payload.prompt ?? payload.title ?? ""), taskId: result.taskId })]);
-				await tx.query("INSERT INTO pim_app.command_inbox (owner_id, command_id, partition_id) VALUES ($1,$2,(SELECT partition_id FROM pim_app.conversations WHERE public_chat_id = $3))", [p.ownerId, wakeId, chatId]);
 			}
 			await tx.query("UPDATE pim_app.accepted_commands SET public_chat_id = $2, payload = payload || $3::jsonb WHERE command_id = $1", [input.commandId, chatId, JSON.stringify(result ? { _result: result } : {})]);
 			if (RUNTIME_KINDS.has(input.kind)) {
@@ -156,18 +157,22 @@ export class Conversations {
 	/** `GET /api/sessions`: most recently active first, with what the sidebar shows. `startedBy` names the chat and task that started a chat made for a task. */
 	async list(ownerId: string, opts: { archived?: boolean; limit?: number } = {}) {
 		return this.db.owner(ownerId, async (tx) => {
+			// A chat that has been idle for two weeks is archived by age, as in v1, unless it is at work or has a reply not yet read; its next activity lists it again.
 			const { rows } = await tx.query(
-				`SELECT c.public_chat_id, c.title, c.kind, c.created_at, c.updated_at, c.response_at, c.read_at, c.archived_at, c.continued_from, c.agent_id, c.room_mode,
-				        t.task_id, t.status AS task_status, t.started_by,
-				        (SELECT coalesce(jsonb_agg(m.member), '[]') FROM pim_app.room_members m WHERE m.public_chat_id = c.public_chat_id) AS members,
-				        (SELECT count(*)::int FROM pim_app.command_inbox i JOIN pim_app.accepted_commands a ON a.command_id = i.command_id AND a.owner_id = i.owner_id WHERE a.public_chat_id = c.public_chat_id) AS queued
-				 FROM pim_app.conversations c LEFT JOIN pim_app.tasks t ON t.task_chat = c.public_chat_id
-				 WHERE c.deleted_at IS NULL AND (c.archived_at IS NOT NULL) = $1 ORDER BY c.updated_at DESC LIMIT $2`,
+				`SELECT * FROM (
+				   SELECT c.public_chat_id, c.title, c.kind, c.created_at, c.updated_at, c.response_at, c.read_at, c.archived_at, c.continued_from, c.agent_id, c.room_mode,
+				          t.task_id, t.status AS task_status, t.started_by,
+				          (SELECT coalesce(jsonb_agg(m.member), '[]') FROM pim_app.room_members m WHERE m.public_chat_id = c.public_chat_id) AS members,
+				          (SELECT count(*)::int FROM pim_app.command_inbox i JOIN pim_app.accepted_commands a ON a.command_id = i.command_id AND a.owner_id = i.owner_id WHERE a.public_chat_id = c.public_chat_id) AS queued
+				   FROM pim_app.conversations c LEFT JOIN pim_app.tasks t ON t.task_chat = c.public_chat_id
+				   WHERE c.deleted_at IS NULL) l
+				 WHERE (l.archived_at IS NOT NULL OR (l.queued = 0 AND l.updated_at < now() - interval '14 days' AND NOT (l.response_at IS NOT NULL AND (l.read_at IS NULL OR l.read_at < l.response_at)))) = $1
+				 ORDER BY l.updated_at DESC LIMIT $2`,
 				[opts.archived ?? false, Math.min(opts.limit ?? 100, 200)],
 			);
 			return rows.map((r) => ({
 				id: r.public_chat_id as string, title: r.title as string | null, kind: r.kind as string, createdAt: r.created_at as Date, updatedAt: r.updated_at as Date, responseAt: r.response_at as Date | null,
-				unread: r.response_at !== null && (r.read_at === null || r.read_at < r.response_at), archived: r.archived_at !== null, busy: r.queued > 0,
+				unread: r.response_at !== null && (r.read_at === null || r.read_at < r.response_at), archived: r.archived_at !== null || (r.queued === 0 && r.updated_at < new Date(Date.now() - ARCHIVE_AFTER_MS) && !(r.response_at !== null && (r.read_at === null || r.read_at < r.response_at))), busy: r.queued > 0,
 				agent: r.agent_id as string | null, continuedFrom: r.continued_from as string | null,
 				startedBy: r.task_id ? { session: r.started_by as string, task: r.task_id as string, state: r.task_status as string } : null,
 				room: r.room_mode || r.kind === "group" ? { mode: (r.room_mode as string | null) ?? "host", members: r.members as string[] } : null,
@@ -180,11 +185,16 @@ export class Conversations {
 		await this.db.owner(ownerId, (tx) => tx.query("UPDATE pim_app.conversations SET response_at = $2, updated_at = greatest(updated_at, $2) WHERE public_chat_id = $1", [chatId, at]));
 	}
 
-	async markRead(p: Principal, chatId: string, at = new Date()): Promise<void> {
+	/**
+	 * The person has read the chat. With `through`, the reply (its `responseAt`, in ms) they read, only that far is read, so a slow acknowledgement of an earlier reply never hides a newer one
+	 * that came meanwhile (v1's `readSession`); without it, everything is.
+	 */
+	async markRead(p: Principal, chatId: string, at = new Date(), through?: number): Promise<void> {
 		await this.authz.enforce(p, "api:write");
 		await this.db.owner(p.ownerId, async (tx) => {
 			await requireChat(tx, chatId);
-			await tx.query("UPDATE pim_app.conversations SET read_at = $2 WHERE public_chat_id = $1", [chatId, at]);
+			if (through === undefined) await tx.query("UPDATE pim_app.conversations SET read_at = $2 WHERE public_chat_id = $1", [chatId, at]);
+			else await tx.query("UPDATE pim_app.conversations SET read_at = greatest(coalesce(read_at, 'epoch'), least(coalesce(response_at, 'epoch'), to_timestamp($2::double precision / 1000))) WHERE public_chat_id = $1", [chatId, through]);
 		});
 	}
 
@@ -277,6 +287,54 @@ export class Conversations {
 		});
 	}
 
+	/**
+	 * What an agent sends in a chat a task started is part of its answer to the agent that asked. Kept under `key` (the call's), so a replayed send is kept once; false when the chat is
+	 * not the chat of a task that is working.
+	 */
+	async taskSaid(ownerId: string, chatId: string, key: string, text: string): Promise<boolean> {
+		return this.db.owner(ownerId, async (tx) => {
+			const task = (await tx.query("SELECT task_id, said FROM pim_app.tasks WHERE task_chat = $1 AND status IN ('working', 'auth-required') ORDER BY created_at DESC LIMIT 1 FOR UPDATE", [chatId])).rows[0];
+			if (!task) return false;
+			if (!(task.said as { key: string }[]).some((s) => s.key === key)) await tx.query("UPDATE pim_app.tasks SET said = said || $2::jsonb WHERE task_id = $1", [task.task_id, JSON.stringify([{ key, text }])]);
+			return true;
+		});
+	}
+
+	/**
+	 * Ends a task whose agent's run has settled, and tells whoever asked: with what the agent sent while working on it as its answer, or, given a `failure`, why it did not finish.
+	 * Nothing if it was ended already (canceled, say).
+	 */
+	async settleTask(ownerId: string, taskId: string, failure?: string): Promise<void> {
+		await this.db.owner(ownerId, async (tx) => {
+			const task = (await tx.query("SELECT status, said FROM pim_app.tasks WHERE task_id = $1 FOR UPDATE", [taskId])).rows[0];
+			if (!task || (task.status !== "working" && task.status !== "auth-required")) return;
+			const said = (task.said as { text: string }[]).map((s) => s.text.trim()).filter(Boolean).join("\n\n");
+			if (failure !== undefined) await moveTask(tx, ownerId, taskId, "failed", `It didn't finish: ${failure}.`.slice(0, 2000));
+			else await moveTask(tx, ownerId, taskId, "completed", (said || "(It gave no answer.)").slice(0, 20_000));
+		});
+	}
+
+	/** The tasks one `delegate` call handed out, with who did each: what a call that waits returns once they are all done. */
+	async batch(ownerId: string, batch: string): Promise<{ id: string; status: string; result: string | null; by: string }[]> {
+		return this.db.owner(ownerId, async (tx) => (await tx.query(
+			"SELECT t.task_id, t.status, t.result, coalesce(a.name, 'An agent') AS by FROM pim_app.tasks t LEFT JOIN pim_app.agents a ON a.owner_id = t.owner_id AND a.id = t.agent_id WHERE t.batch = $1 ORDER BY t.position",
+			[batch],
+		)).rows.map((r) => ({ id: r.task_id as string, status: r.status as string, result: r.result as string | null, by: r.by as string })));
+	}
+
+	/** A call that waited has returned the answers of its tasks: they are told, and it no longer waits. */
+	async answered(ownerId: string, batch: string): Promise<void> {
+		await this.db.owner(ownerId, (tx) => tx.query("UPDATE pim_app.tasks SET delivered = 1, waits = false WHERE batch = $1 AND status IN ('completed', 'failed', 'canceled')", [batch]));
+	}
+
+	/** The call that waited for a batch cannot be woken, as when its chat was stopped: its answers go to its chat as an update instead. */
+	async stopWaiting(ownerId: string, batch: string): Promise<void> {
+		await this.db.owner(ownerId, async (tx) => {
+			await tx.query("UPDATE pim_app.tasks SET waits = false WHERE batch = $1", [batch]);
+			await deliverBatch(tx, ownerId, batch);
+		});
+	}
+
 	/** archive_task_chats: archives the chats of finished tasks so they leave the list; returns how many. */
 	async archiveTaskChats(p: Principal): Promise<number> {
 		await this.authz.enforce(p, "api:write");
@@ -348,13 +406,50 @@ async function resume(tx: Tx, chatId: string): Promise<void> {
 	await tx.query("UPDATE pim_app.conversations SET continued_to = NULL, archived_at = NULL WHERE public_chat_id = $1", [chatId]);
 }
 
-async function delegateTask(tx: Tx, p: Principal, fromChat: string, commandId: string, payload: Record<string, unknown>): Promise<Record<string, unknown>> {
-	const title = String(payload.title ?? "Task");
-	const taskId = `task_${createHash("sha256").update(`${p.ownerId}\n${commandId}`).digest("hex").slice(0, 16)}`;
-	const taskChat = await createChat(tx, p.ownerId, { id: uuidFrom(`${p.ownerId}\ntask\n${commandId}`), agentId: payload.agentId as string | undefined, title, kind: "task" });
-	// The effective principal that asked is recorded: what runs the task is bounded by it, however many agents delegate onward.
-	await tx.query("INSERT INTO pim_app.tasks (task_id, owner_id, started_by, task_chat, origin_principal, title) VALUES ($1, $2, $3, $4, $5, $6)", [taskId, p.ownerId, fromChat, taskChat, JSON.stringify(effectivePrincipal(p)), title]);
-	return { taskId, taskChatId: taskChat };
+/** The most tasks one `delegate` call hands out, and how deep a chain of tasks goes (v1's limits). */
+export const MAX_TASKS = 8;
+export const MAX_TASK_DEPTH = 3;
+
+const clipTitle = (text: string) => (text.replace(/\s+/g, " ").trim().slice(0, 60) || "Task");
+
+/**
+ * Hands out the tasks of one `delegate` call, each in a chat of its own (or that of the earlier task it `continues`) with the agent doing it, started by a first message from the agent
+ * that asked. A task is one `{ agentId, text }`, or the payload is one itself (`title`, `text`, `agentId`). A replay of the call is a replay of the command, which gives none twice.
+ */
+async function delegateTasks(tx: Tx, p: Principal, fromChat: string, commandId: string, payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+	type Handed = { agentId?: string; text?: string; title?: string; continues?: string };
+	const handed: Handed[] = Array.isArray(payload.tasks) ? (payload.tasks as Handed[]) : [{ agentId: payload.agentId as string | undefined, text: String(payload.text ?? payload.prompt ?? payload.title ?? ""), title: payload.title as string | undefined }];
+	if (handed.length === 0 || handed.length > MAX_TASKS) throw new BadRequestError(`A call hands out 1 to ${MAX_TASKS} tasks`);
+	const from = typeof payload.fromName === "string" && payload.fromName ? payload.fromName : null;
+	const seed = (i: number) => (i === 0 ? commandId : `${commandId}\n${i}`);
+	const parent = (await tx.query("SELECT task_id FROM pim_app.tasks WHERE task_chat = $1 AND status IN ('working', 'auth-required') ORDER BY created_at DESC LIMIT 1", [fromChat])).rows[0]?.task_id ?? null;
+	const tasks: { taskId: string; chatId: string; agentId: string | null }[] = [];
+	for (const [i, one] of handed.entries()) {
+		const text = String(one.text ?? one.title ?? "");
+		const taskId = `task_${createHash("sha256").update(`${p.ownerId}\n${seed(i)}`).digest("hex").slice(0, 16)}`;
+		let chat: string;
+		let agentId = one.agentId ?? null;
+		if (one.continues) {
+			// A follow-up goes on in the chat where the earlier task worked, which is brought back if it was archived.
+			const earlier = (await tx.query("SELECT task_chat, agent_id FROM pim_app.tasks WHERE task_id = $1 AND started_by = $2 AND task_chat IS NOT NULL", [one.continues, fromChat])).rows[0];
+			if (!earlier) throw new NotFoundError(`No task ${one.continues} you handed out`);
+			chat = earlier.task_chat as string;
+			agentId = agentId ?? earlier.agent_id;
+			await resume(tx, chat);
+		} else {
+			chat = await createChat(tx, p.ownerId, { id: uuidFrom(`${p.ownerId}\ntask\n${seed(i)}`), agentId: agentId ?? undefined, title: one.title ?? clipTitle(text), kind: "task" });
+		}
+		const wakeId = i === 0 ? `${commandId}:wake` : `${commandId}:wake:${i}`;
+		// The effective principal that asked is recorded: what runs the task is bounded by it, however many agents delegate onward.
+		await tx.query(
+			"INSERT INTO pim_app.tasks (task_id, owner_id, started_by, task_chat, origin_principal, title, agent_id, batch, position, waits, waiter_task, parent_task, body, wake_request) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
+			[taskId, p.ownerId, fromChat, chat, JSON.stringify(effectivePrincipal(p)), one.title ?? clipTitle(text), agentId, commandId, i, payload.waits === true, payload.waits === true && payload.waiterTask !== undefined ? Number(payload.waiterTask) : null, parent, text, requestId(p.ownerId, wakeId)],
+		);
+		// The task chat starts working: its first message, from the agent that handed it out.
+		await enqueue(tx, p.ownerId, wakeId, "user_message", chat, { text: from ? `[From ${from}]\n${text}` : text, taskId, whenBusy: "followUp" });
+		tasks.push({ taskId, chatId: chat, agentId });
+	}
+	return { taskId: tasks[0]!.taskId, taskChatId: tasks[0]!.chatId, batch: commandId, tasks };
 }
 
 /** Accepts a command for a chat into the same transaction, for the Runner to work in its turn. A command id that was accepted already is not accepted again. */
@@ -384,17 +479,59 @@ async function stopChat(tx: Tx, ownerId: string, chatId: string, commandId: stri
 
 /** The body of `updateTask`, in the caller's transaction. */
 async function moveTask(tx: Tx, ownerId: string, taskId: string, status: string, result?: string): Promise<{ delivered: boolean }> {
-	const { rows } = await tx.query("SELECT status, started_by, task_chat FROM pim_app.tasks WHERE task_id = $1 FOR UPDATE", [taskId]);
+	const { rows } = await tx.query("SELECT status, started_by, task_chat, batch FROM pim_app.tasks WHERE task_id = $1 FOR UPDATE", [taskId]);
 	const task = rows[0];
 	if (!task) throw new NotFoundError("No such task");
 	if (task.status !== status && !TASK_NEXT[task.status]?.includes(status)) throw new ConflictError(`A ${task.status} task cannot become ${status}`, "bad_task_transition");
 	await tx.query("UPDATE pim_app.tasks SET status = $2, result = coalesce($3, result), updated_at = now() WHERE task_id = $1", [taskId, status, result ?? null]);
 	if (status === "canceled" && task.status !== "canceled" && task.task_chat) await stopChat(tx, ownerId, task.task_chat, `abort:task:${taskId}`, "Its task was canceled.");
-	const commandId = `task:${taskId}:${status}`;
-	const first = await tx.query("INSERT INTO pim_app.task_update_deliveries (task_id, owner_id, status, command_id) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING", [taskId, ownerId, status, commandId]);
-	if (!first.rowCount) return { delivered: false };
-	// A chat that was deleted hears of nothing, and is not woken to.
-	if (!(await tx.query("SELECT 1 FROM pim_app.conversations WHERE public_chat_id = $1 AND deleted_at IS NULL", [task.started_by])).rowCount) return { delivered: false };
-	await enqueue(tx, ownerId, commandId, "user_message", task.started_by, { text: `[Task update] ${taskId} is ${status}${result ? `: ${result}` : ""}`, taskId, status });
+	if (task.status === status) return { delivered: false };
+	return deliverBatch(tx, ownerId, task.batch ?? taskId);
+}
+
+type TaskRow = { task_id: string; status: string; result: string | null; started_by: string; delivered: number; waits: boolean; waiter_task: string | null; position: number; updated_at: Date; by: string | null };
+const TERMINAL = new Set(["completed", "failed", "canceled"]);
+
+/** The message that gives a requester the answers of tasks it handed out together, and says which of them still wait for the person. */
+export function taskUpdateText(done: readonly { id: string; status: string; result: string | null; by: string }[], waiting: readonly { id: string; by: string }[]): string {
+	const outcome = (t: { id: string; status: string; result: string | null; by: string }) =>
+		t.status === "completed" ? `${t.by} finished task ${t.id}:\n${t.result}` : t.status === "canceled" ? `Task ${t.id} for ${t.by} was canceled: ${t.result}` : `${t.by} didn't finish task ${t.id}: ${t.result}`;
+	const headline = (t: { status: string; by: string }) => `${t.by} ${t.status === "completed" ? "answered" : t.status === "canceled" ? "was canceled" : "didn't finish"}`;
+	return [`[Task update] ${done.map(headline).join("; ")}`, ...done.map(outcome), ...waiting.map((t) => `${t.by} is waiting for the person's approval on task ${t.id}; its answer will come in a later update.`)].join("\n\n");
+}
+
+/**
+ * Tells a requester what came of the tasks it handed out together, once none of them is working: in one message, which wakes it. Those waiting for the person are named, and
+ * answered in a later update of their own. A `delegate` call that waits gets nothing until every one of them is done, those waiting for the person too; then it is woken to return
+ * the answers itself (`task_wake`). A chat that was deleted hears of nothing, and is not woken to.
+ */
+async function deliverBatch(tx: Tx, ownerId: string, batch: string): Promise<{ delivered: boolean }> {
+	const tasks = (await tx.query(
+		`SELECT t.task_id, t.status, t.result, t.started_by, t.delivered, t.waits, t.waiter_task, t.position, t.updated_at, a.name AS by
+		 FROM pim_app.tasks t LEFT JOIN pim_app.agents a ON a.owner_id = t.owner_id AND a.id = t.agent_id WHERE t.batch = $1 ORDER BY t.position FOR UPDATE OF t`,
+		[batch],
+	)).rows as TaskRow[];
+	if (tasks.length === 0 || tasks.some((t) => t.status === "working")) return { delivered: false };
+	const requester = tasks[0]!.started_by;
+	const done = tasks.filter((t) => TERMINAL.has(t.status) && t.delivered === 0);
+	if (done.length === 0) return { delivered: false };
+	if (!(await tx.query("SELECT 1 FROM pim_app.conversations WHERE public_chat_id = $1 AND deleted_at IS NULL", [requester])).rowCount) {
+		await tx.query("UPDATE pim_app.tasks SET delivered = 1 WHERE batch = $1 AND status IN ('completed', 'failed', 'canceled')", [batch]);
+		return { delivered: false };
+	}
+	if (tasks[0]!.waits) {
+		if (tasks.some((t) => !TERMINAL.has(t.status)) || tasks[0]!.waiter_task === null) return { delivered: false };
+		await enqueue(tx, ownerId, `task-wake:${createHash("sha256").update(batch).digest("hex").slice(0, 40)}`, "task_wake", requester, { taskId: Number(tasks[0]!.waiter_task) });
+		return { delivered: true };
+	}
+	const text = taskUpdateText(
+		done.map((t) => ({ id: t.task_id, status: t.status, result: t.result, by: t.by ?? "An agent" })),
+		tasks.filter((t) => t.status === "auth-required").map((t) => ({ id: t.task_id, by: t.by ?? "An agent" })),
+	);
+	const commandId = `task-update:${createHash("sha256").update(done.map((t) => `${t.task_id}@${t.updated_at.toISOString()}`).join(",")).digest("hex").slice(0, 40)}`;
+	await tx.query("UPDATE pim_app.tasks SET delivered = 1 WHERE task_id = ANY($1::text[])", [done.map((t) => t.task_id)]);
+	await enqueue(tx, ownerId, commandId, "user_message", requester, { text, whenBusy: "followUp", tasks: done.map((t) => t.task_id) });
+	// An agent at work on a task of its own goes on with the answers, and finishes its task once it has them all: its task now waits on that turn, which starts over what it has sent.
+	await tx.query("UPDATE pim_app.tasks SET wake_request = $2, said = '[]' WHERE task_chat = $1 AND status IN ('working', 'auth-required')", [requester, requestId(ownerId, commandId)]);
 	return { delivered: true };
 }

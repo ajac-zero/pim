@@ -9,7 +9,8 @@ import { KeyringCrypto, sealString } from "@pim/v2-app/crypto";
 import { connect } from "@pim/v2-app/db";
 import { createGate } from "@pim/v2-app/gate";
 import { MemoryObjectStore } from "@pim/v2-app/objects";
-import { planAnswer, NAME_CHAT } from "../src/compat/utility.ts";
+import { planAnswer, NAME_CHAT, nameChatsFromFirstMessage } from "../src/compat/utility.ts";
+import { webApproval } from "../src/compat/boot.ts";
 import { chatRoutes } from "../src/compat/chat.ts";
 import { apiClientRoutes } from "../src/compat/api-clients.ts";
 import { diagnosticsRoutes } from "../src/compat/diagnostics.ts";
@@ -352,7 +353,7 @@ describe("diagnostics", () => {
 		expect((await call(ada, "GET", "/api/admin/diagnostics?kind=nope")).status).toBe(400);
 		expect((await call(ada, "GET", "/api/admin/diagnostics?since=soon")).status).toBe(400);
 		expect((await call(bob, "GET", "/api/admin/diagnostics")).status).toBe(403);
-		expect((await call(ada, "GET", "/api/admin/health")).body.deployment).toMatchObject({ publicUrlSet: true, approvalPolicy: "explicit" });
+		expect((await call(ada, "GET", "/api/admin/health")).body.deployment).toMatchObject({ publicUrlSet: true, approvalPolicy: "majordomo" });
 	});
 });
 
@@ -402,6 +403,60 @@ describe("the utility model", () => {
 		await call(ada, "GET", `/api/sessions/${chat}/summary`);
 		expect(asked).toHaveLength(before);
 		expect((await call(bob, "POST", `/api/sessions/${chat}/title`)).status).toBe(404);
+	});
+});
+
+describe("an approval's card", () => {
+	it("carries the note the person left with their decision, the majordomo's own note, and what the action returned", () => {
+		const row = (more: object) => ({ id: "ap_1", tool: "http:request", public_chat_id: null, created_at: new Date(), expires_at: null, timeout_policy: "deny", decided_at: new Date(), via_standing_grant: null, ...more });
+		expect(webApproval(row({ state: "denied", decided_by: "user:s1", args: { summary: "GET x", note: "Not this week." } }))).toMatchObject({ status: "denied", note: "Not this week.", result: null, args: { summary: "GET x" } });
+		expect(webApproval(row({ state: "approved", decided_by: "user:s1", args: { result: "200 ok" } }))).toMatchObject({ status: "approved", note: null, result: "200 ok" });
+		expect(webApproval(row({ state: "approved", decided_by: "majordomo", args: { review: { status: "decided", note: "Routine." } } }))).toMatchObject({ decidedBy: "majordomo", note: "Routine." });
+	});
+});
+
+describe("naming a chat from its first message", () => {
+	it("titles it from what was said at once, names it with the utility model, and keeps a rename and what a fork is called until its first message", async () => {
+		const person = (await app.identity.authenticate(ada)) as never;
+		const send = (chat: string, text: string) => app.conversations.admit(person, { commandId: `first-${chat}-${text.length}`, kind: "user_message", chatId: chat, payload: { text } });
+		const titleOf = async (chat: string) => (await stack.admin.query("SELECT title FROM pim_app.conversations WHERE public_chat_id = $1", [chat])).rows[0].title as string | null;
+		const named = async (chat: string, title: string) => { for (let i = 0; i < 100 && (await titleOf(chat)) !== title; i++) await new Promise((r) => setTimeout(r, 50)); return titleOf(chat); };
+		const original = app.conversations.admit;
+		nameChatsFromFirstMessage(app, process.env);
+		try {
+			// With no utility model the first words are the title: the first line, at most 80 characters.
+			await stack.admin.query("DELETE FROM pim_app.owner_settings WHERE key = 'model_utility' AND owner_id = $1", [await ownerOf(ada)]);
+			const plain = (await call(ada, "POST", "/api/sessions", { agentId: agent })).body.id as string;
+			await send(plain, `${"Plan the garden beds ".repeat(6)}\nand then the fence`);
+			expect(await titleOf(plain)).toBe(`${"Plan the garden beds ".repeat(6)}`.slice(0, 79).trimEnd() + "…");
+			// A second message changes nothing, and nor does a retry.
+			await send(plain, "something else");
+			expect((await titleOf(plain))!.startsWith("Plan the garden")).toBe(true);
+
+			// With one chosen the chat is named from the first message in the background.
+			expect((await call(ada, "PUT", "/api/model/utility", { provider: "gateway", id: "u2" })).status).toBe(200);
+			const asking = asked.length;
+			const chat = (await call(ada, "POST", "/api/sessions", { agentId: agent })).body.id as string;
+			await send(chat, "Help me plan my garden");
+			expect(await named(chat, "Fresh Garden Plan")).toBe("Fresh Garden Plan");
+			expect(JSON.stringify(asked.at(asking)?.messages[1].content)).toBe('"Person: Help me plan my garden"');
+
+			// A rename before the answer stays.
+			const renamed = (await call(ada, "POST", "/api/sessions", { agentId: agent })).body.id as string;
+			const slow = send(renamed, "Water the beds");
+			await call(ada, "PUT", `/api/sessions/${renamed}`, { title: "Mine" });
+			await slow;
+			await new Promise((r) => setTimeout(r, 400));
+			expect(await titleOf(renamed)).toBe("Mine");
+
+			// A fork keeps its numbered title until its first message, which names it anew.
+			const fork = (await call(ada, "POST", "/api/sessions", { agentId: agent, title: "Garden (fork #2)" })).body.id as string;
+			expect(await titleOf(fork)).toBe("Garden (fork #2)");
+			await send(fork, "And the roses?");
+			expect(await named(fork, "Fresh Garden Plan")).toBe("Fresh Garden Plan");
+		} finally {
+			app.conversations.admit = original;
+		}
 	});
 });
 
@@ -471,6 +526,12 @@ describe("a chat's own model", () => {
 		const context = async () => (await stack.admin.query("SELECT pim_app.runner_context($1, $2) AS c", [owner, chat])).rows[0].c;
 		expect((await context()).chat_model).toBeNull();
 		expect((await call(ada, "PUT", `/api/sessions/${chat}/model`, { provider: "gateway", id: "nope" })).status).toBe(400);
+		// v1's other shapes: {model: "<provider>/<id>"} and a bare id, and what to send when it is none of them.
+		expect((await call(ada, "PUT", `/api/sessions/${chat}/model`, { model: "gateway/u2" })).body).toMatchObject({ model: { provider: "gateway", id: "u2" }, override: { provider: "gateway", id: "u2" } });
+		expect((await call(ada, "PUT", `/api/sessions/${chat}/model`, { model: "u1" })).body).toMatchObject({ model: { provider: "gateway", id: "u1" } });
+		const bad = await call(ada, "PUT", `/api/sessions/${chat}/model`, { model: "gateway/nope" });
+		expect(bad.status).toBe(400);
+		expect(bad.body.message).toContain('or {model:"<provider>/<id>"}.');
 		expect((await call(ada, "PUT", `/api/sessions/${chat}/model`, { provider: "gateway", id: "u1" })).body).toMatchObject({ model: { provider: "gateway", id: "u1" } });
 		expect((await context()).chat_model).toEqual({ provider: "gateway", id: "u1" });
 		const row = ((await call(ada, "GET", "/api/snapshot/sidebar")).body.sessions as { chatId: string; summary: any }[]).find((s) => s.chatId === chat);

@@ -99,7 +99,7 @@ export async function health(app: App, env: Readonly<Record<string, string | und
 	return scrubValue({
 		generatedAt: new Date().toISOString(),
 		counts,
-		deployment: { publicUrlSet: !!env.PIM_PUBLIC_URL, appsOriginSet: !!env.PIM_APPS_ORIGIN, contentOriginSet: !!env.PIM_CONTENT_ORIGIN, defaultModel: env.PIM_DEFAULT_MODEL ?? null, approvalPolicy: env.PIM_APPROVAL_POLICY ?? "explicit" },
+		deployment: { publicUrlSet: !!env.PIM_PUBLIC_URL, appsOriginSet: !!env.PIM_APPS_ORIGIN, contentOriginSet: !!env.PIM_CONTENT_ORIGIN, defaultModel: env.PIM_DEFAULT_MODEL ?? null, approvalPolicy: env.PIM_APPROVAL_POLICY ?? "majordomo" },
 	});
 }
 

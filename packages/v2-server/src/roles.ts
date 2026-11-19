@@ -44,11 +44,13 @@ import { natsRelayBus } from "./relay-bus.ts";
 import { notifyPass } from "./notifier.ts";
 import { vapidFromEnv } from "./push.ts";
 import { startApprovalReviews } from "./approval-review.ts";
+import { startTaskSettler } from "./task-settler.ts";
 import { sweepApprovals, sweepErasures, tickSchedules, tickTriggers, trimForgeOutbox } from "./sweeps.ts";
 import { webAssets } from "./web-assets.ts";
 import { poolRoutes } from "./compat/admin.ts";
 import { webCompatRoutes } from "./compat/index.ts";
 import { gateBefore, limitGuestMessages } from "./limits.ts";
+import { nameChatsFromFirstMessage } from "./compat/utility.ts";
 import { checkForUpdate } from "./update-check.ts";
 
 export type Env = Record<string, string | undefined>;
@@ -109,8 +111,6 @@ export async function startGate(config: ProcessConfig, env: Env, host: Host, nat
 	if (nats) publishRevocations(app, nats);
 	// A computer paired to another process (the `relay` container, another Gate) is reached over NATS.
 	if (nats) app.relay.useBus(natsRelayBus(nats));
-	deliverApprovalDecisions(app);
-	limitGuestMessages(app);
 	// What happens in a person's space that their open apps should hear of at once reaches them through Pulse and Live: the rows' changes (`notice-bridge.ts`), their computer coming
 	// and going, and what the apps ask of the server over their sockets, such as watching a file (`live-says.ts`).
 	const stopNotices: (() => void)[] = [];
@@ -120,6 +120,9 @@ export async function startGate(config: ProcessConfig, env: Env, host: Host, nat
 		const stopBridge = startNoticeBridge(app, nats, config.databaseUrl);
 		stopNotices.push(() => void stopBridge(), serveSays(app, nats), () => app.notices.close());
 	}
+	deliverApprovalDecisions(app);
+	limitGuestMessages(app);
+	nameChatsFromFirstMessage(app, env);
 	// What the triggers runtime on a person's computer says over its connection is answered here, in the process that holds the socket.
 	app.relay.computerTriggers = new ComputerTriggers(app);
 	const secure = config.publicUrl.startsWith("https:");
@@ -152,10 +155,10 @@ export async function startGate(config: ProcessConfig, env: Env, host: Host, nat
 		name: "gate",
 		async close() {
 			stopLoop();
+			for (const stop of stopNotices) stop();
 			sockets.close();
 			await db.end();
 		},
-			for (const stop of stopNotices) stop();
 	};
 }
 
@@ -242,9 +245,6 @@ export async function startRunner(config: ProcessConfig, env: Env, host: Host, h
 	// The computer's tools reach a paired computer over the Relay's bus (NATS). The connection is made when an agent first uses one, so a Runner that never does needs no NATS.
 	let relayPulse: Promise<NatsPulse> | undefined;
 	const relayBus = async () => natsRelayBus(await (relayPulse ??= NatsPulse.connect(config.natsUrl)));
-	const host_ = hooks.harnessOptions ? undefined : createAgentHost({ db, env, crypto, app, forge, relay: relayBus, providers: hooks.providers, fetch: hooks.fetch, ...(chatgptFromEnv(env) ? { chatgpt: { ...chatgptFromEnv(env), ...(env.PIM_CHATGPT_BASE_URL ? { baseUrl: env.PIM_CHATGPT_BASE_URL } : {}) } } : {}), ...(env.PIM_PROVIDER_COOLDOWN_MS ? { cooldowns: { transientMs: Number(env.PIM_PROVIDER_COOLDOWN_MS) } } : {}), stallMs: { ...(env.PIM_MODEL_STALL_MS ? { stream: Number(env.PIM_MODEL_STALL_MS) } : {}), ...(env.PIM_TOOL_TIMEOUT_MS ? { tool: Number(env.PIM_TOOL_TIMEOUT_MS) } : {}) } });
-	// While nobody is in a chat, what was said in it is kept as a memory (`./memory-nap.ts`); it needs the host's model catalog and the application's services.
-	const stopNap = host_ && app ? startMemoryNap({ pool: runtimePool, db, app, complete: host_.complete, env, onError: (error) => console.error("memory nap", error) }) : undefined;
 	// What an agent's tools tell the person's open apps (open a file in the canvas, ask about it) goes by the same connection, made when it is first needed.
 	if (app) {
 		const bus = () => (relayPulse ??= NatsPulse.connect(config.natsUrl));
@@ -257,6 +257,9 @@ export async function startRunner(config: ProcessConfig, env: Env, host: Host, h
 			},
 		);
 	}
+	const host_ = hooks.harnessOptions ? undefined : createAgentHost({ db, env, crypto, app, forge, relay: relayBus, providers: hooks.providers, fetch: hooks.fetch, ...(chatgptFromEnv(env) ? { chatgpt: { ...chatgptFromEnv(env), ...(env.PIM_CHATGPT_BASE_URL ? { baseUrl: env.PIM_CHATGPT_BASE_URL } : {}) } } : {}), ...(env.PIM_PROVIDER_COOLDOWN_MS ? { cooldowns: { transientMs: Number(env.PIM_PROVIDER_COOLDOWN_MS) } } : {}), stallMs: { ...(env.PIM_MODEL_STALL_MS ? { stream: Number(env.PIM_MODEL_STALL_MS) } : {}), ...(env.PIM_TOOL_TIMEOUT_MS ? { tool: Number(env.PIM_TOOL_TIMEOUT_MS) } : {}) } });
+	// While nobody is in a chat, what was said in it is kept as a memory (`./memory-nap.ts`); it needs the host's model catalog and the application's services.
+	const stopNap = host_ && app ? startMemoryNap({ pool: runtimePool, db, app, complete: host_.complete, env, onError: (error) => console.error("memory nap", error) }) : undefined;
 	const runner = new Runner({
 		db,
 		harnessOptions: hooks.harnessOptions ?? host_!.harnessOptions,
@@ -277,7 +280,8 @@ export async function startRunner(config: ProcessConfig, env: Env, host: Host, h
 	const relay = new CommandRelay({ pool: runtimePool, db, inbox: runner.inbox, directory: runner.directory, holder: holderId, onError: (e) => console.error("relay", e) });
 	metrics.leasesHeld.collect(() => metrics.leasesHeld.set(runner.residents.length, { service: "runner" }));
 	// The majordomo reviews approvals for people whose policy says so; it needs the application's services and the person's models.
-	const reviews = host_ && app ? startApprovalReviews({ pool: runtimePool, app, host: host_, defaultPolicy: env.PIM_APPROVAL_POLICY ?? "explicit", onError: (e) => console.error("approval review", e) }) : undefined;
+	const settler = app ? startTaskSettler({ pool: runtimePool, db, app, onError: (e) => console.error("task settler", e) }) : undefined;
+	const reviews = host_ && app ? startApprovalReviews({ pool: runtimePool, app, host: host_, defaultPolicy: env.PIM_APPROVAL_POLICY ?? "majordomo", onError: (e) => console.error("approval review", e) }) : undefined;
 	let started = false;
 	let stopped = false;
 	const tryStart = async () => {
@@ -303,6 +307,7 @@ export async function startRunner(config: ProcessConfig, env: Env, host: Host, h
 			clearInterval(retry);
 			relay.stop();
 			await reviews?.stop();
+			await settler?.stop();
 			await stopNap?.();
 			await runner.stop();
 			await runtimePool.end();

@@ -7,6 +7,7 @@ import { BadRequestError, CapabilityUnavailableError, NotFoundError } from "@pim
 import { ok, route, type Route } from "@pim/v2-app/http";
 import { validSubscription, vapidFromEnv } from "../push.ts";
 import { ms } from "./admin-util.ts";
+import { sessionView } from "./chat-sessions.ts";
 
 const SELECT = `SELECT n.id, n.kind, n.public_chat_id, n.title, n.body, n.created_at, n.read_at, a.id AS agent_id, a.emoji, a.color, a.icon_key, a.updated_at AS agent_updated
 	FROM pim_app.notifications n
@@ -50,11 +51,14 @@ export function notificationRoutes(env: Record<string, string | undefined>): Rou
 			return ok(view(row));
 		}),
 		// Reading a chat reads what mentioned the person in it, as in v1; the chat's own read state is the application's.
-		route("POST", "/api/sessions/:id/read", async ({ app, principal, params }) => {
+		route("POST", "/api/sessions/:id/read", async ({ app, principal, params, json }) => {
 			const p = await principal();
-			await app.conversations.markRead(p, params[0]!);
+			// `responseAt`, the reply that was read, protects a newer one from a slow acknowledgement; a call without it reads everything.
+			const { responseAt } = (await json().catch(() => ({}))) as { responseAt?: unknown };
+			if (responseAt !== undefined && !(typeof responseAt === "number" && Number.isSafeInteger(responseAt) && responseAt >= 0)) throw new BadRequestError("responseAt must be a non-negative integer");
+			await app.conversations.markRead(p, params[0]!, new Date(), responseAt);
 			await app.db.owner(p.ownerId, (tx) => tx.query("UPDATE pim_app.notifications SET read_at = now() WHERE public_chat_id = $1 AND kind = 'mention' AND read_at IS NULL", [params[0]]));
-			return ok({ ok: true });
+			return ok(await sessionView(app, p, params[0]!));
 		}),
 		route("GET", "/api/push/key", async ({ principal }) => {
 			await principal();

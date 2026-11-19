@@ -11,7 +11,7 @@ const SEND_TO_USER = "send_to_user";
 /** A ```ui fence, alone on its lines. */
 const UI_BLOCK = /```ui[ \t]*\r?\n([\s\S]*?)\r?\n```[ \t]*(?:\r?\n|$)/g;
 
-const textOf = (parts: readonly MessagePart[]) => parts.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("");
+export const textOf = (parts: readonly MessagePart[]) => parts.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("");
 
 /** A reply as plain Markdown, where its ```ui blocks can't be drawn: they become the readable pieces the app drew from them. */
 export function plainReply(message: string): string {
@@ -21,8 +21,18 @@ export function plainReply(message: string): string {
 	});
 }
 
+/** A widget as Markdown, for a client that can't draw it. */
+export function widgetMarkdown(widget: { title?: unknown; empty?: unknown; kind?: string; failed?: true; items?: { title?: string; detail?: string; time?: string; value?: number; max?: number }[] }): string {
+	const said = (text: unknown) => (typeof text === "string" ? text : ((text as { en?: string } | undefined)?.en ?? ""));
+	const title = `**${said(widget.title)}**`;
+	if (widget.failed || !widget.items) return `${title}\n(Couldn't load.)`;
+	if (widget.items.length === 0) return `${title}\n${said(widget.empty)}`;
+	const lines = widget.kind === "list" ? widget.items.map((i) => [i.title, i.detail, i.time].filter(Boolean).join(" · ")) : widget.items.map((i) => [`${i.title} (${i.value}/${i.max})`, i.detail].filter(Boolean).join(" · "));
+	return [title, ...lines.map((line) => `- ${line}`)].join("\n");
+}
+
 /** The widgets a `send_to_user` result says went with the message, without their rows' links, which go to the owner's own chats and apps. */
-function widgetsOf(result: string): unknown[] {
+export function widgetsOf(result: string): unknown[] {
 	if (!result.startsWith("{")) return [];
 	try {
 		const { widgets } = JSON.parse(result) as { widgets?: unknown };

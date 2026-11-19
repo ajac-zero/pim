@@ -200,6 +200,14 @@ describe("chats and the account", () => {
 		expect((await call(ada, "GET", `/api/sessions/${chat}/tasks`)).body).toEqual({ tasks: [] });
 		expect((await call(bob, "GET", `/api/sessions/${chat}/cost`)).status).toBe(404);
 		expect((await call(ada, "POST", "/api/prompts/improve", { text: "x" })).status).toBe(501);
+		// What a chat's model calls cost is read from the ledger by the chat they were for, with the cache tiers and the calls of its tasks.
+		const owner = await ownerOf(ada);
+		await app.usage.record(owner, { id: "cc1", runKind: "chat", chatId: chat, provider: "gateway", model: "m", inputTokens: 1000, outputTokens: 200, cacheReadTokens: 800, cacheWriteTokens: 50, costMicroUsd: 12_000 });
+		await app.usage.record(owner, { id: "cc2", runKind: "chat", chatId: chat, provider: "gateway", model: "m", inputTokens: 10, outputTokens: 20, costMicroUsd: 3_000 });
+		const costed = (await call(ada, "GET", `/api/sessions/${chat}/cost`)).body;
+		expect(costed).toEqual({ total: 0.015, models: [{ provider: "gateway", model: "m", input: 1010, output: 220, cacheRead: 800, cacheWrite: 50, cost: 0.015 }] });
+		expect((await call(ada, "GET", `/api/sessions/${chat}/activity`)).body.steps.map((s: any) => [s.kind, s.model])).toEqual([["model", "gateway/m"], ["model", "gateway/m"]]);
+		await stack.admin.query("DELETE FROM pim_app.model_calls WHERE id IN ('cc1', 'cc2')");
 		expect((await call(ada, "DELETE", `/api/sessions/${chat}`)).body).toEqual({ deleted: true });
 		expect((await call(ada, "GET", `/api/sessions/${chat}/summary`)).status).toBe(404);
 		const token = (await call(ada, "POST", "/auth/tokens", { name: "cli" })).body;
@@ -268,17 +276,54 @@ describe("the API's clients", () => {
 		expect((await call(ada, "POST", `/api/sessions/${chat}/messages`, { content: "something else", operationId: "op-1" })).status).toBe(409); // another message under the same id
 		expect((await call(ada, "POST", `/api/sessions/${chat}/messages`, { content: [{ type: "text", text: "from a client" }], operationId: "op-1" })).status).toBe(200);
 		expect((await call(ada, "POST", `/api/sessions/${chat}/messages`, { content: "  " })).status).toBe(400);
-		expect((await call(ada, "GET", `/api/sessions/${chat}/operations/op-1`)).body).toMatchObject({ status: "pending", session: chat });
+		expect((await call(ada, "GET", `/api/sessions/${chat}/operations/op-1?timeout=100`)).body).toMatchObject({ status: "pending", session: chat });
 		expect((await call(ada, "GET", `/api/sessions/${chat}/operations/nope`)).status).toBe(404);
 		expect((await call(ada, "GET", `/api/sessions/${chat}/messages`)).body).toMatchObject({ session: chat, busy: true, pending: ["op-1"], messages: [] });
 		expect((await call(bob, "GET", `/api/sessions/${chat}/messages`)).status).toBe(404);
-		expect((await call(ada, "GET", "/api")).body).toMatchObject({ timeZone: expect.any(String), tools: [] });
+		const root = (await call(ada, "GET", "/api")).body;
+		expect(root).toMatchObject({ timeZone: expect.any(String) });
+		const tools = new Map((root.tools as { name: string; requiresApproval: boolean }[]).map((t) => [t.name, t.requiresApproval]));
+		expect([tools.get("connector_call"), tools.get("note"), tools.has("fetch_url")]).toEqual([true, false, true]);
 		expect((await call(ada, "GET", "/api/health")).body).toEqual({ name: "pim", ok: true });
 		// The export carries each chat with its messages, the settings, approvals and the days of usage, and only the person's own.
 		const exported = (await call(ada, "GET", "/api/export")).body;
 		expect(exported.chats.find((c: { id: string }) => c.id === chat)).toMatchObject({ title: "api", messages: [] });
 		expect(Object.keys(exported)).toEqual(expect.arrayContaining(["settings", "approvals", "permissions", "usage"]));
 		expect((await call(bob, "GET", "/api/export")).body.chats.some((c: { id: string }) => c.id === chat)).toBe(false);
+	});
+
+	it("holds a message sent with wait until its turn ends and answers what the agent sent, and long-polls an operation the same way", async () => {
+		const chat = (await call(ada, "POST", "/api/sessions", { title: "waiting" })).body.id as string;
+		const owner = await ownerOf(ada);
+		const partition = (await stack.admin.query("SELECT partition_id FROM pim_app.conversations WHERE public_chat_id = $1", [chat])).rows[0].partition_id;
+		let position = 0;
+		const project = async (message: object, partial = false) => {
+			position++;
+			await stack.admin.query("INSERT INTO pim_projection.chat_transcript_projection (owner_id, stream_kind, chat_id, entry_id, position, partial, message, partition_id, commit_seq, projection_version) VALUES ($1,'chat',$2,$3,$4,$5,$6,$7,$4,1)", [owner, chat, `e${position}`, position, partial, JSON.stringify({ id: `e${position}`, ...message }), partition]);
+		};
+		const at = Date.now() + 60_000;
+		const send = (id: string, message: string, extra = {}) => ({ role: "assistant", timestamp: at, stopReason: "toolUse", parts: [{ type: "thinking", text: "secret thoughts" }, { type: "tool-call", id, name: "send_to_user", arguments: { message, ...extra } }] });
+		const answered = (id: string, text = "Sent.") => ({ role: "tool", timestamp: at, parts: [{ type: "tool-result", id, name: "send_to_user", content: [{ type: "text", text }], error: false }] });
+		await project({ role: "user", timestamp: at, parts: [{ type: "text", text: "hi" }] });
+		// The turn is still going: the answer is pending.
+		await project(send("c0", "Not yet."), true);
+		process.env.PIM_API_WAIT_MS = "300";
+		const held = await call(ada, "POST", `/api/sessions/${chat}/messages`, { content: "hi", operationId: "w-0", wait: true });
+		expect(held.status).toBe(200);
+		expect(held.body).toMatchObject({ operationId: "w-0", status: "pending", replies: [] });
+		// It ends with a send the person read, one that went to their inbox, and a refused one; only the first is a reply.
+		await stack.admin.query("DELETE FROM pim_projection.chat_transcript_projection WHERE chat_id = $1 AND partial", [chat]);
+		await project(send("c1", "Lisbon it is."));
+		await project(answered("c1"));
+		await project(send("c2", "An email.", { channel: "email" }));
+		await project(answered("c2"));
+		await project({ role: "assistant", timestamp: at, stopReason: "stop", parts: [{ type: "text", text: "Done." }] });
+		const done = await call(ada, "POST", `/api/sessions/${chat}/messages`, { content: "again", operationId: "w-1", wait: true });
+		expect(done.body).toEqual({ operationId: "w-1", session: chat, status: "done", replies: ["Lisbon it is."], text: "Lisbon it is." });
+		expect(JSON.stringify(done.body)).not.toContain("secret thoughts");
+		expect((await call(ada, "GET", `/api/sessions/${chat}/operations/w-1?timeout=100`)).body).toMatchObject({ status: "done", replies: ["Lisbon it is."] });
+		// Stopping by the operation's id answers as the app's Stop does.
+		expect((await call(ada, "POST", `/api/sessions/${chat}/abort`, { operationId: "w-1" })).body).toMatchObject({ aborted: true });
 	});
 
 	it("shows one trigger run by its id, and no other person's", async () => {

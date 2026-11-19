@@ -33,7 +33,7 @@ const GUEST_ALLOWED: { methods: string[] | "all"; path: RegExp }[] = [
 	{ methods: ["GET", "DELETE"], path: /^\/api\/account$/ },
 	{ methods: ["GET", "PUT"], path: /^\/api\/settings$/ },
 	{ methods: ["POST"], path: /^\/api\/(prompts\/improve|app-actions\/.*|artifacts\/.*)$/ },
-	{ methods: "all", path: /^\/api\/(sessions(\/.*)?|approvals(\/.*)?|files(\/.*)?|notifications(\/.*)?|push(\/.*)?|goals(\/.*)?|schedules(\/.*)?|snapshot\/.*|chats(\/.*)?|tasks(\/.*)?)$/ },
+	{ methods: "all", path: /^\/api\/(sessions(\/.*)?|approvals(\/.*)?|files(\/.*)?|notifications(\/.*)?|push(\/.*)?|goals(\/.*)?|schedules(\/.*)?|snapshot\/.*|chats(\/.*)?|tasks(\/.*)?|mcp(\/.*)?)$/ },
 ];
 const guestMayCall = (method: string, path: string) => GUEST_ALLOWED.some((a) => (a.methods === "all" || a.methods.includes(method)) && a.path.test(path));
 
@@ -54,6 +54,12 @@ export function gateBefore(app: App, env: Env): (ctx: Ctx, route: Route) => Prom
 		}
 		if (PUBLIC.test(path)) {
 			return (await app.limits.hit("public", clientAddress(req, env), publicLimit, WINDOW_MS)) ? undefined : tooMany("Too many requests. Slow down a little.");
+		}
+		// The MCP endpoint is the API for another assistant: counted per person, like the rest of it.
+		if (path === "/mcp" && method === "POST") {
+			const mcp = await ctx.maybePrincipal().catch(() => null);
+			if (mcp && !(await app.limits.hit("api", mcp.ownerId, api, WINDOW_MS))) return tooMany("Too many requests. Slow down a little.");
+			return undefined;
 		}
 		if (!path.startsWith("/api/")) return undefined;
 		if (path.startsWith("/api/notes") && (await disabledBuiltins(app)).includes("notes")) return { status: 404, body: { error: "not_found", message: "Notes are turned off for everyone by this Pim's admin." } };

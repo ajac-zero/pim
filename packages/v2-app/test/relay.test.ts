@@ -519,12 +519,22 @@ describe("apps with a backend, through the computer", () => {
 		await app.sharing.addMember(owner.principal, circle.id, "rl-friend");
 		const anon = await call(host, "/");
 		expect(anon.status).toBe(302);
-		expect(anon.headers.location).toBe(`http://pim.test/hosted/enter?app=${encodeURIComponent(host.split(".")[0]!)}`);
+		expect(anon.headers.location).toBe(`http://pim.test/hosted/enter?app=${encodeURIComponent(host.split(".")[0]!)}&next=%2F`);
 		const label0 = host.split(".")[0]!;
-		const enter = await call("127.0.0.1", `/hosted/enter?app=${label0}`, { cookie: friend.cookie });
+		// The cookie Pim keeps is not sent with a visit from another site, so the first answer is a page that sends the browser back here itself (`go`); a visit without the cookie then is told to sign in.
+		const interstitial = await call("127.0.0.1", `/hosted/enter?app=${label0}&next=%2Fdash`);
+		expect(interstitial.status).toBe(200);
+		expect(String(interstitial.headers["content-type"])).toContain("text/html");
+		expect(interstitial.body).toContain("url=http://pim.test/hosted/enter");
+		expect(interstitial.body).toContain("go=1");
+		const signedOut = await call("127.0.0.1", `/hosted/enter?app=${label0}&go=1`);
+		expect(signedOut.status).toBe(401);
+		expect(signedOut.body).toContain("Sign in to Pim");
+		const enter = await call("127.0.0.1", `/hosted/enter?app=${label0}&go=1&next=%2Fdash`, { cookie: friend.cookie });
 		expect(enter.status).toBe(302);
 		const to = new URL(enter.headers.location as string);
 		expect(to.hostname).toBe(host);
+		expect(to.pathname).toBe("/dash");
 		const code = to.searchParams.get("pim_enter")!;
 		const exchanged = await call(host, `/dash?pim_enter=${code}`);
 		expect(exchanged.status).toBe(302);
@@ -539,7 +549,7 @@ describe("apps with a backend, through the computer", () => {
 		// The signature is the HMAC of <user id>.<time> under the app's own secret, which a backend can check.
 		expect(headers["x-pim-signature"]).toBe(createHmac("sha256", app.relay.appSecret(owner.account.ownerId, pub.id)).update(`${friend.account.ownerId}.${headers["x-pim-time"]}`).digest("base64url"));
 		// A stranger is not let in; taking the friend out of the circle stops them at their next request.
-		expect((await call("127.0.0.1", `/hosted/enter?app=${label0}`, { cookie: stranger.cookie })).status).toBe(404);
+		expect((await call("127.0.0.1", `/hosted/enter?app=${label0}&go=1`, { cookie: stranger.cookie })).status).toBe(404);
 		await app.sharing.removeMember(owner.principal, circle.id, friend.account.ownerId);
 		expect((await call(host, "/dash", { cookie: appCookie })).status).toBe(404);
 		// Back in, but suspended: the app does not run for anyone while its owner is suspended.

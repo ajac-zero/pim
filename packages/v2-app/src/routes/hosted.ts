@@ -46,6 +46,15 @@ function toReply(r: { status: number; headers: Record<string, string>; body: Uin
 	return { status: r.status, headers, raw: r.body };
 }
 
+const escaped = (text: string) => text.replace(/[&<>"]/g, (char) => `&#${char.charCodeAt(0)};`);
+/** A path inside an app, from what a link carries: it must start with one slash, so it can never name another address. */
+const pathInApp = (raw: string | null) => (raw && /^\/(?!\/|\\)/.test(raw) ? raw : "/");
+const page = (body: string, status = 200, head = ""): Reply => ({
+	status,
+	raw: `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Pim</title>${head}<body style="font:16px system-ui;margin:3rem auto;max-width:32rem;padding:0 1rem">${body}`,
+	headers: { "content-type": "text/html; charset=utf-8", "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'", "referrer-policy": "no-referrer" },
+});
+
 const METHODS = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"] as const;
 
 /**
@@ -59,15 +68,26 @@ export const hostedRoutes: Route[] = [
 		route(method, "/hosted/:owner/:id/:token", async (ctx) => hosted(ctx.app, ctx.req, ctx.params as [string, string, string], "", ctx.url.search)),
 		route(method, "/hosted/:owner/:id/:token/*", async (ctx) => hosted(ctx.app, ctx.req, ctx.params as [string, string, string, string], `/${ctx.params[3] ?? ""}`, ctx.url.search)),
 	]),
-	// A person asks to open an app at its own address: the answer is a minute-long code that address trades for its cookie.
-	route("GET", "/hosted/enter", async ({ app, principal, url, appsOrigin }) => {
+	// A person asks to open an app at its own address: the answer is a minute-long code that address trades for its cookie. The session cookie is SameSite=Strict, so the
+	// visit from the app's address, another site, does not carry it: the first answer only sends the browser on to this address again (`go`), which Pim's own page does, and then it does.
+	route("GET", "/hosted/enter", async ({ app, maybePrincipal, url, appsOrigin }): Promise<Reply> => {
 		if (!appsOrigin) throw new NotFoundError();
 		const label = url.searchParams.get("app") ?? "";
-		const code = await app.apps.enter(await principal(), label);
+		const next = pathInApp(url.searchParams.get("next"));
+		if (!url.searchParams.has("go")) {
+			const again = new URL(url);
+			again.searchParams.set("go", "1");
+			return page(`<p>Opening the app…</p><p><a href="${escaped(again.href)}">Continue</a></p>`, 200, `<meta http-equiv="refresh" content="0;url=${escaped(again.href)}">`);
+		}
+		const p = await maybePrincipal();
+		if (!p) return page(`<h1>Sign in to Pim</h1><p>This app is for people signed in to Pim. <a href="${escaped(new URL("/", url).href)}">Sign in</a>, then open the app again.</p>`, 401);
+		const code = await app.apps.enter(p, label);
 		const target = new URL(appsOrigin);
 		target.hostname = `${label}.${target.hostname}`;
+		target.pathname = next.split("?")[0]!;
+		target.search = next.includes("?") ? next.slice(next.indexOf("?")) : "";
 		target.searchParams.set("pim_enter", code);
-		return { status: 302, headers: { location: target.toString() } };
+		return { status: 302, headers: { location: target.toString(), "referrer-policy": "no-referrer" } };
 	}),
 ];
 
@@ -96,7 +116,7 @@ export async function serveAppOrigin(app: App, req: IncomingMessage, url: URL, l
 	}
 	const visitor = await app.apps.cookieVisitor(label, readCookie(req, APP_COOKIE));
 	if (!(await app.apps.mayOpen(found, visitor))) {
-		if (visitor === null && found.access !== "public") return { status: 302, headers: { location: `${opts.origin}/hosted/enter?app=${encodeURIComponent(label)}` } };
+		if (visitor === null && found.access !== "public") return { status: 302, headers: { location: `${opts.origin}/hosted/enter?app=${encodeURIComponent(label)}&next=${encodeURIComponent(url.pathname + url.search)}` } };
 		throw new NotFoundError();
 	}
 	const body = ["GET", "HEAD"].includes(req.method ?? "GET") ? undefined : await readBody(req, 1_048_576);

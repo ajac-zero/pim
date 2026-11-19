@@ -11,11 +11,22 @@ import { toServiceInput } from "@pim/v2-app/web-providers";
 import { configuredProviders, PROVIDER_IDS, providerName, providerSecrets } from "@pim/v2-app/oauth";
 import type { Principal } from "@pim/v2-contracts/identity";
 import type { IncomingMessage } from "node:http";
-import { randomBytes } from "node:crypto";
 import { CUSTOM_APPS_KEY, type CustomApp, customApps } from "./admin-gallery.ts";
 import { ComposeWorkspaceProvider } from "@pim/coding/workspace/compose";
 import { readDeployment } from "../deployment.ts";
 import { deleted, ms, ok } from "./admin-util.ts";
+import { findSiteIcon } from "./site-icon.ts";
+
+/** Where the Connectors page files a connector; the web app names each. */
+const APP_CATEGORIES = ["productivity", "meetings", "development", "data", "finance", "customers", "websites", "automation", "research", "media"];
+const MAX_APP_NAME = 40;
+/** An icon the admin gave: an https image address, or null for none (a `javascript:` or `data:` address is refused, since it is shown as an image address). */
+const iconGiven = (value: unknown): string | null => {
+	if (value === undefined || value === null || (typeof value === "string" && value.trim() === "")) return null;
+	const url = typeof value === "string" ? value.trim() : "";
+	if (!/^https:\/\/\S+$/.test(url) || url.length > 1000) throw new BadRequestError("icon must be an https URL");
+	return url;
+};
 
 type Env = Readonly<Record<string, string | undefined>>;
 /** Forge's HTTP handler, which owns the coding pools: a Fetch handler that answers null for a path that is not its own. */
@@ -125,7 +136,7 @@ export function screenRoutes(env: Env): Route[] {
 			await admin(app, p, "admin:providers");
 			const existing = (await app.providers.list(p)).find((r) => r.id === params[0] && r.config.shared === true);
 			if (!existing) throw new NotFoundError("No such shared provider");
-			const input = await toServiceInput(await json(), existing);
+			const input = await toServiceInput(await json(), existing, { existingKey: existing.hasKey ? await app.providers.reveal(p.ownerId, existing.id).catch(() => null) : null });
 			return ok({ provider: saved(await app.providers.update(p, params[0]!, input)) });
 		}),
 		route("DELETE", "/api/admin/providers/:id", async ({ app, principal, params }) => {
@@ -140,20 +151,40 @@ export function screenRoutes(env: Env): Route[] {
 		route("POST", "/api/admin/apps", async ({ app, principal, json }) => {
 			await admin(app, await principal(), "admin:apps");
 			const b = await json();
-			if (typeof b.name !== "string" || !b.name.trim()) throw new BadRequestError("A connector needs a name");
+			const name = typeof b.name === "string" ? b.name.trim() : "";
+			if (!name) throw new BadRequestError("A connector needs a name");
+			if (name.length > MAX_APP_NAME) throw new BadRequestError(`name must be at most ${MAX_APP_NAME} characters`);
+			if (b.description !== undefined && b.description !== null && (typeof b.description !== "string" || b.description.length > 1000)) throw new BadRequestError("description must be a string of at most 1000 characters");
 			if (!/^https:\/\//.test(String(b.url ?? "")) && !/^http:\/\/(localhost|127\.0\.0\.1)/.test(String(b.url ?? "")) && !(process.env.PIM_CONNECTOR_ALLOW_PRIVATE === "1" && /^http:\/\//.test(String(b.url ?? "")))) throw new BadRequestError("A connector's url is https");
-			const entry: CustomApp = { id: `${slug(b.name) || "connector"}-${randomBytes(3).toString("hex")}`, name: b.name.trim(), description: String(b.description ?? ""), url: b.url, icon: b.icon ? String(b.icon) : null, category: b.category ? String(b.category) : null };
-			await setSetting(app, CUSTOM_APPS_KEY, [...(await customApps(app)), entry]);
-			return ok({ app: { id: `custom/${entry.id}` } }, 201);
+			const url = String(b.url).trim();
+			if (b.category !== undefined && b.category !== null && b.category !== "" && !APP_CATEGORIES.includes(b.category)) throw new BadRequestError(`category must be one of ${APP_CATEGORIES.join(", ")}`);
+			const given = iconGiven(b.icon);
+			const same = (list: CustomApp[]) => list.some((c) => c.url === url || c.name.toLowerCase() === name.toLowerCase());
+			if (same(await customApps(app))) throw new BadRequestError("A connector with that name or URL is already here");
+			// Its icon is its site's unless one was given; looking takes a while, so it is checked again after.
+			const icon = given ?? (url.startsWith("https://") ? await findSiteIcon(url) : null);
+			const list = await customApps(app);
+			if (same(list)) throw new BadRequestError("A connector with that name or URL is already here");
+			const base = slug(name) || "app";
+			const taken = new Set(list.map((c) => c.id));
+			let id = base;
+			for (let n = 2; taken.has(id); n++) id = `${base}-${n}`;
+			const entry: CustomApp = { id, name, description: typeof b.description === "string" ? b.description.trim() : "", url, icon, category: b.category ? String(b.category) : null };
+			await setSetting(app, CUSTOM_APPS_KEY, [...list, entry]);
+			return ok({ app: { ...entry, id: `custom/${entry.id}` } }, 201);
 		}),
 		route("PUT", "/api/admin/apps/:id", async ({ app, principal, params, json }) => {
 			await admin(app, await principal(), "admin:apps");
 			const b = await json();
 			const id = params[0]!.replace(/^custom\//, "");
-			const list = await customApps(app);
-			if (!list.some((c) => c.id === id)) throw new NotFoundError("No such connector");
-			await setSetting(app, CUSTOM_APPS_KEY, list.map((c) => (c.id === id ? { ...c, ...(typeof b.icon === "string" ? { icon: b.icon || null } : {}), ...(typeof b.name === "string" ? { name: b.name } : {}), ...(typeof b.description === "string" ? { description: b.description } : {}) } : c)));
-			return ok({ app: { id: `custom/${id}` } });
+			const found = (await customApps(app)).find((c) => c.id === id);
+			if (!found) throw new NotFoundError("No such connector");
+			// An icon is an https address; with none given, the site's is looked up again.
+			const icon = "icon" in b || !("name" in b || "description" in b) ? (iconGiven(b.icon) ?? (found.url.startsWith("https://") ? await findSiteIcon(found.url) : null)) : undefined;
+			let changed: CustomApp | undefined;
+			await setSetting(app, CUSTOM_APPS_KEY, (await customApps(app)).map((c) => (c.id === id ? (changed = { ...c, ...(icon !== undefined ? { icon } : {}), ...(typeof b.name === "string" ? { name: b.name } : {}), ...(typeof b.description === "string" ? { description: b.description } : {}) }) : c)));
+			if (!changed) throw new NotFoundError("No such connector");
+			return ok({ app: { ...changed, id: `custom/${id}` } });
 		}),
 		route("DELETE", "/api/admin/apps/:id", async ({ app, principal, params }) => {
 			await admin(app, await principal(), "admin:apps");

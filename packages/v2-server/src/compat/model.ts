@@ -9,7 +9,7 @@ import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
 import { googleProvider } from "@earendil-works/pi-ai/providers/google";
 import { BadRequestError, NotFoundError, PimError } from "@pim/v2-app/errors";
 import { ok, type Route, route } from "@pim/v2-app/http";
-import { toWebProvider } from "@pim/v2-app/web-providers";
+import { providerCatalog, toWebProvider } from "@pim/v2-app/web-providers";
 import { CodexImagesSignIn } from "../codex-images.ts";
 import { offeredModels } from "../deployment.ts";
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
@@ -31,7 +31,36 @@ const catalogInfo = (m: Model<Api>) => ({ id: m.id, name: m.name ?? m.id, contex
 const parse = (v: string | undefined): ModelRef | null => (v && v.includes("/") ? { provider: v.split("/")[0]!, id: v.split("/").slice(1).join("/") } : null);
 const same = (a: ModelRef, b: ModelRef) => a.provider === b.provider && a.id === b.id;
 
+/** pi-ai's catalog by model id, from the first of the services that has each: what a provider's card says of a model its server did not describe. */
+let knownById: Map<string, Model<Api>> | undefined;
+const knownModel = (id: string) => (knownById ??= new Map([anthropicProvider(), openaiProvider(), googleProvider()].flatMap((p) => (p.getModels() as unknown as Model<Api>[]).map((m) => [m.id, m] as const)).reverse())).get(id);
+
+/**
+ * The models this Pim offers everyone, which an admin may give a bot's guests: the deployment's default and its gateway's models, and the providers the admin shared
+ * with everyone. Never the admin's own ChatGPT plan or providers, nor the services only their own key opens.
+ */
+export async function everyoneModels(app: any, p: any, env: Env): Promise<ModelRef[]> {
+	const found: ModelRef[] = [];
+	const add = (provider: string, id: string) => found.some((m) => m.provider === provider && m.id === id) || found.push({ provider, id });
+	const fallback = parse(env.PIM_DEFAULT_MODEL);
+	if (fallback) add(fallback.provider, fallback.id);
+	for (const shared of ((await app.db.anonymous(async (tx: any) => (await tx.query("SELECT pim_app.instance_provider_models() AS p")).rows[0]?.p)) ?? []) as { id: string; models: { id: string }[] }[]) for (const m of shared.models) add(shared.id, m.id);
+	for (const row of await app.providers.shared(p)) {
+		const kind = row.config.builtin ?? row.kind;
+		if (row.hasKey && row.config.builtin && kind !== "openai") for (const m of CATALOGS[kind]?.models() ?? []) if (!row.config.chosen || row.config.chosen.includes(m.id)) add(m.provider, m.id);
+		if (row.kind === "openai_compatible" && Array.isArray(row.config.models)) for (const m of row.config.models) add(`${SHARED}${row.id}`, m.id);
+	}
+	if (env.PIM_AI_GATEWAY_URL) for (const id of offeredModels(env)) add("gateway", id);
+	return found;
+}
+
 export function modelRoutes(env: Env): Route[] {
+	// What the Gate's checks of a provider's form need of pi-ai, which `@pim/v2-app` does not depend on.
+	providerCatalog.builtin = (id) => CATALOGS[id]?.models().map((m) => m.id);
+	providerCatalog.known = (id) => {
+		const m = knownModel(id);
+		return m && { contextWindow: m.contextWindow, maxTokens: m.maxTokens, images: Array.isArray(m.input) && m.input.includes("image"), reasoning: m.reasoning === true };
+	};
 	const setting = (app: any, ownerId: string, key: string): Promise<ModelRef | null> => app.db.owner(ownerId, async (tx: any) => (await tx.query("SELECT value FROM pim_app.owner_settings WHERE key = $1", [key])).rows[0]?.value ?? null);
 
 	async function settings(app: any, p: any) {

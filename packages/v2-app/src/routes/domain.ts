@@ -118,7 +118,7 @@ export const domainRoutes: Route[] = [
 		if (!isWebProviderInput(body)) return ok(await app.providers.update(await principal(), params[0]!, body as never));
 		const p = await principal();
 		const existing = (await app.providers.list(p)).find((x) => x.id === params[0]!);
-		const input = await toServiceInput(body, existing);
+		const input = await toServiceInput(body, existing, { existingKey: existing?.hasKey ? await app.providers.reveal(p.ownerId, params[0]!).catch(() => null) : null });
 		return ok({ provider: toWebProvider(await app.providers.update(p, params[0]!, { ...(input.name ? { name: input.name } : {}), config: input.config, ...(input.apiKey !== undefined ? { apiKey: input.apiKey } : {}) })) });
 	}),
 	route("DELETE", "/api/providers/:id", async ({ app, principal, params }) => (await app.providers.remove(await principal(), params[0]!), none())),

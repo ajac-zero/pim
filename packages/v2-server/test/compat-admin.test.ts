@@ -187,7 +187,10 @@ describe("the web app's apps, gallery and admin routes", () => {
 		expect((await call("bob", "POST", "/api/admin/computer-host")).status).toBe(403);
 		const sign = (await call("ada", "GET", "/api/admin/sign-in")).json.providers;
 		expect(sign.map((p: any) => p.id)).toEqual(["google", "github", "oidc"]);
-		const provider = (await call("ada", "POST", "/api/admin/providers", { name: "Local", url: "http://x/v1", key: "sk-secret" })).json.provider;
+		// A provider is checked before it is kept: a server that cannot be read says so unless its models are named, and a built-in service needs its key.
+		expect(await call("ada", "POST", "/api/admin/providers", { name: "Local", url: "http://127.0.0.1:1/v1", key: "sk-secret" })).toMatchObject({ status: 400, json: { message: expect.stringContaining("couldn't read the models") } });
+		expect(await call("ada", "POST", "/api/admin/providers", { builtin: "openai", models: ["gpt-4.1"] })).toMatchObject({ status: 400, json: { message: "An API key is required" } });
+		const provider = (await call("ada", "POST", "/api/admin/providers", { name: "Local", url: "http://127.0.0.1:1/v1", key: "sk-secret", models: ["local"] })).json.provider;
 		expect(JSON.stringify(provider)).not.toContain("sk-secret");
 		expect(provider.hasKey).toBe(true);
 	});

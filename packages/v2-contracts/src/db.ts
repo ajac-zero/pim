@@ -14,7 +14,7 @@ export const MIGRATION_BANDS: Readonly<Record<MigrationOwner, readonly [number, 
 	forge: [400, 499],
 	operations: [500, 599],
 	/** Grants and functions that span workstreams (what Live may read of the runtime); applied after every other band. */
-	integration: [600, 699],
+	integration: [600, 799],
 };
 
 /** The schema each band's migrations create tables in; foundation creates all of them, and operations only maintains. */

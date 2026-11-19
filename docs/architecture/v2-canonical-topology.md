@@ -42,7 +42,7 @@ A v2 package imports `@pim/v2-contracts` and npm packages. It does not import an
 | 0300–0399 | live | `pim_projection` |
 | 0400–0499 | forge | `pim_forge` |
 | 0500–0599 | operations | maintenance across schemas |
-| 0600–0699 | canonical (`packages/v2-server/migrations`) | grants, numbering and functions across workstreams, applied last (`0600` Live reads the runtime, `0601` Live reads Forge) |
+| 0600–0799 | canonical (`packages/v2-server/migrations`) | grants, numbering and functions across workstreams, applied last (`0600` Live reads the runtime, `0601` Live reads Forge) |
 
 `validateMigrationFiles` in `src/db.ts` checks a directory against its band. Work for an owner goes through `withTenantTransaction`, which sets `pim.owner_id` with `SET LOCAL` semantics so PgBouncer in transaction mode never leaks it.
 

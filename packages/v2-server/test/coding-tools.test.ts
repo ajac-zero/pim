@@ -53,7 +53,7 @@ describe("what an agent reads of a coding thread", () => {
 
 	it("says where a push went", () => {
 		expect(pushedMessage("https://github.com/acme/app", "acme/app", "pushed", "a".repeat(40), "pim/x")).toBe(`Pushed pim/x (${"a".repeat(12)}) to github.com/acme/app: https://github.com/acme/app/compare/pim%2Fx?expand=1 Open a pull request with coding_open_pull_request.`);
-		expect(pushedMessage("https://gitea.example/acme/app", "acme/app", "unchanged", "b".repeat(40), "pim/x")).toBe(`pim/x on gitea.example/acme/app was already at ${"b".repeat(12)}.`);
+		expect(pushedMessage("https://gitea.example.test/acme/app", "acme/app", "unchanged", "b".repeat(40), "pim/x")).toBe(`pim/x on gitea.example.test/acme/app was already at ${"b".repeat(12)}.`);
 		expect(BRANCH_OR_COMMIT.test("pim/x-1")).toBe(true);
 		expect(BRANCH_OR_COMMIT.test("a b")).toBe(false);
 	});

@@ -109,7 +109,7 @@ describe("PostgreSQL pool instrumentation", () => {
 	const db = usePostgres();
 	it("measures connection wait and query time by statement kind without recording SQL text", async () => {
 		const m = createPimMetrics();
-		const pool = new pg.Pool({ connectionString: db.server.url(), max: 1 });
+		const pool = new pg.Pool({ connectionString: db.server.url(), max: 1 }).on("error", () => undefined);
 		instrumentPool(pool, m, "runner");
 		const slow = pool.query("SELECT pg_sleep(0.15), 'secret-looking-literal-sk-live-abcdefghijkl'");
 		const waiting = pool.query("SELECT 1");

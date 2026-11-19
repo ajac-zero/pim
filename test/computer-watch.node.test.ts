@@ -7,7 +7,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { FSWatcher } from "node:fs";
 import { Link, MAX_WATCHES, type Machine, WATCH_DEBOUNCE_MS } from "../computer/pim-computer";
 
-const fake = vi.hoisted(() => ({ failStat: false, watchers: [] as unknown[] }));
+const fake = vi.hoisted(() => ({ failStat: false, mute: false, watchers: [] as unknown[], listeners: [] as ((event: string, name: string) => void)[] }));
 vi.mock("node:fs", async (original) => {
 	const actual = await original<typeof import("node:fs")>();
 	return {
@@ -16,8 +16,13 @@ vi.mock("node:fs", async (original) => {
 			if (fake.failStat) throw Object.assign(new Error("gone"), { code: "EIO" });
 			return actual.statSync(...args);
 		}) as typeof actual.statSync,
-		watch: ((...args: Parameters<typeof actual.watch>) => {
-			const watcher = actual.watch(...args);
+		watch: ((...args: unknown[]) => {
+			// The folder's listener is kept so a test can tell it of a change itself, and the file system's own notifications can be muted meanwhile.
+			const at = args.findIndex((arg) => typeof arg === "function");
+			const listener = args[at] as (event: string, name: string) => void;
+			fake.listeners.push(listener);
+			args[at] = (event: string, name: string) => void (fake.mute || listener(event, name));
+			const watcher = (actual.watch as (...args: unknown[]) => FSWatcher)(...args);
 			vi.spyOn(watcher, "close");
 			fake.watchers.push(watcher);
 			return watcher;
@@ -37,6 +42,7 @@ beforeEach(async () => {
 	link = new Link(machine, (message) => void messages.push(JSON.parse(String(message))));
 });
 afterEach(async () => {
+	fake.mute = false;
 	vi.useRealTimers();
 	link.close();
 	await fs.rm(root, { recursive: true, force: true });
@@ -89,15 +95,30 @@ it("reports a file that exists when it is watched, with its hash", async () => {
 });
 
 it("reports a burst of writes as one event, with the final state, after the debounce", async () => {
-	await fs.writeFile(path.join(root, "c.txt"), "0");
+	const file = path.join(root, "c.txt");
+	await fs.writeFile(file, "0");
 	await call("watch", { path: "/workspace/c.txt" });
+	// The file system tells the folder's listener of a change when it likes, which would race the fake clock: the burst is told to it by hand instead.
+	fake.mute = true;
 	vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-	for (const text of ["1", "22", "333", "4444"]) await fs.writeFile(path.join(root, "c.txt"), text);
-	await vi.waitFor(() => expect(vi.getTimerCount()).toBeGreaterThan(0), { timeout: 3000, interval: 1 });
-	await vi.advanceTimersByTimeAsync(WATCH_DEBOUNCE_MS - 1);
-	expect(events()).toEqual([]);
-	await vi.advanceTimersByTimeAsync(WATCH_DEBOUNCE_MS);
-	await vi.waitFor(() => expect(events()).toHaveLength(1), { interval: 1 });
+	const changed = fake.listeners.at(-1)!;
+	// The Link checks a file after the debounce, reading it from disk. Asking to watch the file again is answered once every check before it is done, on the real clock, which the fake one doesn't move.
+	const checked = async () => {
+		const id = `c${++next}`;
+		link.receive(JSON.stringify({ type: "call", id, op: "watch", args: { path: "/workspace/c.txt" } }));
+		while (!messages.some((message) => message.id === id)) await new Promise((resolve) => setImmediate(resolve));
+	};
+	for (const text of ["1", "22", "333", "4444"]) {
+		await fs.writeFile(file, text);
+		changed("change", "c.txt");
+		// Each write comes inside the debounce of the one before it, though the burst as a whole outlasts it.
+		await vi.advanceTimersByTimeAsync(WATCH_DEBOUNCE_MS - 1);
+		await checked();
+		expect(events()).toEqual([]);
+	}
+	await vi.advanceTimersByTimeAsync(1);
+	await checked();
+	expect(events()).toHaveLength(1);
 	expect(events()[0]).toMatchObject({ kind: "modified", sha256: hash("4444"), size: 4 });
 });
 

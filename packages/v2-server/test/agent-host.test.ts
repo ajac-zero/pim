@@ -284,6 +284,11 @@ real("the default agent host", () => {
 		faux.setResponses([fauxAssistantMessage([], { stopReason: "error", errorMessage: "400 invalid request body" })] as never);
 		expect((await web.call("POST", `/api/sessions/${chat}/messages`, { commandId: "retry-1", text: "what is 2+2" })).status).toBe(202);
 		await waitFor("the failed request", async () => ((await said("invalid request body")) ? true : undefined), 60_000);
+		// The runtime's transcript is ahead of Live's projection, which a retry reads: wait until the error is the last message the Gate would see.
+		await waitFor("the error projected as the chat's last message", async () => {
+			const last = (await d.stack.admin.query("SELECT message FROM pim_projection.chat_transcript_projection WHERE chat_id = $1 AND NOT partial ORDER BY position DESC LIMIT 1", [chat])).rows[0]?.message;
+			return last?.role === "assistant" && last.stopReason === "error" ? true : undefined;
+		}, 60_000);
 		// Nothing to retry in a chat that is not held.
 		const other = (await web.call("POST", "/api/sessions", { title: "Fine" })).json.id as string;
 		expect((await web.call("POST", `/api/sessions/${other}/retry`, {})).status).toBe(409);

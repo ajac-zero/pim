@@ -107,6 +107,8 @@ export function openPools(config: ProcessConfig, metrics: PimMetrics, service: s
 		POOL_NAMES.map((name) => {
 			const budget = config.pools[name];
 			const pool = new pg.Pool({ connectionString: config.databaseUrl, max: budget.max, idleTimeoutMillis: budget.idleTimeoutMs, statement_timeout: budget.statementTimeoutMs, application_name: `pim-${service}-${name}` });
+			// An idle connection that drops is replaced by the pool; without a listener its error would end the process.
+			pool.on("error", () => {});
 			return [name, instrumentPool(pool, metrics, service, name)];
 		}),
 	) as Record<PoolName, Pool>;

@@ -145,8 +145,11 @@ function mutate(random: Random, source: string): string {
 /** More cases for a longer hunt: `UI_FUZZ_SCALE=20 pnpm --filter pim-web test ui-lang.fuzz`. */
 const SCALE = Number(process.env.UI_FUZZ_SCALE ?? 1);
 
-/** Slowest a single case may be, ms. Cases here take a few ms; this is a ceiling that only a runaway meets. */
-const CASE_LIMIT_MS = 1500;
+/**
+ * Slowest a single case may be, ms. The largest take over a second on a starved CI runner, so this is a ceiling only a runaway meets: input of this
+ * size that costs quadratic or worse takes minutes, and the step budgets are what keep the ordinary cases short.
+ */
+const CASE_LIMIT_MS = 15_000;
 
 /** What a source, drawn and driven, must satisfy. */
 function exercise(random: Random, source: string, label: string) {

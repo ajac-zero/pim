@@ -10,7 +10,10 @@ import pg from "pg";
 export type Tx = pg.PoolClient;
 
 export class Db {
-	constructor(readonly pool: pg.Pool) {}
+	constructor(readonly pool: pg.Pool) {
+		// An idle connection that drops is replaced by the pool; without a listener its error would end the process.
+		pool.on("error", () => {});
+	}
 
 	#transaction: SqlPool["transaction"] = async (fn) => {
 		const client = await this.pool.connect();

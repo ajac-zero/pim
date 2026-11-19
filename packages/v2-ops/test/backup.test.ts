@@ -39,7 +39,7 @@ describe("backup, restore and the post-restore safety pass (real PostgreSQL, phy
 		backupDir = join(root, "backups");
 		objects = new FsObjectStore(join(root, "s3"));
 		live = await startEmbeddedPostgres({ dataDir: join(root, "live"), archiveDir });
-		pool = new pg.Pool({ connectionString: live.url(), max: 4 });
+		pool = new pg.Pool({ connectionString: live.url(), max: 4 }).on("error", () => undefined);
 		await migrate(pool, await loadAllMigrations());
 		await buildLegacySnapshot(join(root, "snapshot"));
 		reader = new SnapshotReader(join(root, "snapshot"));
@@ -70,7 +70,7 @@ describe("backup, restore and the post-restore safety pass (real PostgreSQL, phy
 		const manifest = await restorePhysical({ backupDir: join(backupDir, "b1"), archiveDir, targetDataDir: join(dataDir, "data"), objects: new FsObjectStore(join(root, `s3-${name}`)), ...options });
 		const server = await startEmbeddedPostgres({ dataDir, existing: true });
 		restored.push(server);
-		const restoredPool = new pg.Pool({ connectionString: server.url(), max: 4 });
+		const restoredPool = new pg.Pool({ connectionString: server.url(), max: 4 }).on("error", () => undefined);
 		for (let i = 0; i < 60; i++) {
 			try {
 				if (!(await restoredPool.query("SELECT pg_is_in_recovery() AS r")).rows[0].r) break;

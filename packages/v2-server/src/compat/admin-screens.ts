@@ -20,7 +20,7 @@ type Env = Readonly<Record<string, string | undefined>>;
 export type ForgeHandler = (request: Request) => Promise<Response | null>;
 
 const admin = async (app: App, p: Principal, action: string) => app.identity.authz.enforce(p, action);
-const unsupported = (what: string): Reply => ({ status: 501, body: { error: "not_supported", message: `${what} isn't available on this deployment yet.` } });
+const unsupported = (what: string): Reply => ({ status: 501, body: { error: "not_supported", message: `${what} isn't available on this deployment: set its providers in the deployment's environment and its sandbox pools in Coding.` } });
 
 async function ownerOfUsername(app: App, username: string): Promise<string> {
 	const row = await app.db.anonymous(async (tx) => (await tx.query("SELECT owner_id FROM pim_app.accounts WHERE username = $1 AND status <> 'deleted'", [username.toLowerCase()])).rows[0]);
@@ -164,12 +164,14 @@ export function screenRoutes(env: Env): Route[] {
 		route("GET", "/api/admin/compute", async ({ app, principal }) => {
 			await admin(app, await principal(), "admin:compute");
 			const quota = await app.db.anonymous(async (tx) => (await tx.query("SELECT max_concurrent, compute_minutes FROM pim_forge.forge_quotas WHERE subject_type = 'deployment' AND subject_id = '*'")).rows[0]);
+			// The providers coding sandboxes run on are the ones its pools name (the pools themselves are below, from Forge); a provider is set up in the deployment's environment, not here.
+			const names = (await app.db.anonymous(async (tx) => (await tx.query("SELECT DISTINCT provider FROM pim_forge.forge_pools ORDER BY provider")).rows)).map((r) => String(r.provider));
 			// Everyone's sandbox minutes are in rows each owner alone can read, so the deployment's own usage is shown as nothing here.
-			return ok({ providers: [], kinds: [], quota: { maxConcurrentWorkspaces: quota?.max_concurrent === null || quota === undefined ? null : Number(quota.max_concurrent), monthlySandboxMinutes: quota?.compute_minutes === null || quota === undefined ? null : Number(quota.compute_minutes), maxSessionMinutes: null }, usage: { month: new Date().toISOString().slice(0, 7), minutes: 0, running: 0, byProvider: [], top: [] } });
+			return ok({ providers: names.map((id) => ({ id, kind: id, name: id, settings: {}, credentialsSet: {}, codingSandbox: true, agentComputer: false })), kinds: names.map((id) => ({ kind: id, name: id, fields: [] })), quota: { maxConcurrentWorkspaces: quota?.max_concurrent === null || quota === undefined ? null : Number(quota.max_concurrent), monthlySandboxMinutes: quota?.compute_minutes === null || quota === undefined ? null : Number(quota.compute_minutes), maxSessionMinutes: null }, usage: { month: new Date().toISOString().slice(0, 7), minutes: 0, running: 0, byProvider: [], top: [] } });
 		}),
 		...(["POST /api/admin/compute/providers", "PUT /api/admin/compute/providers/:id", "DELETE /api/admin/compute/providers/:id", "POST /api/admin/compute/providers/:id/validate"] as const).map((spec) => {
 			const [method, path] = spec.split(" ") as [string, string];
-			return route(method, path, async ({ app, principal }) => (await admin(app, await principal(), "admin:compute"), unsupported("Managed compute")));
+			return route(method, path, async ({ app, principal }) => (await admin(app, await principal(), "admin:compute"), unsupported("Changing a compute provider here")));
 		}),
 	];
 }

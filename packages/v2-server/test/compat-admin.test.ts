@@ -161,6 +161,12 @@ describe("the web app's apps, gallery and admin routes", () => {
 		expect((await call("ada", "DELETE", `/api/admin/apps/${encodeURIComponent(added)}`, {})).json).toEqual({ deleted: true });
 		expect((await call("bob", "GET", "/api/app-directory")).json.apps).toEqual([]);
 		expect((await call("ada", "GET", "/api/admin/compute")).json).toMatchObject({ providers: [], quota: { maxConcurrentWorkspaces: null } });
+		// The providers the sandbox pools run on are what the Compute screen lists; changing one is the deployment's environment's, and a member sees nothing of it.
+		await stack.admin.query("INSERT INTO pim_forge.forge_pools (pool_id, provider, size) VALUES ('default', 'sandbox-manager', 4), ('spare', 'sandbox-manager', 2)");
+		expect((await call("ada", "GET", "/api/admin/compute")).json).toMatchObject({ providers: [{ id: "sandbox-manager", kind: "sandbox-manager", name: "sandbox-manager", codingSandbox: true, agentComputer: false, credentialsSet: {} }], kinds: [{ kind: "sandbox-manager", fields: [] }] });
+		expect((await call("bob", "GET", "/api/admin/compute")).status).toBe(403);
+		expect((await call("ada", "POST", "/api/admin/compute/providers", { kind: "e2b" })).json).toMatchObject({ error: "not_supported", message: expect.stringContaining("environment") });
+		await stack.admin.query("DELETE FROM pim_forge.forge_pools");
 		expect((await call("ada", "GET", "/api/admin/computer-host")).json).toMatchObject({ paired: false, connected: false });
 		// Pairing it is the computer host's own tests (computer-host.test.ts): a member cannot.
 		expect((await call("bob", "POST", "/api/admin/computer-host")).status).toBe(403);

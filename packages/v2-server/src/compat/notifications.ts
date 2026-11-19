@@ -2,6 +2,7 @@
  * The bell and the devices: the notifications the web app lists and marks read, and the Web Push subscription routes it calls. What makes the notifications and
  * sends the pushes is `../notifier.ts`, run by the maintenance role.
  */
+import type { App } from "@pim/v2-app/app";
 import { BadRequestError, CapabilityUnavailableError, NotFoundError } from "@pim/v2-app/errors";
 import { ok, route, type Route } from "@pim/v2-app/http";
 import { validSubscription, vapidFromEnv } from "../push.ts";
@@ -22,6 +23,12 @@ const view = (r: Record<string, any>) => ({
 	createdAt: ms(r.created_at),
 	readAt: ms(r.read_at),
 });
+
+/** One notification as the web app reads it, or undefined once it is gone. */
+export async function notificationOf(app: App, ownerId: string, id: string) {
+	const row = await app.db.owner(ownerId, async (tx) => (await tx.query(`${SELECT} WHERE n.id = $1`, [id])).rows[0]);
+	return row ? view(row) : undefined;
+}
 
 export function notificationRoutes(env: Record<string, string | undefined>): Route[] {
 	const keys = vapidFromEnv(env);

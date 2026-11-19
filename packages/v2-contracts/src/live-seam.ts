@@ -36,6 +36,10 @@ export const pulseSubjects = {
 	chat: (ownerId: OwnerId, chatId: string) => `${NATS_SUBJECT_ROOT}.${ownerId}.chat.${chatId}`,
 	sidebar: (ownerId: OwnerId) => `${NATS_SUBJECT_ROOT}.${ownerId}.sidebar`,
 	coding: (ownerId: OwnerId, threadId: string) => `${NATS_SUBJECT_ROOT}.${ownerId}.coding.${threadId}`,
+	/** What happened in an owner's space that their open apps should hear of at once (a notification, an approval, a setting, a computer, a file): ephemeral, never replayed. */
+	notice: (ownerId: OwnerId) => `${NATS_SUBJECT_ROOT}.${ownerId}.notice`,
+	/** What an owner's apps ask of the server over their Live socket (watch a file, answer a canvas query): ephemeral, answered by whichever process holds what is asked about. */
+	say: (ownerId: OwnerId) => `${NATS_SUBJECT_ROOT}.${ownerId}.say`,
 } as const;
 
 /** The only thing a Pulse message holds: where to catch up from. */
@@ -55,9 +59,16 @@ export const EventFrame = z.object({ type: z.literal("event"), topic: z.string()
 export const CoalescedProgressFrame = z.object({ type: z.literal("coalesced_progress"), topic: z.string(), cursor: z.string(), skipped: z.number().int().nonnegative(), data: z.unknown() });
 /** The client is too far behind or on another projection version: fetch a snapshot, then subscribe from its cursor. */
 export const SnapshotRequiredFrame = z.object({ type: z.literal("snapshot_required"), topic: z.string(), reason: z.enum(["gap", "projection_version", "expired"]) });
+/**
+ * Something that happened that an open app should react to now, with no cursor and no replay: a reconnecting app reloads what it shows. `kind` names it (`notification`,
+ * `approval`, `settings`, `computer`, `tasks`, `visits`, `file_changed`, `file_resync`, `canvas_open`, `canvas_query`) and `data` is small.
+ */
+export const NoticeFrame = z.object({ type: z.literal("notice"), kind: z.string().max(64), data: z.unknown().optional() });
+/** An app asks the server for something that is not a topic: `watch_file`, `unwatch_file` or `canvas_answer`. It travels on to whatever process answers it, and nothing comes back but notices. */
+export const SayFrame = z.object({ type: z.literal("say"), kind: z.string().max(64), data: z.unknown().optional() });
 export const ErrorFrame = z.object({ type: z.literal("error"), code: z.string(), message: z.string() });
 
-export const ClientFrame = z.discriminatedUnion("type", [SubscribeFrame, UnsubscribeFrame, AckFrame]);
-export const ServerFrame = z.discriminatedUnion("type", [CursorReplayFrame, EventFrame, CoalescedProgressFrame, SnapshotRequiredFrame, AckFrame, ErrorFrame]);
+export const ClientFrame = z.discriminatedUnion("type", [SubscribeFrame, UnsubscribeFrame, AckFrame, SayFrame]);
+export const ServerFrame = z.discriminatedUnion("type", [CursorReplayFrame, EventFrame, CoalescedProgressFrame, SnapshotRequiredFrame, AckFrame, NoticeFrame, ErrorFrame]);
 export type ClientFrame = z.infer<typeof ClientFrame>;
 export type ServerFrame = z.infer<typeof ServerFrame>;

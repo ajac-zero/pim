@@ -212,9 +212,19 @@ export class PimClient {
         onSidebarSummary: (row) => this.handlers.onSidebarSummary?.(row),
         onCodingSummary: () => this.handlers.onCodingSummary?.(),
         onUnauthorized: () => this.handlers.onUnauthorized?.(),
+        onNotice: (kind, data) => this.#notice(kind, data),
+        onReconnected: () => {
+          // Notices said while the socket was down were missed: what they stand for is read again.
+          this.handlers.onSessions?.();
+          this.handlers.onSettings?.();
+          this.handlers.onComputer?.();
+          this.handlers.onVisits?.();
+        },
       },
       onChat: (chat) => this.#chatArrived(chat),
-      onStatus: (status) =>
+      onStatus: (status) => {
+        // A new connection holds none of the files this app asked to hear of.
+        if (status === "live") this.#rewatch();
         this.#set({
           connection:
             status === "live"
@@ -222,9 +232,24 @@ export class PimClient {
               : status === "offline"
                 ? "closed"
                 : "connecting",
-        }),
+        });
+      },
     });
     return this.#v2;
+  }
+
+  /** Pim v2: what the Live service says happened (a notice) is handled as the chat's own socket's messages were. */
+  #notice(kind: string, data: unknown) {
+    const body = (
+      typeof data === "object" && data !== null ? data : {}
+    ) as Record<string, unknown>;
+    const message =
+      kind === "notification"
+        ? { type: kind, notification: data }
+        : kind === "approval"
+          ? { type: kind, approval: data }
+          : { ...body, type: kind };
+    this.#receive(message as unknown as ServerMessage);
   }
 
   /** Pim v2: the sidebar follows the live service for as long as the app is open. */
@@ -311,6 +336,10 @@ export class PimClient {
   }
 
   #sendFile(type: "watch_file" | "unwatch_file", path: string) {
+    if (serverGeneration() === "v2") {
+      this.#v2?.say(type, { path });
+      return;
+    }
     if (this.#socket?.readyState === WebSocket.OPEN) {
       this.#socket.send(JSON.stringify({ type, path }));
     }
@@ -330,6 +359,10 @@ export class PimClient {
   }
 
   answerCanvas(request: string, answer: CanvasAnswer) {
+    if (serverGeneration() === "v2") {
+      this.#v2?.say("canvas_answer", { request, ...answer });
+      return;
+    }
     if (this.#socket?.readyState !== WebSocket.OPEN) return;
     this.#socket.send(
       JSON.stringify({ type: "canvas_answer", request, ...answer }),

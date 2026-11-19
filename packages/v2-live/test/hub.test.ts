@@ -68,6 +68,50 @@ live("Live bridge over PostgreSQL", () => {
 		expect(transport.events(TOPIC)[0]).toMatchObject({ type: "event", kind: "message", cursor: `${P1}:1:3` });
 	});
 
+	it("tells an owner's open apps what happened at once, without a topic or a replay, to that owner's sockets only", async () => {
+		const mine = new FakeTransport();
+		const other = new FakeTransport();
+		const sideways = new FakeTransport();
+		hub.connect(principal(ADA, "s1"), mine);
+		hub.connect(principal(ADA, "s2"), sideways);
+		hub.connect(principal(GRACE, "s1"), other);
+		await pulse.publishNotice(ADA, { kind: "settings" });
+		await pulse.publishNotice(ADA, { kind: "approval", data: { id: "ap1" } });
+		await until(() => mine.of("notice").length === 2, "both notices");
+		expect(mine.of("notice")).toEqual([{ type: "notice", kind: "settings" }, { type: "notice", kind: "approval", data: { id: "ap1" } }]);
+		expect(sideways.of("notice")).toHaveLength(2);
+		expect(other.of("notice")).toEqual([]);
+		// Every Gate replica that heard of a change says so: the socket is told once.
+		await pulse.publishNotice(ADA, { kind: "approval", data: { id: "ap2" }, key: "tx1:approvals:ap2" });
+		await pulse.publishNotice(ADA, { kind: "approval", data: { id: "ap2" }, key: "tx1:approvals:ap2" });
+		await until(() => mine.of("notice").length === 3, "the keyed notice");
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		expect(mine.of("notice")).toHaveLength(3);
+		// A socket that connects later hears nothing of what came before.
+		const late = new FakeTransport();
+		hub.connect(principal(ADA, "s3"), late);
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		expect(late.of("notice")).toEqual([]);
+	});
+
+	it("passes on what an app asks of the server, with its socket's name, and says when the socket ends", async () => {
+		const heard: { owner: string; kind: string; connection: string; data?: unknown }[] = [];
+		pulse.onSay((owner, said) => heard.push({ owner, ...said }));
+		const transport = new FakeTransport();
+		const connection = hub.connect(principal(ADA, "s1"), transport);
+		await connection.receive(JSON.stringify({ type: "say", kind: "watch_file", data: { path: "/workspace/a.md" } }));
+		await until(() => heard.length === 1, "what it said");
+		expect(heard[0]).toEqual({ owner: ADA, kind: "watch_file", data: { path: "/workspace/a.md" }, connection: connection.id });
+		connection.close(1000, "bye");
+		await until(() => heard.length === 2, "its end");
+		expect(heard[1]).toMatchObject({ kind: "closed", connection: connection.id });
+		// A socket that said nothing has nothing to end.
+		const quiet = hub.connect(principal(ADA, "s2"), new FakeTransport());
+		quiet.close(1000, "bye");
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		expect(heard).toHaveLength(2);
+	});
+
 	it("stops delivering a topic after unsubscribe, keeps the others on the same connection, and ignores a topic it never followed", async () => {
 		const { transport, connection } = await open(TOPIC);
 		await connection.receive(JSON.stringify({ type: "subscribe", topic: "sidebar" }));

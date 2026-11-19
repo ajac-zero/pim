@@ -13,6 +13,7 @@ import { Memories } from "./memory.ts";
 import { Quota } from "./quota.ts";
 import { Providers } from "./providers.ts";
 import { RateLimits } from "./ratelimit.ts";
+import { Notices } from "./notices.ts";
 import { Sharing, type TranscriptSource } from "./sharing.ts";
 import { Triggers } from "./triggers.ts";
 import { Usage } from "./usage.ts";
@@ -60,6 +61,9 @@ export class App {
 		this.schedules.quota = this.quota;
 		return this;
 	}
+
+	/** Tells a person's open apps what happened at once (a canvas to open, a file that changed); connected to the bus by the process that has one. */
+	readonly notices = new Notices();
 
 	constructor(readonly db: Db, store: ObjectStore, opts: { hideSuspended?: boolean; providers?: Partial<Record<ProviderId, ProviderSettings>>; crypto?: EnvelopeCrypto; appKey?: string; fetchTools?: ToolFetcher; exchange?: CodeExchanger; transcripts?: TranscriptSource; chatgpt?: ChatGPTOptions; env?: Record<string, string | undefined>; mcpReplyWaitMs?: number; allowHttpConnectors?: boolean } = {}) {
 		this.identity = new Identity(db);

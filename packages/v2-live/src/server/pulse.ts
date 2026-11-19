@@ -5,7 +5,7 @@
  * PostgreSQL log (see hub.ts).
  */
 import { connect, type NatsConnection } from "@nats-io/transport-node";
-import { NATS_SUBJECT_ROOT, type PulseHint } from "@pim/v2-contracts/live-seam";
+import { NATS_SUBJECT_ROOT, type PulseHint, pulseSubjects } from "@pim/v2-contracts/live-seam";
 import { OwnerId } from "@pim/v2-contracts/identity";
 import { subjectOf } from "../contracts.ts";
 
@@ -16,8 +16,22 @@ export interface Pulse {
 	/** Tells every Live replica that an owner's access (or one session of it) ended, so they need not wait for their next check. */
 	publishRevocation(ownerId: string, sessionId?: string): Promise<void>;
 	onRevocation(handler: (revocation: { ownerId: string; sessionId?: string }) => void): () => void;
+	/** Tells an owner's open apps something at once (see the contracts' `NoticeFrame`): best effort, never stored. */
+	publishNotice(ownerId: string, notice: Notice): Promise<void>;
+	subscribeNotices(ownerId: string, handler: (notice: Notice) => void): () => void;
+	/** What an owner's apps said over their Live sockets (`SayFrame`), for whichever process answers it; `connection` names the socket, so what it asked for can end with it. */
+	publishSay(ownerId: string, said: Said): Promise<void>;
+	/** Every owner's: a process that holds computers hears for all of them. */
+	onSay(handler: (ownerId: string, said: Said) => void): () => void;
 	close(): Promise<void>;
 }
+
+/** `key` names the change, so a notice told twice (by every Gate replica that heard it) is delivered once. */
+export type Notice = { kind: string; data?: unknown; key?: string };
+export type Said = { kind: string; data?: unknown; connection: string };
+/** The most a notice or what an app says may weigh: both are hints, not payloads. */
+export const MAX_NOTICE_BYTES = 32_768;
+const ALL_SAY = `${NATS_SUBJECT_ROOT}.*.say`;
 
 const revocationSubject = (ownerId: string) => `${NATS_SUBJECT_ROOT}.${OwnerId.parse(ownerId)}.revoked`;
 const ALL_REVOCATIONS = `${NATS_SUBJECT_ROOT}.*.revoked`;
@@ -66,6 +80,47 @@ export class NatsPulse implements Pulse {
 					handler(message.json());
 				} catch {
 					// Ignored: the periodic check catches it.
+				}
+			},
+		});
+		return () => sub.unsubscribe();
+	}
+
+	async publishNotice(ownerId: string, notice: Notice): Promise<void> {
+		const body = JSON.stringify(notice);
+		if (body.length <= MAX_NOTICE_BYTES) this.#nc.publish(pulseSubjects.notice(OwnerId.parse(ownerId)), this.#codec.encode(body));
+	}
+
+	subscribeNotices(ownerId: string, handler: (notice: Notice) => void): () => void {
+		const sub = this.#nc.subscribe(pulseSubjects.notice(OwnerId.parse(ownerId)), {
+			callback: (error, message) => {
+				if (error) return;
+				try {
+					const notice = message.json<Notice>();
+					if (typeof notice?.kind === "string") handler(notice);
+				} catch {
+					// A malformed notice is a missed one.
+				}
+			},
+		});
+		return () => sub.unsubscribe();
+	}
+
+	async publishSay(ownerId: string, said: Said): Promise<void> {
+		const body = JSON.stringify(said);
+		if (body.length <= MAX_NOTICE_BYTES) this.#nc.publish(pulseSubjects.say(OwnerId.parse(ownerId)), this.#codec.encode(body));
+	}
+
+	onSay(handler: (ownerId: string, said: Said) => void): () => void {
+		const sub = this.#nc.subscribe(ALL_SAY, {
+			callback: (error, message) => {
+				if (error) return;
+				try {
+					const owner = OwnerId.safeParse(message.subject.split(".")[3]);
+					const said = message.json<Said>();
+					if (owner.success && typeof said?.kind === "string" && typeof said.connection === "string") handler(owner.data, said);
+				} catch {
+					// A malformed message is a missed one.
 				}
 			},
 		});
@@ -131,8 +186,35 @@ export class MemoryPulse implements Pulse {
 		return () => this.#revocations.delete(handler);
 	}
 
+	readonly #notices = new Map<string, Set<(notice: Notice) => void>>();
+	readonly #says = new Set<(ownerId: string, said: Said) => void>();
+
+	async publishNotice(ownerId: string, notice: Notice): Promise<void> {
+		if (this.down) return;
+		for (const handler of this.#notices.get(ownerId) ?? []) queueMicrotask(() => handler(notice));
+	}
+
+	subscribeNotices(ownerId: string, handler: (notice: Notice) => void): () => void {
+		const set = this.#notices.get(ownerId) ?? new Set();
+		this.#notices.set(ownerId, set);
+		set.add(handler);
+		return () => set.delete(handler);
+	}
+
+	async publishSay(ownerId: string, said: Said): Promise<void> {
+		if (this.down) return;
+		for (const handler of this.#says) queueMicrotask(() => handler(ownerId, said));
+	}
+
+	onSay(handler: (ownerId: string, said: Said) => void): () => void {
+		this.#says.add(handler);
+		return () => this.#says.delete(handler);
+	}
+
 	async close(): Promise<void> {
 		this.#subs.clear();
 		this.#revocations.clear();
+		this.#notices.clear();
+		this.#says.clear();
 	}
 }

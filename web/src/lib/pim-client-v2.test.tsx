@@ -457,4 +457,113 @@ describe("a chat and the sidebar on Pim v2, with the socket still connecting", (
     expect(onUnauthorized).toHaveBeenCalledTimes(1);
     expect(client.getState().connection).toBe("closed");
   });
+
+  it("hears what the Live service says happened: a notification, an approval, a setting, the computer, tasks, a visit", async () => {
+    const { fetchImpl } = server({
+      c1: { messages: [], nextBefore: null, liveCursor: null },
+    });
+    vi.stubGlobal("fetch", fetchImpl);
+    const handlers = {
+      onNotification: vi.fn(),
+      onApproval: vi.fn(),
+      onSettings: vi.fn(),
+      onComputer: vi.fn(),
+      onTasks: vi.fn(),
+      onVisits: vi.fn(),
+    };
+    const client = new PimClient();
+    client.handlers = handlers;
+    client.open("c1");
+    await flush();
+    const socket = LiveSocket.at(0);
+    socket.open();
+    const notification = {
+      id: "n1",
+      kind: "mention",
+      title: "Ada",
+      body: "hi",
+    };
+    const approval = { id: "ap1", action: "http_request", status: "pending" };
+    socket.say({ type: "notice", kind: "notification", data: notification });
+    socket.say({ type: "notice", kind: "approval", data: approval });
+    socket.say({ type: "notice", kind: "settings" });
+    socket.say({ type: "notice", kind: "computer" });
+    socket.say({ type: "notice", kind: "tasks", data: { session: "c1" } });
+    socket.say({ type: "notice", kind: "visits" });
+    expect(handlers.onNotification).toHaveBeenCalledWith(notification);
+    expect(handlers.onApproval).toHaveBeenCalledWith(approval);
+    expect(handlers.onSettings).toHaveBeenCalledTimes(1);
+    expect(handlers.onComputer).toHaveBeenCalledTimes(1);
+    expect(handlers.onTasks).toHaveBeenCalledWith("c1");
+    expect(handlers.onVisits).toHaveBeenCalledTimes(1);
+  });
+
+  it("asks the server to watch a file, hears of its changes, answers an agent's canvas question, and asks again after a reconnect", async () => {
+    const { fetchImpl } = server({
+      c1: { messages: [], nextBefore: null, liveCursor: null },
+    });
+    vi.stubGlobal("fetch", fetchImpl);
+    const client = new PimClient();
+    const onSessions = vi.fn();
+    client.handlers = { onSessions };
+    client.open("c1");
+    await flush();
+    const socket = LiveSocket.at(0);
+    const changes: unknown[] = [];
+    // Watching before the socket is up is asked for as it comes up.
+    const stop = client.watchFile("/workspace/a.md", (change) =>
+      changes.push(change),
+    );
+    socket.open();
+    const said = () => socket.sent.filter((frame) => frame.type === "say");
+    expect(said()).toEqual([
+      { type: "say", kind: "watch_file", data: { path: "/workspace/a.md" } },
+    ]);
+    socket.say({
+      type: "notice",
+      kind: "file_changed",
+      data: {
+        path: "/workspace/a.md",
+        kind: "modified",
+        sha256: "abc",
+        size: 3,
+      },
+    });
+    expect(changes).toEqual([{ kind: "modified", sha256: "abc", size: 3 }]);
+    // An agent asks what the canvas shows; the app answers on the same socket.
+    const requests: unknown[] = [];
+    client.listenCanvas((request) => requests.push(request));
+    socket.say({
+      type: "notice",
+      kind: "canvas_query",
+      data: { session: "c1", request: "r1", what: "tabs" },
+    });
+    expect(requests).toEqual([{ type: "query", request: "r1", what: "tabs" }]);
+    client.answerCanvas("r1", { tabs: [], active: null } as never);
+    expect(said().at(-1)).toMatchObject({
+      kind: "canvas_answer",
+      data: { request: "r1" },
+    });
+    // The socket drops and comes back as a new connection: what it held is asked for again, and what notices said meanwhile is read again.
+    vi.useFakeTimers();
+    try {
+      socket.drop();
+      expect(onSessions).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(20_000);
+    } finally {
+      vi.useRealTimers();
+    }
+    const again = LiveSocket.at(LiveSocket.all.length - 1);
+    again.open();
+    expect(again.sent.filter((frame) => frame.type === "say")).toEqual([
+      { type: "say", kind: "watch_file", data: { path: "/workspace/a.md" } },
+    ]);
+    expect(onSessions).toHaveBeenCalledTimes(1);
+    stop();
+    expect(again.sent.filter((frame) => frame.type === "say").at(-1)).toEqual({
+      type: "say",
+      kind: "unwatch_file",
+      data: { path: "/workspace/a.md" },
+    });
+  });
 });

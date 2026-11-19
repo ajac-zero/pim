@@ -526,6 +526,8 @@ export class Relay {
 	#bus: RelayBus | null = null;
 	/** Set by the Gate, so a computer's triggers frames have somewhere to go. */
 	computerTriggers: ComputerTriggersHost | null = null;
+	/** Told when an owner's computer is paired, forgotten, connects or drops, so their open apps show it (set by the Gate; the Live service carries it on). */
+	changed: ((ownerId: string) => void) | null = null;
 	/** Names this process on the bus, so it hears its own notices as its own. */
 	#holder = newId("relay");
 	/** The owners whose computer this process holds, with what it does on the bus for them while it does. */
@@ -558,6 +560,7 @@ export class Relay {
 			await tx.query("INSERT INTO pim_app.computers (id, owner_id, name, protocol, consumer_id) VALUES ($1,$2,$3,$4,$5)", [computerId, p.ownerId, name, protocol, consumer.id]);
 		});
 		this.disconnect(p.ownerId);
+		this.changed?.(p.ownerId);
 		return { computerId, token: consumer.token };
 	}
 
@@ -569,6 +572,7 @@ export class Relay {
 			await tx.query("UPDATE pim_app.token_consumers SET revoked_at = coalesce(revoked_at, now()) WHERE kind = 'computer'");
 		});
 		this.disconnect(p.ownerId);
+		this.changed?.(p.ownerId);
 	}
 
 	async status(p: Principal) {
@@ -601,13 +605,17 @@ export class Relay {
 		this.#links.set(p.ownerId, conn);
 		previous?.close(REPLACED, "Another computer connected with this token");
 		this.#serve(p.ownerId, conn);
+		this.changed?.(p.ownerId);
 		return conn;
 	}
 
 	/** The socket closed. A replaced connection does not remove its successor. */
 	disconnected(conn: ComputerConnection): void {
 		conn.closed();
-		if (this.#links.get(conn.ownerId) === conn) this.#unlink(conn.ownerId);
+		if (this.#links.get(conn.ownerId) === conn) {
+			this.#unlink(conn.ownerId);
+			this.changed?.(conn.ownerId);
+		}
 	}
 
 	disconnect(ownerId: string, code = 1000, reason = "Unpaired"): void {

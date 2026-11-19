@@ -43,6 +43,7 @@ type Frame =
 			topic: string;
 			reason: "gap" | "projection_version" | "expired";
 		}
+	| { type: "notice"; kind: string; data?: unknown }
 	| { type: "error"; code: string; message: string };
 
 /** What the page is told of each frame that carries state. */
@@ -78,6 +79,8 @@ export type LiveClientOptions = {
 	/** Fetches and shows a topic's bounded page over HTTP; resolves with its cursor. */
 	loadSnapshot: (topic: string) => Promise<Snapshot>;
 	onUpdate: (update: LiveUpdate) => void;
+	/** Something happened that the page should react to now (a notification, an approval, a setting, a file): told once, never replayed, so a page that was offline reloads what it shows. */
+	onNotice?: (notice: { kind: string; data: unknown }) => void;
 	onStatus?: (status: LiveStatus) => void;
 	/** Access ended: wipe this device's kept views and show the sign-in screen. */
 	onUnauthorized: () => void;
@@ -158,6 +161,13 @@ export class LiveClient {
 		}
 		if (wanted.size === 0) this.#hangUp();
 		this.#refresh();
+	}
+
+	/** Asks the server for something that is not a topic (watch a file, answer a canvas query); false when the socket is not open to say it. */
+	say(kind: string, data?: unknown): boolean {
+		if (!this.#open) return false;
+		this.#send({ type: "say", kind, ...(data === undefined ? {} : { data }) });
+		return true;
 	}
 
 	/** Signing out, or access ended: nothing more is read or opened. */
@@ -272,6 +282,9 @@ export class LiveClient {
 				this.#queueAck();
 				return;
 			}
+			case "notice":
+				this.#options.onNotice?.({ kind: frame.kind, data: frame.data });
+				return;
 			case "snapshot_required":
 				if (this.#topics.has(frame.topic)) void this.#snapshot(frame.topic);
 				this.#refresh();

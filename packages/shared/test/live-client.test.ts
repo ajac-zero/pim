@@ -264,4 +264,40 @@ describe("LiveClient", () => {
 			{ type: "subscribe", topic: "chat:a", cursor: at(3) },
 		]);
 	});
+
+	it("passes on a notice as it is, with no cursor to dedupe by, and says what an app asks of the server only while the socket is open", async () => {
+		const notices: unknown[] = [];
+		const sockets: FakeSocket[] = [];
+		const client = new LiveClient({
+			openSocket: () => {
+				const socket = new FakeSocket();
+				sockets.push(socket);
+				return socket;
+			},
+			loadSnapshot: async () => ({ liveCursor: at(1) }),
+			onUpdate: () => {},
+			onNotice: (notice) => notices.push(notice),
+			onUnauthorized: () => {},
+			schedule: () => 0,
+			cancel: () => {},
+		});
+		client.follow(["sidebar"]);
+		expect(client.say("watch_file", { path: "/workspace/a" })).toBe(false);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		sockets[0]!.open();
+		expect(client.say("watch_file", { path: "/workspace/a" })).toBe(true);
+		expect(sockets[0]!.sent.at(-1)).toEqual({
+			type: "say",
+			kind: "watch_file",
+			data: { path: "/workspace/a" },
+		});
+		// The same notice twice is two notices: whether it repeats is the server's to say.
+		for (let i = 0; i < 2; i++) sockets[0]!.say({ type: "notice", kind: "settings" });
+		sockets[0]!.say({ type: "notice", kind: "approval", data: { id: "a1" } });
+		expect(notices).toEqual([
+			{ kind: "settings", data: undefined },
+			{ kind: "settings", data: undefined },
+			{ kind: "approval", data: { id: "a1" } },
+		]);
+	});
 });

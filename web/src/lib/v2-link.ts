@@ -87,6 +87,10 @@ export type V2Handlers = {
   onSidebarSummary(row: SidebarRow): void;
   onCodingSummary(): void;
   onUnauthorized(): void;
+  /** Something happened in the person's space that the app should react to now: `kind` is a notification, an approval, a setting, a computer, tasks, visits, a file or a canvas request. */
+  onNotice(kind: string, data: unknown): void;
+  /** The Live socket is back after it dropped: what notices said meanwhile was missed, so what they stand for is read again. */
+  onReconnected(): void;
 };
 
 export type V2Chat = {
@@ -110,6 +114,8 @@ export class V2Link {
   /** Which chats the sidebar last said are at work. A chat's own messages can't say so while a long tool call writes nothing, so every view of a chat is settled by this. */
   readonly #busy = new Map<string, boolean>();
   readonly #onChat: (chat: V2Chat) => void;
+  #everLive = false;
+  #dropped = false;
 
   constructor(options: {
     handlers: V2Handlers;
@@ -130,7 +136,15 @@ export class V2Link {
           ) as unknown as LiveSocket),
       loadSnapshot: (topic) => this.#snapshot(topic),
       onUpdate: (update) => this.#update(update),
-      onStatus: options.onStatus,
+      onNotice: ({ kind, data }) => this.#handlers.onNotice(kind, data),
+      onStatus: (status) => {
+        if (status === "live" && this.#dropped) {
+          this.#dropped = false;
+          this.#handlers.onReconnected();
+        } else if (status !== "live" && this.#everLive) this.#dropped = true;
+        if (status === "live") this.#everLive = true;
+        options.onStatus(status);
+      },
       onUnauthorized: () => this.#handlers.onUnauthorized(),
     });
   }
@@ -161,6 +175,11 @@ export class V2Link {
 
   stop(): void {
     this.#live.stop();
+  }
+
+  /** Asks the server for something that is not a topic, such as watching a file; false when the socket is not open. */
+  say(kind: string, data?: unknown): boolean {
+    return this.#live.say(kind, data);
   }
 
   async #snapshot(topic: string): Promise<{ liveCursor: string | null }> {

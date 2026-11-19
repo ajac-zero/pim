@@ -51,7 +51,9 @@ export class AppLiveIdentity implements LiveIdentity {
 export class LiveAuthorizer implements Authorizer {
 	async authorize(request: AuthzRequest) {
 		const p = request.principal;
-		if (p.kind === "token" && !p.scopes.some((s) => s === "*" || s === "api:*" || s === "api:read" || s === "live:*" || s === "live:subscribe")) throw new ForbiddenError(request.action, "the token's scopes do not read");
+		// What a token may follow is what it may read; what an app asks of the server over the socket (a watched file, a canvas answer) takes more than that.
+		const reads = request.action === "live:say" ? ["*", "api:*", "live:*"] : ["*", "api:*", "api:read", "live:*", "live:subscribe"];
+		if (p.kind === "token" && !p.scopes.some((s) => reads.includes(s))) throw new ForbiddenError(request.action, "the token's scopes do not read");
 		return { outcome: "allow" as const };
 	}
 }
@@ -92,8 +94,8 @@ export function publishRevocations(app: App, pulse: Pulse): void {
  */
 export function deliverApprovalDecisions(app: App): void {
 	const decide = app.approvals.decide.bind(app.approvals);
-	app.approvals.decide = async (p, approvalId, approve) => {
-		await decide(p, approvalId, approve);
+	app.approvals.decide = async (p, approvalId, approve, note) => {
+		await decide(p, approvalId, approve, note);
 		const row = await app.db.owner(p.ownerId, async (tx) => (await tx.query("SELECT public_chat_id, args FROM pim_app.approvals WHERE id = $1", [approvalId])).rows[0]);
 		const taskId = row?.args?.taskId;
 		// A guest's call that asked the host: the parked task is in the guest's own chat, so the decision is admitted there, as the guest's.

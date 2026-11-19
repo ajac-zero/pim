@@ -113,6 +113,9 @@ export class LiveConnection {
 	#progress = Date.now();
 	#closed = false;
 	readonly #done: () => void;
+	readonly #stopNotices: () => void;
+	#said = false;
+	readonly #told = new Set<string>();
 
 	constructor(
 		hub: LiveHub,
@@ -124,6 +127,16 @@ export class LiveConnection {
 		this.#transport = transport;
 		this.#done = done;
 		this.queue = new OutboundQueue(hub.options.maxQueueBytes);
+		// What happens in the owner's space that an open app should hear of at once, whatever it follows: told as it is, and not replayed.
+		this.#stopNotices = hub.pulse.subscribeNotices(principal.ownerId, (notice) => {
+			// Every replica that heard of a change says so: it is told once.
+			if (notice.key !== undefined) {
+				if (this.#told.has(notice.key)) return;
+				this.#told.add(notice.key);
+				if (this.#told.size > 256) this.#told.delete(this.#told.values().next().value!);
+			}
+			this.control({ type: "notice", kind: notice.kind, ...(notice.data === undefined ? {} : { data: notice.data }) });
+		});
 		this.#timers.push(setInterval(() => void this.#heartbeat(), hub.options.heartbeatMs), setInterval(() => void this.#revalidate(), hub.options.revalidateMs));
 		for (const timer of this.#timers) timer.unref?.();
 	}
@@ -159,6 +172,19 @@ export class LiveConnection {
 		}
 		if (frame.type === "unsubscribe") {
 			this.#drop(frame.topic);
+			return;
+		}
+		if (frame.type === "say") {
+			// Asked of the server rather than followed: the process that holds what it is about answers it, by notices. A revoked principal asks nothing.
+			try {
+				if (!(await this.#hub.identity.stillValid(this.principal))) return this.unauthorized("revoked");
+				await this.#hub.authorizer.authorize({ principal: this.principal, ownerId: this.principal.ownerId, action: "live:say", resource: { kind: frame.kind } });
+			} catch (error) {
+				if (error instanceof ForbiddenError) return this.error("forbidden", "Not allowed");
+				return this.error("authorization_unavailable", "Authorization is unavailable");
+			}
+			this.#said = true;
+			await this.#hub.pulse.publishSay(this.ownerId, { kind: frame.kind, ...(frame.data === undefined ? {} : { data: frame.data }), connection: this.id }).catch(() => undefined);
 			return;
 		}
 		await this.#subscribe(frame.topic, frame.cursor);
@@ -284,6 +310,9 @@ export class LiveConnection {
 		if (this.#closed) return;
 		this.#closed = true;
 		for (const timer of this.#timers) clearInterval(timer);
+		this.#stopNotices();
+		// What the app asked the server to keep for it (the files it watched) ends with its socket.
+		if (this.#said) void this.#hub.pulse.publishSay(this.ownerId, { kind: "closed", connection: this.id }).catch(() => undefined);
 		if (this.#pump) clearTimeout(this.#pump);
 		for (const bridge of this.#bridges.values()) bridge.dispose();
 		this.#bridges.clear();

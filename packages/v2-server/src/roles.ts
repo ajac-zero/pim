@@ -36,6 +36,8 @@ import { mcpFetchTools } from "./connector-tools.ts";
 import { publicUrl } from "./agent-tools.ts";
 import { renewDue } from "./watches.ts";
 import type { Host } from "./host.ts";
+import { serveSays } from "./live-says.ts";
+import { startNoticeBridge } from "./notice-bridge.ts";
 import { AppLiveIdentity, deliverApprovalDecisions, deliverForgeDecisions, LiveAuthorizer, mirrorCodingGrants, pageApproval, publishRevocations, surfaceForgeApprovals } from "./identity.ts";
 import { runtimeOutboxSource } from "./runtime-source.ts";
 import { natsRelayBus } from "./relay-bus.ts";
@@ -109,6 +111,15 @@ export async function startGate(config: ProcessConfig, env: Env, host: Host, nat
 	if (nats) app.relay.useBus(natsRelayBus(nats));
 	deliverApprovalDecisions(app);
 	limitGuestMessages(app);
+	// What happens in a person's space that their open apps should hear of at once reaches them through Pulse and Live: the rows' changes (`notice-bridge.ts`), their computer coming
+	// and going, and what the apps ask of the server over their sockets, such as watching a file (`live-says.ts`).
+	const stopNotices: (() => void)[] = [];
+	if (nats) {
+		app.relay.changed = (owner) => void nats.publishNotice(owner, { kind: "computer" }).catch(() => undefined);
+		app.notices.connect((owner, notice) => void nats.publishNotice(owner, notice).catch(() => undefined), (heard) => nats.onSay(heard));
+		const stopBridge = startNoticeBridge(app, nats, config.databaseUrl);
+		stopNotices.push(() => void stopBridge(), serveSays(app, nats), () => app.notices.close());
+	}
 	// What the triggers runtime on a person's computer says over its connection is answered here, in the process that holds the socket.
 	app.relay.computerTriggers = new ComputerTriggers(app);
 	const secure = config.publicUrl.startsWith("https:");
@@ -144,6 +155,7 @@ export async function startGate(config: ProcessConfig, env: Env, host: Host, nat
 			sockets.close();
 			await db.end();
 		},
+			for (const stop of stopNotices) stop();
 	};
 }
 
@@ -233,6 +245,18 @@ export async function startRunner(config: ProcessConfig, env: Env, host: Host, h
 	const host_ = hooks.harnessOptions ? undefined : createAgentHost({ db, env, crypto, app, forge, relay: relayBus, providers: hooks.providers, fetch: hooks.fetch, ...(chatgptFromEnv(env) ? { chatgpt: { ...chatgptFromEnv(env), ...(env.PIM_CHATGPT_BASE_URL ? { baseUrl: env.PIM_CHATGPT_BASE_URL } : {}) } } : {}), ...(env.PIM_PROVIDER_COOLDOWN_MS ? { cooldowns: { transientMs: Number(env.PIM_PROVIDER_COOLDOWN_MS) } } : {}), stallMs: { ...(env.PIM_MODEL_STALL_MS ? { stream: Number(env.PIM_MODEL_STALL_MS) } : {}), ...(env.PIM_TOOL_TIMEOUT_MS ? { tool: Number(env.PIM_TOOL_TIMEOUT_MS) } : {}) } });
 	// While nobody is in a chat, what was said in it is kept as a memory (`./memory-nap.ts`); it needs the host's model catalog and the application's services.
 	const stopNap = host_ && app ? startMemoryNap({ pool: runtimePool, db, app, complete: host_.complete, env, onError: (error) => console.error("memory nap", error) }) : undefined;
+	// What an agent's tools tell the person's open apps (open a file in the canvas, ask about it) goes by the same connection, made when it is first needed.
+	if (app) {
+		const bus = () => (relayPulse ??= NatsPulse.connect(config.natsUrl));
+		app.notices.connect(
+			(owner, notice) => void bus().then((pulse) => pulse.publishNotice(owner, notice)).catch(() => undefined),
+			(heard) => {
+				let stop: (() => void) | undefined;
+				void bus().then((pulse) => (stop = pulse.onSay(heard))).catch(() => undefined);
+				return () => stop?.();
+			},
+		);
+	}
 	const runner = new Runner({
 		db,
 		harnessOptions: hooks.harnessOptions ?? host_!.harnessOptions,

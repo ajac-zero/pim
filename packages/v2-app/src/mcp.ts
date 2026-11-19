@@ -149,11 +149,16 @@ export class McpOAuth {
 	}
 
 	/** What the agent has sent the person in a chat so far (`send_to_user` calls), by tool-call id. */
-	async #read(ownerId: string, chat: string): Promise<{ sent: Map<string, string>; last: any }> {
+	async #read(ownerId: string, chat: string): Promise<{ sent: Map<string, string>; last: any; closing: Set<string> }> {
 		const messages = (await this.opts.transcripts?.read(ownerId, chat, 200).catch(() => [])) as any[] | undefined;
 		const sent = new Map<string, string>();
-		for (const m of messages ?? []) for (const part of m.role === "assistant" ? m.parts ?? [] : []) if (part.type === "tool-call" && part.name === "send_to_user" && typeof part.arguments?.message === "string") sent.set(String(part.id), part.arguments.message);
-		return { sent, last: messages?.at(-1) };
+		// A reply that is not marked `complete: false` ends the turn: the agent makes no further request, so the newest message is that call's result.
+		const closing = new Set<string>();
+		for (const m of messages ?? []) for (const part of m.role === "assistant" ? m.parts ?? [] : []) if (part.type === "tool-call" && part.name === "send_to_user" && typeof part.arguments?.message === "string") {
+			sent.set(String(part.id), part.arguments.message);
+			if (part.arguments.complete !== false) closing.add(String(part.id));
+		}
+		return { sent, last: messages?.at(-1), closing };
 	}
 
 	async #sent(ownerId: string, chat: string): Promise<Set<string>> {
@@ -168,10 +173,10 @@ export class McpOAuth {
 		let failed: string | null = null;
 		for (;;) {
 			await new Promise((r) => setTimeout(r, 300));
-			const { sent, last } = await this.#read(ownerId, chat);
+			const { sent, last, closing } = await this.#read(ownerId, chat);
 			replies = [...sent].filter(([id]) => !before.has(id)).map(([, text]) => text);
 			// The turn is over when the newest message is the agent's final one, after it sent something, or when it ended in an error.
-			const ended = last?.role === "assistant" && last.partial !== true && last.stopReason !== undefined && last.stopReason !== "toolUse";
+			const ended = (last?.role === "assistant" && last.partial !== true && last.stopReason !== undefined && last.stopReason !== "toolUse") || (last?.role === "tool" && (last.parts ?? []).some((part: any) => part.type === "tool-result" && closing.has(String(part.id))));
 			if (ended && last.stopReason === "error") failed = String(last.error ?? "the turn ended with an error").slice(0, 200);
 			if ((ended && replies.length) || (ended && failed) || Date.now() >= until) return { replies, failed };
 		}

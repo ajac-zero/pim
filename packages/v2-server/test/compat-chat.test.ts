@@ -12,7 +12,7 @@ import { MemoryObjectStore } from "@pim/v2-app/objects";
 import { planAnswer, NAME_CHAT, nameChatsFromFirstMessage } from "../src/compat/utility.ts";
 import { webApproval } from "../src/compat/boot.ts";
 import { chatRoutes } from "../src/compat/chat.ts";
-import { apiClientRoutes } from "../src/compat/api-clients.ts";
+import { apiClientRoutes, outcomeOf } from "../src/compat/api-clients.ts";
 import { accountRoutes } from "../src/compat/chat-account.ts";
 import { bootRoutes } from "../src/compat/boot.ts";
 import { screenRoutes } from "../src/compat/admin-screens.ts";
@@ -368,6 +368,17 @@ describe("the API's clients", () => {
 		expect((await call(ada, "GET", `/api/sessions/${chat}/operations/w-1?timeout=100`)).body).toMatchObject({ status: "done", replies: ["Lisbon it is."] });
 		// Stopping by the operation's id answers as the app's Stop does.
 		expect((await call(ada, "POST", `/api/sessions/${chat}/abort`, { operationId: "w-1" })).body).toMatchObject({ aborted: true });
+	});
+
+	it("counts a turn as ended when its reply closed it, though no answer from the model follows", () => {
+		// A reply ends the turn (the agent asks the model nothing more), so the newest message is the send's own result; `complete: false` keeps the turn going.
+		const turn = (complete?: boolean) => [
+			{ role: "user", timestamp: 1, parts: [{ type: "text", text: "hi" }] },
+			{ role: "assistant", timestamp: 2, stopReason: "toolUse", parts: [{ type: "tool-call", id: "c1", name: "send_to_user", arguments: { message: "Hello.", ...(complete === undefined ? {} : { complete }) } }] },
+			{ role: "tool", timestamp: 3, parts: [{ type: "tool-result", id: "c1", name: "send_to_user", content: [{ type: "text", text: "Sent." }], error: false }] },
+		] as never;
+		expect(outcomeOf(turn(), 0)).toEqual({ status: "done", replies: ["Hello."], text: "Hello." });
+		expect(outcomeOf(turn(false), 0)).toBeNull();
 	});
 
 	it("shows one trigger run by its id, and no other person's", async () => {

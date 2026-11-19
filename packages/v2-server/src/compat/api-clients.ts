@@ -33,7 +33,12 @@ export function outcomeOf(messages: readonly TranscriptMessage[], since: number)
 	if (begun < 0) return null;
 	const turn = messages.slice(begun);
 	const last = turn.at(-1)!;
-	if (turn.some((m) => (m as { partial?: boolean }).partial) || last.role !== "assistant" || last.stopReason === undefined || last.stopReason === "toolUse") return null;
+	// A reply not marked `complete: false` ends the turn: the agent asks the model nothing more, so the newest message is that call's result, not an answer.
+	const closing = new Set<string>();
+	for (const m of turn) for (const part of m.role === "assistant" ? m.parts : []) if (part.type === "tool-call" && part.name === "send_to_user" && (part.arguments as { complete?: unknown } | undefined)?.complete !== false) closing.add(part.id);
+	const closed = last.role !== "assistant" && last.parts.some((part) => part.type === "tool-result" && closing.has(part.id));
+	if (turn.some((m) => (m as { partial?: boolean }).partial)) return null;
+	if (!closed && (last.role !== "assistant" || last.stopReason === undefined || last.stopReason === "toolUse")) return null;
 	const results = new Map<string, { text: string; error: boolean }>();
 	for (const m of turn) for (const part of m.parts) if (part.type === "tool-result") results.set(part.id, { text: partsText(part.content), error: part.error });
 	const replies: string[] = [];
@@ -47,7 +52,7 @@ export function outcomeOf(messages: readonly TranscriptMessage[], since: number)
 			replies.push([plainReply(message), ...widgetsOf(sent.text).map((w) => widgetMarkdown(w as never))].join("\n\n"));
 		}
 	}
-	const status = last.stopReason === "error" ? "failed" : last.stopReason === "aborted" ? "aborted" : "done";
+	const status = closed ? "done" : last.stopReason === "error" ? "failed" : last.stopReason === "aborted" ? "aborted" : "done";
 	return { status, replies, ...(replies.length > 0 ? { text: replies.join("\n\n") } : {}), ...(status === "failed" ? { reason: last.error ?? "The run ended with an error." } : {}) };
 }
 

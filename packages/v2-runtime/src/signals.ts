@@ -156,6 +156,28 @@ export class PartitionInbox {
 		await this.#db.read(ownerId, `UPDATE ${S}.durable_signals SET settled_at = clock_timestamp() WHERE owner_id = $1 AND partition_id = $2 AND signal_id = $3 AND settled_at IS NULL`, [ownerId, partitionId, signalId]);
 	}
 
+	/** Keeps a note for a conversation of the partition until its next owner writes it (`ResidentPartition.#writeNotes`); the same `key` again keeps nothing more. */
+	async addNote(ownerId: string, partitionId: string, note: { key: string; conversationId: number; entry: unknown }): Promise<void> {
+		await this.#db.read(
+			ownerId,
+			`INSERT INTO ${S}.pending_notes (owner_id, partition_id, note_key, conversation_id, entry) VALUES ($1, $2, $3, $4, $5::json) ON CONFLICT DO NOTHING`,
+			[ownerId, partitionId, note.key, note.conversationId, JSON.stringify(note.entry)],
+		);
+	}
+
+	async pendingNotes(ownerId: string, partitionId: string): Promise<{ key: string; conversationId: number; entry: unknown }[]> {
+		const result = await this.#db.read<{ note_key: string; conversation_id: string; entry: unknown }>(
+			ownerId,
+			`SELECT note_key, conversation_id, entry FROM ${S}.pending_notes WHERE owner_id = $1 AND partition_id = $2 AND settled_at IS NULL ORDER BY created_at`,
+			[ownerId, partitionId],
+		);
+		return result.rows.map((row) => ({ key: row.note_key, conversationId: Number(row.conversation_id), entry: row.entry }));
+	}
+
+	async settleNote(ownerId: string, partitionId: string, key: string): Promise<void> {
+		await this.#db.read(ownerId, `UPDATE ${S}.pending_notes SET settled_at = clock_timestamp() WHERE owner_id = $1 AND partition_id = $2 AND note_key = $3 AND settled_at IS NULL`, [ownerId, partitionId, key]);
+	}
+
 	/** The activation sequence an owner reads before it decides whether to release. */
 	async activationSeq(ownerId: string, partitionId: string): Promise<number> {
 		const result = await this.#db.read<{ activation_seq: string }>(ownerId, `SELECT activation_seq FROM ${S}.due_work WHERE owner_id = $1 AND partition_id = $2`, [ownerId, partitionId]);

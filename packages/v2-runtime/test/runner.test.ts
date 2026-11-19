@@ -342,8 +342,12 @@ describe("run guard and watchdog", () => {
 		await waitFor("the tool to hang", () => stuck.state.hangs > 0 || undefined);
 		await waitFor("the watchdog to stop the run", () => stuck.events.some((e) => e.type === "stalled") || undefined, 20_000);
 		await waitFor("the tool call to be settled as aborted", async () => ((await toolResults(stuckOwner, stuckHome)).some((e) => JSON.stringify(e).includes("was aborted")) ? true : undefined), 20_000);
+		// The tool ignored the stop, so the partition was recycled; the note that says why the chat stopped is not lost with it, and is there once.
+		expect(stuck.events.some((e) => e.type === "stalled" && e.recycled)).toBe(true);
+		await waitFor("the note that says why", async () => ((await readTranscript(database.db, stuckOwner, stuckHome, 1)).some((e) => JSON.stringify(e).includes("Pim stopped this turn")) ? true : undefined), 20_000);
 		await command(second.inbox, stuckOwner, stuckHome, "m2", 1, { content: "again" });
 		await waitFor("the chat to answer again", async () => (await readTranscript(database.db, stuckOwner, stuckHome, 1)).some((e) => textOf(e) === "recovered"));
+		expect((await readTranscript(database.db, stuckOwner, stuckHome, 1)).filter((e) => JSON.stringify(e).includes("Pim stopped this turn"))).toHaveLength(1);
 		await second.stop();
 	});
 

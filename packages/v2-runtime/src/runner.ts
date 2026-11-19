@@ -123,6 +123,8 @@ export class ResidentPartition {
 	#seq = 0;
 	#watch: { fingerprint: string; since: number } | undefined;
 	#watchedAt = 0;
+	/** Whether the partition may hold notes a previous owner left for its conversations (`pending_notes`); looked at when it opens, and until each is written. */
+	#notes = true;
 
 	constructor(runner: Runner, lease: Lease) {
 		this.runner = runner;
@@ -205,6 +207,7 @@ export class ResidentPartition {
 		try {
 			const worked = await this.#deliver();
 			if (!this.#disposed) await this.#guard();
+			if (!this.#disposed && this.#notes) await this.#writeNotes();
 			if (worked || this.#disposed) return;
 			await this.#considerRelease();
 		} catch (error) {
@@ -218,19 +221,43 @@ export class ResidentPartition {
 	 * the partition's commands behind it. The abort mark is durable, so when the run has not ended within the grace the partition is recycled: its Harness is closed, the lease
 	 * handed off, and the next claim's recovery runs the abort handlers of what was marked.
 	 */
-	async stopRun(conversation: Conversation, context: Context): Promise<void> {
+	async stopRun(conversation: Conversation, context: Context, note?: { key: string; entry: unknown }): Promise<void> {
 		const aborted = conversation.abort(context).then(() => true);
 		aborted.catch(() => {});
 		const grace = this.runner.abortGraceMs;
 		let timer: ReturnType<typeof setTimeout> | undefined;
 		const ended = await Promise.race([aborted, new Promise<false>((resolve) => (timer = setTimeout(() => resolve(false), grace)))]);
 		clearTimeout(timer);
-		if (!ended) await this.recycle(Number(conversation.id));
+		if (!ended) await this.recycle(Number(conversation.id), note);
+	}
+
+	/**
+	 * Writes the notes a previous owner left for conversations of this partition (see `recycle`), each once the conversation's run has ended: while it is at work, a note would wait in
+	 * its inbox until the person's next message, and they would not read it when it matters.
+	 */
+	async #writeNotes(): Promise<void> {
+		const notes = await this.runner.inbox.pendingNotes(this.ownerId, this.partitionId);
+		if (notes.length === 0) {
+			this.#notes = false;
+			return;
+		}
+		for (const note of notes) {
+			if (this.#disposed) return;
+			const conversation = await this.#harness.conversation(note.conversationId as ConversationId, this.context);
+			if (conversation !== undefined) {
+				const live = await this.#harness.snapshot(LiveDoc, conversation.id, this.context);
+				if (live?.run !== undefined) continue;
+				await conversation.submit({ type: "write", requestId: `note:${note.key}`, entry: note.entry } as never, this.context);
+			}
+			await this.runner.inbox.settleNote(this.ownerId, this.partitionId, note.key);
+		}
 	}
 
 	/** Give the partition up while a run is stuck in it: nothing waits for the stuck work, and its writes are fenced once the next owner takes the partition. */
-	async recycle(conversationId: number): Promise<void> {
+	async recycle(conversationId: number, note?: { key: string; entry: unknown }): Promise<void> {
 		if (this.#disposed) return;
+		// What the person should read about why the run stopped is kept for the next owner, which writes it once the conversation is idle: this partition can write nothing more.
+		if (note !== undefined) await this.runner.inbox.addNote(this.ownerId, this.partitionId, { ...note, conversationId });
 		this.runner.emit({ type: "stalled", ownerId: this.ownerId, partitionId: this.partitionId, conversationId, recycled: true });
 		void this.dispose("recycled").catch(() => {});
 		await this.runner.steward.handOff(this.lease, "a stopped run did not end");
@@ -257,15 +284,18 @@ export class ResidentPartition {
 			return;
 		}
 		if (now - this.#watch.since < stallMs) return;
+		const stuckSince = this.#watch.since;
 		this.#watch = undefined;
 		for (const id of conversations) {
 			if (this.#disposed) return;
 			this.runner.emit({ type: "stalled", ownerId: this.ownerId, partitionId: this.partitionId, conversationId: id, recycled: false });
 			const conversation = await this.#harness.conversation(id as ConversationId, this.context);
 			if (!conversation) continue;
-			await this.stopRun(conversation, this.context);
-			// The person finds out why the chat stopped: an error answer, which the model's context leaves out as it does any failed request. A recycled partition is gone, and says nothing.
-			if (!this.#disposed) await conversation.submit({ type: "write", entry: { kind: "pi.assistant", model: [stalledNote(stallMs, this.runner.clock())] } } as never, this.context);
+			// The person finds out why the chat stopped: an error answer, which the model's context leaves out as it does any failed request. A stop that recycles the partition leaves it
+			// to the partition's next owner, who writes it under the same key: the note is written once, whoever writes it.
+			const note = { key: `stalled:${id}:${stuckSince}`, entry: { kind: "pi.assistant", model: [stalledNote(stallMs, this.runner.clock())] } };
+			await this.stopRun(conversation, this.context, note);
+			if (!this.#disposed) await conversation.submit({ type: "write", requestId: `note:${note.key}`, entry: note.entry } as never, this.context);
 		}
 	}
 

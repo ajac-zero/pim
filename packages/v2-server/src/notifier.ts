@@ -104,14 +104,15 @@ export function lastSaid(entries: readonly Entry[]): { message: string; asked: b
 /** One pass: announce what is new, then send what is due. How many notifications and device alerts it made or sent. */
 export async function notifyPass(app: App, pool: Pool, options: NotifierOptions): Promise<number> {
 	const now = (options.now ?? (() => new Date()))();
-	return (await announceApprovals(app, pool, now)) + (await announceReplies(app, pool, now)) + (await deliver(app, pool, options, now));
+	return (await announceApprovals(app, pool, now)) + (await announceSchedules(app, pool, now)) + (await announceReplies(app, pool, now)) + (await deliver(app, pool, options, now));
 }
 
 /** The bell entry and, as a row of the same id, the device alert; once however often the event is seen. */
-async function announce(app: App, ownerId: string, n: { id: string; kind: "general" | "mention"; chat: string | null; title: string; body: string }, at: Date): Promise<boolean> {
+async function announce(app: App, ownerId: string, n: { id: string; kind: "general" | "mention" | "scheduled"; chat: string | null; title: string; body: string; /** No alert for the devices: the bell and the open apps only. */ quiet?: boolean }, at: Date): Promise<boolean> {
 	return app.db.owner(ownerId, async (tx) => {
 		const made = await tx.query("INSERT INTO pim_app.notifications (id, owner_id, kind, public_chat_id, title, body, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING", [n.id, ownerId, n.kind, n.chat, n.title, n.body, at]);
 		if (made.rowCount === 0) return false;
+		if (n.quiet) return true;
 		await tx.query("INSERT INTO pim_app.push_queue (id, owner_id, kind, public_chat_id, title, body, send_after, created_at) VALUES ($1,$2,'alert',$3,$4,$5,$6,$6) ON CONFLICT DO NOTHING", [n.id, ownerId, n.chat, n.title, n.body, at]);
 		return true;
 	});
@@ -129,6 +130,30 @@ async function announceApprovals(app: App, pool: Pool, now: Date): Promise<numbe
 	for (const row of rows) {
 		const approval = webApproval(row);
 		if (await announce(app, row.owner_id, { id: `approval-${row.id}`, kind: "general", chat: row.public_chat_id ?? null, title: "Pim needs your approval", body: approval.summary }, now)) made++;
+	}
+	return made;
+}
+
+/**
+ * A scheduled task that fired is a notification of its own kind, once per firing, as in v1: it names the task (its label, else what it asks) and links to the chat it runs in. It is for the
+ * bell and the open apps only: the chat's own reply alerts the devices when it is ready.
+ */
+async function announceSchedules(app: App, pool: Pool, now: Date): Promise<number> {
+	const rows = await acrossOwners(
+		pool,
+		`SELECT r.owner_id, r.schedule_id, r.command_id FROM pim_app.schedule_runs r
+		  WHERE r.outcome = 'fired' AND r.command_id IS NOT NULL AND r.recorded_at > $1
+		    AND NOT EXISTS (SELECT 1 FROM pim_app.notifications n WHERE n.owner_id = r.owner_id AND n.id = 'scheduled-' || r.command_id) ORDER BY r.recorded_at LIMIT 100`,
+		[new Date(now.getTime() - LOOKBACK_MS)],
+	);
+	let made = 0;
+	for (const row of rows) {
+		const found = await app.db.owner(row.owner_id, async (tx) => ({
+			task: (await tx.query("SELECT label, prompt FROM pim_app.schedules WHERE id = $1", [row.schedule_id])).rows[0],
+			chat: (await tx.query("SELECT public_chat_id FROM pim_app.accepted_commands WHERE command_id = $1", [row.command_id])).rows[0]?.public_chat_id as string | undefined,
+		}));
+		const title = String(found.task?.label ?? found.task?.prompt ?? "Scheduled task").replace(/\s+/g, " ").trim();
+		if (await announce(app, row.owner_id, { id: `scheduled-${row.command_id}`, kind: "scheduled", chat: found.chat ?? null, title: title.length > 80 ? `${title.slice(0, 79)}…` : title, body: "", quiet: true }, now)) made++;
 	}
 	return made;
 }

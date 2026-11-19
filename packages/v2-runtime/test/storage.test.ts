@@ -33,7 +33,7 @@ describe("migrations", () => {
 	it("apply once, are recorded with their checksum, and refuse a changed file", async () => {
 		expect((await migrate(database.db.pool)).applied).toEqual([]);
 		const names = (await database.db.pool.query<{ name: string }>("SELECT name FROM public.pim_schema_migrations WHERE number >= 100 ORDER BY number")).rows.map((r) => r.name);
-		expect(names).toEqual(["pi_runtime_schema", "pi_conversations_entries", "pi_tasks_submissions", "pi_documents", "pi_commit_receipts_outbox", "runtime_ownership_and_inbox", "external_operations", "sleeping_tasks"]);
+		expect(names).toEqual(["pi_runtime_schema", "pi_conversations_entries", "pi_tasks_submissions", "pi_documents", "pi_commit_receipts_outbox", "runtime_ownership_and_inbox", "external_operations", "sleeping_tasks", "pending_notes"]);
 		const dir = mkdtempSync(join(tmpdir(), "pim-mig-"));
 		writeFileSync(join(dir, "0100_pi_runtime_schema.sql"), "select 1;");
 		await expect(migrate(database.db.pool, dir)).rejects.toThrow(/changed after it was applied/);
@@ -49,7 +49,7 @@ describe("migrations", () => {
 			await fresh.db.pool.query("DROP SCHEMA pim_runtime CASCADE; CREATE SCHEMA pim_runtime; DELETE FROM public.pim_schema_migrations WHERE number >= 100");
 			const pools = [0, 1, 2, 3].map(() => new pg.Pool({ connectionString: fresh.url, max: 1 }));
 			const results = await Promise.all(pools.map((pool) => migrate(pool)));
-			expect(results.reduce((n, r) => n + r.applied.length, 0)).toBe(8);
+			expect(results.reduce((n, r) => n + r.applied.length, 0)).toBe(9);
 			await Promise.all(pools.map((pool) => pool.end()));
 		} finally {
 			await fresh.drop();

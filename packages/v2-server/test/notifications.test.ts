@@ -274,3 +274,29 @@ describe("a push that cannot be sent now", () => {
 		expect(Number((await stack.admin.query("SELECT count(*) n FROM pim_app.push_subscriptions WHERE owner_id = $1", [ada.ownerId])).rows[0].n)).toBe(0);
 	});
 });
+
+describe("a scheduled task that fired", () => {
+	it("is a notification of its own kind, once per firing, for the bell and open apps and not the devices, and only to its owner", async () => {
+		const ada = people.ada!;
+		const principal = (await gate.identity.authenticate(ada.token))! as never;
+		const queued = (await queue()).length;
+		const at = new Date(Date.now() - 1000);
+		const id = await gate.schedules.create(principal, { kind: "at", spec: at.toISOString(), prompt: "Water the plants and tell me which ones are thirsty", label: "Water the plants", now: new Date(at.getTime() - 60_000) });
+		const missed = await gate.schedules.create(principal, { kind: "at", spec: new Date(Date.now() - 3_600_000).toISOString(), prompt: "Too late", label: "Too late", now: new Date(Date.now() - 7_200_000) });
+		expect(await gate.schedules.tick(ada.ownerId, new Date())).toMatchObject({ fired: 1, missed: 1 });
+		expect(id).not.toBe(missed);
+		pushed.length = 0;
+		expect(await notifyPass(maint, maintPool, options)).toBe(1);
+		expect(await notifyPass(maint, maintPool, options)).toBe(0);
+		const found = (await call(ada.token, "GET", "/api/notifications")).body.notifications.filter((n: { kind: string }) => n.kind === "scheduled");
+		expect(found).toHaveLength(1);
+		expect(found[0]).toMatchObject({ title: "Water the plants", body: "", readAt: null });
+		// It links to the chat the task runs in, which is the one the schedule made.
+		const chat = (await stack.admin.query("SELECT public_chat_id FROM pim_app.accepted_commands WHERE command_id LIKE $1", [`sched:${id}:%`])).rows[0].public_chat_id;
+		expect(found[0].session).toBe(chat);
+		expect((await call(people.bob!.token, "GET", "/api/notifications")).body.notifications.filter((n: { kind: string }) => n.kind === "scheduled")).toEqual([]);
+		// No alert for the devices: the chat's own reply does that when it is ready.
+		expect(pushed).toHaveLength(0);
+		expect(await queue()).toHaveLength(queued);
+	});
+});

@@ -63,6 +63,10 @@ describe("what changed in a person's space, told to their open apps", () => {
 		await app.db.owner(ada, (tx) => tx.query("INSERT INTO pim_app.notifications (id, owner_id, kind, title, body) VALUES ('n-1',$1,'general','Reminder','Water the plants')", [ada]));
 		const made = await until("the notification", () => notices(ada, "notification")[0]);
 		expect(made.data).toMatchObject({ id: "n-1", kind: "general", title: "Reminder", body: "Water the plants", session: null });
+		// A scheduled task's notification is one of its own kind, which the toast shows the same way.
+		await app.db.owner(ada, (tx) => tx.query("INSERT INTO pim_app.notifications (id, owner_id, kind, title, body) VALUES ('n-2',$1,'scheduled','Water the plants','')", [ada]));
+		const scheduled = await until("the scheduled notification", () => notices(ada, "notification").find((n) => (n.data as { id?: string }).id === "n-2"));
+		expect(scheduled.data).toMatchObject({ id: "n-2", kind: "scheduled", title: "Water the plants" });
 	});
 
 	it("tells of a changed setting, but not of the model's or the majordomo's bookkeeping, and of a visit", async () => {

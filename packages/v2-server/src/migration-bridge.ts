@@ -16,7 +16,7 @@
  *   rooms and their seats, circles' tool permissions and guest activity, the models' cost history, objects' metadata and ACLs, and the settings a person explicitly set.
  *
  * It is idempotent per tenant and runs as the schema owner. **Not promoted** (they remain in `pim_ops.legacy_rows` and the ops ledger, listed in
- * docs/architecture/v2-implementation-status.md): legacy schedules (they are triggers, promoted as such), deployment-level providers, templates and bots,
+ * docs/architecture/v2-implementation-status.md): legacy schedules (they are triggers, promoted as such), a bot's snapshot of its agent, the Gitea connection,
  * standing approvals (an admin records those again, deliberately). Coding grants: v1 had none (any member could code), so a person who had coding threads is given one (`promoteCodingGrant`) and everyone else waits for an admin.
  */
 import { createHash } from "node:crypto";
@@ -25,6 +25,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { projectEntries } from "@pim/shared/transcript";
 import { binaryValue } from "@pim/v2-app/app-files";
 import { appLabel, parseManifest } from "@pim/v2-app/apps";
+import type { Bundle, BundleAgent } from "@pim/v2-app/bundles";
 import { chatgptContext } from "@pim/v2-app/chatgpt";
 import { KeyringCrypto, sealString } from "@pim/v2-app/crypto";
 import { mergeNoteUpdates, noteUpdateFromText } from "@pim/v2-app/note-import";
@@ -356,6 +357,12 @@ async function promoteForge(pool: Pool, owner: string): Promise<number> {
 			await pool.query("INSERT INTO pim_forge.forge_events (thread_id, seq, kind, data, at) VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING", [t.thread_id, e.seq, e.kind, typeof e.data === "string" ? e.data : JSON.stringify(e.data ?? {}), ts(e.at)]);
 		}
 	}
+	// The setup script a person saved for a repository (v1 kept them in the person's scheduler, by lowercase `owner/name`).
+	const scripts = (await pool.query("SELECT row FROM pim_ops.legacy_rows WHERE owner_id = $1 AND table_name = 'pim_coding_repo_settings'", [owner])).rows.map((r) => r.row as Record<string, any>);
+	for (const r of scripts) {
+		if (typeof r.repo !== "string" || typeof r.setup_script !== "string" || r.setup_script === "" || r.setup_script.length > 65_536) continue;
+		await pool.query("INSERT INTO pim_forge.forge_repo_settings (owner_id, repo, setup_script, updated_at) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING", [owner, r.repo, r.setup_script, ts(r.updated_at)]);
+	}
 	// v1 let every member code; v2 asks for a grant. A person who had coding threads keeps coding: they are given what an admin would give (start, steer, abort, and push, pull request and merge with a person's yes), on any repository
 	// the deployment allows. Someone who never coded is left for an admin to grant, as is a guest.
 	if (rows.length) await promoteCodingGrant(pool, owner);
@@ -460,6 +467,8 @@ async function promoteDomain(pool: Pool, owner: string, options: PromoteOptions,
 	const modelCalls = await rows("pim_model_calls");
 	const usageDaily = await rows("pim_usage_daily");
 	const publishedApps = (await legacyRows(pool, "_deployment", "published_artifacts")).filter((r) => String(r.owner_id) === legacyId);
+	const deploymentBots = (await legacyRows(pool, "_deployment", "bots")) as Record<string, any>[];
+	const notifications = await rows("pim_notifications");
 	const noteUpdates = await rows("pim_note_updates");
 	const storedFiles = await rows("pim_stored_files");
 	const agentSessions = await rows("pim_agent_sessions");
@@ -761,6 +770,24 @@ async function promoteDomain(pool: Pool, owner: string, options: PromoteOptions,
 			const r = await c.query("INSERT INTO pim_app.shares (id, owner_id, kind, resource_id, audience, link, created_at) VALUES ($1,$2,'chat',$3,'link',$4,$5) ON CONFLICT DO NOTHING", [`sh_legacy_${l.id}`, owner, chat, l.id, ms(l.shared_at)]);
 			bump(d, "shares", r.rowCount ?? 0);
 		}
+		// A guest of a bot the admin shared: which bot, whose it is and which agent is their copy of it (v1 kept it in the guest's space and on the Directory's account; here it is one row).
+		for (const m of meta.filter((x) => x.key === "guest_bot")) {
+			const joined = parseJson(m.value, null) as { bot?: string; agent?: string; owner?: string; sharedAt?: number } | null;
+			if (!joined?.bot || !joined.agent) continue;
+			const hostLegacy = joined.owner ?? deploymentBots.find((b) => String(b.id) === joined.bot)?.owner_id;
+			const host = hostLegacy ? owners.get(String(hostLegacy)) : undefined;
+			if (!host) {
+				d.skipped.push(`guest of bot ${joined.bot}: its host has no account here`);
+				continue;
+			}
+			const r = await c.query("INSERT INTO pim_app.guest_bots (owner_id, bot_id, host_owner, agent_id, shared_at) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (owner_id) DO NOTHING", [owner, joined.bot, host, joined.agent, ms(joined.sharedAt)]);
+			bump(d, "guest bots", r.rowCount ?? 0);
+		}
+		// The bell's list: what the person had not read stays unread.
+		for (const n of notifications) {
+			const r = await c.query("INSERT INTO pim_app.notifications (id, owner_id, kind, public_chat_id, title, body, created_at, read_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT DO NOTHING", [`legacy-${n.id}`, owner, ["general", "mention", "scheduled"].includes(String(n.kind)) ? n.kind : "general", chatOf.get(String(n.session)) ?? null, String(n.title ?? ""), String(n.body ?? ""), ms(n.created_at), n.read_at ? ms(n.read_at) : null]);
+			bump(d, "notifications", r.rowCount ?? 0);
+		}
 		if (profile) {
 			const r = await c.query("INSERT INTO pim_app.profiles (owner_id, display_name, bio, published) VALUES ($1,$2,$3,true) ON CONFLICT DO NOTHING", [owner, profile.display_name ?? "", profile.bio ?? ""]);
 			bump(d, "profiles", r.rowCount ?? 0);
@@ -870,6 +897,45 @@ async function sharedProviders(pool: Pool, options: PromoteOptions): Promise<Sha
 	return out;
 }
 
+type LegacyBundled = { name?: string; role?: string; description?: string; instructions?: string; apps?: string[]; symbol?: string | null; color?: string | null; contacts?: string[] };
+
+/**
+ * What a v1 template, bot or default agent carried, as a v2 bundle: the agent with its role, description, connectors, look and contacts, the agents that came with it (the
+ * newer `bundle`, or the older `team` of name and instructions), and every uploaded icon as a public image object under the author (`<owner>/bundle-icons/<holder>/<position>`,
+ * position -1 being the agent's own). Without somewhere to put the bytes the icons are left in the landing and said so.
+ */
+async function legacyBundle(pool: Pool, owner: string, holder: string, row: Record<string, any>, put: PromoteOptions["objects"], d: Domain): Promise<Bundle> {
+	const apps = parseJson(row.apps, []) as string[];
+	const team = parseJson(row.team, []) as { name: string; instructions: string }[];
+	const others: BundleAgent[] = team.length > 0
+		? team.map((m) => ({ name: m.name, role: m.name, description: (m.instructions.trim().split(/\r?\n/)[0] ?? "").slice(0, 280), instructions: m.instructions, apps, emoji: null, color: row.color ?? null, contacts: [], icon: null }))
+		: (parseJson(row.bundle, []) as LegacyBundled[]).map((a) => ({ name: String(a.name ?? ""), role: a.role ?? String(a.name ?? ""), description: a.description ?? "", instructions: a.instructions ?? "", apps: a.apps ?? [], emoji: a.symbol ?? null, color: a.color ?? null, contacts: a.contacts ?? [], icon: null }));
+	const contacts = team.length > 0 ? team.map((m) => m.name) : (parseJson(row.contacts, []) as string[]);
+	const keep = async (position: number, cell: unknown, type: unknown): Promise<string | null> => {
+		const b64 = cell && typeof cell === "object" ? (cell as { $b64?: unknown }).$b64 : undefined;
+		if (typeof b64 !== "string") return null;
+		if (!put?.put) {
+			d.skipped.push(`${holder}: an uploaded icon was not carried, no object store was given`);
+			return null;
+		}
+		const bytes = Buffer.from(b64, "base64");
+		const contentType = typeof type === "string" && /^image\//.test(type) ? type : bytes[0] === 0xff ? "image/jpeg" : "image/png";
+		const key = `${owner}/bundle-icons/${holder}/${position}`;
+		await put.put(key, bytes, contentType);
+		await asOwner(pool, owner, (c) => c.query("INSERT INTO pim_app.objects (key, owner_id, purpose, content_type, size, sha256, acl) VALUES ($1,$2,'image',$3,$4,$5,'public') ON CONFLICT (key) DO UPDATE SET content_type = $3, size = $4, sha256 = $5, acl = 'public', deleted_at = NULL", [key, owner, contentType, bytes.length, createHash("sha256").update(bytes).digest("hex")]));
+		return key;
+	};
+	const icon = await keep(-1, row.icon_data, row.icon_type);
+	for (const r of await legacyRows(pool, "_deployment", "bundle_icons")) {
+		const position = Number(r.position);
+		if (String(r.holder) !== holder || !others[position]) continue;
+		const key = await keep(position, r.data, r.type);
+		if (key) others[position] = { ...others[position]!, icon: key };
+	}
+	const agent: BundleAgent = { name: String(row.name), role: String(row.role ?? row.name), description: row.description ?? "", instructions: row.instructions ?? "", apps, emoji: row.symbol ?? null, color: row.color ?? null, contacts, icon };
+	return { agent, description: agent.description, apps, ...(icon ? { icon } : {}), ...(others.length > 0 ? { bundle: others } : {}) };
+}
+
 /**
  * What the old Pim's Gallery kept for the deployment: the providers its admin shared with everyone (the deployment's own here, with their keys sealed for the deployment, not
  * for any person), the templates people published, the bots the admin shared, and the agent everyone starts with. A template, bot or default agent whose author has no account here is
@@ -922,11 +988,10 @@ async function promoteDeployment(pool: Pool, options: PromoteOptions, d: Domain)
 			d.skipped.push(`template ${t.id}: its author ${t.username} has no account here`);
 			continue;
 		}
-		const bundle = { agent: { name: t.name, instructions: t.instructions, emoji: t.symbol ?? null, color: t.color ?? null }, description: t.description ?? "", apps: parseJson(t.apps, []) };
+		const bundle = await legacyBundle(pool, owner, t.id, t, options.objects, d);
 		// The tables are sealed to their owner: a row is written as the person it belongs to.
 		const r = await asOwner(pool, owner, (c) => c.query("INSERT INTO pim_app.templates (id, owner_id, agent_id, title, bundle, published_at, uses) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING", [t.id, owner, t.agent_id, t.name, JSON.stringify(bundle), ms(t.published_at), Number(t.uses ?? 0)]));
 		bump(d, "templates", r.rowCount ?? 0);
-		if (parseJson(t.bundle, []).length > 0 || parseJson(t.team, []).length > 0 || t.icon_data) d.skipped.push(`template ${t.id}: its bundled agents and icon are not carried`);
 	}
 
 	for (const b of await rows("bots")) {
@@ -939,8 +1004,29 @@ async function promoteDeployment(pool: Pool, options: PromoteOptions, d: Domain)
 		const settings = { dailyMessages: b.daily_messages ?? null, dailyToolCalls: b.daily_tool_calls ?? null, model: modelRef(b.model), tools: tools.map((x) => x.name).filter(Boolean), ask: tools.filter((x) => x.ask).map((x) => x.name).filter(Boolean) };
 		const r = await asOwner(pool, owner, (c) => c.query("INSERT INTO pim_app.bots (id, owner_id, name, agent_id, settings, created_at) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING", [b.id, owner, b.name, b.agent_id, JSON.stringify(settings), ms(b.shared_at)]));
 		bump(d, "bots", r.rowCount ?? 0);
-		if (b.icon_data) d.skipped.push(`bot ${b.id}: its icon is not carried`);
+		// A bot here shows its agent's own picture, and v1's was a copy of it made when the bot was shared: it becomes the agent's icon when the agent has none.
+		const b64 = b.icon_data && typeof b.icon_data === "object" ? (b.icon_data as { $b64?: unknown }).$b64 : undefined;
+		if (typeof b64 === "string" && options.objects?.put) {
+			const bytes = Buffer.from(b64, "base64");
+			const type = typeof b.icon_type === "string" && /^image\//.test(b.icon_type) ? b.icon_type : bytes[0] === 0xff ? "image/jpeg" : "image/png";
+			const key = `${owner}/agent-icons/${b.agent_id}`;
+			const lacks = await asOwner(pool, owner, async (c) => (await c.query("SELECT 1 FROM pim_app.agents WHERE id = $1 AND icon_key IS NULL AND deleted_at IS NULL", [b.agent_id])).rowCount);
+			if (lacks) {
+				await options.objects.put(key, bytes, type);
+				await asOwner(pool, owner, async (c) => {
+					await c.query("INSERT INTO pim_app.objects (key, owner_id, purpose, content_type, size, sha256, acl) VALUES ($1,$2,'image',$3,$4,$5,'public') ON CONFLICT (key) DO NOTHING", [key, owner, type, bytes.length, createHash("sha256").update(bytes).digest("hex")]);
+					await c.query("UPDATE pim_app.agents SET icon_key = $2, updated_at = now() WHERE id = $1 AND icon_key IS NULL", [b.agent_id, key]);
+				});
+				bump(d, "bot icons");
+			}
+		} else if (b64) d.skipped.push(`bot ${b.id}: its icon was not carried, no object store was given`);
 	}
+
+	// The admin's own connector catalog (custom connectors with their address, icon and category) and the built-in apps the admin turned off; each is one deployment setting here.
+	const customApps = (await rows("apps")).map((a) => ({ id: String(a.id), name: String(a.name), description: String(a.description ?? ""), url: String(a.url), icon: a.icon ?? null, category: a.category ?? null }));
+	if (customApps.length > 0) bump(d, "custom connectors", (await pool.query("INSERT INTO pim_app.instance_settings (key, value) VALUES ('custom_apps', $1) ON CONFLICT DO NOTHING", [JSON.stringify(customApps)])).rowCount ?? 0 ? customApps.length : 0);
+	const disabledApps = (await rows("disabled_builtin_apps")).map((a) => String(a.id));
+	if (disabledApps.length > 0) bump(d, "disabled built-in apps", (await pool.query("INSERT INTO pim_app.instance_settings (key, value) VALUES ('disabled_builtin_apps', $1) ON CONFLICT DO NOTHING", [JSON.stringify(disabledApps)])).rowCount ?? 0 ? disabledApps.length : 0);
 
 	// The agent everyone starts with is a template an admin marks as the default; one that was never published as a template becomes one.
 	for (const a of await rows("default_agent")) {
@@ -949,9 +1035,9 @@ async function promoteDeployment(pool: Pool, options: PromoteOptions, d: Domain)
 			d.skipped.push(`default agent ${a.agent_id}: its author ${a.username} has no account here`);
 			continue;
 		}
-		const bundle = { agent: { name: a.name, instructions: a.instructions, emoji: a.symbol ?? null, color: a.color ?? null }, description: a.description ?? "", apps: parseJson(a.apps, []) };
 		const marked = await asOwner(pool, owner, (c) => c.query("UPDATE pim_app.templates SET default_for_everyone = true WHERE owner_id = $1 AND agent_id = $2 AND NOT EXISTS (SELECT 1 FROM pim_app.templates WHERE default_for_everyone)", [owner, a.agent_id]));
 		if (marked.rowCount) continue;
+		const bundle = await legacyBundle(pool, owner, "default", a, options.objects, d);
 		const r = await asOwner(pool, owner, (c) => c.query("INSERT INTO pim_app.templates (id, owner_id, agent_id, title, bundle, published_at, default_for_everyone) SELECT $1,$2,$3,$4,$5,$6,true WHERE NOT EXISTS (SELECT 1 FROM pim_app.templates WHERE default_for_everyone) ON CONFLICT DO NOTHING", [`tpl_legacy_default`, owner, a.agent_id, a.name, JSON.stringify(bundle), ms(a.updated_at)]));
 		bump(d, "default agent", r.rowCount ?? 0);
 	}

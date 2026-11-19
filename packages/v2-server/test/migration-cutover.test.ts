@@ -98,6 +98,24 @@ async function legacyDomain(admin: Pool, objects: FsObjectStore, conversation: s
 	for (const [table, pk, row] of rows) await admin.query("INSERT INTO pim_ops.legacy_rows (owner_id, source, table_name, pk, row) VALUES ($1,'Pim',$2,$3,$4)", [ADA, table, pk, JSON.stringify(row)]);
 	// The gallery's entry for the habit tracker (the fixture's pa_1) is in the landing as the fixture made it; an invitation nobody used is the Directory's.
 	await admin.query("INSERT INTO pim_ops.legacy_rows (owner_id, source, table_name, pk, row) VALUES ('_deployment','Directory','invites',$1,$2)", ["ee".repeat(32), JSON.stringify({ hash: "ee".repeat(32), note: "for Heidi", created_at: at, used_by: null, used_at: null })]);
+	// What the gallery kept besides: a template with an agent that comes with it and two uploaded icons, the bot's own picture, the admin's connector catalog, a built-in app turned off, the bell, a repository's
+	// setup script, and a guest of the bot (an account of their own, whose space remembers which bot they joined and which agent is their copy).
+	const gallery = (table: string, pk: string, row: unknown) => admin.query("INSERT INTO pim_ops.legacy_rows (owner_id, source, table_name, pk, row) VALUES ('_deployment','Gallery',$1,$2,$3)", [table, pk, JSON.stringify(row)]);
+	const icon = { $b64: PNG.toString("base64") };
+	await gallery("templates", "tpl_team", { id: "tpl_team", owner_id: legacy, username: "ada", agent_id: "ag_poet", name: "Writers", role: "Lead", description: "A poet and an editor", instructions: "Lead the writers.", apps: JSON.stringify(["gmail"]), team: "[]", contacts: JSON.stringify(["Editor"]), bundle: JSON.stringify([{ name: "Ed", role: "Editor", description: "Fixes it", instructions: "Edit.", apps: [], symbol: "E", color: "red", contacts: [], icon: 1 }]), symbol: "W", color: "green", icon_type: "image/png", icon_data: icon, published_at: at, uses: 0 });
+	await gallery("bundle_icons", "template-tpl_team:0", { holder: "tpl_team", position: 0, type: "image/png", data: icon });
+	// A bot whose agent has no picture of its own shows the bot's copy of it.
+	await admin.query("INSERT INTO pim_ops.legacy_rows (owner_id, source, table_name, pk, row) VALUES ($1,'Pim','pim_agents','ag_blank',$2)", [ADA, JSON.stringify({ id: "ag_blank", name: "Blank", instructions: "Hi.", model: null, fallbacks: "[]", skills: "[]", apps: "[]", contacts: "[]", role: null, description: "", is_default: 0, symbol: null, color: null, memory_scope: "private", memory_scopes: "[]", created_at: at })]);
+	await gallery("bots", "b_blank", { id: "b_blank", owner_id: legacy, username: "ada", agent_id: "ag_blank", name: "Blank bot", shared_at: at, daily_messages: null, daily_tool_calls: null, model: null, tools: "[]", icon_type: "image/png", icon_data: icon });
+	await gallery("apps", "app_wiki", { id: "app_wiki", name: "Wiki", description: "The team wiki", url: "https://wiki.example.test/mcp", icon: null, category: "knowledge", created_at: at });
+	await gallery("disabled_builtin_apps", "notes", { id: "notes" });
+	await admin.query("INSERT INTO pim_ops.legacy_rows (owner_id, source, table_name, pk, row) VALUES ($1,'Pim','pim_notifications','n1',$2), ($1,'Pim','pim_notifications','n2',$3), ($1,'CodingScheduler:x','pim_coding_repo_settings','acme/app',$4)", [
+		ADA, JSON.stringify({ id: "n1", kind: "general", session: null, title: "Take a look", body: "Your goal moved", created_at: at, read_at: null }), JSON.stringify({ id: "n2", kind: "mention", session: String(conversation), title: "Poet replied", body: "", created_at: at, read_at: at }),
+		JSON.stringify({ repo: "acme/app", setup_script: "pnpm install", updated_at: at }),
+	]);
+	await admin.query("INSERT INTO pim_ops.tenants (owner_id, username, role, status, created_at_ms, activated_at_ms) VALUES ('o_own_heidi','heidi','guest','active',$1,$1)", [at]);
+	await admin.query("INSERT INTO pim_ops.owner_map (legacy_id, owner_id) VALUES ('own_heidi','o_own_heidi')");
+	await admin.query("INSERT INTO pim_ops.legacy_rows (owner_id, source, table_name, pk, row) VALUES ('o_own_heidi','Pim:own_heidi','pim_meta','guest_bot',$1)", [JSON.stringify({ key: "guest_bot", value: JSON.stringify({ bot: "b_ada1", agent: "ag_heidi_copy", sharedAt: at, owner: legacy, tools: [] }) })]);
 }
 const ADA = "o_own_ada";
 const HABIT_HTML = "<!doctype html><title>Habit tracker</title>";
@@ -235,8 +253,22 @@ expect(await as("SELECT kind, app_ref, status FROM pim_app.connectors WHERE owne
 		expect(report.skipped.join("\n")).toMatch(/shared provider prov_2: kept sealed in the landing; the built-in anthropic service/);
 		expect(await as<{ p: { id: string; shared?: boolean }[] }>("SELECT pim_app.runner_providers($1) AS p", [ADA]).then((r) => r[0]!.p.filter((p) => p.shared).map((p) => p.id))).toEqual(["shared:prov_1"]);
 		// Templates, the bot the admin shared (its own model named without the old catalog's prefix) and the agent everyone starts with.
-		expect(await as("SELECT id, owner_id, agent_id, title, bundle, uses, default_for_everyone FROM pim_app.templates")).toEqual([{ id: "tpl_1", owner_id: ADA, agent_id: "agent_ada_1", title: "Researcher", bundle: { agent: { name: "Researcher", instructions: "Be brief.", emoji: "R", color: "blue" }, description: "Reads things", apps: [] }, uses: 3, default_for_everyone: true }]);
-		expect(await as("SELECT id, owner_id, agent_id, name, settings FROM pim_app.bots")).toEqual([{ id: "b_ada1", owner_id: ADA, agent_id: "agent_ada_1", name: "Ask Ada", settings: { dailyMessages: 25, dailyToolCalls: 5, model: { provider: "prov_own", id: "m" }, tools: ["search", "create_ticket"], ask: ["create_ticket"] } }]);
+		expect(await as("SELECT id, owner_id, agent_id, title, bundle, uses, default_for_everyone FROM pim_app.templates WHERE id = 'tpl_1'")).toEqual([{ id: "tpl_1", owner_id: ADA, agent_id: "agent_ada_1", title: "Researcher", bundle: { agent: { name: "Researcher", role: "Researcher", description: "Reads things", instructions: "Be brief.", apps: [], emoji: "R", color: "blue", contacts: [], icon: null }, description: "Reads things", apps: [] }, uses: 3, default_for_everyone: true }]);
+		// A template keeps what it came with: its role, connectors, contacts, the agent that comes with it, and both uploaded icons as public image objects under its author.
+		const team = (await as<{ bundle: any }>("SELECT bundle FROM pim_app.templates WHERE id = 'tpl_team'"))[0]!.bundle;
+		expect(team).toMatchObject({ agent: { name: "Writers", role: "Lead", description: "A poet and an editor", apps: ["gmail"], emoji: "W", color: "green", contacts: ["Editor"], icon: `${ADA}/bundle-icons/tpl_team/-1` }, apps: ["gmail"], icon: `${ADA}/bundle-icons/tpl_team/-1` });
+		expect(team.bundle).toEqual([{ name: "Ed", role: "Editor", description: "Fixes it", instructions: "Edit.", apps: [], emoji: "E", color: "red", contacts: [], icon: `${ADA}/bundle-icons/tpl_team/0` }]);
+		for (const key of [`${ADA}/bundle-icons/tpl_team/-1`, `${ADA}/bundle-icons/tpl_team/0`]) {
+			expect(Buffer.from(copied.get(key)!).equals(PNG)).toBe(true);
+			expect(await count(`SELECT count(*) n FROM pim_app.objects WHERE key = '${key}' AND purpose = 'image' AND acl = 'public'`)).toBe(1);
+		}
+		expect(await as("SELECT icon_key FROM pim_app.agents WHERE owner_id = $1 AND id = 'ag_blank'", [ADA])).toEqual([{ icon_key: `${ADA}/agent-icons/ag_blank` }]);
+		// The admin's connector catalog, a built-in app turned off, the bell, a repository's setup script, and a guest's bot.
+		expect(await as("SELECT value FROM pim_app.instance_settings WHERE key IN ('custom_apps', 'disabled_builtin_apps') ORDER BY key")).toEqual([{ value: [{ id: "app_wiki", name: "Wiki", description: "The team wiki", url: "https://wiki.example.test/mcp", icon: null, category: "knowledge" }] }, { value: ["notes"] }]);
+		expect((await as("SELECT title, kind, read_at IS NULL AS unread FROM pim_app.notifications WHERE owner_id = $1 ORDER BY id", [ADA])).map((n: any) => [n.title, n.kind, n.unread])).toEqual([["Take a look", "general", true], ["Poet replied", "mention", false]]);
+		expect(await as("SELECT repo, setup_script FROM pim_forge.forge_repo_settings WHERE owner_id = $1", [ADA])).toEqual([{ repo: "acme/app", setup_script: "pnpm install" }]);
+		expect(await as("SELECT owner_id, bot_id, host_owner, agent_id FROM pim_app.guest_bots")).toEqual([{ owner_id: "o_own_heidi", bot_id: "b_ada1", host_owner: ADA, agent_id: "ag_heidi_copy" }]);
+		expect(await as("SELECT id, owner_id, agent_id, name, settings FROM pim_app.bots WHERE id = 'b_ada1'")).toEqual([{ id: "b_ada1", owner_id: ADA, agent_id: "agent_ada_1", name: "Ask Ada", settings: { dailyMessages: 25, dailyToolCalls: 5, model: { provider: "prov_own", id: "m" }, tools: ["search", "create_ticket"], ask: ["create_ticket"] } }]);
 		for (const p of await as<{ id: string; secret: string | null }>("SELECT id, secret FROM pim_app.providers WHERE owner_id = $1 AND secret IS NOT NULL", [ADA])) expect((await openString(appKeys, p.secret!, `provider:${ADA}/${p.id}`)).length).toBeGreaterThan(0);
 		// A file from before files moved to computers: its bytes are an object under the new owner, and its path is kept in an index, since an object key has no room for it.
 		expect(Buffer.from(copied.get(`${ADA}/files/f1`)!).toString()).toBe("%PDF");

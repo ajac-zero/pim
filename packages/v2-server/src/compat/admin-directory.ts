@@ -9,6 +9,7 @@ import { BadRequestError, NotFoundError } from "@pim/v2-app/errors";
 import { route, type Route } from "@pim/v2-app/http";
 import type { Principal } from "@pim/v2-contracts/identity";
 import { ms, ok } from "./admin-util.ts";
+import { computeReport, usageReport } from "./usage.ts";
 
 export const BUILTIN_APPS = [{ id: "notes", name: "Notes", description: "Documents people write with their agents, live, with diagrams and drawings in them." }] as const;
 export const DISABLED_BUILTIN_KEY = "disabled_builtin_apps";
@@ -44,16 +45,28 @@ export function adminDirectoryRoutes(): Route[] {
 				 ORDER BY created_at, username LIMIT $3`, [status, after, limit + 1])).rows);
 			return ok({ accounts: rows.slice(0, limit).map(member), next: rows.length > limit ? rows[limit - 1]!.username : null });
 		}),
+		// One account with what it used and what is left to erase when it is going: as v1's `{ account, usage, compute, cleanup }`, with the account's own fields flat as before.
 		route("GET", "/api/admin/accounts/:username", async ({ app, principal, params }) => {
 			await admin(app, await principal(), "admin:accounts");
 			const r = await app.db.anonymous(async (tx) => (await tx.query(`SELECT ${COLUMNS} FROM pim_app.accounts WHERE username = $1`, [params[0]!.toLowerCase()])).rows[0]);
 			if (!r) throw new NotFoundError("No such account");
-			return ok({ ...member(r), guest: r.bot === true });
+			const live = r.status === "active" || r.status === "suspended";
+			return ok({
+				...member(r), guest: r.bot === true,
+				usage: live ? await usageReport(app, r.owner_id) : null,
+				compute: live ? await computeReport(app, r.owner_id).catch(() => null) : null,
+				cleanup: r.status === "deleting" ? { kind: "delete", requestedAt: ms(r.status_changed_at), attempts: 0 } : null,
+			});
 		}),
+		// The accounts by status as before, with what an operator watches: registrations in the last day, invites still unused (this admin's), and accounts still being erased
+		// (`failing` are the ones that have been for more than a day).
 		route("GET", "/api/admin/stats", async ({ app, principal }) => {
-			await admin(app, await principal(), "admin:accounts");
-			const n = await app.db.anonymous(async (tx) => (await tx.query("SELECT count(*) FILTER (WHERE status = 'active')::int AS active, count(*) FILTER (WHERE status = 'suspended')::int AS suspended, count(*) FILTER (WHERE status = 'active' AND role = 'admin')::int AS admins, count(*) FILTER (WHERE status = 'active' AND role = 'guest')::int AS guests, count(*) FILTER (WHERE status IN ('deleting', 'deleted'))::int AS removed FROM pim_app.accounts")).rows[0]);
-			return ok({ accounts: n });
+			const p = await principal();
+			await admin(app, p, "admin:accounts");
+			const n = await app.db.anonymous(async (tx) => (await tx.query("SELECT count(*) FILTER (WHERE status = 'active')::int AS active, count(*) FILTER (WHERE status = 'suspended')::int AS suspended, count(*) FILTER (WHERE status = 'pending')::int AS pending, count(*) FILTER (WHERE status = 'active' AND role = 'admin')::int AS admins, count(*) FILTER (WHERE status = 'active' AND role = 'guest')::int AS guests, count(*) FILTER (WHERE status IN ('deleting', 'deleted'))::int AS removed, count(*) FILTER (WHERE status = 'deleting')::int AS deleting, count(*) FILTER (WHERE status = 'deleting' AND status_changed_at < now() - interval '1 day')::int AS stuck, count(*) FILTER (WHERE created_at >= now() - interval '1 day')::int AS recent FROM pim_app.accounts")).rows[0]);
+			const unused = await app.db.owner(p.ownerId, async (tx) => (await tx.query("SELECT count(*)::int AS n FROM pim_app.invites WHERE used_at IS NULL OR NOT EXISTS (SELECT 1 FROM pim_app.accounts WHERE owner_id = invites.used_by)")).rows[0].n as number);
+			const { recent, deleting, stuck, ...accounts } = n;
+			return ok({ accounts, registrationsLastDay: recent, invitesUnused: unused, cleanups: { queued: deleting, failing: stuck } });
 		}),
 
 		// ---- what Pim brings ----

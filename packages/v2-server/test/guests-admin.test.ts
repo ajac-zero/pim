@@ -287,7 +287,7 @@ real("guests, circles and the admin's majordomo", () => {
 	it("gives the admin's majordomo the admin API as three tools, and no one else", async () => {
 		await send(host, "how is the deployment?", false, toolUse(fauxToolCall("admin_read", { path: "/api/admin/stats" })), toolUse(fauxToolCall("admin_read", { path: "/api/admin/deployment" })), toolUse(fauxToolCall("admin_read", { path: "/api/other" })));
 		const read = await results(host, "admin_read");
-		expect(JSON.parse(read[0]!)).toMatchObject({ status: 200, body: { accounts: { active: 3, admins: 1, guests: 1 } } });
+		expect(JSON.parse(read[0]!)).toMatchObject({ status: 200, body: { accounts: { active: 3, admins: 1, guests: 1 }, registrationsLastDay: expect.any(Number), invitesUnused: 0, cleanups: { queued: 0, failing: 0 } } });
 		expect(read[1]).toContain("PIM_PUBLIC_URL");
 		expect(read[2]).toMatch(/starting \/api\/admin|A path is/);
 
@@ -333,6 +333,43 @@ real("guests, circles and the admin's majordomo", () => {
 		expect((await results(host, "admin_write_approved")).at(-1)).toMatch(/"status": 403/);
 		expect((await d.stack.admin.query("SELECT status FROM pim_app.accounts WHERE username = 'anibal'")).rows[0].status).toBe("active");
 	}, 300_000);
+
+	it("lets the admin's majordomo read its own audit, diagnostics and health, and do in the app what the person does, with deletes asking first", async () => {
+		await send(host, "audit what you did", false, toolUse(fauxToolCall("admin_audit", { limit: 3 })), toolUse(fauxToolCall("pim_health", {})), toolUse(fauxToolCall("pim_diagnostics", { kind: "approvals" })));
+		const audit = JSON.parse((await results(host, "admin_audit")).at(-1)!);
+		expect(audit.writes.length).toBe(3);
+		expect(audit.writes[0]).toMatchObject({ tool: expect.stringMatching(/^admin_/), method: expect.any(String), path: expect.stringMatching(/^\/api\/admin\//), decision: expect.any(String) });
+		expect(JSON.parse((await results(host, "pim_health")).at(-1)!)).toMatchObject({ status: 200, body: { counts: { active_accounts: expect.any(Number) } } });
+		expect(JSON.parse((await results(host, "pim_diagnostics")).at(-1)!).status).toBe(200);
+
+		const goal = (await host.web.call("POST", "/api/goals", { title: "Sail", steps: ["Buy a boat"] })).json;
+		await send(host, "look at the app", false,
+			toolUse(fauxToolCall("ui_routes", {})), toolUse(fauxToolCall("ui_read", { path: "/api/goals" })), toolUse(fauxToolCall("ui_read", { path: "/api/account/export" })), toolUse(fauxToolCall("ui_read", { path: "/api/admin/stats" })),
+			toolUse(fauxToolCall("ui_write", { method: "DELETE", path: `/api/goals/${goal.id}` })));
+		expect((await results(host, "ui_routes")).at(-1)).toContain('"class":"blocked"');
+		expect((await results(host, "ui_read"))[0]).toContain("Sail");
+		expect((await results(host, "ui_read"))[1]).toMatch(/not open to you/);
+		expect((await results(host, "ui_read"))[2]).toMatch(/not open to you/); // the admin API has its own tools
+		expect((await results(host, "ui_write")).at(-1)).toMatch(/use ui_write_destructive/);
+
+		await send(host, "rename the goal", false, toolUse(fauxToolCall("ui_write", { method: "PUT", path: `/api/goals/${goal.id}`, body: { title: "Sail far" } })));
+		expect((await host.web.call("GET", `/api/goals/${goal.id}`)).json).toMatchObject({ title: "Sail far" });
+		// A delete asks the admin, with the exact request, and runs only on a yes.
+		await send(host, "drop the goal", true, toolUse(fauxToolCall("ui_write_destructive", { method: "DELETE", path: `/api/goals/${goal.id}` })));
+		const asked = await waitFor("the delete's approval", async () => (await d.stack.admin.query("SELECT id, args FROM pim_app.approvals WHERE tool = 'admin:write' AND state = 'waiting'")).rows[0], 60_000);
+		expect(asked.args).toMatchObject({ method: "DELETE", path: `/api/goals/${goal.id}` });
+		expect((await host.web.call("GET", `/api/goals/${goal.id}`)).status).toBe(200);
+		await host.web.call("POST", `/api/approvals/${asked.id}/approve`, {});
+		await finish(host);
+		expect((await host.web.call("GET", `/api/goals/${goal.id}`)).status).toBe(404);
+		await send(host, "what did you change?", false, toolUse(fauxToolCall("ui_audit", {})));
+		const kept = JSON.parse((await results(host, "ui_audit")).at(-1)!).writes as { tool: string; decision: string; keys: string[]; status: number }[];
+		expect(kept.map((w) => [w.tool, w.decision])).toEqual([["ui_write_destructive", "allowed"], ["ui_write_destructive", "approval_required"], ["ui_write", "allowed"]]);
+		expect(kept[2]).toMatchObject({ keys: ["title"], status: 200 });
+		// A member's majordomo has none of them.
+		await send(bob, "use the app routes", false, toolUse(fauxToolCall("ui_read", { path: "/api/goals" })));
+		expect((await results(bob, "ui_read")).at(-1)).toMatch(/Only the admin/);
+	}, 240_000);
 
 	it("has a development sign-in only where PIM_DEV_SIGN_IN is on, which makes the account, gives it the default agent and joins a bot's guests", async () => {
 		const open = (path: string) => fetch(`${base(gate)}${path}`, { redirect: "manual", headers: { "x-pim-ingress-secret": d.ingressSecret } });

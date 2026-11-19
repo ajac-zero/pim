@@ -14,6 +14,7 @@ import type { Ctx, Route } from "@pim/v2-app/http";
 import type { Principal } from "@pim/v2-contracts/identity";
 import { OwnerId } from "@pim/v2-contracts/identity";
 import { adminCompatRoutes } from "./compat/admin.ts";
+import { diagnosticsRoutes } from "./compat/diagnostics.ts";
 
 type Result = { content: { type: "text"; text: string }[]; isError?: boolean };
 const text = (s: string, isError = false): Result => ({ content: [{ type: "text", text: s }], ...(isError ? { isError } : {}) });
@@ -41,9 +42,31 @@ function normalise(raw: string): URL {
 	return url;
 }
 
+/** What the app's routes never open to the majordomo through `ui_*`: credentials and files handed out, the person's own decisions, the account itself, and the admin API, which has its own tools. */
+const BLOCKED_UI: readonly RegExp[] = [
+	/^\/api\/admin(\/|$)/, /^\/api\/approvals\/[^/]+\/(approve|deny)$/, /\/ui-state(\/|$)/, /\/download$/, /^\/api\/export$/, /^\/api\/account(\/|$)/, /^\/api\/tokens(\/|$)/, /\/callback/, /\/grants$/, /\/bridge$/,
+	/^\/api\/browser\/screenshot$/, /^\/api\/files\/content$/,
+];
+export type UiClass = "read" | "write" | "destructive" | "blocked";
+/** The class of a request to the app's routes: reads and writes run at once, a delete (or resetting a chat) asks the admin, and some are never open. */
+export const classOf = (method: string, path: string): UiClass => (BLOCKED_UI.some((b) => b.test(path)) ? "blocked" : method === "DELETE" || (method === "POST" && /^\/api\/sessions\/[^/]+\/reset$/.test(path)) ? "destructive" : method === "GET" ? "read" : "write");
+
+function normaliseUi(raw: string): URL {
+	const url = new URL(raw, "http://ui.invalid");
+	if (url.origin !== "http://ui.invalid" || !url.pathname.startsWith("/api/") || url.pathname.includes("..") || url.pathname.includes("//")) throw new Error("A path is /api/… of this Pim's app: see ui_routes.");
+	return url;
+}
+
+/** The routes of the web app, as `ui_*` reaches them: Pim's own and the compatibility routes the web app reads. */
+async function appRoutes(): Promise<Route[]> {
+	const [{ webCompatRoutes }, { builtInRoutes }] = await Promise.all([import("./compat/index.ts"), import("@pim/v2-app/gate")]);
+	return [...webCompatRoutes, ...builtInRoutes];
+}
+const readable = (r: Route) => r.pattern.source.replace(/^\^|\$$/g, "").replace(/\(\[\^\/\]\+\)/g, ":id").replace(/\(\.\+\)/g, "*").replace(/\\\//g, "/").replace(/\\\./g, ".");
+
 /** Runs one admin route in-process as the admin. */
-async function dispatch(app: App, admin: Principal, env: Record<string, string | undefined>, method: string, url: URL, body: Record<string, unknown>): Promise<{ status: number; body: unknown }> {
-	for (const r of ROUTES) {
+async function dispatch(app: App, admin: Principal, env: Record<string, string | undefined>, method: string, url: URL, body: Record<string, unknown>, routes: readonly Route[] = ROUTES): Promise<{ status: number; body: unknown }> {
+	for (const r of routes) {
 		if (r.method !== method) continue;
 		const m = r.pattern.exec(url.pathname);
 		if (!m) continue;
@@ -60,7 +83,7 @@ async function dispatch(app: App, admin: Principal, env: Record<string, string |
 			return { status: known.status, body: { error: known.code, message: (error as Error).message } };
 		}
 	}
-	return { status: 404, body: { error: "not_found", message: "This deployment has no such admin route." } };
+	return { status: 404, body: { error: "not_found", message: "This deployment has no such route." } };
 }
 
 export type AdminToolsDeps = {
@@ -86,8 +109,8 @@ export function adminTools(deps: AdminToolsDeps): ToolRegistration[] {
 		if (!account || account.status !== "active" || account.role !== "admin") return "Only the admin of this Pim runs it.";
 		return null;
 	};
-	const audit = (app: App, tool: string, method: string, path: string, decision: string) =>
-		app.db.owner(ownerId, (tx) => tx.query("INSERT INTO pim_app.audit_log (owner_id, actor, action, resource, decision) VALUES ($1,'agent:majordomo',$2,$3,$4)", [ownerId, tool, JSON.stringify({ method, path }), decision])).catch(() => undefined);
+	const audit = (app: App, tool: string, method: string, path: string, decision: string, keys: string[] = [], status?: number) =>
+		app.db.owner(ownerId, (tx) => tx.query("INSERT INTO pim_app.audit_log (owner_id, actor, action, resource, decision, detail) VALUES ($1,'agent:majordomo',$2,$3,$4,$5)", [ownerId, tool, JSON.stringify({ method, path }), decision, JSON.stringify({ keys, ...(status !== undefined ? { status } : {}) })])).catch(() => undefined);
 
 	const answer = (r: { status: number; body: unknown }): Result => text(JSON.stringify({ status: r.status, body: stripSecrets(r.body) }, null, 1), r.status >= 400);
 
@@ -112,9 +135,11 @@ export function adminTools(deps: AdminToolsDeps): ToolRegistration[] {
 		},
 	} as never) as unknown as ToolRegistration;
 
-	const write = (name: string, approved: boolean) => defineTool({
+	const write = (name: string, approved: boolean, ui = false) => defineTool({
 		name,
-		description: approved
+		description: ui
+			? (approved ? "Do something in the app that cannot be taken back, through its own routes: any DELETE, and POST /api/sessions/<id>/reset. The admin is asked to approve each one first, reading the exact request." : "Do what the person does in the app, through its own routes: POST, PUT and PATCH at once. A DELETE is refused here: use ui_write_destructive. See ui_routes for what exists; some routes are never open to you.")
+			: approved
 			? "Make a change to how this Pim is run that cannot be undone or that handles a credential: any delete, providers and their keys, compute, sign-in, an account's suspension, invites. The admin is asked to approve each one first. method is POST, PUT, PATCH or DELETE."
 			: "Make a change to how this Pim is run that can be undone, through the admin API: set the default agent, switch a built-in app, add or edit a connector in the directory, unsuspend an account. Anything that cannot be undone or that handles a credential is refused here: use admin_write_approved for it.",
 		parameters: Type.Object({ method: Type.Union([Type.Literal("POST"), Type.Literal("PUT"), Type.Literal("PATCH"), Type.Literal("DELETE")]), path: Type.String({ description: "A path of this Pim's admin API, starting /api/admin/." }), body: Type.Optional(Type.Record(Type.String(), Type.Any())) }),
@@ -127,10 +152,11 @@ export function adminTools(deps: AdminToolsDeps): ToolRegistration[] {
 				const chat = await deps.chatOf(api.conversationId);
 				const refusal = await allowed(app, chat);
 				if (refusal) return text(refusal, true);
-				const url = normalise(args.path);
-				const gated = needsApproval(args.method, url.pathname);
-				if (gated && !approved) return text(`${args.method} ${url.pathname} can't be undone or handles a credential, so it needs the admin's approval: use admin_write_approved.`, true);
-				if (!gated && approved) return text(`${args.method} ${url.pathname} doesn't need approval: use admin_write.`, true);
+				const url = ui ? normaliseUi(args.path) : normalise(args.path);
+				if (ui && classOf(args.method, url.pathname) === "blocked") return text(`${args.method} ${url.pathname} is not open to you.`, true);
+				const gated = ui ? classOf(args.method, url.pathname) === "destructive" : needsApproval(args.method, url.pathname);
+				if (gated && !approved) return text(ui ? `${args.method} ${url.pathname} can't be taken back, so it needs the admin's approval: use ui_write_destructive.` : `${args.method} ${url.pathname} can't be undone or handles a credential, so it needs the admin's approval: use admin_write_approved.`, true);
+				if (!gated && approved) return text(`${args.method} ${url.pathname} doesn't need approval: use ${ui ? "ui_write" : "admin_write"}.`, true);
 				if (approved) {
 					const taskId = String(api.taskId);
 					const signal = (await deps.runtime.read<{ payload: { approved?: boolean } }>(ownerId, "SELECT payload FROM pim_runtime.durable_signals WHERE owner_id = $1 AND task_id = $2 AND kind = 'approval' ORDER BY signal_id DESC LIMIT 1", [ownerId, taskId])).rows[0];
@@ -148,8 +174,8 @@ export function adminTools(deps: AdminToolsDeps): ToolRegistration[] {
 						return waiting;
 					}
 				}
-				const r = await dispatch(app, admin, deps.env, args.method, url, args.body ?? {});
-				await audit(app, name, args.method, url.pathname, r.status < 400 ? "allowed" : "denied");
+				const r = await dispatch(app, admin, deps.env, args.method, url, args.body ?? {}, ui ? await appRoutes() : ROUTES);
+				await audit(app, name, args.method, url.pathname, r.status < 400 ? "allowed" : "denied", Object.keys(args.body ?? {}), r.status);
 				return answer(r);
 			} catch (error) {
 				return text(error instanceof Error ? error.message : String(error), true);
@@ -157,5 +183,44 @@ export function adminTools(deps: AdminToolsDeps): ToolRegistration[] {
 		},
 	} as never) as unknown as ToolRegistration;
 
-	return [read, write("admin_write", false), write("admin_write_approved", true)];
+	/** Runs a read-only tool for the admin's majordomo: the same checks as every admin tool, then `work`. */
+	const guarded = (name: string, description: string, parameters: unknown, work: (app: App, args: any) => Promise<Result>) => defineTool({
+		name, description, parameters, replay: "safe",
+		async execute(args: any, api: any) {
+			const app = deps.app;
+			if (!app) return text("This Runner has no application database (PIM_APP_DATABASE_URL), so it cannot reach this Pim.", true);
+			try {
+				const refusal = await allowed(app, await deps.chatOf(api.conversationId));
+				if (refusal) return text(refusal, true);
+				return await work(app, args ?? {});
+			} catch (error) {
+				return text(error instanceof Error ? error.message : String(error), true);
+			}
+		},
+	} as never) as unknown as ToolRegistration;
+
+	const auditOf = (tools: string[]) => async (app: App, a: { limit?: number }): Promise<Result> => {
+		const rows = (await app.db.owner(ownerId, async (tx) => (await tx.query("SELECT at, action, resource, decision, detail FROM pim_app.audit_log WHERE actor = 'agent:majordomo' AND action = ANY($1) ORDER BY id DESC LIMIT $2", [tools, Math.min(Math.max(a.limit ?? 50, 1), 500)])).rows));
+		return text(JSON.stringify({ writes: rows.map((r) => ({ at: r.at, tool: r.action, ...(JSON.parse(r.resource ?? "{}") as object), decision: r.decision, status: r.detail?.status ?? null, keys: r.detail?.keys ?? [] })) }, null, 1));
+	};
+	const limitOnly = Type.Object({ limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 500, description: "How many, 50 unless given." })) });
+	const through = (method: string, path: (a: any) => URL, routes?: () => Promise<Route[]>) => async (app: App, a: any): Promise<Result> => answer(await dispatch(app, admin, deps.env, method, path(a), {}, routes ? await routes() : ROUTES));
+	
+	return [
+		read, write("admin_write", false), write("admin_write_approved", true),
+		guarded("admin_audit", "The writes made to the admin area through admin_write and admin_write_approved, newest first: method, path, the admin's decision, status and the keys of the body.", limitOnly, auditOf(["admin_write", "admin_write_approved"])),
+		guarded("pim_diagnostics", "What went wrong in this Pim lately, read only: chats at work now, failed runs and tasks, triggers' health, model call errors, connectors that aren't ready and approvals waiting. Give kind to read one kind, since (an ISO time, or 90m, 6h, 2d) and limit.", Type.Object({ since: Type.Optional(Type.String()), kind: Type.Optional(Type.String()), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 200 })) }), through("GET", (a) => { const u = new URL("/api/admin/diagnostics", "http://admin.invalid"); for (const k of ["since", "kind", "limit"]) if (a[k] !== undefined) u.searchParams.set(k, String(a[k])); return u; }, async () => diagnosticsRoutes(deps.env))),
+		guarded("pim_health", "How this Pim is doing, read only: how many accounts are active, being erased, how many approvals wait, and how the deployment is set (without addresses or keys).", Type.Object({}), through("GET", () => new URL("/api/admin/health", "http://admin.invalid"), async () => diagnosticsRoutes(deps.env))),
+		guarded("ui_routes", "Every route of the app you can use through ui_read and ui_write, with its class: read, write, destructive (ui_write_destructive, which asks the admin) or blocked (never open to you).", Type.Object({}), async () => text(JSON.stringify({ routes: (await appRoutes()).map((r) => ({ method: r.method, path: readable(r) })).filter((r) => r.path.startsWith("/api/")).map((r) => ({ ...r, class: classOf(r.method, r.path.replace(/:id/g, "x").replace(/\*/g, "x")) })) }))),
+		guarded("ui_read", "Read anything the app reads, through its own route (a GET), such as /api/sessions or /api/goals. Answers JSON as it is, cut at 100,000 characters; give a query to ask for less.", Type.Object({ path: Type.String({ description: "A route of the app, starting /api/, with any query." }) }), async (app, a: { path: string }) => {
+			const url = normaliseUi(a.path);
+			if (classOf("GET", url.pathname) === "blocked") return text(`GET ${url.pathname} is not open to you.`, true);
+			const reply = await dispatch(app, admin, deps.env, "GET", url, {}, await appRoutes());
+			await audit(app, "ui_read", "GET", url.pathname, reply.status < 400 ? "allowed" : "denied", [], reply.status);
+			const out = JSON.stringify({ status: reply.status, body: stripSecrets(reply.body) });
+			return text(out.length > 100_000 ? `${out.slice(0, 100_000)} … [cut: ask for less with a query]` : out, reply.status >= 400);
+		}),
+		write("ui_write", false, true), write("ui_write_destructive", true, true),
+		guarded("ui_audit", "The writes made through ui_write and ui_write_destructive, newest first: method, path, the decision, status and the keys of the body.", limitOnly, auditOf(["ui_write", "ui_write_destructive"])),
+	];
 }

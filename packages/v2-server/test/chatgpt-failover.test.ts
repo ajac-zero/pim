@@ -137,7 +137,10 @@ real("Sign in with ChatGPT and provider failover", () => {
 		ownerId = registered.json.account.ownerId;
 		runner = await start(d, "runner", { pollMs: 40, providers: () => [faux.provider] }, { ...env, PIM_CHATGPT_BASE_URL: openai.issuer, PIM_PROVIDER_COOLDOWN_MS: "600000", PIM_APP_DATABASE_URL: stack.url("gate") });
 	}, 180_000);
+	/** What a test opened that its database drop would otherwise cut off (a pool left idle gets an error when its server is dropped under it). */
+	const closers: (() => Promise<unknown>)[] = [];
 	afterAll(async () => {
+		await Promise.allSettled(closers.map((close) => close()));
 		await Promise.allSettled([runner?.close(), gate?.close()]);
 		await app?.db.end();
 		d?.nats.stop();
@@ -249,7 +252,9 @@ real("Sign in with ChatGPT and provider failover", () => {
 		// What the runtime committed to the chat, by the runtime's own number for its conversation.
 		const entries = async () => (await d.stack.admin.query("SELECT record FROM pim_runtime.entries WHERE owner_id = $1 AND conversation_id = (SELECT conversation_id FROM pim_runtime.conversation_partitions WHERE owner_id = $1 AND public_chat_id = $2) ORDER BY id", [ownerId, chat])).rows.map((r) => r.record).join("\n");
 		const sweeper = new App(connectApp(d.stack.url("maintenance"), 2), new MemoryObjectStore());
-		const sweep = (now = new Date()) => sweepHeldRetries(sweeper, new pg.Pool({ connectionString: d.stack.url("maintenance"), max: 1 }), now);
+		const sweepPool = new pg.Pool({ connectionString: d.stack.url("maintenance"), max: 1 }).on("error", () => {});
+		closers.push(() => Promise.allSettled([sweeper.db.end(), sweepPool.end()]));
+		const sweep = (now = new Date()) => sweepHeldRetries(sweeper, sweepPool, now);
 		// The plan is out, and so is the fallback: every model fails with a usage limit, so the run is held for the person's Try again.
 		openai.state.limited = true;
 		const out = () => fauxAssistantMessage([], { stopReason: "error", errorMessage: "You have hit your usage limit. Try again in 2 hours." });

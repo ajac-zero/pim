@@ -10,7 +10,9 @@ import { chatgptContext } from "@pim/v2-app/chatgpt";
 import { KeyringCrypto, openString, sealString } from "@pim/v2-app/crypto";
 import { connect as connectApp } from "@pim/v2-app/db";
 import { MemoryObjectStore } from "@pim/v2-app/objects";
+import pg from "pg";
 import type { Process } from "../src/main.ts";
+import { sweepHeldRetries } from "../src/sweeps.ts";
 import { chatgptCredentialStore } from "../src/chatgpt-auth.ts";
 import { readTranscript, waitFor } from "../../v2-runtime/test/support/rig.ts";
 import { Client } from "./support/client.ts";
@@ -133,7 +135,7 @@ real("Sign in with ChatGPT and provider failover", () => {
 		const registered = await web.call("POST", "/auth/register", { username: "anibal", bootstrap: claim, session: true });
 		expect(registered.status).toBe(201);
 		ownerId = registered.json.account.ownerId;
-		runner = await start(d, "runner", { pollMs: 40, providers: () => [faux.provider] }, { ...env, PIM_CHATGPT_BASE_URL: openai.issuer, PIM_PROVIDER_COOLDOWN_MS: "600000"});
+		runner = await start(d, "runner", { pollMs: 40, providers: () => [faux.provider] }, { ...env, PIM_CHATGPT_BASE_URL: openai.issuer, PIM_PROVIDER_COOLDOWN_MS: "600000", PIM_APP_DATABASE_URL: stack.url("gate") });
 	}, 180_000);
 	afterAll(async () => {
 		await Promise.allSettled([runner?.close(), gate?.close()]);
@@ -235,6 +237,39 @@ real("Sign in with ChatGPT and provider failover", () => {
 		const calls = (await d.stack.admin.query("SELECT provider, model FROM pim_app.model_calls")).rows;
 		expect(calls).toContainEqual({ provider: "faux", model: "m" });
 	}, 90_000);
+
+	it("holds a run that has nowhere else to go on the plan's usage limit, and goes on by itself when the limit resets", async () => {
+		const chat = (await web.call("POST", "/api/sessions", { title: "Out of usage" })).json.id as string;
+		// What the runtime committed to the chat, by the runtime's own number for its conversation.
+		const entries = async () => (await d.stack.admin.query("SELECT record FROM pim_runtime.entries WHERE owner_id = $1 AND conversation_id = (SELECT conversation_id FROM pim_runtime.conversation_partitions WHERE owner_id = $1 AND public_chat_id = $2) ORDER BY id", [ownerId, chat])).rows.map((r) => r.record).join("\n");
+		const sweeper = new App(connectApp(d.stack.url("maintenance"), 2), new MemoryObjectStore());
+		const sweep = (now = new Date()) => sweepHeldRetries(sweeper, new pg.Pool({ connectionString: d.stack.url("maintenance"), max: 1 }), now);
+		// The plan is out, and so is the fallback: every model fails with a usage limit, so the run is held for the person's Try again.
+		openai.state.limited = true;
+		const out = () => fauxAssistantMessage([], { stopReason: "error", errorMessage: "You have hit your usage limit. Try again in 2 hours." });
+		faux.setResponses(Array.from({ length: 12 }, out) as never);
+		expect((await web.call("POST", `/api/sessions/${chat}/messages`, { commandId: "out-1", text: "work out of usage" })).status).toBe(202);
+		const held = await waitFor("the hold to be remembered for the limit's reset", async () => (await d.stack.admin.query("SELECT id, resume_at FROM pim_app.held_retries WHERE public_chat_id = $1 AND done_at IS NULL", [chat])).rows[0], 60_000);
+		expect(held.resume_at.getTime()).toBeGreaterThan(Date.now() + 60_000);
+		// Not before the limit resets: nothing is asked of the chat.
+		expect(await sweep()).toBe(0);
+		// The limit resets: the plan answers again, and the chat goes on without a message from the person, and without saying it twice.
+		openai.state.limited = false;
+		faux.setResponses(Array.from({ length: 4 }, () => fauxAssistantMessage([fauxToolCall("send_to_user", { message: "went on by itself" })], { stopReason: "toolUse" })) as never);
+		await d.stack.admin.query("UPDATE pim_app.held_retries SET resume_at = now() - interval '1 second' WHERE public_chat_id = $1", [chat]);
+		expect(await sweep()).toBe(1);
+		// Whichever of the plan and the fallback takes the run first, it is answered: by the model, which sends its answer.
+		await waitFor("the chat to go on", async () => (/plan says hi|went on by itself/.test(await entries()) ? true : undefined), 15_000);
+		await waitFor("the turn to end", async () => ((await entries()).includes('"text":"Sent."') ? true : undefined), 60_000);
+		expect((await entries()).split("work out of usage").length - 1).toBe(1);
+		expect((await d.stack.admin.query("SELECT done_at FROM pim_app.held_retries WHERE public_chat_id = $1", [chat])).rows[0].done_at).not.toBeNull();
+		// A retry for a chat that is no longer held changes nothing: the person answered first.
+		const before = await entries();
+		await d.stack.admin.query("INSERT INTO pim_app.held_retries (owner_id, id, public_chat_id, resume_at) VALUES ($1, 'stale', $2, now() - interval '1 second')", [ownerId, chat]);
+		expect(await sweep()).toBe(1);
+		await waitFor("the stale retry to be settled", async () => ((await d.stack.admin.query("SELECT 1 FROM pim_app.accepted_commands WHERE command_id LIKE '%:stale' AND state = 'runtime_committed'")).rowCount ? true : undefined), 30_000);
+		expect(await entries()).toBe(before);
+	}, 150_000);
 
 	it("disconnects", async () => {
 		expect((await web.call("DELETE", "/api/chatgpt")).json).toEqual({ connected: false, email: null });

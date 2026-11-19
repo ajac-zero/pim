@@ -442,6 +442,66 @@ describe("a chat and the sidebar on Pim v2, with the socket still connecting", (
     expect(client.getState().view.running).toBe(false);
   });
 
+  it("shows the messages queued behind the running turn, from the snapshot and as the live queue changes, and the line said of a step's tool calls", async () => {
+    const queued = [{ id: 7, mode: "followUp", content: "and then this" }];
+    const { fetchImpl } = server({
+      c1: {
+        messages: [user(1, "go")],
+        queue: queued,
+        nextBefore: null,
+        liveCursor: at(1),
+      } as never,
+    });
+    vi.stubGlobal("fetch", fetchImpl);
+    const client = new PimClient();
+    client.handlers = {};
+    client.open("c1");
+    await flush();
+    expect(client.getState().view.queue).toEqual([
+      { id: 7, text: "and then this", images: 0, steer: false },
+    ]);
+    const socket = LiveSocket.at(0);
+    socket.open();
+    socket.say({
+      type: "event",
+      topic: "chat:c1",
+      cursor: at(2),
+      kind: "queue",
+      data: { items: [{ ...queued[0], mode: "steer" }] },
+    });
+    expect(client.getState().view.queue).toEqual([
+      { id: 7, text: "and then this", images: 0, steer: true },
+    ]);
+    socket.say({
+      type: "event",
+      topic: "chat:c1",
+      cursor: at(3),
+      kind: "queue",
+      data: { items: [] },
+    });
+    expect(client.getState().view.queue).toEqual([]);
+    // What the agent is doing, said of the calls of its step, for the chat on screen alone.
+    socket.say({
+      type: "notice",
+      kind: "progress",
+      data: { session: "c2", calls: ["call-1"], text: "Elsewhere" },
+    });
+    expect(client.getState().view.lines).toEqual({});
+    socket.say({
+      type: "notice",
+      kind: "progress",
+      data: {
+        session: "c1",
+        calls: ["call-1", "call-2"],
+        text: "Comparing flight prices",
+      },
+    });
+    expect(client.getState().view.lines).toEqual({
+      "call-1": "Comparing flight prices",
+      "call-2": "Comparing flight prices",
+    });
+  });
+
   it("wipes what was kept when access ends: 4003 stops the connection and tells the app", async () => {
     const { fetchImpl } = server({
       c1: { messages: [], nextBefore: null, liveCursor: null },

@@ -492,6 +492,10 @@ const inputCommand: CommandHandler = async (resident, command, context) => {
 		await conversation.submit({ type: "write", requestId: command.piRequestId, entry: { kind: "pim.room", model: [{ role: "user", content, timestamp: Date.now() }] } }, context);
 		return;
 	}
+	// A run held after its model request failed for good waits for a person: a retry asks the model again without saying the message twice, and a new message goes on with it.
+	const held = command.kind === "user_message" ? await resident.heldGeneration(conversation, context) : undefined;
+	// A retry the system asks for (a usage limit that reset) changes nothing for a chat that is no longer held: the person went on, or tried again, in the meantime.
+	if (held === undefined && command.payload.retry === true && command.payload.onlyIfHeld === true) return;
 	// The chat's model is read again before each message, so a model chosen for this chat alone (or the agent's, or Settings') is the next turn's.
 	if (command.kind === "user_message" && command.publicChatId !== undefined && resident.runner.chatAgent !== undefined) {
 		try {
@@ -508,8 +512,6 @@ const inputCommand: CommandHandler = async (resident, command, context) => {
 			resident.runner.report(error);
 		}
 	}
-	// A run held after its model request failed for good waits for a person: a retry asks the model again without saying the message twice, and a new message goes on with it.
-	const held = command.kind === "user_message" ? await resident.heldGeneration(conversation, context) : undefined;
 	if (held !== undefined && command.payload.retry === true) return resident.resumeHeld(command, held);
 	const whenBusy = command.payload.whenBusy as "steer" | "followUp" | "reject" | undefined;
 	// What the host wants the agent to know before the person's words (the files that changed since it last saw them) goes first, in the same message.

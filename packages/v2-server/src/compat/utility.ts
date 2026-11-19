@@ -30,6 +30,18 @@ export const NAME_CHAT: UtilityTask = {
 	clean: (answer) => line(answer, /^title\s*:\s*/i).slice(0, 100),
 };
 
+/** What an agent is doing now, in a few words, for the person waiting on it (see ../progress.ts). */
+export const DESCRIBE_WORK: UtilityTask = {
+	instructions: [
+		"You tell a person what their AI assistant is doing right now, while they wait for its answer.",
+		"You are given their request, what the assistant found so far, its notes and the tools it is calling now.",
+		'Reply with only one line of 3 to 8 words, in the language of the request, starting with a verb in the present progressive, such as "Comparing flight prices for May".',
+		"Say what it is doing for them, not how: no tool names, code or quotes, no ending punctuation, and not the same as the previous line.",
+	].join(" "),
+	maxTokens: 32,
+	clean: (answer) => line(answer, /^line\s*:\s*/i).slice(0, 120),
+};
+
 export const IMPROVE_PROMPT: UtilityTask = {
 	instructions: [
 		"You improve messages a person is about to send to their AI assistant.",

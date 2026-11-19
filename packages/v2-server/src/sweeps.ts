@@ -1,5 +1,6 @@
 /** The recurring passes of the `maintenance` role that no single service owns. */
 import type { App } from "@pim/v2-app/app";
+import { ForbiddenError, NotFoundError } from "@pim/v2-app/errors";
 import { forgePartitionId } from "./forge-source.ts";
 import type { ObjectStore } from "@pim/v2-contracts/platform";
 import type { Pool } from "pg";
@@ -32,6 +33,35 @@ export async function sweepApprovals(app: App, pool: Pool, now = new Date()): Pr
 		}
 	}
 	return delivered;
+}
+
+/**
+ * Asks the chats held on a subscription's usage limit to try again once it has reset (`pim_app.held_retries`, left by the Runner that held them). The command id is the hold's, so
+ * a retry is asked for once however often this runs; a chat that is no longer held when it arrives is left as it is. Returns how many were asked.
+ */
+export async function sweepHeldRetries(app: App, pool: Pool, now = new Date()): Promise<number> {
+	const client = await pool.connect();
+	let due: { owner_id: string; id: string; public_chat_id: string }[];
+	try {
+		await client.query("BEGIN");
+		await client.query("SELECT set_config('pim.scope', 'all', true)");
+		due = (await client.query("SELECT owner_id, id, public_chat_id FROM pim_app.held_retries WHERE done_at IS NULL AND resume_at <= $1 ORDER BY resume_at LIMIT 100", [now])).rows;
+		await client.query("COMMIT");
+	} finally {
+		client.release();
+	}
+	let asked = 0;
+	for (const row of due) {
+		try {
+			await app.conversations.admit({ kind: "user", ownerId: row.owner_id as never, role: "member", sessionId: "usage-limit-reset" }, { commandId: `held-retry:${row.owner_id}:${row.id}`.slice(0, 128), kind: "user_message", chatId: row.public_chat_id, payload: { text: "", retry: true, onlyIfHeld: true } });
+			asked++;
+		} catch (error) {
+			// A chat that was deleted, or an owner that is suspended, has nothing to go on with; anything else is tried again at the next pass.
+			if (!(error instanceof NotFoundError) && !(error instanceof ForbiddenError)) throw error;
+		}
+		await app.db.owner(row.owner_id, (tx) => tx.query("UPDATE pim_app.held_retries SET done_at = now() WHERE id = $1", [row.id]));
+	}
+	return asked;
 }
 
 /**

@@ -45,7 +45,7 @@ import { notifyPass } from "./notifier.ts";
 import { vapidFromEnv } from "./push.ts";
 import { startApprovalReviews } from "./approval-review.ts";
 import { startTaskSettler } from "./task-settler.ts";
-import { sweepApprovals, sweepErasures, tickSchedules, tickTriggers, trimForgeOutbox } from "./sweeps.ts";
+import { sweepApprovals, sweepErasures, sweepHeldRetries, tickSchedules, tickTriggers, trimForgeOutbox } from "./sweeps.ts";
 import { webAssets } from "./web-assets.ts";
 import { poolRoutes } from "./compat/admin.ts";
 import { webCompatRoutes } from "./compat/index.ts";
@@ -379,6 +379,8 @@ export async function startMaintenance(config: ProcessConfig, env: Env, host: Ho
 			await renewDue(watching, maint).catch((e) => console.error("watch renewal", e));
 		}
 		await sweepApprovals(sweeper, maint).catch((e) => console.error("approval sweep", e));
+		// A chat held on a subscription's usage limit tries again when the limit resets.
+		await sweepHeldRetries(sweeper, maint).catch((e) => console.error("held retry sweep", e));
 		// Schedules and time triggers fire from here: a schedule's due time is looked up every pass, the triggers' every few seconds.
 		await tickSchedules(sweeper).catch((e) => console.error("schedule sweep", e));
 		if (Date.now() - lastTriggers > 5_000) {

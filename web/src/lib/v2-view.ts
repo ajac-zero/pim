@@ -171,6 +171,17 @@ export function applyMessage(state: StreamState, m: V2Message): StreamState {
   );
 }
 
+/** The utility model's line for tool calls of the work in progress; lines last as long as the app does. */
+export function applyProgress(
+  state: StreamState,
+  calls: readonly string[],
+  text: string,
+): StreamState {
+  const lines = { ...state.view.lines };
+  for (const call of calls) lines[call] = text;
+  return { ...state, view: { ...state.view, lines } };
+}
+
 /** The messages queued behind the chat's running turn changed. */
 export function applyQueue(
   state: StreamState,

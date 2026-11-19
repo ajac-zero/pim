@@ -40,7 +40,9 @@ import type { ForgeParts } from "./forge-assembly.ts";
 import { mentionedAgents } from "./rooms.ts";
 import { describeGoal } from "./goal-tools.ts";
 import { agentsSection, ASSISTANT_INSTRUCTIONS, delegatesSection, identity, majordomoRole, MAX_TASK_DEPTH, startedBySection, type Roster } from "./agent-prompts.ts";
-import { createFailover, failureMessage } from "./provider-failover.ts";
+import { createFailover, failureKind, failureMessage } from "./provider-failover.ts";
+import { DESCRIBE_WORK, runUtility } from "./compat/utility.ts";
+import { Progress } from "./progress.ts";
 import { priceOf } from "./model-prices.ts";
 import { fallbackMaxTokens } from "@pim/v2-app/web-providers";
 import { memoryLinesOf, offeredModels } from "./deployment.ts";
@@ -352,6 +354,25 @@ export function createAgentHost(options: AgentHostOptions) {
 			},
 		},
 	});
+	/**
+	 * A run held while the ChatGPT plan is out of usage goes on by itself when the limit resets, as in v1: a row says when (`pim_app.held_retries`), and the maintenance role asks the chat
+	 * to try again then (`sweepHeldRetries`). The plan is a way out the failover tried already, so what is held with the plan cooling has nowhere else to go until it resets; a
+	 * failure that is not a rate or usage limit, or a plan that is not cooling, is left for the person's Try again.
+	 */
+	type FailedAnswer = { provider?: string; model?: string; errorMessage?: string; timestamp?: number; stopReason?: string };
+	const holdUntilReset = (ownerId: string, message: FailedAnswer, conversationId: unknown): void => {
+		const app = options.app;
+		if (!app || !planOwners.has(ownerId) || failureKind(message as never) !== "transient") return;
+		const at = failover.providerCooldownEnd(ownerId, "openai");
+		if (at === undefined) return;
+		void (async () => {
+			const chat = await publicChatId(ownerId, conversationId as number);
+			if (!chat) return;
+			await app.db.owner(ownerId, (tx) =>
+				tx.query("INSERT INTO pim_app.held_retries (owner_id, id, public_chat_id, resume_at, reason) VALUES ($1, $2, $3, to_timestamp($4 / 1000.0), $5) ON CONFLICT DO NOTHING", [ownerId, `${conversationId}:${message.timestamp ?? at}`, chat, at, (message.errorMessage ?? "").slice(0, 300)]),
+			);
+		})().catch((error) => console.warn("could not arm a retry at the usage limit's reset", error instanceof Error ? error.message : error));
+	};
 	/** The conversations that are chats of tasks, as far as this process has seen them run: a model that fails for good ends such a run instead of holding it. */
 	const taskConversations = new Set<string>();
 	const chatgptOptions: ChatGPTRunnerOptions = options.chatgpt ?? {};
@@ -446,6 +467,55 @@ export function createAgentHost(options: AgentHostOptions) {
 				if (state?.required) return { continue: answer.stopReason === "length" ? LENGTH_REMINDER : DELIVERY_REMINDER };
 			},
 		} as never);
+
+	/**
+	 * The lines that say what an agent is doing while it works (`./progress.ts`), written by the person's utility model and told to their open apps as a notice. Chats a task started, and a
+	 * person's visits, get none, and nothing is written when there is no utility model.
+	 */
+	const progress = new Progress({
+		describe: async (key, input) => {
+			const [ownerId, , chat] = key.split("\u0000") as [string, string, string];
+			const app = options.app;
+			if (!app || !chat) return null;
+			return runUtility(app, env, { kind: "user", ownerId: ownerId as never, role: "member", sessionId: "progress" }, DESCRIBE_WORK, input);
+		},
+		show: (key, line, calls) => {
+			const [ownerId, , chat] = key.split("\u0000") as [string, string, string];
+			options.app?.notices.publish(ownerId, "progress", { session: chat, calls, text: line });
+		},
+	});
+	const progressHook = (ownerId: string) =>
+		hook(GenerationTask, {
+			async beforeRequest({ messages }: { messages: any[] }, api: any) {
+				try {
+					const key = await progressKey(ownerId, api.conversationId);
+					if (key) progress.request(key, messages);
+				} catch {
+					// A line that is not written costs the person a few words.
+				}
+			},
+			async afterResponse(answer: any, api: any) {
+				try {
+					const key = await progressKey(ownerId, api.conversationId);
+					if (key) progress.step(key, answer);
+				} catch {
+					// As above.
+				}
+			},
+		} as never);
+	/** What names a conversation's lines: its owner and chat, or null for a conversation that gets none (a task's, a visit's, one with no chat). */
+	const progressKinds = new Map<string, { at: number; key: string | null }>();
+	const progressKey = async (ownerId: string, conversationId: number | string): Promise<string | null> => {
+		if (!options.app || taskConversations.has(`${ownerId}\u0000${conversationId}`)) return null;
+		const known = progressKinds.get(`${ownerId}\u0000${conversationId}`);
+		if (known && now() - known.at < 60_000) return known.key;
+		const chat = await publicChatId(ownerId, conversationId);
+		const kind = chat ? ((await options.app.db.owner(ownerId, async (tx) => (await tx.query("SELECT kind FROM pim_app.conversations WHERE public_chat_id = $1", [chat])).rows[0]?.kind)) as string | undefined) : undefined;
+		const key = chat && kind !== "visit" && kind !== "task" && kind !== "review" ? `${ownerId}\u0000${conversationId}\u0000${chat}` : null;
+		if (progressKinds.size > 5000) progressKinds.clear();
+		progressKinds.set(`${ownerId}\u0000${conversationId}`, { at: now(), key });
+		return key;
+	};
 
 	/** One model call into the owner's ledger, with what it was for: its tokens by tier, its price, the chat and the agent it ran as. A call that used nothing is not a row. */
 	const recordCall = async (ownerId: string, kind: "chat" | "background", chat: string | null, agent: string | null, id: string, message: any, model: any): Promise<void> => {
@@ -577,13 +647,17 @@ export function createAgentHost(options: AgentHostOptions) {
 			}),
 		]));
 		// Only what send_to_user sends reaches the person, so a turn that ends in plain text is sent back for delivery, and after two reminders it fails (v1's messaging extension).
-		registry.install(defineExtension({ name: "delivery", hooks: [deliveryHook(ownerId), ledgerHook(ownerId)] }));
+		registry.install(defineExtension({ name: "delivery", hooks: [deliveryHook(ownerId), ledgerHook(ownerId), progressHook(ownerId)] }));
 		// The admin's majordomo may ask the host daemon for operations, each after a person approves it (`./hostops/`).
 		const hostops = await hostopsExtension({ ownerId, partitionId: partition.partitionId, app: options.app, chatOf: deps.chatOf });
 		if (hostops) registry.install(hostops);
 		// A request that failed for good, with nothing left to retry or fail over to, holds the run where it stopped: the person's Try again on the error card asks the model again (`POST /api/sessions/:id/retry`), so they need not say it twice.
 		// pi 1.5 stores a streamed answer and running tool output up to a second late; the live projector reads them from PostgreSQL, so each is stored as it is committed, as in pi 1.1.
-		return { models: metered, registry, settings: { retry: { suspend: (_message: unknown, conversationId: unknown) => !taskConversations.has(`${ownerId}\u0000${conversationId}`) }, progress: { persistWithinMs: 0 } } } as HarnessOptions;
+		return { models: metered, registry, settings: { retry: { suspend: (message: unknown, conversationId: unknown) => {
+			if (taskConversations.has(`${ownerId}\u0000${conversationId}`)) return false;
+			holdUntilReset(ownerId, message as FailedAnswer, conversationId);
+			return true;
+		} }, progress: { persistWithinMs: 0 } } } as HarnessOptions;
 	};
 
 	/**

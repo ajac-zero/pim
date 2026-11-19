@@ -11,6 +11,7 @@ import { EMPTY_STREAM } from "~/lib/pim-view";
 import {
   applyBusy,
   applyMessage,
+  applyProgress,
   applyQueue,
   type SidebarRow,
   sessionOf,
@@ -112,6 +113,8 @@ export class V2Link {
     id: string;
     messages: V2Message[];
     queue: V2Queued[];
+    /** The lines said of the work, by tool call: they are not in any message, so a stream drawn again from the messages is given them again. */
+    lines: Record<string, string>;
     nextBefore: string | null;
     stream: StreamState;
   } | null = null;
@@ -141,7 +144,11 @@ export class V2Link {
           ) as unknown as LiveSocket),
       loadSnapshot: (topic) => this.#snapshot(topic),
       onUpdate: (update) => this.#update(update),
-      onNotice: ({ kind, data }) => this.#handlers.onNotice(kind, data),
+      onNotice: ({ kind, data }) => {
+        // What the agent is doing now, in a few words, for the tool calls of its latest step: only the chat on screen shows it.
+        if (kind === "progress") this.#progress(data);
+        else this.#handlers.onNotice(kind, data);
+      },
       onStatus: (status) => {
         if (status === "live" && this.#dropped) {
           this.#dropped = false;
@@ -161,7 +168,14 @@ export class V2Link {
   /** Follows this chat (null: none) and, while the app is open, the sidebar. */
   followChat(id: string | null): void {
     this.#chat = id
-      ? { id, messages: [], queue: [], nextBefore: null, stream: EMPTY_STREAM }
+      ? {
+          id,
+          messages: [],
+          queue: [],
+          lines: {},
+          nextBefore: null,
+          stream: EMPTY_STREAM,
+        }
       : null;
     this.#follow();
   }
@@ -236,13 +250,30 @@ export class V2Link {
     this.#publish();
   }
 
+  #progress(data: unknown): void {
+    const said = data as { session?: string; calls?: unknown; text?: unknown };
+    const chat = this.#chat;
+    if (!chat || said?.session !== chat.id || typeof said.text !== "string") {
+      return;
+    }
+    if (!Array.isArray(said.calls)) return;
+    const calls = said.calls.filter(
+      (call): call is string => typeof call === "string",
+    );
+    for (const call of calls) chat.lines[call] = said.text;
+    chat.stream = applyProgress(chat.stream, calls, said.text);
+    this.#publish();
+  }
+
   /** A chat drawn from its messages, at work as the sidebar last said: a reload or a page of older messages in the middle of a long tool call still shows the turn going on. */
   #drawn(chat: {
     id: string;
     messages: V2Message[];
     queue: V2Queued[];
+    lines: Record<string, string>;
   }): StreamState {
-    const stream = streamOf(chat.messages, chat.queue);
+    const drawn = streamOf(chat.messages, chat.queue);
+    const stream = { ...drawn, view: { ...drawn.view, lines: chat.lines } };
     const busy = this.#busy.get(chat.id);
     return busy === undefined ? stream : applyBusy(stream, busy);
   }

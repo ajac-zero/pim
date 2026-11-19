@@ -85,6 +85,12 @@ export function createFailover(options: { now?: (() => number) | undefined; cool
 			chains.set(refKey(ownerId, primary.provider, primary.id), chain);
 		},
 		isCooling: cooling,
+		/** When the last of a provider's models stops cooling (ms), or undefined when none is. */
+		providerCooldownEnd(ownerId: string, provider: string): number | undefined {
+			const prefix = `${ownerId}\u0000${provider}/`;
+			const ends = [...until].filter(([key, end]) => key.startsWith(prefix) && end > now()).map(([, end]) => end);
+			return ends.length > 0 ? Math.max(...ends) : undefined;
+		},
 		wrap(models: Models, ownerId: string): Models {
 			return new Proxy(models, {
 				get(target, property, receiver) {

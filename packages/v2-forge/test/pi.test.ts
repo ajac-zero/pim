@@ -21,7 +21,7 @@ describe("pi on pi-durable and PostgreSQL", () => {
 	beforeAll(async () => {
 		s = await stack();
 		await s.grantAll("ada");
-		const manager = fakeManager(5);
+		const manager = fakeManager(10);
 		manager.backing.register("sh", async (ctx) => {
 			ran.push(ctx.argv);
 			if (ctx.argv.join(" ").includes("sleepy")) await new Promise((r) => setTimeout(r, 800));
@@ -126,5 +126,22 @@ describe("pi on pi-durable and PostgreSQL", () => {
 		expect((await s.pool.query("select status from pim_forge.forge_inbox where thread_id = $1 and operation_id = 'pi-steer-1'", [threadId])).rows[0]!.status).toBe("done");
 		// One turn, not two.
 		expect((await s.pool.query("select count(*) c from pim_forge.forge_harness_runs where thread_id = $1", [threadId])).rows[0]!.c).toBe("1");
+	});
+	it("runs on the model the thread asked for in the person's own catalog, with its thinking level, and on the first model they can run when it asked for none and the default is not theirs", async () => {
+		const own = fauxProvider({ provider: "pv_own", models: [{ id: "local", reasoning: true }] });
+		const models = createModels();
+		models.setProvider(own.provider);
+		const mine = new PiTurnPort({ store: s.store, compute: agent, models: async () => models, defaultModel: { provider: "faux", modelId: "faux-model" }, lookMs: 50 });
+		own.setResponses([fauxAssistantMessage("On mine.")]);
+		const asked = await s.forge.start(ada, startReq("pi-own-model", { harness: "pi", profile: { providerId: "own:pv_own", model: "local", thinking: "high" } as never }));
+		await s.worker({ compute: agent, turns: { pi: mine } }).step(asked.threadId);
+		expect(own.getPendingResponseCount()).toBe(0);
+		expect(await s.store.get(asked.threadId)).toMatchObject({ state: "idle", resolvedProfile: { provider: "pv_own", model: "local", source: "explicit" } });
+		// No profile, and the deployment's default model is not in this person's catalog: their first available model answers.
+		own.setResponses([fauxAssistantMessage("On the first I can run.")]);
+		const plain = await s.forge.start(ada, startReq("pi-default-model", { harness: "pi" }));
+		await s.worker({ compute: agent, turns: { pi: mine } }).step(plain.threadId);
+		expect(own.getPendingResponseCount()).toBe(0);
+		expect(await s.store.get(plain.threadId)).toMatchObject({ state: "idle", resolvedProfile: { provider: "pv_own", model: "local", source: "default" } });
 	});
 });

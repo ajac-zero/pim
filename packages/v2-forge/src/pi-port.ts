@@ -65,10 +65,17 @@ export class PiTurnPort implements TurnPort {
 				}),
 			}),
 		);
-		const harness = await Harness.open(storage, { models: await this.d.models(thread), registry }, BACKGROUND_CONTEXT);
+		const models = await this.d.models(thread);
+		const harness = await Harness.open(storage, { models, registry }, BACKGROUND_CONTEXT);
 		try {
-			const model = thread.profile?.providerId ? { provider: thread.profile.providerId, modelId: thread.profile.model } : this.d.defaultModel;
-			const root = await harness.root(BACKGROUND_CONTEXT, { agent: { model } });
+			// The model the thread asked for, as the person's catalog has it; a thread that asked for none runs on the deployment's default, or on the first model the person can run when that one is not theirs to use.
+			const asked = thread.profile?.providerId ? { provider: String(thread.profile.providerId).replace(/^own:/, ""), modelId: thread.profile.model as string } : null;
+			const available = asked ? [] : await models.getAvailable().catch(() => []);
+			const first = available[0];
+			const model = asked ?? (first && !available.some((m) => m.provider === this.d.defaultModel.provider && m.id === this.d.defaultModel.modelId) ? { provider: first.provider, modelId: first.id } : this.d.defaultModel);
+			await store.patch(store.db, thread.threadId, { resolved_profile: { provider: model.provider, model: model.modelId, source: asked ? "explicit" : "default" } }).catch(() => {});
+			const thinking = thread.profile?.thinking;
+			const root = await harness.root(BACKGROUND_CONTEXT, { agent: { model, ...(["minimal", "low", "medium", "high", "xhigh"].includes(thinking) ? { thinkingLevel: thinking } : {}) } });
 			harness.resume();
 			const before = costOf(await harness.usage(BACKGROUND_CONTEXT));
 			// The request id is the turn's root operation: a resumed turn finds the submission the dead worker made instead of submitting twice. A retry after a failure is a new submission.

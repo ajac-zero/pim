@@ -8,11 +8,10 @@
  *
  * `startForgeLoops` runs what keeps threads moving. `forgeHttp` is Forge's HTTP surface for the Gate.
  */
-import { compatibleProvider } from "./agent-host.ts";
+import { type CatalogDb, ownerCatalog } from "./agent-host.ts";
+import type { ChatGPTRunnerOptions } from "./chatgpt-auth.ts";
+import type { KeyringCrypto } from "@pim/v2-app/crypto";
 import { type PageApproval, webCodingShapes } from "./compat/coding.ts";
-import { createModels } from "@earendil-works/pi-ai";
-import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
-import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 import { randomBytes } from "node:crypto";
 import { GiteaNotConnectedError } from "@pim/coding/git-broker/gitea-connection";
 import { githubAppConfig, githubAppStatus, giteaConfig, brokerPolicy, GITEA_INSTANCE_ID } from "@pim/coding/git-broker/config";
@@ -30,7 +29,7 @@ import { type ApprovalFiled, Authz } from "@pim/v2-forge/authz";
 import { ampAttachmentFetcher, ampOrbClients } from "@pim/v2-forge/amp-adapter";
 import { CliTurnPort } from "@pim/v2-forge/cli-port";
 import type { ComputeProvider } from "@pim/v2-forge/compute";
-import { type Db as ForgeDb, scopedDb } from "@pim/v2-forge/db";
+import { type Db as ForgeDb, type Queryable, scopedDb, tx } from "@pim/v2-forge/db";
 import { CapabilityUnavailableError } from "@pim/v2-forge/errors";
 import { Forge } from "@pim/v2-forge/forge";
 import { GiteaConnection } from "@pim/v2-forge/gitea";
@@ -67,6 +66,8 @@ export type ForgeOverrides = Partial<{
 	git: GitHost;
 	gitUpstream: GitUpstream;
 	models: PiPortDeps["models"];
+	/** Where a person's ChatGPT plan is called and refreshed, when not OpenAI's own (a proxy; tests). */
+	chatgpt: ChatGPTRunnerOptions;
 	fetch: typeof fetch;
 	clock: () => number;
 }>;
@@ -98,15 +99,14 @@ export type ForgeParts = {
 	env: Env;
 };
 
-/** The pi models a coding thread may use: the deployment's providers, and `PIM_CODING_DEFAULT_MODEL` (`provider/model`) for a thread that names none. */
-function defaultModels(env: Env): PiPortDeps["models"] {
-	const models = createModels();
-	models.setProvider(anthropicProvider());
-	models.setProvider(openaiProvider());
-	// The deployment's OpenAI-compatible gateway (a stand-in model in a trial), as `gateway/<model>`.
-	const listed = (env.PIM_AI_GATEWAY_MODELS ?? "").split(",").map((m) => m.trim()).filter(Boolean);
-	if (env.PIM_AI_GATEWAY_URL && listed.length > 0) models.setProvider(compatibleProvider("gateway", "AI gateway", env.PIM_AI_GATEWAY_URL, listed.map((id) => ({ id })), () => env.PIM_AI_GATEWAY_KEY) as never);
-	return async () => models;
+/**
+ * The pi models a coding thread may use: the person's own, as their chats have them (their providers, their ChatGPT plan for `openai`, what the admin shared, the deployment's
+ * gateway), read through the definer functions Forge's role may call (migration 0701); `PIM_CODING_DEFAULT_MODEL` (`provider/model`) is what a thread that names none runs on.
+ */
+export function ownerModels(db: ForgeDb, crypto: EnvelopeCrypto | undefined, env: Env): PiPortDeps["models"] {
+	const transaction = <T>(ownerId: string, body: (client: Queryable) => Promise<T>) => tx(db, async (q) => (await q.query("SELECT set_config('pim.owner_id', $1, true)", [ownerId]), body(q)));
+	const catalog = { read: (ownerId: string, text: string, values: unknown[] = []) => transaction(ownerId, (q) => q.query(text, values)), transaction } as CatalogDb;
+	return async (thread) => (await ownerCatalog({ db: catalog, crypto: crypto as KeyringCrypto | undefined, env, chatgpt: overrides.chatgpt }, thread.ownerId)).models;
 }
 
 export function assembleForge(db: ForgeDb, objects: ObjectStore, env: Env, crypto?: EnvelopeCrypto, opts: { scoped?: boolean; /** Whether this deployment can run Amp, for a process that holds no vault of its own (the Runner, which only starts threads). Default: this process has a vault. */ ampConfigured?: boolean; /** Where a person answers what Forge asks them to approve. */ onApprovalFiled?: (filed: ApprovalFiled) => Promise<void> } = {}): ForgeParts {
@@ -151,7 +151,7 @@ export function assembleForge(db: ForgeDb, objects: ObjectStore, env: Env, crypt
 	const turns: Partial<Record<Harness, TurnPort>> = {};
 	if (compute) {
 		const [provider, ...rest] = (env.PIM_CODING_DEFAULT_MODEL ?? "anthropic/claude-sonnet-5").split("/");
-		turns.pi = new PiTurnPort({ store, compute, models: overrides.models ?? defaultModels(env), defaultModel: { provider: provider!, modelId: rest.join("/") } });
+		turns.pi = new PiTurnPort({ store, compute, models: overrides.models ?? ownerModels(db, crypto, env), defaultModel: { provider: provider!, modelId: rest.join("/") } });
 		if (vault) for (const cli of [claudeCode, codex, mistralVibe]) turns[cli.id as Harness] = new CliTurnPort({ cli, compute, store, scheduler, vault });
 	}
 	const wiring = vault ? { db, vault, baseUrl: env.PIM_AMP_BASE_URL ?? "https://ampcode.com", ...(overrides.fetch ? { fetch: overrides.fetch } : {}) } : null;

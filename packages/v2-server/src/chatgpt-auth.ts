@@ -6,7 +6,6 @@
 import type { Provider } from "@earendil-works/pi-ai";
 import { type ChatGPTCredential, type ChatGPTOptions, chatgptContext, refreshChatGPT } from "@pim/v2-app/chatgpt";
 import { type KeyringCrypto, openString, sealString } from "@pim/v2-app/crypto";
-import type { Db } from "@pim/v2-runtime/db";
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 
 export type ChatGPTRunnerOptions = ChatGPTOptions & {
@@ -14,7 +13,13 @@ export type ChatGPTRunnerOptions = ChatGPTOptions & {
 	baseUrl?: string | undefined;
 };
 
-export function chatgptCredentialStore(db: Db, crypto: KeyringCrypto, ownerId: string, options: ChatGPTRunnerOptions = {}) {
+/** What the credential store needs of a database: a read for an owner, and a transaction for an owner that holds the row's lock while a refresh runs. */
+export type CredentialDb = {
+	read<R extends Record<string, any> = Record<string, any>>(ownerId: string, text: string, values?: unknown[]): Promise<{ rows: R[] }>;
+	transaction<T>(ownerId: string, body: (client: { query(text: string, values?: unknown[]): Promise<{ rows: any[] }> }) => Promise<T>): Promise<T>;
+};
+
+export function chatgptCredentialStore(db: CredentialDb, crypto: KeyringCrypto, ownerId: string, options: ChatGPTRunnerOptions = {}) {
 	const open = async (sealed: string | null | undefined) => (sealed ? (JSON.parse(await openString(crypto, sealed, chatgptContext(ownerId))) as ChatGPTCredential) : undefined);
 	return {
 		async read(): Promise<ChatGPTCredential | undefined> {

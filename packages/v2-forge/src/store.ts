@@ -48,6 +48,8 @@ export type ThreadRow = {
 	spentUsd: number;
 	consecutiveInterrupts: number;
 	profile: any;
+	/** The model the thread ran on last and whether it was asked for (`explicit`) or the default's, as the page shows it. */
+	resolvedProfile: { provider: string; model: string; source: "explicit" | "default" } | null;
 	/** The thread this one continues from, if any. */
 	parentId: string | null;
 	gatewayNonce: string;
@@ -87,6 +89,7 @@ export const toThread = (r: Row): ThreadRow => ({
 	spentUsd: Number(r.spent_usd),
 	consecutiveInterrupts: r.consecutive_interrupts,
 	profile: r.profile,
+	resolvedProfile: r.resolved_profile ?? null,
 	parentId: r.limits?.parent ?? null,
 	gatewayNonce: r.gateway_nonce,
 	leaseHolder: r.lease_holder,

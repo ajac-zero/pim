@@ -91,7 +91,7 @@ function view(t: Thread, progress: Progress, unpushed: { commits: number; sha: s
 		stateDetail: setupFailed ? (environment.error ?? null) : t.stateDetail,
 		repo: { url: t.repo, ref: t.ref ?? "", branch: t.branch ?? "", baseSha: t.baseSha },
 		profile: t.profile ?? { providerId: "", model: "" },
-		resolvedProfile: t.profile?.model ? { provider: t.profile.providerId, model: t.profile.model, source: "explicit" } : null,
+		resolvedProfile: t.resolvedProfile ?? (t.profile?.model ? { provider: t.profile.providerId, model: t.profile.model, source: "explicit" } : null),
 		workspaceProvider: provider,
 		provider,
 		pool,

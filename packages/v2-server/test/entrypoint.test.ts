@@ -31,7 +31,7 @@ real("the role entrypoint", () => {
 
 	it("migrates every band into one ledger, and again with nothing to do", async () => {
 		const bands = (await d.stack.admin.query("SELECT (number / 100) AS band FROM public.pim_schema_migrations GROUP BY 1 ORDER BY 1")).rows.map((r) => Number(r.band));
-		expect(bands).toEqual([0, 1, 2, 3, 4, 5, 6]);
+		expect(bands).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
 		expect(await migrateCommand({ PIM_DATABASE_URL: d.stack.url("super") })).toEqual([]);
 	});
 
@@ -120,7 +120,7 @@ real("the role entrypoint", () => {
 		expect(migrated()).toContain('"event":"pim.migrate"');
 		const check = new pg.Client({ connectionString: url.toString() });
 		await check.connect();
-		expect((await check.query("SELECT count(DISTINCT number / 100)::int AS bands FROM public.pim_schema_migrations")).rows[0].bands).toBe(7);
+		expect((await check.query("SELECT count(DISTINCT number / 100)::int AS bands FROM public.pim_schema_migrations")).rows[0].bands).toBe(8);
 		// The roles a deployment's logins belong to exist now; a Runner connects as one of them.
 		await check.query("CREATE ROLE cli_runtime LOGIN NOSUPERUSER NOBYPASSRLS; GRANT pim_runtime TO cli_runtime");
 		await check.end();

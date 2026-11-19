@@ -34,7 +34,7 @@ import { CodexImagesClient } from "./codex-images.ts";
 import { imageEndpoints } from "./image-tools.ts";
 import { hostopsExtension } from "./hostops/tools.ts";
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
-import { chatgptCredentialStore, chatgptProvider, type ChatGPTRunnerOptions } from "./chatgpt-auth.ts";
+import { chatgptCredentialStore, chatgptProvider, type ChatGPTRunnerOptions, type CredentialDb } from "./chatgpt-auth.ts";
 import type { ForgeParts } from "./forge-assembly.ts";
 import { mentionedAgents } from "./rooms.ts";
 import { describeGoal } from "./goal-tools.ts";
@@ -103,6 +103,69 @@ Rules that always hold:
 - Ask before acting on the world. Tools that change things outside this conversation (sending requests, messages or purchases) need the person's approval. Calling one asks for it and waits for the decision, which the call returns with the action's result; do not retry.
 - Be honest about what you can and cannot do. Never claim an action happened unless a tool result says so.
 - Times: call \`current_time\` when the time matters.`;
+
+/** What an owner's catalog is made from: a database that can read for an owner (a Runner's, or Forge's worker's, each in its own role), the key ring that opens sealed keys, and the deployment's environment. */
+export type CatalogDb = CredentialDb;
+export type CatalogDeps = { db: CatalogDb; crypto?: KeyringCrypto | undefined; env: Env; chatgpt?: ChatGPTRunnerOptions | undefined; providers?: AgentHostOptions["providers"] };
+
+/**
+ * The models an owner can run: pi-ai's own providers, the owner's ChatGPT plan for `openai` when they signed in with it, the deployment's gateway, the owner's own providers and
+ * the ones the admin shared with everyone (`shared:<id>`), their keys opened once. Chats and pi coding threads resolve their models against the same catalog. `plan` says whether
+ * `openai` runs on the owner's ChatGPT plan, a subscription whose usage limit is left until it resets.
+ */
+export async function ownerCatalog(deps: CatalogDeps, ownerId: string): Promise<{ models: Models; plan: boolean }> {
+	const { db, crypto, env } = deps;
+	const chatgpt = deps.chatgpt ?? {};
+	const own = (await db.read<{ p: ProviderRow[] }>(ownerId, "SELECT pim_app.runner_providers($1) AS p", [ownerId]).catch(() => ({ rows: [{ p: [] as ProviderRow[] }] }))).rows[0]!.p;
+	// What an admin shared with everyone is in every catalog as `shared:<id>`, its key opened under the admin's owner id as it was sealed. An admin's own list leaves it out.
+	const sharedRows = (await db.read<{ p: (ProviderRow & { owner: string })[] }>(ownerId, "SELECT pim_app.shared_providers(true) AS p").catch(() => ({ rows: [] as { p: (ProviderRow & { owner: string })[] }[] }))).rows[0]?.p ?? [];
+	const context = new Map<string, string>(sharedRows.map((r) => [`shared:${r.id}`, `provider:${r.owner}/${r.id}`]));
+	const rows: ProviderRow[] = [...own.filter((r) => r.config.shared !== true), ...sharedRows.map((r) => ({ id: `shared:${r.id}`, kind: r.kind, config: r.config, secret: r.secret }))];
+	const keys = new Map<string, string>();
+	for (const row of rows) {
+		if (!row.secret || !crypto) continue;
+		try {
+			// An admin's shared provider is sealed under the admin; one promoted from v1's deployment under `_instance`; the owner's own under them.
+			keys.set(row.id, await openString(crypto, row.secret, context.get(row.id) ?? (row.shared ? `provider:_instance/${row.id.slice(SHARED.length)}` : `provider:${ownerId}/${row.id}`)));
+		} catch {
+			// A key sealed under a key this process does not hold stays unavailable, and the provider with it.
+		}
+	}
+	// An owner signed in with ChatGPT runs `openai` on the plan: its sealed credential is read and refreshed live, not opened once.
+	const plan = crypto && (await db.read<{ s: string | null }>(ownerId, "SELECT pim_app.runner_chatgpt($1) AS s", [ownerId]).then((r) => r.rows[0]?.s, () => null)) ? chatgptCredentialStore(db, crypto, ownerId, chatgpt) : undefined;
+	const builtin = (kind: string) => rows.find((r) => r.kind === kind && keys.has(r.id));
+	const credentials = {
+		async read(providerId: string) {
+			if (plan && providerId === "openai") return plan.read();
+			const row = builtin(providerId);
+			return row ? ({ type: "api_key", key: keys.get(row.id) } as const) : undefined;
+		},
+		async list() {
+			return ["anthropic", "openai", "google"].filter((k) => builtin(k) || (plan && k === "openai")).map((providerId) => ({ providerId, type: "api_key" as const }));
+		},
+		async modify(providerId: string, fn: (c: any) => Promise<any>) {
+			if (plan && providerId === "openai") return plan.modify(fn);
+			return fn(undefined);
+		},
+		async delete() {},
+	};
+	const models: MutableModels = createModels({ credentials: credentials as never });
+	models.setProvider(anthropicProvider() as never);
+	models.setProvider((plan ? chatgptProvider(chatgpt) : openaiProvider()) as never);
+	models.setProvider(googleProvider() as never);
+	if (env.PIM_AI_GATEWAY_URL) {
+		const listed = offeredModels(env);
+		if (listed.length > 0) models.setProvider(compatibleProvider("gateway", "AI gateway", env.PIM_AI_GATEWAY_URL, listed.map((id) => ({ id })), () => env.PIM_AI_GATEWAY_KEY) as never);
+	}
+	for (const row of rows) {
+		const url = row.config.baseUrl ?? row.config.url;
+		if (["openai_compatible", "custom"].includes(row.kind) && typeof url === "string" && Array.isArray(row.config.models)) {
+			models.setProvider(compatibleProvider(row.id, String(row.config.name ?? row.id), url, row.config.models.filter((m: any) => typeof m?.id === "string"), () => keys.get(row.id), row.config.api === "anthropic-messages" ? "anthropic-messages" : "openai-completions") as never);
+		}
+	}
+	for (const extra of (await deps.providers?.(ownerId)) ?? []) models.setProvider(extra as never);
+	return { models, plan: plan !== undefined };
+}
 
 const asModelRef = (v: unknown): ModelRef | null => {
 	if (typeof v === "string") return v.includes("/") ? { provider: v.split("/")[0]!.replace(/^own:/, ""), id: v.split("/").slice(1).join("/") } : null;
@@ -321,56 +384,9 @@ export function createAgentHost(options: AgentHostOptions) {
 
 	/** The owner's providers: what the catalog offers, with their keys opened once, so a model call never waits on the application's database. */
 	async function buildModels(ownerId: string): Promise<Models> {
-		const own = (await db.read<{ p: ProviderRow[] }>(ownerId, "SELECT pim_app.runner_providers($1) AS p", [ownerId]).catch(() => ({ rows: [{ p: [] as ProviderRow[] }] }))).rows[0]!.p;
-		// What an admin shared with everyone is in every catalog as `shared:<id>`, its key opened under the admin's owner id as it was sealed. An admin's own list leaves it out.
-		const sharedRows = (await db.read<{ p: (ProviderRow & { owner: string })[] }>(ownerId, "SELECT pim_app.shared_providers(true) AS p").catch(() => ({ rows: [] as { p: (ProviderRow & { owner: string })[] }[] }))).rows[0]?.p ?? [];
-		const context = new Map<string, string>(sharedRows.map((r) => [`shared:${r.id}`, `provider:${r.owner}/${r.id}`]));
-		const rows: ProviderRow[] = [...own.filter((r) => r.config.shared !== true), ...sharedRows.map((r) => ({ id: `shared:${r.id}`, kind: r.kind, config: r.config, secret: r.secret }))];
-		const keys = new Map<string, string>();
-		for (const row of rows) {
-			if (!row.secret || !options.crypto) continue;
-			try {
-				// An admin's shared provider is sealed under the admin; one promoted from v1's deployment under `_instance`; the owner's own under them.
-				keys.set(row.id, await openString(options.crypto, row.secret, context.get(row.id) ?? (row.shared ? `provider:_instance/${row.id.slice(SHARED.length)}` : `provider:${ownerId}/${row.id}`)));
-			} catch {
-				// A key sealed under a key this process does not hold stays unavailable, and the provider with it.
-			}
-		}
-		// An owner signed in with ChatGPT runs `openai` on the plan: its sealed credential is read and refreshed live, not opened once.
-		const plan = options.crypto && (await db.read<{ s: string | null }>(ownerId, "SELECT pim_app.runner_chatgpt($1) AS s", [ownerId]).then((r) => r.rows[0]?.s, () => null)) ? chatgptCredentialStore(db, options.crypto, ownerId, chatgptOptions) : undefined;
+		const { models, plan } = await ownerCatalog({ db, crypto: options.crypto, env, chatgpt: chatgptOptions, providers: options.providers }, ownerId);
 		if (plan) planOwners.add(ownerId);
 		else planOwners.delete(ownerId);
-		const builtin = (kind: string) => rows.find((r) => r.kind === kind && keys.has(r.id));
-		const credentials = {
-			async read(providerId: string) {
-				if (plan && providerId === "openai") return plan.read();
-				const row = builtin(providerId);
-				return row ? ({ type: "api_key", key: keys.get(row.id) } as const) : undefined;
-			},
-			async list() {
-				return ["anthropic", "openai", "google"].filter((k) => builtin(k) || (plan && k === "openai")).map((providerId) => ({ providerId, type: "api_key" as const }));
-			},
-			async modify(providerId: string, fn: (c: any) => Promise<any>) {
-				if (plan && providerId === "openai") return plan.modify(fn);
-				return fn(undefined);
-			},
-			async delete() {},
-		};
-		const models: MutableModels = createModels({ credentials: credentials as never });
-		models.setProvider(anthropicProvider() as never);
-		models.setProvider((plan ? chatgptProvider(chatgptOptions) : openaiProvider()) as never);
-		models.setProvider(googleProvider() as never);
-		if (env.PIM_AI_GATEWAY_URL) {
-			const listed = offeredModels(env);
-			if (listed.length > 0) models.setProvider(compatibleProvider("gateway", "AI gateway", env.PIM_AI_GATEWAY_URL, listed.map((id) => ({ id })), () => env.PIM_AI_GATEWAY_KEY) as never);
-		}
-		for (const row of rows) {
-			const url = row.config.baseUrl ?? row.config.url;
-			if (["openai_compatible", "custom"].includes(row.kind) && typeof url === "string" && Array.isArray(row.config.models)) {
-				models.setProvider(compatibleProvider(row.id, String(row.config.name ?? row.id), url, row.config.models.filter((m: any) => typeof m?.id === "string"), () => keys.get(row.id), row.config.api === "anthropic-messages" ? "anthropic-messages" : "openai-completions") as never);
-			}
-		}
-		for (const extra of (await options.providers?.(ownerId)) ?? []) models.setProvider(extra as never);
 		return models;
 	}
 

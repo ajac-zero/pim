@@ -139,6 +139,33 @@ real("an agent on a paired computer", () => {
 		expect(content.status === 200 ? await content.text() : "").toBe("line one\nline 2\n");
 	}, 180_000);
 
+	it("tells the agent which files it saw changed since, with the person's next message and once, and not what it changed itself", async () => {
+		writeFileSync(join(root, "plan.txt"), "alpha\nbeta\ngamma\n");
+		const told = async () => (JSON.parse(await transcript()) as { model?: { role: string; content: unknown }[] }[]).flatMap((e) => e.model ?? []).filter((m) => m.role === "user" && JSON.stringify(m.content).includes("[Files you changed since your last turn]")).map((m) => JSON.stringify(m.content));
+		const end = await ask("read the plan", toolUse(fauxToolCall("file_read", { path: "/workspace/plan.txt" })));
+		await end();
+		const before = (await told()).length;
+		// The person edits it in the code editor (or any program does); the agent hears of it with their next message.
+		writeFileSync(join(root, "plan.txt"), "alpha\nBETA\ngamma\ndelta\n");
+		await (await ask("what do you think now?"))();
+		const blocks = await told();
+		expect(blocks).toHaveLength(before + 1);
+		expect(blocks.at(-1)).toContain("/workspace/plan.txt (changed)");
+		expect(blocks.at(-1)).toContain("-beta");
+		expect(blocks.at(-1)).toContain("+BETA");
+		expect(blocks.at(-1)).toContain("+delta");
+		expect(blocks.at(-1)).toContain("what do you think now?");
+		// Told once: nothing changed since, so the next message carries none. And what the agent wrote itself is not a change.
+		await (await ask("and the file_edit?", toolUse(fauxToolCall("file_edit", { path: "/workspace/plan.txt", edits: [{ oldText: "delta", newText: "epsilon" }] }))))();
+		await (await ask("anything else?"))();
+		expect(await told()).toHaveLength(before + 1);
+		// A deleted file is told as deleted.
+		rmSync(join(root, "plan.txt"));
+		await (await ask("still there?"))();
+		const last = (await told()).at(-1)!;
+		expect(last).toContain("/workspace/plan.txt (deleted)");
+	}, 180_000);
+
 	it("answers at once when the computer's answer is bigger than the bus carries, and tells the model where /workspace is in the shell", async () => {
 		// A 1.5 MB attachment, as a PDF: a read of it asked for 1 MiB, which as base64 is more than NATS's default 1 MB limit, and the Gate waited out its timeout.
 		writeFileSync(join(root, "big.pdf"), Buffer.concat([Buffer.from("%PDF-1.7\n"), Buffer.alloc(1_500_000, 0)]));

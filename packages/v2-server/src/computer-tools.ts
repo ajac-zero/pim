@@ -22,6 +22,7 @@ import type { ExternalOperations } from "@pim/v2-runtime/external";
 import type { Db as RuntimeDb } from "@pim/v2-runtime/db";
 import { hostedTools } from "./hosted-tools.ts";
 import { recordResult } from "./tool-approval.ts";
+import { sawFile } from "./file-changes.ts";
 import { type BrowserTransport, type Computer as BrowserComputer, describePage, PimBrowser } from "./computer-browser.ts";
 
 type Part = { type: "text"; text: string } | { type: "image"; data: string; mimeType: string };
@@ -160,6 +161,15 @@ export function computerTools(deps: ComputerToolDeps, kit: ComputerToolKit): Too
 		return { ...c, computer: await acquire(capability) };
 	};
 
+	/** The chat's agent has seen (or just written) `path`: remembered, so the person's later changes to it can be told to the agent with their next message (`./file-changes.ts`). */
+	const remember = async (c: { app: App; chat: string | null; computer: Computer }, path: string, sha256?: string) => {
+		if (c.chat) await sawFile(c.app, ownerId, c.chat, c.computer, path, sha256);
+	};
+	const forget = async (api: any, path: string) => {
+		const { app, chat } = await caller(api);
+		if (chat) await app.db.owner(ownerId, (tx) => tx.query("DELETE FROM pim_app.file_seen WHERE chat_id = $1 AND (path = $2 OR path LIKE $3)", [chat, path, `${path.replace(/[%_\\]/g, "\\$&")}/%`])).catch(() => undefined);
+	};
+
 	// ---- the approval and the once-only effect behind a gated tool ----
 
 	type Prepared = { result: Result } | { summary: string };
@@ -244,7 +254,8 @@ export function computerTools(deps: ComputerToolDeps, kit: ComputerToolKit): Too
 		tool("file_read", `Read a text file, from line \`offset\` (1-based) for \`limit\` lines. A picture (PNG, JPEG, WebP, GIF) is shown to you instead, scaled down if it is large. ${WHERE}`, Type.Object({ path: Type.String(), offset: Type.Optional(Type.Integer({ minimum: 1 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 5000 })) }), async (a, api) => {
 			const bad = confined(a.path);
 			if (bad) return bad;
-			const { computer } = await use(api, "file_read");
+			const used = await use(api, "file_read");
+			const { computer } = used;
 			const stat = await computer.call<{ isDirectory: boolean; sha256: string | null }>("stat", { path: a.path });
 			if (stat.isDirectory) return text(`${a.path} is a folder: list it with file_list.`, true);
 			const { bytes, size } = await readFile(computer, a.path, MAX_TEXT_READ);
@@ -269,6 +280,7 @@ export function computerTools(deps: ComputerToolDeps, kit: ComputerToolKit): Too
 			const shown = lines.slice(from, from + (a.limit ?? 2000));
 			const more = from + shown.length < lines.length ? `\n[${lines.length - from - shown.length} more lines: read on with offset ${from + shown.length + 1}]` : "";
 			const cut = size > bytes.length ? `\n[The file is ${size} bytes; only the first ${bytes.length} were read.]` : "";
+			await remember(used, a.path, stat.sha256 ?? undefined);
 			return text(`${clip(shown.join("\n"))}${more}${cut}${stat.sha256 ? `\nsha256 of the whole file: ${stat.sha256}` : ""}`);
 		}),
 		tool("file_list", `List a folder. ${WHERE}`, Type.Object({ path: Type.Optional(Type.String({ description: `Defaults to ${FILES_ROOT}.` })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 1000 })) }), async (a, api) => {
@@ -297,7 +309,8 @@ export function computerTools(deps: ComputerToolDeps, kit: ComputerToolKit): Too
 			const bad = confined(a.path);
 			if (bad) return bad;
 			if (a.path === FILES_ROOT) return text(`${FILES_ROOT} is a folder.`, true);
-			const { computer } = await use(api, "file_write");
+			const used = await use(api, "file_write");
+			const { computer } = used;
 			try {
 				await writeFile(computer, a.path, Buffer.from(a.content, "utf8"), a.expectedHash);
 			} catch (error) {
@@ -305,12 +318,14 @@ export function computerTools(deps: ComputerToolDeps, kit: ComputerToolKit): Too
 				if (conflict) return conflict;
 				throw error;
 			}
+			await remember(used, a.path);
 			return text(`Wrote ${a.path} (${Buffer.byteLength(a.content)} bytes).`);
 		}),
 		tool("file_edit", `Edit a text file: each of \`edits\` replaces text that occurs exactly once. ${WHERE}`, Type.Object({ path: Type.String(), edits: Type.Array(Type.Object({ oldText: Type.String({ minLength: 1 }), newText: Type.String() }), { minItems: 1 }), expectedHash: EXPECTED_HASH }), async (a, api) => {
 			const bad = confined(a.path);
 			if (bad) return bad;
-			const { computer } = await use(api, "file_edit");
+			const used = await use(api, "file_edit");
+			const { computer } = used;
 			const { bytes, size } = await readFile(computer, a.path);
 			if (size > bytes.length) return text(`${a.path} is too large to edit (${size} bytes).`, true);
 			let body = bytes.toString("utf8");
@@ -328,6 +343,7 @@ export function computerTools(deps: ComputerToolDeps, kit: ComputerToolKit): Too
 				if (conflict) return conflict;
 				throw error;
 			}
+			await remember(used, a.path);
 			return text(`Edited ${a.path}.`);
 		}, "unsafe"),
 		tool("file_delete", `Delete a file or folder. ${WHERE}`, Type.Object({ path: Type.String(), recursive: Type.Optional(Type.Boolean()) }), async (a, api) => {
@@ -339,7 +355,7 @@ export function computerTools(deps: ComputerToolDeps, kit: ComputerToolKit): Too
 				tool: "file_delete",
 				resource: { path: a.path },
 				args: { path: a.path, recursive: a.recursive === true, summary: `Delete ${a.path}${a.recursive === true ? " and everything in it" : ""}` },
-				run: async (c) => (await c.call("rm", { path: a.path, recursive: a.recursive === true }), { text: `Deleted ${a.path}.` }),
+				run: async (c) => (await c.call("rm", { path: a.path, recursive: a.recursive === true }), await forget(api, a.path), { text: `Deleted ${a.path}.` }),
 			});
 		}),
 		tool(

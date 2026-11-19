@@ -272,6 +272,7 @@ export async function startRunner(config: ProcessConfig, env: Env, host: Host, h
 		harnessOptions: hooks.harnessOptions ?? host_!.harnessOptions,
 		...(hooks.homeRoot ?? host_?.homeRoot ? { homeRoot: (hooks.homeRoot ?? host_!.homeRoot)! } : {}),
 		...(hooks.chatAgent ?? host_?.chatAgent ? { chatAgent: (hooks.chatAgent ?? host_!.chatAgent)! } : {}),
+		...(host_ ? { beforeUserMessage: host_.beforeUserMessage } : {}),
 		steward: { holderId },
 		// The run watchdog and how long a stop waits before recycling the partition (`PIM_RUN_STALL_MS`, 0 turns the watchdog off; `PIM_STOP_GRACE_MS`).
 		...(env.PIM_RUN_STALL_MS ? { stallMs: Number(env.PIM_RUN_STALL_MS) } : {}),

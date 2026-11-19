@@ -63,6 +63,11 @@ export type RunnerOptions = {
 	/** The agent a conversation made by the built-in `create_conversation` command starts with; `publicChatId` names the chat when the command carries one. */
 	/** A chat's agent. `explicit: false` says its model is only the deployment's default standing in, so it starts a new chat but never replaces the model an existing chat already runs on. */
 	readonly chatAgent?: (ownerId: string, publicChatId?: string) => ChatAgent | Promise<ChatAgent>;
+	/**
+	 * What goes before a person's message, as a part of their own: asked as the message is about to be given to its chat, and the parts it returns come first. `taken` runs once the
+	 * conversation has taken the message, so what the parts told is told once. A failure here never keeps the message from the chat.
+	 */
+	readonly beforeUserMessage?: (ownerId: string, publicChatId: string) => Promise<{ readonly before: readonly { readonly type: "text"; readonly text: string }[]; readonly taken?: () => Promise<void> } | undefined>;
 	/** Handlers that replace or add to the built-in ones for the contract's command kinds. */
 	readonly commands?: Readonly<Record<string, CommandHandler>>;
 	readonly admission?: AdmissionOptions;
@@ -450,7 +455,7 @@ const conversationOf = async (resident: ResidentPartition, command: Command, con
 /** user_message, trigger_fire and coding_wake each put input in front of a conversation; the contract's `piRequestId` deduplicates a redelivery. */
 const inputCommand: CommandHandler = async (resident, command, context) => {
 	const conversation = await conversationOf(resident, command, context);
-	const content = (command.payload.content ?? command.payload.text) as Input | undefined;
+	let content = (command.payload.content ?? command.payload.text) as Input | undefined;
 	if (content === undefined) throw new CommandRejected(`Command ${command.commandId} has no content`);
 	// A message in a room that is not for this conversation's agent is written into it without waking the agent: it is in its context from its next request.
 	if (command.payload.write === true) {
@@ -477,6 +482,19 @@ const inputCommand: CommandHandler = async (resident, command, context) => {
 	const held = command.kind === "user_message" ? await resident.heldGeneration(conversation, context) : undefined;
 	if (held !== undefined && command.payload.retry === true) return resident.resumeHeld(command, held);
 	const whenBusy = command.payload.whenBusy as "steer" | "followUp" | "reject" | undefined;
+	// What the host wants the agent to know before the person's words (the files that changed since it last saw them) goes first, in the same message.
+	let told: (() => Promise<void>) | undefined;
+	if (command.kind === "user_message" && command.publicChatId !== undefined && resident.runner.beforeUserMessage !== undefined) {
+		try {
+			const extra = await resident.runner.beforeUserMessage(resident.ownerId, command.publicChatId);
+			if (extra !== undefined && extra.before.length > 0) {
+				content = [...extra.before, ...(typeof content === "string" ? [{ type: "text" as const, text: content }] : content)] as Input;
+				told = extra.taken;
+			}
+		} catch (error) {
+			resident.runner.report(error);
+		}
+	}
 	try {
 		await conversation.submit({ type: "input", content, requestId: command.piRequestId, ...(whenBusy === undefined ? {} : { whenBusy }) }, context);
 	} catch (error) {
@@ -484,6 +502,7 @@ const inputCommand: CommandHandler = async (resident, command, context) => {
 		if (error instanceof ConversationBusy) throw new CommandRejected(`Conversation ${command.conversationId} is at work`);
 		throw error;
 	}
+	if (told !== undefined) await told().catch((error) => resident.runner.report(error));
 	if (held !== undefined) await resident.resumeHeld(command, held);
 };
 
@@ -614,6 +633,7 @@ export class Runner {
 	readonly harnessOptions: RunnerOptions["harnessOptions"];
 	readonly homeRoot: RunnerOptions["homeRoot"];
 	readonly chatAgent: RunnerOptions["chatAgent"];
+	readonly beforeUserMessage: RunnerOptions["beforeUserMessage"];
 	readonly #resident = new Map<string, ResidentPartition>();
 	readonly #options: RunnerOptions;
 	#timer: ReturnType<typeof setTimeout> | undefined;
@@ -629,6 +649,7 @@ export class Runner {
 		this.directory = new PartitionDirectory(options.db);
 		this.operations = new ExternalOperations(options.db);
 		this.chatAgent = options.chatAgent;
+		this.beforeUserMessage = options.beforeUserMessage;
 		this.admission = options.admission === undefined ? undefined : new ModelAdmission(options.admission);
 		this.commands = options.commands ?? {};
 		this.longWaitMs = options.longWaitMs ?? 60_000;

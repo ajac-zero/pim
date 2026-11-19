@@ -24,7 +24,7 @@ import { createRegistry, defineExtension, GenerationTask, hook, section, type Ha
 import { deliveryOwed, DELIVERY_REMINDER, enforceDelivery, LENGTH_REMINDER, ROOM_POST } from "@pim/shared/transcript";
 import type { App } from "@pim/v2-app/app";
 import { deploymentLimits, QUOTA_MESSAGE } from "@pim/v2-app/quota";
-import type { RelayBus } from "@pim/v2-app/relay";
+import { acquireRemote, type RelayBus } from "@pim/v2-app/relay";
 import { openString, type KeyringCrypto } from "@pim/v2-app/crypto";
 import type { Db as RuntimeDb } from "@pim/v2-runtime/db";
 import type { PartitionContext, RunnerOptions } from "@pim/v2-runtime/runner";
@@ -33,6 +33,7 @@ import { BUILTIN_SKILLS } from "./builtin-skills.ts";
 import { CodexImagesClient } from "./codex-images.ts";
 import { imageEndpoints } from "./image-tools.ts";
 import { hostopsExtension } from "./hostops/tools.ts";
+import { fileChangesBlock } from "./file-changes.ts";
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 import { chatgptCredentialStore, chatgptProvider, type ChatGPTRunnerOptions, type CredentialDb } from "./chatgpt-auth.ts";
 import type { ForgeParts } from "./forge-assembly.ts";
@@ -585,6 +586,17 @@ export function createAgentHost(options: AgentHostOptions) {
 		return { models: metered, registry, settings: { retry: { suspend: (_message: unknown, conversationId: unknown) => !taskConversations.has(`${ownerId}\u0000${conversationId}`) }, progress: { persistWithinMs: 0 } } } as HarnessOptions;
 	};
 
+	/**
+	 * What the agent is told before a person's message: which of the files it saw changed since (`./file-changes.ts`). It needs the person's computer, so with none connected, or no
+	 * application database, the message goes as it is.
+	 */
+	const beforeUserMessage: NonNullable<RunnerOptions["beforeUserMessage"]> = async (ownerId, chat) => {
+		const app = options.app;
+		if (!app || !options.relay) return undefined;
+		const found = await fileChangesBlock(app, ownerId, chat, async () => acquireRemote(await options.relay!().catch(() => null), ownerId, "file_changes"));
+		return found ? { before: [{ type: "text", text: found.block }], taken: found.taken } : undefined;
+	};
+
 	/** The model the owner chose in Settings for agents with none of their own (migration 0611). */
 	const chosenModel = async (ownerId: string) => asModelRef((await db.read<{ m: unknown }>(ownerId, "SELECT pim_app.runner_model($1) AS m", [ownerId]).catch(() => ({ rows: [] as { m: unknown }[] }))).rows[0]?.m);
 
@@ -631,5 +643,5 @@ export function createAgentHost(options: AgentHostOptions) {
 		return ((answer as any).content as { type: string; text?: string }[]).flatMap((c) => (c.type === "text" ? [c.text ?? ""] : [])).join("").trim();
 	}
 
-	return { harnessOptions, homeRoot, chatAgent, ask, complete, context: (ownerId: string, chat: string | null) => readContext(ownerId, chat) };
+	return { harnessOptions, homeRoot, chatAgent, beforeUserMessage, ask, complete, context: (ownerId: string, chat: string | null) => readContext(ownerId, chat) };
 }

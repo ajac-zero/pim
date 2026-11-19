@@ -3,6 +3,7 @@ import { Authorizer } from "./authz.ts";
 import type { Db, Tx } from "./db.ts";
 import { BadRequestError, ConflictError, NotFoundError } from "./errors.ts";
 import { newId } from "./ids.ts";
+import { sizeOfFile } from "./app-files.ts";
 import type { Bundle, Bundles } from "./bundles.ts";
 
 export type Agent = {
@@ -316,14 +317,14 @@ export class Agents {
 	}
 }
 
-/** Supporting files: relative paths with no `..`, text only, bounded. */
+/** Supporting files: relative paths with no `..`; text, or bytes (a template, a font) as `pim-binary:` and base64, as an app's files are. Up to 50 files and 10 MB, as in v1. */
 function checkFiles(files: Record<string, string>): Record<string, string> {
 	let total = 0;
 	for (const [path, content] of Object.entries(files)) {
 		if (!/^[\w.-]+(\/[\w.-]+)*$/.test(path) || path.split("/").includes("..")) throw new BadRequestError(`"${path}" is not a plain relative path`);
 		if (typeof content !== "string") throw new BadRequestError(`${path} must be text`);
-		total += content.length;
+		total += sizeOfFile(content);
 	}
-	if (Object.keys(files).length > 50 || total > 1_000_000) throw new BadRequestError("A skill has up to 50 files and 1 MB");
+	if (Object.keys(files).length > 50 || total > 10_000_000) throw new BadRequestError("A skill has up to 50 files and 10 MB");
 	return files;
 }

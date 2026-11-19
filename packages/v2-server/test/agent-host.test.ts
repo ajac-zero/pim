@@ -1,7 +1,7 @@
 // The default agent host on the real stack: a Runner started without any `harnessOptions` runs a real Pim agent. The only thing given to it is a model provider (pi-ai's
 // faux one, as a deployment's own provider would be) and the databases the tools write through. The agent keeps notes and goals, creates a note and an app, makes an
 // HTTP request that is sent at once and only once, and starts a coding thread under an admin's grant; every model call lands in the cost ledger.
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { App } from "@pim/v2-app/app";
@@ -36,9 +36,10 @@ real("the default agent host", () => {
 	const sent: { url: string; method: string; headers: Record<string, string>; body: unknown }[] = [];
 	let failNext = false;
 	/** GitHub's side of install_skill: one repository at one commit, whose files the test can change. */
-	const github = { sha: "a".repeat(40), files: {} as Record<string, string> };
+	const github = { sha: "a".repeat(40), files: {} as Record<string, string>, redirectTo: undefined as string | undefined };
 	const serveGithub = (url: URL): Response | undefined => {
 		if (url.hostname === "api.github.com") {
+			if (github.redirectTo) return new Response(null, { status: 302, headers: { location: github.redirectTo } });
 			if (url.pathname.includes("/commits/")) return Response.json({ sha: github.sha });
 			if (url.pathname.includes("/git/trees/")) return Response.json({ tree: Object.entries(github.files).map(([path, content]) => ({ path, type: "blob", size: content.length })) });
 		}
@@ -830,6 +831,73 @@ const agentId = (await d.stack.admin.query("SELECT id FROM pim_app.agents WHERE 
 		await turnWith(chat, [fauxToolCall("write_skill", { name: "sonnet", body: "Approved.", base_version: 1 })], { action: "skill:write", approve: true });
 		expect((await resultsIn(chat, "write_skill")).at(-1)).toMatch(/^Saved the skill sonnet, version 2, one of Scribe's skills/);
 		expect(await skill()).toMatchObject({ version: 2, body: "Approved." });
+	}, 240_000);
+
+	it("copies the person's own files into a skill, shown with their hashes and saved only as shown, copies them back out, and installs from their files for another agent", async () => {
+		expect((await web.call("PUT", "/api/settings", { approvalPolicy: "explicit" })).status).toBe(200);
+		// The person's files, through the Files screen's own routes.
+		const file = (method: string, path: string, body?: Uint8Array) => fetch(`${web.base}/api/files/content?path=${path}`, { method, headers: { "x-pim-ingress-secret": web.ingress, cookie: web.cookie, ...(body ? { "content-type": "application/octet-stream" } : {}) }, ...(body ? { body } : {}) });
+		const put = async (path: string, bytes: Uint8Array) => expect((await file("PUT", path, bytes)).status).toBe(200);
+		const template = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xff, 0xfe, 0x00, 0x01]);
+		await put("/workspace/templates/report.bin", template);
+		await put("/workspace/templates/notes.txt", Buffer.from("plain notes"));
+		const binder = await newAgent("Binder", "Binds reports");
+		const chat = (await web.call("POST", "/api/sessions", { title: "Binder", agentId: binder })).json.id as string;
+		const skill = async (name: string) => (await d.stack.admin.query("SELECT version, body, files FROM pim_app.skills WHERE name = $1", [name])).rows[0] as { version: number; body: string; files: Record<string, string> } | undefined;
+		const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+
+		// What the person is shown names each copy with the hash of what it holds; text is kept as text and anything else as bytes.
+		await turnWith(chat, [fauxToolCall("write_skill", { name: "report-kit", description: "Make the report", body: "Fill the template.", copy_files: [{ path: "tpl/report.bin", from_file: "/workspace/templates/report.bin" }, { path: "tpl/notes.txt", from_file: "/workspace/templates/notes.txt" }] })], {
+			action: "skill:write", approve: true,
+			during: async (filed) => {
+				expect(filed.args.copies).toEqual([{ path: "tpl/report.bin", from_file: "/workspace/templates/report.bin", sha256: hash(template), size: 8 }, { path: "tpl/notes.txt", from_file: "/workspace/templates/notes.txt", sha256: hash(Buffer.from("plain notes")), size: 11 }]);
+				expect(filed.args.summary).toContain("2 files copied from the person's own");
+			},
+		});
+		const kit = (await skill("report-kit"))!;
+		expect(kit.version).toBe(1);
+		expect(kit.files["tpl/notes.txt"]).toBe("plain notes");
+		expect(kit.files["tpl/report.bin"]).toBe(`pim-binary:${template.toString("base64")}`);
+
+		// A file that changed after the person was shown it is not copied.
+		await turnWith(chat, [fauxToolCall("write_skill", { name: "report-kit", body: "Changed.", base_version: 1, copy_files: [{ path: "tpl/report.bin", from_file: "/workspace/templates/report.bin" }] })], {
+			action: "skill:write", approve: true,
+			during: async () => void (await put("/workspace/templates/report.bin", Buffer.from([1, 2, 3]))),
+		});
+		expect((await resultsIn(chat, "write_skill")).at(-1)).toMatch(/\/workspace\/templates\/report\.bin changed after the person approved copying it/);
+		expect((await skill("report-kit"))!.version).toBe(1);
+
+		// A file that is not text is not read out, and is copied to the person's files instead.
+		await turnWith(chat, [fauxToolCall("read_skill_file", { name: "report-kit", path: "tpl/report.bin" }), fauxToolCall("read_skill_file", { name: "report-kit", path: "tpl/report.bin", save_to: "/workspace/out/report.bin" }), fauxToolCall("read_skill_file", { name: "report-kit", path: "tpl/nothing.md" })]);
+		const read = await resultsIn(chat, "read_skill_file");
+		expect(read.find((r) => r.startsWith("(binary file"))).toBe("(binary file, 8 bytes, application/octet-stream): copy it to the person's files with save_to to use it.");
+		expect(read.find((r) => r.startsWith("Copied"))).toBe("Copied tpl/report.bin from the report-kit skill, version 1, to /workspace/out/report.bin (8 bytes).");
+		expect(read.find((r) => r.includes("nothing.md"))).toContain("Its files: tpl/notes.txt, tpl/report.bin.");
+		expect(Buffer.from(await (await file("GET", "/workspace/out/report.bin")).arrayBuffer())).toEqual(template);
+
+		// A skill in the person's files is installed as it is there; the majordomo may install it for another agent, and another agent may not.
+		await put("/workspace/skills/greeter/SKILL.md", Buffer.from("---\nname: greeter\ndescription: Say hello\n---\nSay hello warmly.\n"));
+		await put("/workspace/skills/greeter/phrases.txt", Buffer.from("hello"));
+		await put("/workspace/skills/greeter/.hidden", Buffer.from("never"));
+		await turnWith(chat, [fauxToolCall("install_skill", { source: "/workspace/skills/greeter", agent: "a_someone_else" })]);
+		expect((await resultsIn(chat, "install_skill")).at(-1)).toMatch(/no agent with the id a_someone_else/);
+		const other = await newAgent("Other", "Someone else");
+		await turnWith(chat, [fauxToolCall("install_skill", { source: "/workspace/skills/greeter", agent: other })]);
+		expect((await resultsIn(chat, "install_skill")).at(-1)).toBe("Only the person's majordomo writes skills for their other agents.");
+		await turnWith(chatId, [fauxToolCall("install_skill", { source: "/workspace/skills/greeter", agent: binder })], { action: "skill:install", approve: true, during: async (filed) => void expect(Object.keys(filed.args.hashes).sort()).toEqual(["SKILL.md", "phrases.txt"]) });
+		const greeter = (await skill("greeter"))!;
+		expect(greeter).toMatchObject({ body: "Say hello warmly.\n" });
+		expect(Object.keys(greeter.files).sort()).toEqual([".source", "phrases.txt"]);
+		expect((await d.stack.admin.query("SELECT config->'skills' AS skills FROM pim_app.agents WHERE id = $1", [binder])).rows[0].skills).toEqual(["report-kit", "greeter"]);
+
+		// GitHub sending a request elsewhere is refused.
+		github.redirectTo = "https://evil.example/steal";
+		try {
+			await say("install from github", toolUse(fauxToolCall("install_skill", { source: "https://github.com/acme/skills/tree/main/skills/tea" })));
+			expect((await results("install_skill")).at(-1)).toMatch(/GitHub sent https:\/\/api\.github\.com elsewhere, so nothing was read from it/);
+		} finally {
+			github.redirectTo = undefined;
+		}
 	}, 240_000);
 
 	it("keeps an agent to the memory scopes it reads, one line of at most 280 bytes to a memory title, and says when recall shows only the newest", async () => {

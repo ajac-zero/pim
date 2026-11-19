@@ -1,6 +1,7 @@
 // The Relay across processes: a personal computer's socket is held by one process (a `relay` container), and a Gate in another process, with no
 // connection of its own, serves `/hosted/*` and calls the computer for a Runner, through NATS. Two real processes (their own HTTP servers), real
 // PostgreSQL (the shared stack) and a real nats-server; the computer is a software `pim-computer`.
+import { computerAppId } from "@pim/v2-app/hosted-run";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { WebSocket } from "ws";
 import { App } from "@pim/v2-app/app";
@@ -135,9 +136,9 @@ real("the Relay across processes, over NATS", () => {
 		});
 		expect(response.status).toBe(201);
 		const seen = JSON.parse(await response.text());
-		expect(seen).toMatchObject({ id: appId, method: "POST", path: "/api/items?x=1", body: Buffer.from("payload").toString("base64") });
-		expect(Object.keys(seen.headers)).toEqual(expect.arrayContaining(["accept", "x-forwarded-prefix"]));
-		expect(Object.keys(seen.headers).filter((h) => /cookie|authorization|^x-pim-/.test(h))).toEqual([]); // never Pim's cookie or a forged x-pim-*
+		expect(seen).toMatchObject({ id: computerAppId(appId), method: "POST", path: "/api/items?x=1", body: Buffer.from("payload").toString("base64") });
+		expect(Object.keys(Object.fromEntries(seen.headers))).toEqual(expect.arrayContaining(["accept", "x-forwarded-prefix"]));
+		expect(Object.keys(Object.fromEntries(seen.headers)).filter((h) => /cookie|authorization|^x-pim-/.test(h))).toEqual([]); // never Pim's cookie or a forged x-pim-*
 		expect(response.headers.get("set-cookie")).toBeNull();
 		expect(response.headers.get("content-security-policy")).toContain("default-src 'self'");
 		// The call went to the computer on the relay process, not to a connection of the Gate's own.
@@ -154,7 +155,7 @@ real("the Relay across processes, over NATS", () => {
 		ws.on("message", (data, isBinary) => got.push(isBinary ? (data as Buffer) : data.toString()));
 		await new Promise<void>((resolve, reject) => (ws.once("open", () => resolve()), ws.once("error", reject)));
 		await until("the computer to be asked to open it", () => c.calls.find((x) => x.op === "app_ws_open"));
-		expect(c.calls.find((x) => x.op === "app_ws_open")!.args).toMatchObject({ id: appId, path: "/socket?room=1" });
+		expect(c.calls.find((x) => x.op === "app_ws_open")!.args).toMatchObject({ id: computerAppId(appId), path: "/socket?room=1" });
 		ws.send("hello");
 		ws.send(Buffer.from([1, 2, 3]));
 		await until("both frames to reach the computer", () => c.frames.filter((f) => f.type === "app_ws").length === 2);

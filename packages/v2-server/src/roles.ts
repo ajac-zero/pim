@@ -34,7 +34,7 @@ import { deliverForgeWakes } from "./forge-wakes.ts";
 import { codingAdminRoutes, forgeAuthenticator, forgeRoutes, projectedTranscripts, snapshotRoutes } from "./gate-extras.ts";
 import { mcpFetchTools } from "./connector-tools.ts";
 import { publicUrl } from "./agent-tools.ts";
-import { renewDue } from "./watches.ts";
+import { reconcileWatches, renewDue } from "./watches.ts";
 import type { Host } from "./host.ts";
 import { serveSays } from "./live-says.ts";
 import { startNoticeBridge } from "./notice-bridge.ts";
@@ -361,10 +361,13 @@ export async function startMaintenance(config: ProcessConfig, env: Env, host: Ho
 			lastUpdateCheck = Date.now();
 			await checkForUpdate(app, env).catch((e) => console.error("update check", e));
 		}
-		// Watches' grants that are running out are asked for again (`watches.ts`), once a minute.
-		if (keys && Date.now() - lastRenewal > 60_000) {
+		// Watches' subscriptions are matched to the triggers and grants that are running out are asked for again (`watches.ts`), every fifteen seconds.
+		if (keys && Date.now() - lastRenewal > 15_000) {
 			lastRenewal = Date.now();
-			await renewDue({ app: new App(app, objects, { crypto: keys }), crypto: keys, transport: { fetch, allowPrivate: env.PIM_CONNECTOR_ALLOW_PRIVATE === "1", check: publicUrl }, publicUrl: env.PIM_PUBLIC_URL, now: Date.now }, maint).catch((e) => console.error("watch renewal", e));
+			const watching = { app: new App(app, objects, { crypto: keys }), crypto: keys, transport: { fetch, allowPrivate: env.PIM_CONNECTOR_ALLOW_PRIVATE === "1", check: publicUrl }, publicUrl: env.PIM_PUBLIC_URL, now: Date.now };
+			// The subscriptions match the triggers first (a deleted or paused watch is unsubscribed, a new one subscribed), then the grants that are running out are renewed.
+			await reconcileWatches(watching, maint).catch((e) => console.error("watch reconcile", e));
+			await renewDue(watching, maint).catch((e) => console.error("watch renewal", e));
 		}
 		await sweepApprovals(sweeper, maint).catch((e) => console.error("approval sweep", e));
 		// Schedules and time triggers fire from here: a schedule's due time is looked up every pass, the triggers' every few seconds.

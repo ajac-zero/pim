@@ -25,11 +25,20 @@ import { uiBlockReference } from "@pim/ui-lang";
 import { loadWidgets, MAX_WIDGETS, type ShownWidget, uiDiagnostics, widgetRefs } from "./agent-widgets.ts";
 import { connectorToolset, type Transport } from "./connector-tools.ts";
 import { watchTools } from "./watch-tools.ts";
+import { canvasTools } from "./canvas-tools.ts";
+import { connectorAdminTools } from "./connector-admin-tools.ts";
 import { builtinSkill } from "./builtin-skills.ts";
 import { readSkillFolder } from "./skill-sources.ts";
 import { adminTools } from "./admin-tools.ts";
 import { rosterOf, teamTools } from "./agent-team-tools.ts";
 import { roomTools } from "./room-tools.ts";
+import { triggerTools } from "./trigger-tools.ts";
+import { copiedFiles } from "./app-from-files.ts";
+import { noteTools } from "./note-tools.ts";
+import { goalTools } from "./goal-tools.ts";
+import { memoryTools } from "./memory-tools.ts";
+import { skillTools } from "./skill-tools.ts";
+import { clipText, webTools } from "./web-tools.ts";
 import { blockImages, fetchImage, imageCopyId, MAX_REPLY_IMAGES, MAX_UI_STATE_CHARS, REPLY_BLOCKS_GUIDANCE, replyBlocks, uiBlockLabel, uiProgramsOf } from "./reply-blocks.ts";
 import { disabledBuiltins } from "./compat/admin-directory.ts";
 import { textDigest } from "./compat/admin-util.ts";
@@ -62,6 +71,8 @@ const json = (v: unknown): Result => text(JSON.stringify(v, null, 1));
 
 const MAX_BODY = 100_000;
 const MAX_REQUEST_MS = 20_000;
+/** How much of an HTTP response the agent is shown, as in v1. */
+const MAX_RESPONSE_CHARS = 8000;
 
 /** Whether an address is one an agent may not reach: loopback, private, link-local and the like. */
 function privateAddress(address: string): boolean {
@@ -130,7 +141,11 @@ const HOW_APPS_RUN =
 	"pim.shared has the same calls, for text everyone the user shares the app with sees and changes; pim.ask(prompt) answers with text from Pim's model, which has no tools and sees only the prompt; " +
 	"pim.tools.call(name, input) runs one of the user's connector tools that runs without asking, by its tool name, and answers with its result as text. " +
 	"The user is asked once per version before ask or a tool first runs; tools that ask before they run can't be used. Show a message when a call fails. " +
-	"A jsx app is a React app, App.jsx: `export default function App() { ... }`, with hooks from \"react\"; it may import \"react\", \"recharts\", \"lucide-react\" and its own files, is styled with Tailwind classes, and is compiled when you save it: a compile error comes back to you to fix. ";
+	"A jsx app is a React app, App.jsx: `export default function App() { ... }`, with hooks from \"react\"; it may import \"react\", \"recharts\", \"lucide-react\" and its own files, is styled with Tailwind classes, and is compiled when you save it: a compile error comes back to you to fix. " +
+	"HTML and JSX apps can have more files than the main one, by relative path (\"app.js\", \"components/Chart.jsx\", \"data.json\", \"images/logo.png\"): " +
+	"a page loads its own with <script src=\"app.js\">, <link rel=\"stylesheet\" href=\"style.css\"> and <img src=\"images/logo.png\">, and reads data from <script type=\"application/json\" id=\"data\" src=\"data.json\"> (JSON.parse(document.getElementById(\"data\").textContent)), and keeps markup it reuses in <template> elements in index.html, not files of its own; " +
+	"an app imports them: import Chart from \"./components/Chart\", import rows from \"./data.json\", import \"./styles.css\", import logo from \"./logo.png\" (a URL). " +
+	"Give a file's content as text in files, or in copy_files a path in the user's files (/workspace/...) to copy, for an image or a dataset the user has (up to 10 MB in all, 100 files). Split a large app into files, and change one with edits and path. ";
 
 /**
  * Makes a tool stoppable: its call ends when the chat is stopped (the abort signal) even if the tool's own work ignores it, and with an error after `timeoutMs` instead of
@@ -235,6 +250,8 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 	const strings = Type.Array(Type.String());
 	const anyObject = Type.Record(Type.String(), Type.Any());
 	const files = Type.Record(Type.String(), Type.String());
+	const copyFiles = Type.Array(Type.Object({ path: S({ minLength: 1, maxLength: 200, description: "Where it goes in the app." }), from_file: S({ description: "A path in the user's files, such as /workspace/photos/logo.png, to copy." }) }), { maxItems: 100, description: "Files of the user's to copy into the app, such as an image or a dataset." });
+	const copied = (app: App, call: Call, list: { path: string; from_file: string }[] | undefined) => copiedFiles({ ownerId, app, relay: deps.relay }, call.p, list);
 
 	const tools: ToolRegistration[] = [
 		tool(
@@ -348,28 +365,6 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 			return json({ utc: now.toISOString(), timeZone: zone, local: now.toLocaleString("en-US", { timeZone: zone, dateStyle: "full", timeStyle: "long" }) });
 		}, "safe"),
 
-		// Memory.
-		write("note", "Save something to remember: a title and the text. It goes to your own memory unless you give a scope such as everyone.", Type.Object({ title: S({ minLength: 1 }), body: S({ minLength: 1 }), scope: O(S()) }), async (app, call, a) =>
-			text(`Remembered as ${await app.memories.remember(call.p, a.scope ?? (await app.agents.memoryOf(call.p, call.agentId)).own, a.title, a.body)}.`)),
-		read("recall", "Search your memory with a regular expression (case-insensitive) over titles and text.", Type.Object({ pattern: S({ minLength: 1 }), scope: O(S()), limit: O(Type.Integer({ minimum: 1, maximum: 50 })) }), async (app, call, a) => {
-			const scopes = a.scope ? [a.scope] : (await app.agents.memoryOf(call.p, call.agentId)).reads;
-			const found = await app.memories.recall(call.p, scopes, a.pattern, a.limit ?? 20);
-			return text(found.length ? found.map((m) => `[${m.id}] (${m.scope}) ${m.title}`).join("\n") : "Nothing matches.");
-		}),
-		read("zoom", "Read a memory in full, or a block of its lines.", Type.Object({ id: S(), start: O(Type.Integer({ minimum: 1 })), count: O(Type.Integer({ minimum: 1, maximum: 400 })) }), async (app, call, a) => {
-			const z = await app.memories.zoom(call.p, a.id, a.start ?? 1, a.count ?? 40);
-			return text(`${z.lines.join("\n")}\n(${z.total} lines in all)`);
-		}),
-		write("forget", "Forget a memory.", Type.Object({ id: S() }), async (app, call, a) => (await app.memories.forget(call.p, a.id), text("Forgotten."))),
-		write("create_memory_scope", "Name a shared memory scope, such as Work or Family, for the part of the person's life only some agents should know. It returns the scope's key; save to it with note's scope, and let an agent read it with share_memory_scope.", Type.Object({ name: S({ minLength: 1, maxLength: 40 }) }), async (app, call, a) =>
-			text(`Created the memory scope "${a.name.trim()}" with key ${await app.memories.createScope(call.p, a.name.trim())}.`)),
-		write("share_memory_scope", "Let another agent read a named memory scope, by its key, or with stop no longer read it. An agent always reads its own scope and everyone.", Type.Object({ scope: S(), agent: S(), stop: O(Type.Boolean()) }), async (app, call, a) => {
-			const kept = (await app.agents.get(call.p, a.agent)).memoryScopes.filter((k) => k !== a.scope);
-			const agent = await app.agents.update(call.p, a.agent, { memoryScopes: a.stop ? kept : [...kept, a.scope] });
-			return text(a.stop ? `${agent.name} no longer reads ${a.scope}.` : `${agent.name} reads ${a.scope} from its next step.`);
-		}),
-		write("move_memory", "Move a memory to another scope, such as everyone or another agent's.", Type.Object({ id: S(), scope: S() }), async (app, call, a) => (await app.memories.move(call.p, a.id, a.scope), text(`Moved to ${a.scope}.`))),
-
 		// Skills and goals.
 		read("read_skill", "Read a skill's instructions and the names of its files: one of the person's own, or one that comes with Pim.", Type.Object({ name: S() }), async (app, call, a) => {
 			const s = await app.agents.getSkill(call.p, a.name).catch((error) => {
@@ -377,16 +372,11 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 				throw error;
 			});
 			if (!s) return text(`${builtinSkill(a.name)!.instructions}\n\nFiles: none`);
-			return text(`${s.body}\n\nFiles: ${Object.keys(s.files ?? {}).join(", ") || "none"}`);
+			return text(`Skill ${a.name}, version ${s.version}:\n${s.body}\n\nFiles: ${Object.keys(s.files ?? {}).join(", ") || "none"}`);
 		}),
 		read("read_skill_file", "Read one of a skill's supporting files.", Type.Object({ name: S(), path: S() }), async (app, call, a) => {
 			const file = ((await app.agents.getSkill(call.p, a.name)).files ?? {})[a.path];
 			return file === undefined ? text(`${a.name} has no file ${a.path}.`, true) : text(file);
-		}),
-		write("write_skill", "Create a skill, or save a new version of it: a name, what it is for, instructions, and supporting files by path.", Type.Object({ name: S(), description: O(S()), body: O(S()), files: O(files) }), async (app, call, a) => {
-			const exists = await app.agents.getSkill(call.p, a.name).then(() => true, () => false);
-			await (exists ? app.agents.updateSkill(call.p, a.name, { description: a.description, body: a.body, files: a.files }) : app.agents.createSkill(call.p, { name: a.name, description: a.description, body: a.body, files: a.files }));
-			return text(exists ? `Saved a new version of ${a.name}.` : `Created ${a.name}.`);
 		}),
 		tool("install_skill", "Install a skill from a GitHub folder (https://github.com/owner/repo/tree/ref/path, holding a SKILL.md and any files it uses). A person approves it first, with the files it holds listed; what is installed is exactly what they approved, at the commit the folder is at now.", Type.Object({ source: S({ minLength: 1 }), name: O(S()) }),
 			async (args, api) => {
@@ -419,14 +409,6 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 					return text(error instanceof Error ? error.message : String(error), true);
 				}
 			}, "safe"),
-		write("create_goal", "Start a goal, with the steps to reach it.", Type.Object({ title: S({ minLength: 1 }), steps: O(strings) }), async (app, call, a) => text(`Created goal ${await app.memories.createGoal(call.p, a.title, a.steps ?? [])}.`)),
-		write("update_goal", "Record progress on a goal: its title, its status (active, paused, done, dropped), its steps (steps replaces them all; add_steps adds to the end), a progress note; or tick a step off with complete_step (its position, from 0).", Type.Object({ id: S(), title: O(S()), status: O(Type.Union([Type.Literal("active"), Type.Literal("paused"), Type.Literal("done"), Type.Literal("dropped")])), steps: O(strings), add_steps: O(strings), note: O(S()), complete_step: O(Type.Integer({ minimum: 0 })) }), async (app, call, a) => {
-			if (a.title !== undefined || a.status !== undefined || a.steps !== undefined || a.add_steps !== undefined || a.note !== undefined) await app.memories.updateGoal(call.p, a.id, { title: a.title, status: a.status, steps: a.steps, addSteps: a.add_steps, note: a.note });
-			if (a.complete_step !== undefined) return text((await app.memories.completeStep(call.p, a.id, a.complete_step)).goalDone ? "Step done; the goal is done." : "Step done.");
-			return text("Updated.");
-		}),
-		read("list_goals", "Your goals with their steps and progress notes, optionally only those with a status.", Type.Object({ status: O(Type.Union([Type.Literal("active"), Type.Literal("paused"), Type.Literal("done"), Type.Literal("dropped")])) }), async (app, call, a) => json((await app.memories.listGoals(call.p)).filter((g) => a.status === undefined || g.status === a.status))),
-
 		// Schedules and triggers.
 		read("schedule_task", "Wake yourself up later with an instruction, to follow up, check progress, send a reminder, or do recurring work. Give exactly one of delay_seconds, at (ISO 8601 with offset), or cron (5 fields, UTC). The instruction arrives as a message starting with \"[Scheduled task\": in this conversation, or with new_chat in a new chat each time it fires.", Type.Object({
 			instruction: S({ minLength: 1, description: "What to do when it fires, written to your future self." }),
@@ -461,64 +443,18 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 		}),
 		read("list_scheduled_tasks", "List your pending scheduled tasks.", Type.Object({}), async (app, call) => json((await app.schedules.list(call.p)).filter((s) => s.enabled && s.nextRunAt).map((s) => ({ id: s.id, type: s.kind === "cron" ? "cron" : s.kind === "at" ? "scheduled" : "delayed", next: s.nextRunAt!.toISOString(), ...(s.kind === "cron" ? { cron: s.spec } : {}), session: s.chatId, label: s.label, instruction: s.prompt, newChat: s.target === "new_chat", ...(s.target === "new_chat" && s.agentId ? { agent: s.agentId } : {}) })))),
 		write("cancel_scheduled_task", "Cancel a scheduled task.", Type.Object({ id: S() }), async (app, call, a) => (await app.schedules.remove(call.p, a.id), text("Cancelled."))),
-		write("create_trigger", "Create a trigger: the spec says what starts a turn (a time, a connector's event, a computer's file or process) and what to do. It starts as a draft; resume_trigger enables it.", Type.Object({ spec: anyObject }), async (app, call, a) => {
-			const t = await app.triggers.create(call.p, { spec: { ...(call.chat ? { originChatId: call.chat } : {}), ...(call.agentId ? { owningAgentId: call.agentId } : {}), ...a.spec } });
-			return json({ id: t.id, lifecycle: t.lifecycle, label: t.label });
-		}),
-		write("update_trigger", "Replace a trigger's spec.", Type.Object({ id: S(), spec: anyObject }), async (app, call, a) => {
-			const t = await app.triggers.update(call.p, a.id, { spec: { ...(call.chat ? { originChatId: call.chat } : {}), ...(call.agentId ? { owningAgentId: call.agentId } : {}), ...a.spec } });
-			return json({ id: t.id, lifecycle: t.lifecycle, label: t.label });
-		}),
-		read("list_triggers", "Your triggers.", Type.Object({ lifecycle: O(S()) }), async (app, call, a) => json((await app.triggers.list(call.p, { lifecycle: a.lifecycle })).map((t) => ({ id: t.id, lifecycle: t.lifecycle, label: t.label })))),
-		read("get_trigger", "One trigger with its spec and its latest runs.", Type.Object({ id: S() }), async (app, call, a) => json({ trigger: await app.triggers.get(call.p, a.id), runs: await app.triggers.runs(call.p, a.id, 10) })),
-		write("pause_trigger", "Pause a trigger.", Type.Object({ id: S() }), async (app, call, a) => text(`Now ${(await app.triggers.setLifecycle(call.p, a.id, "paused")).lifecycle}.`)),
-		write("resume_trigger", "Enable a trigger, or start one that is paused. A time trigger counts from now.", Type.Object({ id: S() }), async (app, call, a) => text(`Now ${(await app.triggers.setLifecycle(call.p, a.id, "enabled")).lifecycle}.`)),
-		write("delete_trigger", "Delete a trigger.", Type.Object({ id: S() }), async (app, call, a) => (await app.triggers.setLifecycle(call.p, a.id, "deleted"), text("Deleted."))),
-		read("test_trigger", "A dry run, changing nothing and running nothing: whether a trigger (by id, or as you would make it with trigger) is valid, what would stop it being enabled, a time source's next firings, or what its condition says of each sample.", Type.Object({ id: O(S()), trigger: O(anyObject), samples: O(Type.Array(anyObject, { maxItems: 10 })), count: O(Type.Integer({ minimum: 1, maximum: 20 })) }), async (app, call, a) => json(await app.triggers.test(call.p, a.id ?? null, { ...(a.count ? { count: a.count } : {}), ...(a.trigger ? { spec: { ...(call.chat ? { originChatId: call.chat } : {}), ...(call.agentId ? { owningAgentId: call.agentId } : {}), ...a.trigger } } : {}), ...(a.samples ? { samples: a.samples } : {}) }))),
-		read("list_trigger_runs", "A trigger's runs, newest first, with what is known of each.", Type.Object({ id: S(), limit: O(Type.Integer({ minimum: 1, maximum: 50 })) }), async (app, call, a) => json(await app.triggers.runs(call.p, a.id, a.limit))),
-		read("list_trigger_sources", "What a trigger can watch here: each kind of source, and whether it can run now.", Type.Object({}), async (app, call) => {
-			const paired = !!(await app.db.owner(call.p.ownerId, (tx) => tx.query("SELECT 1 FROM pim_app.computers WHERE revoked_at IS NULL LIMIT 1"))).rowCount;
-			const draft = (reason: string) => ({ status: "draft_only", delivers: false, reason });
-			return json({ sources: [
-				{ kind: "time", status: "available", delivers: true, reason: null },
-				{ kind: "connector_event", status: "available", delivers: true, reason: null },
-				{ kind: "file", status: "unavailable", delivers: false, reason: "not_wired" },
-				...["poll", "stream", "process"].map((kind) => ({ kind, ...draft(paired ? "not_wired" : "computer_not_paired") })),
-			] });
-		}),
-
 		// Notes and apps.
-		write("note_create", "Create a note a person can open and edit alongside you. The answer is the note's card in the chat, which is how the person sees and opens it; there is no panel for you to open.", Type.Object({ title: S({ minLength: 1 }), text: O(S()) }), async (app, call, a) =>
+		write("note_create", "Create a note a person can open and edit alongside you. The answer is the note's card in the chat, which is how the person sees and opens it; there is no panel for you to open.", Type.Object({ title: S({ minLength: 1, maxLength: 200 }), text: O(S()) }), async (app, call, a) =>
 			noteCard(app, ownerId, await app.canvas.create(call.p, a.title, a.text ?? "", "agent"), "Made it. The person sees it as a card in the chat and opens it beside the chat.")),
-		read("note_read", "Read a note: its text and its version.", Type.Object({ id: S() }), async (app, call, a) => {
-			await app.canvas.keep(ownerId, a.id, "person");
-			const n = await app.canvas.read(ownerId, a.id);
-			return text(`version ${n.version}\n${n.text}`);
-		}),
-		write("note_edit", "Edit a note by replacing text. The edit applies to the note as it is now, so what the person typed meanwhile stays; it is refused, and you read the note again, only when find no longer appears exactly once. base_version is not needed. A person's typing is never lost. The answer is the note's card in the chat, which is how the person sees and opens it; you can't open a panel, so don't say you did.", Type.Object({ id: S(), base_version: O(Type.Integer({ minimum: 0 })), find: S({ minLength: 1 }), replace: S() }), async (app, call, a) => {
-			const { version } = await app.canvas.edit(call.p, a.id, a.find, a.replace);
-			return noteCard(app, ownerId, a.id, `Saved version ${version}. The person sees the card in the chat and opens the note from it.`);
-		}),
 		read("note_show", "Show the person a note that already exists, such as one from another chat or the one they asked you to open, as the card in this chat that opens it beside the chat. It changes nothing. Find its id with note_list.", Type.Object({ id: S() }), async (app, _call, a) => noteCard(app, ownerId, a.id, "Showed it. The person sees the card in the chat and opens the note from it.")),
-		read("note_list", "Your notes.", Type.Object({}), async (app) => json((await app.db.owner(ownerId, (tx) => tx.query("SELECT note_id, title, kept_version AS version FROM pim_app.notes WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT 200"))).rows)),
-		write("app_create", `Create an app: kind html or jsx, or backend (with a pim.app.json). Files are by path. ${HOW_APPS_RUN}`, Type.Object({ title: S({ minLength: 1 }), kind: Type.Union([Type.Literal("html"), Type.Literal("jsx"), Type.Literal("backend")]), files, message: O(S()) }), async (app, call, a) => appCard(await app.apps.create(call.p, { title: a.title, kind: a.kind, files: a.files, message: a.message }), "Made it. The person sees it in the chat and opens it beside the chat.")),
-		write("app_update", "Change an app. base_version is the version you read; an app that changed since is refused.", Type.Object({ id: S(), base_version: Type.Integer({ minimum: 1 }), title: O(S()), files: O(files), delete_files: O(strings), edits: O(Type.Array(Type.Object({ path: O(S()), find: S(), replace: S() }))), message: O(S()) }), async (app, call, a) =>
-			appCard(await app.apps.update(call.p, a.id, { baseVersion: a.base_version, title: a.title, files: a.files, deleteFiles: a.delete_files, edits: a.edits, message: a.message }), "Saved. The person sees the new version in the chat.")),
+		write("app_create", `Create an app: kind html or jsx, or backend (with a pim.app.json). Files are by path. ${HOW_APPS_RUN}`, Type.Object({ title: S({ minLength: 1 }), kind: Type.Union([Type.Literal("html"), Type.Literal("jsx"), Type.Literal("backend")]), files, copy_files: O(copyFiles), message: O(S()) }), async (app, call, a) => appCard(await app.apps.create(call.p, { title: a.title, kind: a.kind, files: { ...a.files, ...(await copied(app, call, a.copy_files)) }, message: a.message }), "Made it. The person sees it in the chat and opens it beside the chat.")),
+		write("app_update", "Change an app. base_version is the version you read; an app that changed since is refused.", Type.Object({ id: S(), base_version: Type.Integer({ minimum: 1 }), title: O(S()), files: O(files), copy_files: O(copyFiles), delete_files: O(strings), edits: O(Type.Array(Type.Object({ path: O(S()), find: S(), replace: S() }))), message: O(S()) }), async (app, call, a) =>
+			appCard(await app.apps.update(call.p, a.id, { baseVersion: a.base_version, title: a.title, files: a.copy_files ? { ...a.files, ...(await copied(app, call, a.copy_files)) } : a.files, deleteFiles: a.delete_files, edits: a.edits, message: a.message }), "Saved. The person sees the new version in the chat.")),
 		read("app_show", "Show the person an app that already exists, such as one made in another chat, as the card in this chat that opens it beside the chat: the latest version, or the one asked for. It changes nothing; don't make a new version just to show one. Find its id with app_list.", Type.Object({ id: S(), version: O(Type.Integer({ minimum: 1 })) }), async (app, call, a) => appCard(await app.apps.read(call.p, a.id, { version: a.version, path: undefined, offset: undefined }), "Showed it. The person sees it in the chat.")),
 		read("app_read", "Read an app: its files, or one file.", Type.Object({ id: S(), version: O(Type.Integer({ minimum: 1 })), path: O(S()), offset: O(Type.Integer({ minimum: 0 })) }), async (app, call, a) => json(await app.apps.read(call.p, a.id, { version: a.version, path: a.path, offset: a.offset }))),
 		read("app_list", "Your apps.", Type.Object({ query: O(S()) }), async (app, call, a) => json(await app.apps.list(call.p, a.query ?? ""))),
 
 		// The web.
-		tool("fetch_url", "Read a web page or file with an HTTP GET. Public addresses only.", Type.Object({ url: S() }), async (args) => {
-			try {
-				const url = await publicUrl(args.url);
-				const response = await deps.fetch(url, { signal: AbortSignal.timeout(MAX_REQUEST_MS), redirect: "manual", headers: { "user-agent": "Pim/2" } });
-				if (response.status >= 300 && response.status < 400) return text(`Redirected (${response.status}) to ${response.headers.get("location") ?? "somewhere"}. Fetch that address instead if you want it.`);
-				return text(`${response.status} ${response.headers.get("content-type") ?? ""}\n${await readBody(response)}`, !response.ok);
-			} catch (error) {
-				return text(error instanceof Error ? error.message : String(error), true);
-			}
-		}, "safe"),
 		tool("http_request", "Make an HTTP request that may change something elsewhere (POST, PUT, PATCH, DELETE). It is sent once: if its outcome cannot be known, it is not sent again.", Type.Object({ method: Type.Union(["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"].map((m) => Type.Literal(m))), url: S(), headers: O(Type.Record(Type.String(), Type.String())), body: O(S()) }),
 			async (args, api) => {
 				const app = deps.app;
@@ -547,7 +483,7 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 					const idempotent = args.method === "GET" || args.method === "HEAD";
 					try {
 						const response = await deps.fetch(url, { method: args.method, headers: { ...(args.headers ?? {}), ...(idempotent ? {} : { "idempotency-key": op.idempotencyKey }) }, ...(args.body !== undefined && !idempotent ? { body: args.body } : {}), signal: AbortSignal.timeout(MAX_REQUEST_MS), redirect: "manual" });
-						const body = await readBody(response);
+						const body = clipText(await readBody(response), MAX_RESPONSE_CHARS);
 						const summary = `${response.status} ${response.headers.get("content-type") ?? ""}\n${body}`;
 						await ops.transition(ownerId, operationId, "completed", { status: response.status, summary });
 						// What came back is on the approval card too, as in v1.
@@ -570,6 +506,14 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 	tools.push(...teamTools({ ownerId, runtime, fetch: deps.fetch, publicUrl, read, write }));
 	// Group chats and other chats (`./room-tools.ts`).
 	tools.push(...roomTools({ ownerId, runtime, read }));
+	// Triggers, typed, with the person's grant for a computer source (`./trigger-tools.ts`).
+	tools.push(...triggerTools({ ownerId, runtime, read, write }));
+	// Memory (`./memory-tools.ts`), goals (`./goal-tools.ts`), and reading, changing and listing notes (`./note-tools.ts`).
+	tools.push(...webTools({ tool, fetch: deps.fetch, publicUrl }));
+	tools.push(...memoryTools({ ownerId, runtime, read, write }));
+	tools.push(...skillTools({ ownerId, runtime, read }));
+	tools.push(...goalTools({ read, write }));
+	tools.push(...noteTools({ ownerId, read, write, card: (app, id, note) => noteCard(app, ownerId, id, note) }));
 
 	// Coding: Forge, with the Authorizer deciding first whether this agent may.
 	/** `pi`, which runs in a sandbox pool, unless this deployment has no pool to run it in and can run Amp, whose orbs need none. */
@@ -692,12 +636,16 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 	tools.push(...computerTools({ ownerId, partitionId, runtime, app: deps.app, relay: deps.relay, chatOf: deps.chatOf }, { ops, principalOf }));
 
 	// Images: `generate_image`, saved to the person's files.
-	if (deps.images) tools.push(...imageTools({ ownerId, partitionId, runtime, app: deps.app, images: deps.images, fetch: deps.fetch, now: deps.now, chatOf: deps.chatOf }, { ops, principalOf }));
+	if (deps.images) tools.push(...imageTools({ ownerId, partitionId, runtime, app: deps.app, images: deps.images, relay: deps.relay, fetch: deps.fetch, now: deps.now, chatOf: deps.chatOf }, { ops, principalOf }));
 
 	// The owner's connected MCP servers: their tools, with each one's Off, Ask or On.
 	const transport: Transport = { fetch: deps.fetch, allowPrivate: deps.allowPrivateConnectors === true, check: publicUrl };
 	const connectors = connectorToolset({ ownerId, partitionId, runtime, app: deps.app, crypto: deps.crypto, transport, ops, owner, now: deps.now, chatOf: deps.chatOf, principalOf });
 	tools.push(...connectors.tools);
+	// The canvas beside the chat (`./canvas-tools.ts`).
+	tools.push(...canvasTools({ ownerId, read, relay: deps.relay }));
+	// Finding, connecting and managing connectors (`./connector-admin-tools.ts`).
+	tools.push(...connectorAdminTools({ ownerId, runtime, read, write, env: process.env, transport, now: deps.now }));
 	// Watches: events of a connected server, delivered to the chat that asked.
 	tools.push(...watchTools({ ownerId, watch: () => (deps.app && deps.crypto ? { app: deps.app, crypto: deps.crypto, transport, publicUrl: process.env.PIM_PUBLIC_URL, now: deps.now } : undefined), chatOf: deps.chatOf, principalOf: (chat) => (deps.app ? principalOf(deps.app, chat) : Promise.resolve(undefined)) }));
 

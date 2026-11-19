@@ -4,6 +4,7 @@
  * it is shown, so the stored version stays the source. An app imports the runtime's modules and its own files; anything else is refused.
  */
 import { transform } from "sucrase";
+import { BINARY_PREFIX, isBinary, typeOfFile } from "./app-files.ts";
 import { BadRequestError } from "./errors.ts";
 
 /** The modules a JSX app may import, and the runtime file each comes from. */
@@ -31,7 +32,8 @@ export function resolvePath(from: string, reference: string): string | null {
 
 const TYPES: Record<string, string> = { css: "text/css", json: "application/json", svg: "image/svg+xml", html: "text/html", txt: "text/plain", md: "text/markdown" };
 /** A file as a `data:` URL, which a sandboxed page may load. */
-export const dataUrl = (path: string, content: string) => `data:${TYPES[path.split(".").pop()?.toLowerCase() ?? ""] ?? "text/plain"};base64,${Buffer.from(content).toString("base64")}`;
+export const dataUrl = (path: string, content: string) =>
+	isBinary(content) ? `data:${typeOfFile(path)};base64,${content.slice(BINARY_PREFIX.length)}` : `data:${TYPES[path.split(".").pop()?.toLowerCase() ?? ""] ?? "text/plain"};base64,${Buffer.from(content).toString("base64")}`;
 
 /** CSS with the `url(...)`s that name the app's own files made into `data:` URLs. */
 export function inlineCssUrls(css: string, from: string, files: Files): string {

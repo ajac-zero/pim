@@ -197,7 +197,8 @@ export function bridgeRoutes(env: Env): Route[] {
 	routes.push(
 		route("GET", "/p/:id", async ({ app, params, origin }) => {
 			const c = await publishedCopy(app, params[0]!);
-			if (c.kind === "backend") throw new NotFoundError();
+			// Only one its author opened to anyone with the link; the rest are in the gallery for people signed in.
+			if (c.kind === "backend" || !c.pub.public) throw new NotFoundError();
 			const page = framePage(c.kind, c.v.files, origin);
 			return { ...page, headers: { ...page.headers, "x-robots-tag": "noindex" } };
 		}),

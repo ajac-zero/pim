@@ -8,6 +8,7 @@ import * as syncProtocol from "y-protocols/sync";
 import * as Y from "yjs";
 import type { App } from "./app.ts";
 import { type GateOptions, originOf } from "./gate.ts";
+import { computerAppId } from "./hosted-run.ts";
 import { fromAnotherSite, bearerOf } from "./http.ts";
 import { httpStatus, NotFoundError } from "./errors.ts";
 import type { ComputerConnection } from "./relay.ts";
@@ -116,7 +117,7 @@ async function authorizeAppSocket(app: App, req: IncomingMessage, url: URL, byTo
 
 async function proxyAppSocket(app: App, target: AppTarget, ws: WebSocket): Promise<void> {
 	try {
-		const backend = await (await app.relay.acquire(target.ownerId, "hosted app backend")).openAppSocket(target.appId, target.path, target.headers, (data) => {
+		const backend = await (await app.relay.acquire(target.ownerId, "hosted app backend")).openAppSocket(computerAppId(target.appId), target.path, target.headers, (data) => {
 			if (data === null) return ws.close(1001, "The app closed the connection");
 			if (ws.readyState === WebSocket.OPEN) ws.send(data, { binary: typeof data !== "string" });
 		});

@@ -1,3 +1,4 @@
+import { binaryValue } from "../src/app-files.ts";
 import { createHmac } from "node:crypto";
 import type { Server } from "node:http";
 import { OwnerId, type Principal } from "@pim/v2-contracts/identity";
@@ -400,8 +401,17 @@ describe("apps", () => {
 	it("serves a published version at /p/pa_… to anyone, without ?token=, until unpublished, and 410 once the author is deleted", async () => {
 		const u = await mk("pubby");
 		const ref = await app.apps.create(u.principal, { title: "Hello", kind: "html", files: { "index.html": page("hello"), "style.css": "p{color:red}" } });
-		const { publicId } = await app.apps.publish(u.principal, ref.id);
+		// Publishing puts it in the gallery of everyone signed in; the link for anyone is a choice of its own, and publishing again keeps the id.
+		const { publicId, public: open } = await app.apps.publish(u.principal, ref.id);
 		expect(publicId).toMatch(/^pa_/);
+		expect(open).toBe(false);
+		expect((await fetch(`${base}/p/${publicId}`)).status).toBe(404);
+		expect(((await (await u.http("/api/published-artifacts")).json()) as any).published.map((p: any) => p.id)).toContain(publicId);
+		expect(await app.apps.publish(u.principal, ref.id, { public: true })).toEqual({ publicId, version: 1, public: true });
+		expect(await app.apps.publish(u.principal, ref.id)).toMatchObject({ publicId, public: true }); // left out: as it was
+		expect(await app.apps.publish(u.principal, ref.id, { public: false })).toMatchObject({ publicId, public: false });
+		expect((await fetch(`${base}/p/${publicId}`)).status).toBe(404);
+		await app.apps.publish(u.principal, ref.id, { public: true });
 		await app.apps.update(u.principal, ref.id, { baseVersion: 1, edits: [{ find: "hello</p>", replace: "changed</p>" }] });
 		const res = await fetch(`${base}/p/${publicId}`);
 		expect(res.status).toBe(200);
@@ -413,11 +423,34 @@ describe("apps", () => {
 		expect(((await (await u.http("/api/published-artifacts")).json()) as any).published.map((p: any) => p.id)).toContain(publicId);
 		await app.apps.unpublish(u.principal, ref.id);
 		expect((await fetch(`${base}/p/${publicId}`)).status).toBe(404);
-		const again = (await app.apps.publish(u.principal, ref.id)).publicId;
+		const again = (await app.apps.publish(u.principal, ref.id, { public: true })).publicId;
 		await app.identity.setStatus(admin.principal, u.account.ownerId, "suspended");
 		expect((await fetch(`${base}/p/${again}`)).status).toBe(200); // the deliberate separation of publishing from the account
 		await app.identity.setStatus(admin.principal, u.account.ownerId, "deleted");
 		expect((await fetch(`${base}/p/${again}`)).status).toBe(410);
+	});
+
+	it("publishes up to 20 apps, and keeps drawings, diagrams and binary files whole", async () => {
+		const u = await mk("pubcap");
+		const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==", "base64");
+		const html = await app.apps.create(u.principal, { title: "Pic", kind: "html", files: { "index.html": '<!doctype html><img src="dot.png">', "dot.png": binaryValue(png) } });
+		expect((await app.apps.read(u.principal, html.id, { path: "dot.png" })).content).toBe(`(binary file, ${png.length} bytes, image/png)`);
+		expect(html.size).toBeGreaterThan(png.length);
+		await expect(app.apps.update(u.principal, html.id, { baseVersion: 1, edits: [{ path: "dot.png", find: "a", replace: "b" }] })).rejects.toMatchObject({ status: 400 });
+		await expect(app.apps.create(u.principal, { title: "Big", kind: "html", files: { "index.html": "<p>x</p>", "big.bin": binaryValue(Buffer.alloc(10_000_001)) } })).rejects.toMatchObject({ status: 400 });
+		const svg = await app.apps.create(u.principal, { title: "Drawing", kind: "svg", files: { "image.svg": '<svg xmlns="http://www.w3.org/2000/svg"></svg>' } });
+		const diagram = await app.apps.create(u.principal, { title: "Flow", kind: "mermaid", files: { "diagram.mmd": "graph TD; A-->B" } });
+		await expect(app.apps.create(u.principal, { title: "Not a drawing", kind: "svg", files: { "image.svg": "<p>no</p>" } })).rejects.toMatchObject({ status: 400 });
+		expect((await app.apps.list(u.principal)).map((a) => a.kind).sort()).toEqual(["html", "mermaid", "svg"]);
+		expect(svg.kind).toBe("svg");
+		expect(diagram.kind).toBe("mermaid");
+		const published = [];
+		for (let n = 0; n < 20; n++) published.push((await app.apps.publish(u.principal, (await app.apps.create(u.principal, { title: `A${n}`, kind: "html", files: { "index.html": `<p>${n}</p>` } })).id)).publicId);
+		const extra = await app.apps.create(u.principal, { title: "One more", kind: "html", files: { "index.html": "<p>x</p>" } });
+		await expect(app.apps.publish(u.principal, extra.id)).rejects.toMatchObject({ status: 429, message: "You can publish up to 20 apps." });
+		await app.apps.unpublish(u.principal, (await app.apps.list(u.principal)).find((a) => a.title === "A0")!.id);
+		await app.apps.publish(u.principal, extra.id); // a place is free again
+		expect(published).toHaveLength(20);
 	});
 });
 

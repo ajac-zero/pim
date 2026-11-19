@@ -14,6 +14,7 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { dirname, join, posix } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseRange } from "@pim/v2-app/objects";
 import { type Computer, ComputerError } from "@pim/v2-app/relay";
 import { BadRequestError, ConflictError, NotFoundError } from "@pim/v2-app/errors";
 import { ok, type Reply, type Route, route } from "@pim/v2-app/http";
@@ -22,6 +23,8 @@ import { installScript } from "../computer-install-script.ts";
 
 const MAX_UPLOAD_BYTES = 25_000_000;
 const CHUNK_BYTES = 700_000;
+/** What one read of a file asks of the computer: an answer this size, in base64, passes a bus left at NATS's default 1 MB limit. */
+const READ_PART_BYTES = 524_288;
 const TYPES: Record<string, string> = { html: "text/html", css: "text/css", js: "text/javascript", json: "application/json", md: "text/markdown", txt: "text/plain", csv: "text/csv", svg: "image/svg+xml", png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", pdf: "application/pdf", mp4: "video/mp4", mp3: "audio/mpeg" };
 const typeOf = (name: string) => TYPES[name.slice(name.lastIndexOf(".") + 1).toLowerCase()] ?? "application/octet-stream";
 const noStore = { "cache-control": "no-store, private" };
@@ -189,26 +192,33 @@ export function computerRoutes(options: { source?: string } = {}): Route[] {
 			const folder = checked(ctx.url.searchParams.get("path") ?? FILES_ROOT);
 			return ok({ path: folder, entries: await entries(computer, folder) }, 200, noStore);
 		}),
-		route("GET", "/api/files/content", async (ctx) => {
+		// A file of any size is streamed from the computer as it is read, in the parts the relay carries, and a `Range` gives 206 (or 416) so a player seeks.
+		route("GET", "/api/files/content", async (ctx): Promise<Reply> => {
 			const { computer } = await withComputer(ctx, "files");
 			const path = checked(ctx.url.searchParams.get("path"));
 			const stat = await computer.call<{ size: number; isDirectory: boolean; sha256: string | null }>("stat", { path }).catch(answer);
 			if (stat.isDirectory) throw new BadRequestError(`${path} is a folder`);
-			if (stat.size > MAX_UPLOAD_BYTES) throw new BadRequestError(`A file is at most ${MAX_UPLOAD_BYTES} bytes here`);
-			if (stat.sha256 && etags(ctx.req.headers["if-none-match"]).some((t) => t === "*" || t === stat.sha256)) return { status: 304, headers: { etag: etag(stat.sha256), "x-file-sha256": stat.sha256 }, raw: "" };
-			const chunks: Buffer[] = [];
-			for (let offset = 0; offset < stat.size; ) {
-				const { data } = await computer.call<{ data: string }>("read", { path, offset, length: 524_288 }).catch(answer);
-				const bytes = Buffer.from(data, "base64");
-				if (bytes.length === 0) break;
-				chunks.push(bytes);
-				offset += bytes.length;
-			}
+			const range = ctx.req.headers.range ? parseRange(ctx.req.headers.range, stat.size) : "whole";
+			if (stat.sha256 && range === "whole" && etags(ctx.req.headers["if-none-match"]).some((t) => t === "*" || t === stat.sha256)) return { status: 304, headers: { etag: etag(stat.sha256), "x-file-sha256": stat.sha256 }, raw: "" };
 			const name = posix.basename(path);
-			const headers: Record<string, string> = { "content-type": typeOf(name), ...noStore, "content-security-policy": "default-src 'none'; sandbox", "x-content-type-options": "nosniff", "cross-origin-resource-policy": "same-origin", "referrer-policy": "no-referrer" };
+			const headers: Record<string, string> = { "content-type": typeOf(name), "accept-ranges": "bytes", ...noStore, "content-security-policy": "default-src 'none'; sandbox", "x-content-type-options": "nosniff", "cross-origin-resource-policy": "same-origin", "referrer-policy": "no-referrer" };
 			if (stat.sha256) Object.assign(headers, { etag: etag(stat.sha256), "x-file-sha256": stat.sha256 });
 			if (ctx.url.searchParams.has("download")) headers["content-disposition"] = `attachment; filename="${name.replace(/[^\x20-\x7e]|["\\;%]/g, "_")}"; filename*=UTF-8''${encodeURIComponent(name)}`;
-			return { status: 200, headers, raw: Buffer.concat(chunks) };
+			if (range === null) return { status: 416, headers: { ...headers, "content-range": `bytes */${stat.size}` }, raw: "" };
+			const { start, end } = range === "whole" ? { start: 0, end: stat.size - 1 } : range;
+			const length = stat.size === 0 ? 0 : end - start + 1;
+			let offset = start;
+			const stream = new ReadableStream<Uint8Array>({
+				async pull(controller) {
+					if (offset > end || length === 0) return controller.close();
+					const { data } = await computer.call<{ data: string }>("read", { path, offset, length: Math.min(READ_PART_BYTES, end - offset + 1) });
+					const bytes = Buffer.from(data, "base64");
+					if (bytes.length === 0) return controller.close();
+					offset += bytes.length;
+					controller.enqueue(new Uint8Array(bytes));
+				},
+			});
+			return { status: range === "whole" ? 200 : 206, headers: { ...headers, "content-length": String(length), ...(range === "whole" ? {} : { "content-range": `bytes ${start}-${end}/${stat.size}` }) }, stream };
 		}),
 		route("HEAD", "/api/files/content", async (ctx) => {
 			const { computer } = await withComputer(ctx, "files");

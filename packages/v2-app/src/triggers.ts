@@ -8,8 +8,11 @@ import { TriggerValidationError } from "@pim/triggers/validate";
 import { Authorizer } from "./authz.ts";
 import type { Conversations } from "./conversations.ts";
 import type { Db } from "./db.ts";
-import { BadRequestError, ConflictError, NotFoundError } from "./errors.ts";
+import { BadRequestError, ConflictError, NotFoundError, PimError } from "./errors.ts";
 import { newId } from "./ids.ts";
+
+/** The most triggers a space keeps (not counting deleted ones). */
+export const MAX_TRIGGERS = 200;
 
 export type Trigger = { id: string; lifecycle: TriggerLifecycle; label: string; spec: TriggerSpec; createdAt: Date; updatedAt: Date };
 
@@ -55,15 +58,29 @@ export class Triggers {
 		return { id: r.id, lifecycle: r.lifecycle, label: r.title, spec: r.spec, createdAt: r.created_at, updatedAt: r.updated_at };
 	}
 
-	async create(p: Principal, input: { spec: unknown }): Promise<Trigger> {
+	/**
+	 * Makes a trigger, a draft. With `key`, making it is idempotent: the same key with the same request gives the trigger made the first time (`replayed`), and with another request
+	 * is refused (409), so a retried call, or a tool call replayed after a restart, makes nothing twice. A space has at most `MAX_TRIGGERS` that are not deleted.
+	 */
+	async create(p: Principal, input: { spec: unknown; key?: string | null }): Promise<Trigger & { replayed?: true }> {
 		await this.authz.enforce(p, "trigger:write");
 		const spec = validated(input.spec);
 		if (runsOnComputer(spec.source)) await this.authz.enforce(p, "trigger:computer");
 		if (spec.source.kind === "time" && spec.source.schedule === "cron" && !previewFirings(spec.source, { now: Date.now(), count: 1 }).firings.length) throw new BadRequestError("That cron expression never fires");
 		const id = newId("tg");
-		return this.db.owner(p.ownerId, async (tx) =>
-			this.#row((await tx.query("INSERT INTO pim_app.triggers (id, owner_id, agent_id, source, spec, title, origin_chat, lifecycle) VALUES ($1,$2,$3,$4,$5,$6,$7,'draft') RETURNING *", [id, p.ownerId, spec.owningAgentId, SOURCE_COLUMN[spec.source.kind], JSON.stringify(spec), spec.label, spec.originChatId])).rows[0]),
-		);
+		const key = input.key ? createHash("sha256").update(`${p.kind === "agent" ? `agent:${p.agentId}` : "person"}\n${input.key}`).digest("hex") : null;
+		const digest = createHash("sha256").update(JSON.stringify(spec)).digest("hex");
+		return this.db.owner(p.ownerId, async (tx) => {
+			if (key) {
+				const prior = (await tx.query("SELECT * FROM pim_app.triggers WHERE creation_key = $1", [key])).rows[0];
+				if (prior) {
+					if (prior.creation_digest !== digest) throw new ConflictError("This key was used to make another trigger", "idempotency_conflict");
+					return { ...this.#row(prior), replayed: true as const };
+				}
+			}
+			if (Number((await tx.query("SELECT count(*) AS n FROM pim_app.triggers WHERE owner_id = $1 AND lifecycle <> 'deleted'", [p.ownerId])).rows[0]!.n) >= MAX_TRIGGERS) throw new PimError(429, "too_many_triggers", `A space has at most ${MAX_TRIGGERS} triggers: delete one that is no longer needed.`);
+			return this.#row((await tx.query("INSERT INTO pim_app.triggers (id, owner_id, agent_id, source, spec, title, origin_chat, lifecycle, creation_key, creation_digest) VALUES ($1,$2,$3,$4,$5,$6,$7,'draft',$8,$9) RETURNING *", [id, p.ownerId, spec.owningAgentId, SOURCE_COLUMN[spec.source.kind], JSON.stringify(spec), spec.label, spec.originChatId, key, key ? digest : null])).rows[0]);
+		});
 	}
 
 	/** Replaces a trigger's spec. An ended or deleted trigger is for good. A time trigger that is running counts from now, so a changed timetable never replays the past. */
@@ -81,10 +98,10 @@ export class Triggers {
 		});
 	}
 
-	async list(p: Principal, query: { lifecycle?: string; limit?: number } = {}): Promise<Trigger[]> {
+	async list(p: Principal, query: { lifecycle?: string; limit?: number; agentId?: string; sourceKind?: string; offset?: number } = {}): Promise<Trigger[]> {
 		await this.authz.enforce(p, "api:read");
 		if (query.lifecycle !== undefined && !TRIGGER_LIFECYCLES.includes(query.lifecycle as TriggerLifecycle)) throw new BadRequestError(`lifecycle is one of ${TRIGGER_LIFECYCLES.join(", ")}`);
-		return this.db.owner(p.ownerId, async (tx) => (await tx.query("SELECT * FROM pim_app.triggers WHERE lifecycle <> 'deleted' AND ($1::text IS NULL OR lifecycle = $1) ORDER BY created_at DESC LIMIT $2", [query.lifecycle ?? null, Math.min(query.limit ?? 20, 50)])).rows.map((r) => this.#row(r)));
+		return this.db.owner(p.ownerId, async (tx) => (await tx.query("SELECT * FROM pim_app.triggers WHERE lifecycle <> 'deleted' AND ($1::text IS NULL OR lifecycle = $1) AND ($3::text IS NULL OR agent_id = $3) AND ($4::text IS NULL OR source = $4) ORDER BY created_at DESC, id LIMIT $2 OFFSET $5", [query.lifecycle ?? null, Math.min(query.limit ?? 20, 50), query.agentId ?? null, query.sourceKind ?? null, query.offset ?? 0])).rows.map((r) => this.#row(r)));
 	}
 
 	async get(p: Principal, id: string): Promise<Trigger> {
@@ -98,6 +115,8 @@ export class Triggers {
 		return this.db.owner(p.ownerId, async (tx) => {
 			const r = await load(tx, id);
 			if (!NEXT[r.lifecycle as TriggerLifecycle].includes(to)) throw new ConflictError(`A ${r.lifecycle} trigger cannot become ${to}`, "bad_trigger_transition");
+			// Nothing on a computer observes files yet, so a file source is kept as a draft rather than enabled to do nothing.
+			if (to === "enabled" && (r.spec as TriggerSpec).source.kind === "file") throw new ConflictError("Nothing delivers this kind of source yet: it can be kept only as a draft", "source_not_wired");
 			if (to === "enabled" && runsOnComputer((r.spec as TriggerSpec).source)) {
 				await this.authz.enforce(p, "trigger:computer");
 				if (!(await tx.query("SELECT 1 FROM pim_app.trigger_computer_grants WHERE trigger_id = $1 AND revoked_at IS NULL", [id])).rowCount) throw new CapabilityUnavailableError("computer trigger", "grant it a paired computer first (trigger_computer_grant)");
@@ -175,11 +194,11 @@ export class Triggers {
 		return result;
 	}
 
-	async runs(p: Principal, id: string, limit = 20) {
+	async runs(p: Principal, id: string, limit = 20, offset = 0) {
 		await this.authz.enforce(p, "api:read");
 		return this.db.owner(p.ownerId, async (tx) => {
 			await load(tx, id);
-			return (await tx.query("SELECT id, phase, command_id, detail, at FROM pim_app.trigger_runs WHERE trigger_id = $1 ORDER BY at DESC, id LIMIT $2", [id, Math.min(limit, 50)])).rows.map((r) => ({ id: r.id as string, phase: r.phase as string, commandId: r.command_id as string | null, detail: r.detail as Record<string, unknown>, at: r.at as Date }));
+			return (await tx.query("SELECT id, phase, command_id, detail, at FROM pim_app.trigger_runs WHERE trigger_id = $1 ORDER BY at DESC, id LIMIT $2 OFFSET $3", [id, Math.min(limit, 50), offset])).rows.map((r) => ({ id: r.id as string, phase: r.phase as string, commandId: r.command_id as string | null, detail: r.detail as Record<string, unknown>, at: r.at as Date }));
 		});
 	}
 

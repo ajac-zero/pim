@@ -16,20 +16,25 @@ const ms = (value: Date | string | null | undefined): number | null => (value ? 
 const DAY = 86_400_000;
 const DELIVERY_TTL_MS = DAY;
 
-type Row = { id: string; lifecycle: TriggerLifecycle; spec: TriggerSpec; created_at: Date; updated_at: Date };
-type Context = { computerPaired: boolean; granted: Map<string, string | null> };
+export type Row = { id: string; lifecycle: TriggerLifecycle; spec: TriggerSpec; created_at: Date; updated_at: Date };
+export type Context = { computerPaired: boolean; granted: Map<string, string | null> };
 
-async function contextOf(tx: Tx): Promise<Context> {
+export async function contextOf(tx: Tx): Promise<Context> {
 	const computerPaired = !!(await tx.query("SELECT 1 FROM pim_app.computers WHERE revoked_at IS NULL LIMIT 1")).rowCount;
 	const granted = new Map((await tx.query("SELECT trigger_id, config_hash FROM pim_app.trigger_computer_grants WHERE revoked_at IS NULL")).rows.map((r) => [r.trigger_id as string, r.config_hash as string | null] as const));
 	return { computerPaired, granted };
 }
 
 /** What a source can do here: a timetable and a connector's events run; a poll, stream or process runs on the paired computer; watching files is kept as a draft, as nothing observes files yet. */
-function capabilityOf(kind: string, ctx: Context) {
+export function capabilityOf(kind: string, ctx: Context) {
 	if (kind === "time" || kind === "connector_event") return { status: "available", delivers: true, reason: null };
 	if (kind === "file") return { status: "unavailable", delivers: false, reason: "not_wired" };
 	return ctx.computerPaired ? { status: "available", delivers: true, reason: null } : { status: "draft_only", delivers: false, reason: "computer_not_paired" };
+}
+
+/** Every kind of source, and what it can do here now: the same answer for the triggers screen and for an agent's `list_trigger_sources`. */
+export function sourcesOf(ctx: Context) {
+	return ["time", "connector_event", "poll", "stream", "process", "file"].map((kind) => ({ kind, ...capabilityOf(kind, ctx), ...(kind === "time" ? { schedules: ["once", "cron", "interval"] } : {}), ...(kind === "poll" || kind === "stream" || kind === "process" ? { requiresGrant: true, computerPaired: ctx.computerPaired } : {}) }));
 }
 
 function policiesOf(spec: TriggerSpec) {
@@ -46,9 +51,9 @@ function policiesOf(spec: TriggerSpec) {
 	};
 }
 
-const revisionOf = (row: Row) => row.updated_at.getTime();
+export const revisionOf = (row: Row) => row.updated_at.getTime();
 
-async function viewOf(app: App, row: Row, ctx: Context) {
+export async function viewOf(app: App, row: Row, ctx: Context) {
 	const spec = row.spec;
 	const live = row.lifecycle !== "deleted" && row.lifecycle !== "ended";
 	let nextFiringAt: number | null = null;
@@ -83,7 +88,7 @@ async function viewOf(app: App, row: Row, ctx: Context) {
 	};
 }
 
-async function load(app: App, p: Principal, id: string) {
+export async function load(app: App, p: Principal, id: string) {
 	return app.db.owner(p.ownerId, async (tx) => {
 		const row = (await tx.query("SELECT id, lifecycle, spec, created_at, updated_at FROM pim_app.triggers WHERE id = $1 AND lifecycle <> 'deleted'", [id])).rows[0] as Row | undefined;
 		if (!row) throw new NotFoundError("No such trigger");
@@ -106,7 +111,7 @@ function staleRevision(header: string | string[] | undefined, row: Row): Reply |
 }
 
 /** Instants may be given as ISO 8601 text with an offset. */
-function instants(source: unknown): unknown {
+export function instants(source: unknown): unknown {
 	if (typeof source !== "object" || source === null) return source;
 	const s = { ...(source as Record<string, unknown>) };
 	for (const key of ["at", "anchorAt", "expiresAt"]) {
@@ -180,15 +185,20 @@ export function triggerRoutes(): Route[] {
 			await app.identity.authz.enforce(p, "api:read");
 			return answer(app, p, params[0]!);
 		}),
-		route("POST", "/api/triggers", async ({ app, principal, json }) => {
+		route("POST", "/api/triggers", async ({ app, principal, json, req }) => {
 			const p = await principal();
 			const b = await json();
-			if (b.spec !== undefined) return ok(await app.triggers.create(p, { spec: b.spec }), 201);
+			// A retried create with the same `Idempotency-Key` gives the trigger the first one made.
+			const header = req.headers["idempotency-key"];
+			const key = (Array.isArray(header) ? header[0] : header)?.trim() || null;
+			if (key !== null && key.length > 128) throw new BadRequestError("Idempotency-Key is at most 128 characters");
+			if (b.spec !== undefined) return ok(await app.triggers.create(p, { spec: b.spec, key }), 201);
 			const spec = {
 				version: 1, owningAgentId: typeof b.agentId === "string" ? b.agentId : await defaultAgent(app, p), originChatId: "api",
 				label: b.label, instruction: b.instruction, source: instants(b.source), condition: b.condition ?? null, destination: b.destination, delivery: b.delivery, authorizationRef: null,
 			};
-			const made = await app.triggers.create(p, { spec });
+			const made = await app.triggers.create(p, { spec, key });
+			if (made.replayed) return answer(app, p, made.id, 200);
 			if (b.enabled === true) await app.triggers.setLifecycle(p, made.id, "enabled");
 			return answer(app, p, made.id, 201);
 		}),

@@ -26,7 +26,7 @@ function toRequest(req: IncomingMessage, path: string, body: Uint8Array | undefi
 }
 
 /** What the backend may answer with: no cookies on Pim's own address, and none of the headers that would bind the hosts around it. */
-function toReply(r: { status: number; headers: Record<string, string>; body: Uint8Array }, own: { cookies: boolean; csp: boolean }): Reply {
+function toReply(r: { status: number; headers: Record<string, string | string[]>; body: Uint8Array }, own: { cookies: boolean; csp: boolean }): Reply {
 	const headers: Record<string, string | string[]> = {};
 	for (const [k, v] of Object.entries(r.headers)) {
 		const name = k.toLowerCase();

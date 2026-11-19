@@ -161,7 +161,11 @@ export const domainRoutes: Route[] = [
 		const b = await json();
 		return (await app.apps.setAccess(await principal(), params[0]!, b.access, b.circles ?? []), none());
 	}),
-	route("POST", "/api/apps/:id/publish", async ({ app, principal, params, json }) => ok(await app.apps.publish(await principal(), params[0]!, (await json()).version), 201)),
+	route("POST", "/api/apps/:id/publish", async ({ app, principal, params, json }) => {
+		const b = await json();
+		if (b.public !== undefined && typeof b.public !== "boolean") throw new BadRequestError("public must be true or false");
+		return ok(await app.apps.publish(await principal(), params[0]!, { ...(b.version !== undefined ? { version: b.version } : {}), ...(b.public !== undefined ? { public: b.public } : {}) }), 201);
+	}),
 	route("DELETE", "/api/apps/:id/publish", async ({ app, principal, params }) => (await app.apps.unpublish(await principal(), params[0]!), none())),
 	route("POST", "/api/apps/:id/open", async ({ app, principal, params }) => ok(await app.apps.openHosted(await principal(), params[0]!))),
 	route("GET", "/api/published-artifacts", async ({ app, principal }) => {

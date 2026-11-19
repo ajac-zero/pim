@@ -20,6 +20,7 @@ import { CapabilityUnavailableError } from "@pim/v2-contracts/authz";
 import { OwnerId, PartitionId, type Principal } from "@pim/v2-contracts/identity";
 import type { ExternalOperations } from "@pim/v2-runtime/external";
 import type { Db as RuntimeDb } from "@pim/v2-runtime/db";
+import { hostedTools } from "./hosted-tools.ts";
 import { type BrowserTransport, type Computer as BrowserComputer, describePage, PimBrowser } from "./computer-browser.ts";
 
 type Part = { type: "text"; text: string } | { type: "image"; data: string; mimeType: string };
@@ -508,5 +509,7 @@ export function computerTools(deps: ComputerToolDeps, kit: ComputerToolKit): Too
 			});
 		}),
 	);
+	// Apps with a backend (`./hosted-tools.ts`).
+	tools.push(...(hostedTools({ root: FILES_ROOT, tool, use, gated, caller, confined } as never) as ToolRegistration[]));
 	return tools;
 }

@@ -3,6 +3,7 @@
  * `artifact_versions`, `published_artifacts`). What the web app calls an artifact V2 calls an app, and its `hosted` kind is V2's `backend`.
  * Reads go through row-level security as the caller; every write goes through the `Apps` service, so its checks stay the only ones.
  */
+import { bytesOf, isBinary, sizeOfFile } from "@pim/v2-app/app-files";
 import type { App } from "@pim/v2-app/app";
 import type { Tx } from "@pim/v2-app/db";
 import { BadRequestError, ConflictError, GoneError, NotFoundError, RefusedError } from "@pim/v2-app/errors";
@@ -11,7 +12,7 @@ import type { Principal } from "@pim/v2-contracts/identity";
 import { framePage } from "./app-frame.ts";
 import { deleted, digestOf, textDigest, type Files, ms, ok, sizeOf, typeOf } from "./admin-util.ts";
 
-const MAIN: Record<string, string[]> = { html: ["index.html"], jsx: ["App.jsx", "App.tsx"], backend: ["pim.app.json"] };
+const MAIN: Record<string, string[]> = { html: ["index.html"], jsx: ["App.jsx", "App.tsx"], svg: ["image.svg"], mermaid: ["diagram.mmd"], backend: ["pim.app.json"] };
 const mainOf = (kind: string, files: Files) => (MAIN[kind] ?? []).find((m) => m in files) ?? Object.keys(files).sort()[0]!;
 const kindOut = (kind: string) => (kind === "backend" ? "hosted" : kind);
 
@@ -81,8 +82,9 @@ function versionOf(head: { id: string; title: string; kind: string; latest: numb
 	if (!(chosen in v.files)) throw new NotFoundError(`Version ${v.version} has no file ${chosen}`);
 	return {
 		id: head.id, title: head.title, kind: kindOut(head.kind), latest: head.latest, version: v.version, sha256: digestOf(v.files), size: sizeOf(v.files), ...sourceOf(v.message), createdAt: ms(v.created_at),
-		files: Object.entries(v.files).sort(([a], [b]) => (a < b ? -1 : 1)).map(([p, c]) => ({ path: p, sha256: digestOf({ [p]: c }), size: Buffer.byteLength(c), type: typeOf(p) })),
-		path: chosen, content: v.files[chosen]!,
+		files: Object.entries(v.files).sort(([a], [b]) => (a < b ? -1 : 1)).map(([p, c]) => ({ path: p, sha256: digestOf({ [p]: c }), size: sizeOfFile(c), type: typeOf(p) })),
+		// Only text is sent as content: a file that is not text, the file's download has.
+		path: chosen, content: isBinary(v.files[chosen]!) ? null : v.files[chosen]!,
 	};
 }
 
@@ -100,7 +102,8 @@ function downloadReply(files: Files, path: string | undefined): Reply {
 	const chosen = path ?? "";
 	if (!(chosen in files)) throw new NotFoundError(`No file ${chosen}`);
 	const name = chosen.split("/").pop()!.replace(/[^\w.-]/g, "_");
-	return { status: 200, headers: { "content-type": `${typeOf(chosen)}; charset=utf-8`, "content-disposition": `attachment; filename="${name}"`, "x-content-type-options": "nosniff", "cache-control": "no-store" }, raw: files[chosen]! };
+	const binary = isBinary(files[chosen]!);
+	return { status: 200, headers: { "content-type": binary ? "application/octet-stream" : `${typeOf(chosen)}; charset=utf-8`, "content-disposition": `attachment; filename="${name}"`, "x-content-type-options": "nosniff", "cache-control": "no-store" }, raw: binary ? bytesOf(files[chosen]!) : files[chosen]! };
 }
 
 // ---- someone else's: shared with a circle you are in, or published to everyone ----
@@ -121,11 +124,11 @@ const sharedOf = (host: string, r: Latest) => {
 	return { ...artifact, host, address: null };
 };
 
-type Published = { public_id: string; owner_id: string; artifact_id: string; version: number; published_at: Date; uses: number; username: string; status: string; display_name: string | null };
+type Published = { public_id: string; owner_id: string; artifact_id: string; version: number; published_at: Date; uses: number; public: boolean; username: string; status: string; display_name: string | null };
 
 /** The pinned copy a published app is: its row, then its author's version of it, read as the author as the published address does. */
 export async function publishedCopy(app: App, publicId: string) {
-	const pub = (await app.db.lookup(publicId, async (tx) => (await tx.query("SELECT p.public_id, p.owner_id, p.artifact_id, p.version, p.published_at, p.uses, a.username, a.status, pr.display_name FROM pim_app.published_artifacts p JOIN pim_app.accounts a ON a.owner_id = p.owner_id LEFT JOIN pim_app.profiles pr ON pr.owner_id = p.owner_id AND pr.published WHERE p.public_id = $1 AND p.unpublished_at IS NULL", [publicId])).rows[0])) as Published | undefined;
+	const pub = (await app.db.lookup(publicId, async (tx) => (await tx.query("SELECT p.public_id, p.owner_id, p.artifact_id, p.version, p.published_at, p.uses, p.public, a.username, a.status, pr.display_name FROM pim_app.published_artifacts p JOIN pim_app.accounts a ON a.owner_id = p.owner_id LEFT JOIN pim_app.profiles pr ON pr.owner_id = p.owner_id AND pr.published WHERE p.public_id = $1 AND p.unpublished_at IS NULL", [publicId])).rows[0])) as Published | undefined;
 	if (!pub) throw new NotFoundError();
 	if (pub.status === "deleting" || pub.status === "deleted") throw new GoneError("The author of this has deleted their account");
 	const found = await app.db.owner(pub.owner_id, async (tx) => {
@@ -137,13 +140,14 @@ export async function publishedCopy(app: App, publicId: string) {
 	return { pub, title: found.head.title as string, kind: found.head.kind as string, v: found.v };
 }
 
-const publishedOf = (c: Awaited<ReturnType<typeof publishedCopy>>) => ({ id: c.pub.public_id, author: c.pub.username, authorName: c.pub.display_name, artifactId: c.pub.artifact_id, version: c.pub.version, title: c.title, kind: kindOut(c.kind), sha256: digestOf(c.v.files), size: sizeOf(c.v.files), publishedAt: ms(c.pub.published_at), uses: c.pub.uses, public: true });
+const publishedOf = (c: Awaited<ReturnType<typeof publishedCopy>>) => ({ id: c.pub.public_id, author: c.pub.username, authorName: c.pub.display_name, artifactId: c.pub.artifact_id, version: c.pub.version, title: c.title, kind: kindOut(c.kind), sha256: digestOf(c.v.files), size: sizeOf(c.v.files), publishedAt: ms(c.pub.published_at), uses: c.pub.uses, public: c.pub.public });
 
 export function artifactRoutes(): Route[] {
 	const publication = async (app: App, p: Principal, origin: string, id: string) => {
 		const row = await app.db.owner(p.ownerId, async (tx) => (await tx.query("SELECT public_id FROM pim_app.published_artifacts WHERE owner_id = $1 AND artifact_id = $2 AND unpublished_at IS NULL", [p.ownerId, id])).rows[0]);
 		if (!row) return null;
-		return { ...publishedOf(await publishedCopy(app, row.public_id)), linkable: true, link: `${origin}/p/${row.public_id}` };
+		const copy = await publishedCopy(app, row.public_id);
+		return { ...publishedOf(copy), linkable: copy.kind !== "backend", link: copy.pub.public ? `${origin}/p/${row.public_id}` : null };
 	};
 
 	return [
@@ -212,6 +216,11 @@ export function artifactRoutes(): Route[] {
 			const p = await principal();
 			await readable(app, p);
 			const { head, v } = await app.db.owner(p.ownerId, (tx) => ownVersion(tx, p.ownerId, params[0]!, num(params[1])));
+			// An app with a backend loads from the address that reaches its backend, whichever version is asked for: the one running.
+			if (head.kind === "backend") {
+				if ((await app.apps.backendOf(p, head.id)).version === null) throw new ConflictError("This app's backend hasn't been run yet. Deploy it, and it opens here.", "not_running");
+				return { status: 302, headers: { location: (await app.apps.openHosted(p, head.id)).path, "cache-control": "no-store, private" } };
+			}
 			return framePage(head.kind, v.files, origin, { thumbnail: url.searchParams.has("thumbnail") });
 		}),
 		route("GET", "/api/artifacts/:id/versions/:version/download", async ({ app, principal, params, url }) => {
@@ -251,7 +260,7 @@ export function artifactRoutes(): Route[] {
 			await app.apps.setAccess(p, params[0]!, circles.length ? "circles" : "owner", circles);
 			return ok(await detail(app, p, params[0]!));
 		}),
-		// Publishing pins a version at /p/pa_…, open to anyone with the link; there is no "everyone on this Pim but not the web" tier here.
+		// Publishing pins a version in the gallery of everyone signed in; `public: true` also opens it at /p/pa_… to anyone with the link. Publishing again keeps the id.
 		route("GET", "/api/artifacts/:id/publish", async ({ app, principal, params, origin }) => {
 			const p = await principal();
 			await readable(app, p);
@@ -259,21 +268,55 @@ export function artifactRoutes(): Route[] {
 			if (!found) throw new NotFoundError("Not published");
 			return ok(found);
 		}),
-		route("POST", "/api/artifacts/:id/publish", async ({ app, principal, params, origin }) => {
+		route("POST", "/api/artifacts/:id/publish", async ({ app, principal, params, origin, json }) => {
 			const p = await principal();
-			await app.apps.publish(p, params[0]!);
+			const b = await json();
+			if (b.public !== undefined && typeof b.public !== "boolean") throw new BadRequestError("public must be true or false");
+			await app.apps.publish(p, params[0]!, b.public === undefined ? {} : { public: b.public });
 			return ok(await publication(app, p, origin, params[0]!), 201);
 		}),
 		route("DELETE", "/api/artifacts/:id/publish", async ({ app, principal, params }) => (await app.apps.unpublish(await principal(), params[0]!), deleted())),
 
-		// An app's backend runs on a personal computer, which this deployment has none of yet: it reads as an app with no computer.
-		route("GET", "/api/artifacts/:id/backend", async ({ app, principal, params }) => {
-			const r = await latestOf(app, await principal(), params[0]!);
-			return ok({ version: null, status: null, computer: "none", access: r.access === "public" ? "public" : r.access === "shared" ? "circles" : "owner", address: null });
+		// The backend of an app that has one: how it is doing on the person's computer, what it printed, and the person's own choice to stop it or run a version.
+		route("GET", "/api/artifacts/:id/backend", async ({ app, principal, params, appsOrigin }) => {
+			const p = await principal();
+			await readable(app, p);
+			const info = await app.apps.backendOf(p, params[0]!);
+			const base = appsOrigin ? new URL(appsOrigin) : null;
+			return ok({
+				version: info.version,
+				status: info.version === null ? null : await app.relay.appStatus(p.ownerId, params[0]!),
+				computer: (await app.relay.status(p)).state,
+				access: info.access,
+				// Where the app is at an address of its own, when this Pim has one for apps.
+				address: base && info.label ? `${base.protocol}//${info.label}.${base.host}/` : null,
+			});
 		}),
-		route("GET", "/api/artifacts/:id/backend/logs", async ({ app, principal, params }) => (await latestOf(app, await principal(), params[0]!), ok({ text: "" }))),
-		route("POST", "/api/artifacts/:id/backend/stop", async ({ app, principal, params }) => (await latestOf(app, await principal(), params[0]!), ok({ stopped: false }))),
-		route("POST", "/api/artifacts/:id/backend/run", async ({ app, principal, params }) => (await latestOf(app, await principal(), params[0]!), { status: 409, body: { error: "no_computer", message: "Pair a computer to run an app's backend." } })),
+		route("GET", "/api/artifacts/:id/backend/logs", async ({ app, principal, params }) => {
+			const p = await principal();
+			await readable(app, p);
+			await app.apps.backendOf(p, params[0]!);
+			// A backend that has never run has printed nothing.
+			const { text } = await app.relay.appLogs(p, params[0]!, 16_000).catch((error: { remote?: { code?: string } }) => (error.remote?.code === "ENOENT" ? { text: "" } : Promise.reject(error)));
+			return ok({ text });
+		}),
+		route("POST", "/api/artifacts/:id/backend/stop", async ({ app, principal, params }) => {
+			const p = await principal();
+			await app.apps.backendOf(p, params[0]!);
+			await app.relay.stopApp(p, params[0]!);
+			return ok({ stopped: true });
+		}),
+		route("POST", "/api/artifacts/:id/backend/run", async ({ app, principal, params, json }) => {
+			const p = await principal();
+			// Running a version starts its program on the computer: only the person, in their browser, chooses that without an approval.
+			if (p.kind !== "user") throw new RefusedError("Only the person, signed in to Pim in their browser, can run an app's backend", "session-only");
+			const wanted = Number((await json()).version);
+			if (!Number.isInteger(wanted)) throw new BadRequestError("version must be the version to run");
+			const run = await app.apps.backendToRun(p, params[0]!, wanted);
+			await app.relay.deployApp(p, run);
+			await app.apps.backendRan(p, run.id, run.version, run.manifest.access);
+			return ok({ running: run.version });
+		}),
 
 		// ---- shared with you ----
 		route("GET", "/api/shared-artifacts", async ({ app, principal }) => {

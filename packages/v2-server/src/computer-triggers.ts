@@ -137,9 +137,10 @@ class Link {
 			configHash: d.configHash,
 			source: d.source,
 			grant: { grantRef: d.grantRef, scopeHash: grantScopeHash({ space: ownerId, runtimeId: this.runtimeId, triggerId: d.triggerId, sourceId: `${d.triggerId}#${d.revision}`, configHash: d.configHash, grantRef: d.grantRef }) },
-			checkpoint: null,
+			checkpoint: d.checkpoint,
 		}));
-		const digest = sha256(canonical(sources));
+		// A checkpoint moves with every observation, which is not a change of what runs: the digest leaves it out, so the revision stays while an observer works.
+		const digest = sha256(canonical(sources.map(({ checkpoint: _checkpoint, ...rest }) => rest)));
 		const now = Date.now();
 		if (!force && digest === this.#lastDigest && now - this.#sentAt < RENEW_MS) return;
 		const revision = await this.#db.owner(ownerId, async (tx) => {
@@ -156,7 +157,7 @@ class Link {
 	async #observation(f: Frame): Promise<void> {
 		const { sequence, eventId, triggerId, generation, occurredAt } = f;
 		if (!Number.isSafeInteger(sequence) || typeof eventId !== "string" || typeof triggerId !== "string" || !Number.isSafeInteger(generation) || !Number.isSafeInteger(occurredAt)) return;
-		const verdict = await fireComputerEvent(this.app, this.connection.ownerId, this.connection.computerId, { triggerId, generation: generation as number, eventId, observedAt: occurredAt as number, data: (f.data ?? null) as never, gap: f.coalesced !== null && f.coalesced !== undefined });
+		const verdict = await fireComputerEvent(this.app, this.connection.ownerId, this.connection.computerId, { triggerId, generation: generation as number, eventId, observedAt: occurredAt as number, data: (f.data ?? null) as never, gap: f.coalesced !== null && f.coalesced !== undefined, checkpoint: checkpointOf(f.checkpoint) });
 		// The ack is sent after the occurrence was admitted, which is durable; a failure above sends none, and the runtime sends the observation again.
 		this.#ack([{ sequence, eventId, result: verdict.result, reason: verdict.reason ?? null, retryAfterMs: null }]);
 	}
@@ -178,7 +179,12 @@ class Link {
  */
 export async function grantComputerTrigger(app: App, p: Principal, triggerId: string, computerId = ""): Promise<void> {
 	await app.identity.authz.enforce(p, "trigger:computer");
-	await app.db.owner(p.ownerId, async (tx) => {
+	await recordComputerGrant(app, p.ownerId, triggerId, p.kind === "user" ? p.sessionId : p.kind, computerId);
+}
+
+/** Records the grant a person's own act gave: their request through the API, or their approval of an agent's `trigger_computer_grant`. */
+export async function recordComputerGrant(app: App, ownerId: string, triggerId: string, grantedBy: string, computerId = ""): Promise<void> {
+	await app.db.owner(ownerId, async (tx) => {
 		const r = (await tx.query("SELECT spec FROM pim_app.triggers WHERE id = $1 AND lifecycle <> 'deleted'", [triggerId])).rows[0];
 		if (!r) throw new NotFoundError("No such trigger");
 		const source = (r.spec as TriggerSpec).source;
@@ -186,17 +192,17 @@ export async function grantComputerTrigger(app: App, p: Principal, triggerId: st
 		// A person has one computer, so the grant needs no id for it.
 		const computer = (await tx.query("SELECT id FROM pim_app.computers WHERE revoked_at IS NULL AND ($1 = '' OR id = $1) ORDER BY id LIMIT 1", [computerId])).rows[0];
 		if (!computer) throw new CapabilityUnavailableError("computer", "that computer is not paired");
-		await tx.query("INSERT INTO pim_app.trigger_computer_grants (owner_id, trigger_id, computer_id, granted_by, config_hash, grant_ref) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (owner_id, trigger_id, computer_id) DO UPDATE SET revoked_at = NULL, granted_at = now(), granted_by = $4, config_hash = $5, grant_ref = $6", [p.ownerId, triggerId, computer.id, p.kind === "user" ? p.sessionId : p.kind, sourceConfigHash(source), newId("tgr")]);
+		await tx.query("INSERT INTO pim_app.trigger_computer_grants (owner_id, trigger_id, computer_id, granted_by, config_hash, grant_ref) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (owner_id, trigger_id, computer_id) DO UPDATE SET revoked_at = NULL, granted_at = now(), granted_by = $4, config_hash = $5, grant_ref = $6", [ownerId, triggerId, computer.id, grantedBy, sourceConfigHash(source), newId("tgr")]);
 	});
 }
 
 /** The enabled poll, stream and process triggers with a current grant on this computer: what its runtime is to run now, as `triggers.v1` reconciles it. */
-async function desiredOnComputer(app: App, ownerId: string, computerId: string): Promise<{ triggerId: string; revision: number; configHash: string; source: object; grantRef: string }[]> {
-	const rows = await app.db.owner(ownerId, async (tx) => (await tx.query("SELECT t.id, t.spec, t.updated_at, g.config_hash, g.grant_ref FROM pim_app.triggers t JOIN pim_app.trigger_computer_grants g ON g.trigger_id = t.id AND g.computer_id = $1 AND g.revoked_at IS NULL WHERE t.lifecycle = 'enabled' AND t.source IN ('poll', 'stream', 'process') ORDER BY t.created_at, t.id", [computerId])).rows);
+async function desiredOnComputer(app: App, ownerId: string, computerId: string): Promise<{ triggerId: string; revision: number; configHash: string; source: object; grantRef: string; checkpoint: { position: number; cursor: string | null } | null }[]> {
+	const rows = await app.db.owner(ownerId, async (tx) => (await tx.query("SELECT t.id, t.spec, t.updated_at, t.checkpoint, g.config_hash, g.grant_ref FROM pim_app.triggers t JOIN pim_app.trigger_computer_grants g ON g.trigger_id = t.id AND g.computer_id = $1 AND g.revoked_at IS NULL WHERE t.lifecycle = 'enabled' AND t.source IN ('poll', 'stream', 'process') ORDER BY t.created_at, t.id", [computerId])).rows);
 	return rows.flatMap((r) => {
 		const source = (r.spec as TriggerSpec).source;
 		// A grant is for the source it was given for: a changed one is not run until it is granted again.
-		return sourceConfigHash(source) === r.config_hash && r.grant_ref ? [{ triggerId: r.id as string, revision: revisionOf(r.updated_at as Date), configHash: r.config_hash as string, source, grantRef: r.grant_ref as string }] : [];
+		return sourceConfigHash(source) === r.config_hash && r.grant_ref ? [{ triggerId: r.id as string, revision: revisionOf(r.updated_at as Date), configHash: r.config_hash as string, source, grantRef: r.grant_ref as string, checkpoint: (r.checkpoint as { position: number; cursor: string | null } | null) ?? null }] : [];
 	});
 }
 
@@ -205,11 +211,19 @@ async function desiredOnComputer(app: App, ownerId: string, computerId: string):
  * trigger takes nothing at once, before the next reconcile stops its observer. The trigger's condition reads what was observed (a poll fires on an edge, a stream on
  * each line that matches) and what it remembers is kept with the trigger. The occurrence says why it fired and when, never what was observed.
  */
-async function fireComputerEvent(app: App, ownerId: string, computerId: string, event: { triggerId: string; generation: number; eventId: string; observedAt: number; data: JsonValue; gap: boolean }): Promise<{ result: "accepted" | "duplicate" | "rejected"; reason?: string }> {
+/** What an observation says of where its source has got to (a stream's position, a poll's cursor), when it says it. */
+const checkpointOf = (value: unknown): { position: number; cursor: string | null } | null => {
+	const given = value as { position?: unknown; cursor?: unknown } | null | undefined;
+	return given && Number.isSafeInteger(given.position) && (given.position as number) >= 0 && (given.cursor === null || typeof given.cursor === "string") ? { position: given.position as number, cursor: given.cursor as string | null } : null;
+};
+
+async function fireComputerEvent(app: App, ownerId: string, computerId: string, event: { triggerId: string; generation: number; eventId: string; observedAt: number; data: JsonValue; gap: boolean; checkpoint: { position: number; cursor: string | null } | null }): Promise<{ result: "accepted" | "duplicate" | "rejected"; reason?: string }> {
 	const row = await app.db.owner(ownerId, async (tx) => (await tx.query("SELECT t.lifecycle, t.spec, t.updated_at, t.condition_state, g.config_hash FROM pim_app.triggers t LEFT JOIN pim_app.trigger_computer_grants g ON g.trigger_id = t.id AND g.computer_id = $2 AND g.revoked_at IS NULL WHERE t.id = $1 AND t.lifecycle <> 'deleted'", [event.triggerId, computerId])).rows[0]);
 	if (!row) return { result: "rejected", reason: "not_found" };
 	const spec = row.spec as TriggerSpec;
 	const source = spec.source;
+	// Where the source has got to is kept once the observation is taken (fired, or read and found not to match), and only moves forward, so a computer that restarts resumes from it.
+	const keep = () => (event.checkpoint === null ? undefined : app.db.owner(ownerId, (tx) => tx.query("UPDATE pim_app.triggers SET checkpoint = $2 WHERE id = $1 AND (checkpoint IS NULL OR (checkpoint->>'position')::bigint <= $3)", [event.triggerId, JSON.stringify(event.checkpoint), event.checkpoint!.position])));
 	if (row.lifecycle !== "enabled") return { result: "rejected", reason: "not_enabled" };
 	if (source.kind !== "poll" && source.kind !== "stream" && source.kind !== "process") return { result: "rejected", reason: "wrong_source" };
 	if (!row.config_hash || row.config_hash !== sourceConfigHash(source)) return { result: "rejected", reason: "not_granted" };
@@ -217,7 +231,9 @@ async function fireComputerEvent(app: App, ownerId: string, computerId: string, 
 	if (spec.condition) {
 		const evaluation = evaluate(spec.condition, source.kind === "poll" ? "edge" : "filter", (row.condition_state ?? null) as never, { value: event.data, observedAt: event.observedAt, gap: event.gap }, Date.now());
 		await app.db.owner(ownerId, (tx) => tx.query("UPDATE pim_app.triggers SET condition_state = $2 WHERE id = $1", [event.triggerId, JSON.stringify(evaluation.state)]));
-		if (!evaluation.fire) return { result: "accepted", reason: "condition_not_met" };
+		if (!evaluation.fire) return (await keep(), { result: "accepted", reason: "condition_not_met" });
 	}
-	return (await app.triggers.fireOccurrence(ownerId, event.triggerId, `computer:${event.eventId}`, { source: source.kind, eventId: event.eventId, observedAt: event.observedAt })) ? { result: "accepted" } : { result: "duplicate" };
+	const fresh = await app.triggers.fireOccurrence(ownerId, event.triggerId, `computer:${event.eventId}`, { source: source.kind, eventId: event.eventId, observedAt: event.observedAt });
+	await keep();
+	return fresh ? { result: "accepted" } : { result: "duplicate" };
 }

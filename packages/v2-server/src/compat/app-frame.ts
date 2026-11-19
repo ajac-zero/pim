@@ -87,7 +87,7 @@ function inlineOwnFiles(html: string, files: Files): string {
 		.replace(/<(img|source|audio|video)\b[^>]*>/gi, (tag) => dataAttrs(dataAttrs(tag, "src"), "poster"));
 }
 
-/** The page a version is shown as: an HTML app as it is, a JSX one compiled after the React runtime and the modules it imports. Each ends with the height script. */
+/** The page a version is shown as: an HTML app as it is, a drawing or a diagram in a page that fits it, a JSX one compiled after the React runtime and the modules it imports. Each ends with the height script. */
 export function framePage(kind: string, files: Files, origin: string, options: { thumbnail?: boolean } = {}): Reply {
 	const thumbnail = options.thumbnail ? `<script src="${origin}${RUNTIME_PATH}thumbnail.js"></script>` : "";
 	const page = (body: string, runtime = false): Reply => ({ status: 200, headers: frameHeaders(origin, { runtime: runtime || options.thumbnail === true }), raw: body + RESIZE_SCRIPT + thumbnail });
@@ -98,6 +98,12 @@ export function framePage(kind: string, files: Files, origin: string, options: {
 		const { code, runtimes } = compileJsxApp(files, entry);
 		const scripts = [...runtimes, "tailwind"].map((name) => `<script src="${origin}${RUNTIME_PATH}${name}.js"></script>`).join("");
 		return page(`${PAGE_HEAD}</head><body><div id="root"></div>${scripts}<script>__pimMount(function (require, module, exports) {\n${inlineScript(code)}\n})</script></body></html>`, true);
+	}
+	// A drawing is shown fitted to the frame; a diagram is its source, which the Mermaid runtime draws.
+	if (kind === "svg") return page(`${PAGE_HEAD}<style>svg{display:block;max-width:100%;height:auto;margin:0 auto}</style></head><body>${files["image.svg"] ?? ""}</body></html>`);
+	if (kind === "mermaid") {
+		const source = (files["diagram.mmd"] ?? "").replace(/[&<>]/g, (char) => `&#${char.charCodeAt(0)};`);
+		return page(`${PAGE_HEAD}<style>body{padding:16px}pre.mermaid{margin:0;display:flex;justify-content:center}pre.error{white-space:pre-wrap;color:#991b1b}</style></head><body><pre class="mermaid">${source}</pre><script src="${origin}${RUNTIME_PATH}mermaid.js"></script></body></html>`, true);
 	}
 	return page(`<!doctype html><meta charset="utf-8"><body style="font:14px system-ui;padding:16px;color:#555">An app with a backend opens at its own address.</body>`);
 }

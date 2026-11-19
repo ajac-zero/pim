@@ -123,7 +123,7 @@ export async function renewDue(deps: WatchDeps, pool: Pool): Promise<number> {
 	try {
 		await client.query("BEGIN");
 		await client.query("SELECT set_config('pim.scope', 'all', true)");
-		due = (await client.query("SELECT owner_id, trigger_id FROM pim_app.watch_subscriptions WHERE status = 'active' AND renew_before IS NOT NULL AND renew_before <= $1 LIMIT 100", [new Date(deps.now() + RENEW_MARGIN_MS)])).rows;
+		due = (await client.query("SELECT s.owner_id, s.trigger_id FROM pim_app.watch_subscriptions s JOIN pim_app.triggers t ON t.owner_id = s.owner_id AND t.id = s.trigger_id AND t.lifecycle = 'enabled' WHERE s.status = 'active' AND s.renew_before IS NOT NULL AND s.renew_before <= $1 LIMIT 100", [new Date(deps.now() + RENEW_MARGIN_MS)])).rows;
 		await client.query("COMMIT");
 	} finally {
 		client.release();
@@ -142,6 +142,63 @@ export async function renewDue(deps: WatchDeps, pool: Pool): Promise<number> {
 		}
 	}
 	return renewed;
+}
+
+/**
+ * Makes the subscriptions at the servers match the triggers, whichever way a trigger was made or changed: an enabled connector-event trigger has one, and one whose trigger is paused,
+ * ended, deleted (by itself or with its chat or its connector) or changed to another event or arguments has none, so nothing is renewed for ever for a trigger that is gone. A trigger that
+ * `watch_connector_event` made has its subscription at once; this is for the rest (the Triggers screen, `create_trigger`, `resume_trigger`) and for what a failure left half done.
+ */
+export async function reconcileWatches(deps: WatchDeps, pool: Pool): Promise<number> {
+	const client = await pool.connect();
+	let stale: { owner_id: string; trigger_id: string }[];
+	let missing: { owner_id: string; id: string; spec: { source?: { connectorId?: string; event?: string; arguments?: Record<string, unknown> } } }[];
+	let pending: { owner_id: string; trigger_id: string }[];
+	try {
+		await client.query("BEGIN");
+		await client.query("SELECT set_config('pim.scope', 'all', true)");
+		stale = (await client.query(
+			`SELECT s.owner_id, s.trigger_id FROM pim_app.watch_subscriptions s LEFT JOIN pim_app.triggers t ON t.owner_id = s.owner_id AND t.id = s.trigger_id
+			 WHERE t.id IS NULL OR t.lifecycle <> 'enabled' OR t.source <> 'connector_event' OR t.spec->'source'->>'connectorId' <> s.connector_id OR t.spec->'source'->>'event' <> s.event OR coalesce(t.spec->'source'->'arguments', '{}'::jsonb) <> s.arguments LIMIT 100`,
+		)).rows;
+		missing = (await client.query(
+			`SELECT t.owner_id, t.id, t.spec FROM pim_app.triggers t LEFT JOIN pim_app.watch_subscriptions s ON s.owner_id = t.owner_id AND s.trigger_id = t.id
+			 WHERE t.lifecycle = 'enabled' AND t.source = 'connector_event' AND s.trigger_id IS NULL LIMIT 50`,
+		)).rows;
+		// A subscription the server never answered (it was down, or the tool died between its two steps) is asked for again after a minute.
+		pending = (await client.query("SELECT owner_id, trigger_id FROM pim_app.watch_subscriptions WHERE status = 'pending' AND created_at < $1 LIMIT 50", [new Date(deps.now() - 60_000)])).rows;
+		await client.query("COMMIT");
+	} finally {
+		client.release();
+	}
+	const watchOf = (owner: string, trigger: string) => deps.app.db.owner(owner, async (tx) => (await tx.query("SELECT trigger_id, connector_id, event, arguments, secret, cursor FROM pim_app.watch_subscriptions WHERE trigger_id = $1", [trigger])).rows[0] as Watch | undefined);
+	let changed = 0;
+	for (const { owner_id: owner, trigger_id: trigger } of stale) {
+		const w = await watchOf(owner, trigger);
+		if (!w) continue;
+		await unsubscribe(deps, owner, w).catch(() => undefined);
+		await deps.app.db.owner(owner, (tx) => tx.query("DELETE FROM pim_app.watch_subscriptions WHERE trigger_id = $1", [trigger]));
+		changed++;
+	}
+	for (const t of missing) {
+		const source = t.spec.source ?? {};
+		if (!source.connectorId || !source.event) continue;
+		const { sealed } = await newWatchSecret(deps, t.owner_id, t.id);
+		const made = await deps.app.db.owner(t.owner_id, async (tx) => !!(await tx.query("INSERT INTO pim_app.watch_subscriptions (owner_id, trigger_id, connector_id, event, arguments, secret) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING", [t.owner_id, t.id, source.connectorId, source.event, JSON.stringify(source.arguments ?? {}), sealed])).rowCount);
+		if (made) pending.push({ owner_id: t.owner_id, trigger_id: t.id });
+	}
+	for (const { owner_id: owner, trigger_id: trigger } of pending) {
+		const w = await watchOf(owner, trigger);
+		if (!w) continue;
+		try {
+			const r = await subscribe(deps, owner, w);
+			if (!r.ok) await deps.app.db.owner(owner, (tx) => tx.query("UPDATE pim_app.watch_subscriptions SET status = 'ended', last_error = $3 WHERE owner_id = $1 AND trigger_id = $2", [owner, trigger, r.error]));
+			changed++;
+		} catch (error) {
+			await deps.app.db.owner(owner, (tx) => tx.query("UPDATE pim_app.watch_subscriptions SET last_error = $3 WHERE owner_id = $1 AND trigger_id = $2", [owner, trigger, `Subscribing failed: ${error instanceof Error ? error.message.slice(0, 200) : "no answer"}`]));
+		}
+	}
+	return changed;
 }
 
 // ---- deliveries ----

@@ -5,6 +5,7 @@ import { Authorizer } from "./authz.ts";
 import type { Db } from "./db.ts";
 import { NotFoundError, PimError } from "./errors.ts";
 import { Identity } from "./identity.ts";
+import { computerAppId, runBackend } from "./hosted-run.ts";
 import { newId, secret } from "./ids.ts";
 
 /** What the Relay needs of a computer's socket: `ws`'s WebSocket satisfies it, and so does a fake. */
@@ -511,7 +512,7 @@ export async function acquireRemote(bus: RelayBus | null, ownerId: string, capab
 }
 
 export type AppHttpRequest = { method: string; path: string; headers: Record<string, string>; body?: Uint8Array };
-export type AppHttpResponse = { status: number; headers: Record<string, string>; body: Uint8Array };
+export type AppHttpResponse = { status: number; headers: Record<string, string | string[]>; body: Uint8Array };
 
 /**
  * Relay: the personal computers paired with this Pim, and what runs through them. Pairing issues a `pimc_` token; the computer connects out with it
@@ -771,19 +772,30 @@ export class Relay {
 	 * `app_deploy`: puts a version's files on the computer and runs the backend there. A gated action: a person at their own keyboard is the approval,
 	 * anyone else (an agent, a token) needs a standing approval or gets `ApprovalRequiredError`. Without a computer: `CapabilityUnavailableError`.
 	 */
-	async deployApp(p: Principal, app: { id: string; version: number; files: Record<string, string>; manifest: { backend: { command: string; install?: string }; access: string } }): Promise<unknown> {
+	async deployApp(p: Principal, app: { id: string; version: number; files: Record<string, string>; manifest: { backend: { command: string; install?: string }; access: string }; port: number }): Promise<unknown> {
 		const decision = await this.authz.authorize({ principal: p, ownerId: p.ownerId, action: "app:deploy", resource: { app: app.id, access: app.manifest.access } });
 		if (decision.outcome === "approval_required" && p.kind !== "user") throw new ApprovalRequiredError("app:deploy", decision.approvalKey);
 		const link = await this.acquire(p.ownerId, "app_deploy");
-		return link.call("app_start", { id: app.id, version: app.version, files: app.files, backend: app.manifest.backend, env: { PIM_APP_ID: app.id, PIM_APP_SECRET: this.appSecret(p.ownerId, app.id) } }, 15 * 60_000);
+		return runBackend(link, { id: app.id, version: app.version, files: app.files, backend: app.manifest.backend, port: app.port, secret: this.appSecret(p.ownerId, app.id) });
 	}
 
-	async appLogs(p: Principal, appId: string) {
-		return this.call(p, "app_logs", "app_logs", { id: appId });
+	/** What the computer says of an app's backend, or null while it cannot say (offline, or never run). */
+	async appStatus(ownerId: string, appId: string): Promise<{ state: string; restarts: number; since: number | null } | null> {
+		try {
+			const { apps } = await (await this.acquire(ownerId, "app_status")).call<{ apps: { id: string; state: string; restarts: number; since: number }[] }>("app_status", { id: computerAppId(appId) });
+			const mine = apps.find((a) => a.id === computerAppId(appId));
+			return mine ? { state: mine.state, restarts: mine.restarts, since: mine.since } : { state: "stopped", restarts: 0, since: null };
+		} catch {
+			return null;
+		}
+	}
+
+	async appLogs(p: Principal, appId: string, bytes?: number): Promise<{ text: string }> {
+		return this.call(p, "app_logs", "app_logs", { id: computerAppId(appId), ...(bytes ? { bytes } : {}) });
 	}
 
 	async stopApp(p: Principal, appId: string) {
-		return this.call(p, "app_stop", "app_stop", { id: appId });
+		return this.call(p, "app_stop", "app_stop", { id: computerAppId(appId) });
 	}
 
 	/**
@@ -794,9 +806,16 @@ export class Relay {
 		await this.authz.requireLive(ownerId, "hosted:run");
 		if ((request.body?.length ?? 0) > 1_048_576) throw new PimError(413, "too_large", "A request to an app is at most 1 MiB");
 		const link = await this.acquire(ownerId, "hosted app backend");
-		const r = await link.call<{ status: number; headers: Record<string, string>; body: string }>("app_http", { id: appId, method: request.method, path: request.path, headers: request.headers, ...(request.body ? { body: Buffer.from(request.body).toString("base64") } : {}) }, 60_000);
+		// The computer takes and gives headers as [name, value] pairs, so a header that repeats (set-cookie) keeps each of its values.
+		const r = await link.call<{ status: number; headers: [string, string][] | Record<string, string | string[]>; body: string }>("app_http", { id: computerAppId(appId), method: request.method, path: request.path, headers: Object.entries(request.headers), ...(request.body ? { body: Buffer.from(request.body).toString("base64") } : {}) }, 60_000);
 		const body = new Uint8Array(Buffer.from(r.body ?? "", "base64"));
 		if (body.length > 4_194_304) throw new PimError(502, "too_large", "The app's response was over 4 MiB");
-		return { status: r.status, headers: r.headers ?? {}, body };
+		const headers: Record<string, string | string[]> = {};
+		for (const [name, value] of Array.isArray(r.headers) ? r.headers : Object.entries(r.headers ?? {}).flatMap(([n, v]) => (Array.isArray(v) ? v : [v]).map((x): [string, string] => [n, x]))) {
+			const key = name.toLowerCase();
+			const held = headers[key];
+			headers[key] = held === undefined ? value : Array.isArray(held) ? [...held, value] : [held, value];
+		}
+		return { status: r.status, headers, body };
 	}
 }

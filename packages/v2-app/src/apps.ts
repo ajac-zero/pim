@@ -1,8 +1,10 @@
 import { createHash } from "node:crypto";
 import type { Principal } from "@pim/v2-contracts/identity";
+import { type AppFiles, isBinary, sizeOfFile, typeOfFile } from "./app-files.ts";
 import { Authorizer } from "./authz.ts";
 import type { Db, Tx } from "./db.ts";
-import { BadRequestError, ConflictError, GoneError, NotFoundError } from "./errors.ts";
+import { BadRequestError, ConflictError, GoneError, NotFoundError, PimError } from "./errors.ts";
+import { PORT_FROM, PORT_TO } from "./hosted-run.ts";
 import { compileJsxApp } from "./jsx.ts";
 import { newId, secret } from "./ids.ts";
 import type { SignIn } from "./signin.ts";
@@ -10,12 +12,17 @@ import type { SignIn } from "./signin.ts";
 export const MANIFEST_FILE = "pim.app.json";
 export const ACCESS_LEVELS = ["owner", "circles", "public"] as const;
 export type Access = (typeof ACCESS_LEVELS)[number];
-export type AppKind = "html" | "jsx" | "backend";
-export type AppFiles = Record<string, string>;
+export type AppKind = "html" | "jsx" | "svg" | "mermaid" | "backend";
+export type { AppFiles };
 export type AppRef = { id: string; title: string; kind: AppKind; version: number; sha256: string; size: number };
 
-const MAIN: Record<AppKind, string[]> = { html: ["index.html"], jsx: ["App.jsx", "App.tsx"], backend: [MANIFEST_FILE] };
-const LIMITS = { files: 100, file: 1_000_000, total: 5_000_000, readChars: 60_000 };
+const MAIN: Record<AppKind, string[]> = { html: ["index.html"], jsx: ["App.jsx", "App.tsx"], svg: ["image.svg"], mermaid: ["diagram.mmd"], backend: [MANIFEST_FILE] };
+/** A version holds up to 100 files besides its main one and 10 MB in all, images and other binary files included (v1's limits). */
+const LIMITS = { files: 100, file: 10_000_000, total: 10_000_000, readChars: 60_000 };
+/** An SVG app's markup: an `<svg>` element, after at most an XML declaration and comments. */
+const SVG_START = /^\s*(<\?xml[^>]*\?>\s*)?(<!--[\s\S]*?-->\s*)*<svg[\s>]/i;
+/** How many apps a person has published at once. */
+export const MAX_PUBLISHED = 20;
 export const HOSTED_TOKEN_MS = 12 * 3600_000;
 
 /** The manifest of an app with a backend, as the Worker's `parseManifest` reads it: only "backend" and "access", and a field that does nothing is refused. */
@@ -41,21 +48,24 @@ export function parseManifest(text: string): { backend: { command: string; insta
 }
 
 const digestOf = (files: AppFiles) => createHash("sha256").update(JSON.stringify(Object.entries(files).sort(([a], [b]) => (a < b ? -1 : 1)))).digest("hex");
-const sizeOf = (files: AppFiles) => Object.values(files).reduce((n, c) => n + Buffer.byteLength(c), 0);
+const sizeOf = (files: AppFiles) => Object.values(files).reduce((n, c) => n + sizeOfFile(c), 0);
 
 /** The label an app has at its own address: its owner's id and its own, at most 58 characters, DNS-safe. */
 export const appLabel = (ownerId: string, appId: string) => `${ownerId.replace(/^o_/, "")}-${appId}`.toLowerCase().replace(/[^a-z0-9-]/g, "-").slice(0, 58);
 
 function checkFiles(kind: AppKind, files: AppFiles): void {
 	const names = Object.keys(files);
+	for (const main of MAIN[kind]) if (isBinary(files[main] ?? "")) throw new BadRequestError(`${main} must be text`);
 	if (!MAIN[kind].some((m) => names.includes(m))) throw new BadRequestError(`A ${kind} app's main file is ${MAIN[kind].join(" or ")}`);
 	if (names.length > LIMITS.files + 1) throw new BadRequestError(`An app has up to ${LIMITS.files} files besides its main one`);
 	for (const [path, content] of Object.entries(files)) {
 		if (!/^[\w.-]+(\/[\w.-]+)*$/.test(path) || path.split("/").includes("..")) throw new BadRequestError(`"${path}" is not a plain relative path`);
-		if (typeof content !== "string" || Buffer.byteLength(content) > LIMITS.file) throw new BadRequestError(`${path} must be text of at most 1 MB`);
+		if (typeof content !== "string" || sizeOfFile(content) > LIMITS.file) throw new BadRequestError(`${path} must be a file of at most 10 MB`);
 	}
-	if (sizeOf(files) > LIMITS.total) throw new BadRequestError("An app is at most 5 MB");
+	if (sizeOf(files) > LIMITS.total) throw new BadRequestError("An app is at most 10 MB");
 	if (kind === "html" && !/<[a-z!]/i.test(files["index.html"] ?? "")) throw new BadRequestError("index.html is not a page");
+	if (kind === "svg" && !SVG_START.test(files["image.svg"] ?? "")) throw new BadRequestError("An SVG app must be one <svg> element, starting with <svg.");
+	if (kind === "mermaid" && (files["diagram.mmd"] ?? "").trim() === "") throw new BadRequestError("A Mermaid app needs a diagram.");
 	if (kind === "backend") parseManifest(files[MANIFEST_FILE]!);
 	// A JSX app is compiled now, so the agent that wrote it gets the error to fix.
 	if (kind === "jsx") compileJsxApp(files, MAIN.jsx.find((m) => m in files)!);
@@ -80,7 +90,7 @@ export class Apps {
 	async create(p: Principal, input: { title: string; kind: AppKind | "hosted"; files: AppFiles; message?: string }): Promise<AppRef> {
 		await this.authz.enforce(p, "api:write");
 		const kind: AppKind = input.kind === "hosted" ? "backend" : input.kind;
-		if (!input.title?.trim() || !MAIN[kind]) throw new BadRequestError("An app needs a title and a kind (html, jsx or backend)");
+		if (!input.title?.trim() || !MAIN[kind]) throw new BadRequestError("An app needs a title and a kind (html, jsx, svg, mermaid or backend)");
 		checkFiles(kind, input.files ?? {});
 		const id = newId("ar");
 		return this.db.owner(p.ownerId, async (tx) => {
@@ -104,6 +114,7 @@ export class Apps {
 				const path = e.path ?? MAIN[a.kind as AppKind].find((m) => m in files)!;
 				const text = files[path];
 				if (text === undefined) throw new BadRequestError(`No file ${path}`);
+				if (isBinary(text)) throw new BadRequestError(`${path} is not text, so it can't be edited: give the whole file again`);
 				if (text.split(e.find).length !== 2) throw new BadRequestError(`"${e.find}" must match exactly once in ${path}`);
 				files[path] = text.replace(e.find, () => e.replace);
 			}
@@ -129,6 +140,8 @@ export class Apps {
 			const path = opts.path ?? MAIN[ref.kind].find((m) => m in ref.files)!;
 			const text = ref.files[path];
 			if (text === undefined) throw new NotFoundError(`No file ${path}`);
+			// A file that is not text is described, not shown: its bytes would fill the context with nothing a model can read.
+			if (isBinary(text)) return { ...refOnly(ref), path, files: Object.keys(ref.files).sort(), content: `(binary file, ${sizeOfFile(text)} bytes, ${typeOfFile(path)})`, offset: 0, nextOffset: null };
 			const offset = opts.offset ?? 0;
 			return { ...refOnly(ref), path, files: Object.keys(ref.files).sort(), content: text.slice(offset, offset + LIMITS.readChars), offset, nextOffset: offset + LIMITS.readChars < text.length ? offset + LIMITS.readChars : null };
 		});
@@ -182,16 +195,28 @@ export class Apps {
 
 	// ---- publishing ----
 
-	/** Pins a version at `/p/pa_…`. An app with a backend runs its owner's program, so it cannot be published. */
-	async publish(p: Principal, id: string, version?: number): Promise<{ publicId: string; version: number }> {
+	/**
+	 * Publishes a version of one of the person's apps (the latest unless one is named) to the gallery of everyone signed in to this Pim. `public: true` also lets anyone
+	 * with its link at `/p/pa_…` see it, signed in or not; left out, that stays as it was, and is off at first. Publishing an app again keeps its id, so a link keeps
+	 * working, and moves it to the version published now. A person publishes up to 20 apps. An app with a backend runs its owner's program, so it cannot be published.
+	 */
+	async publish(p: Principal, id: string, opts: { version?: number; public?: boolean } = {}): Promise<{ publicId: string; version: number; public: boolean }> {
 		await this.authz.enforce(p, "api:write");
 		return this.db.owner(p.ownerId, async (tx) => {
-			const ref = await this.#ref(tx, id, version);
+			const ref = await this.#ref(tx, id, opts.version);
 			if (ref.kind === "backend") throw new BadRequestError("An app with a backend can't be published");
-			await tx.query("UPDATE pim_app.published_artifacts SET unpublished_at = now() WHERE artifact_id = $1 AND unpublished_at IS NULL", [id]);
+			if (opts.public === true && ref.kind !== "html" && ref.kind !== "jsx" && ref.kind !== "svg" && ref.kind !== "mermaid") throw new BadRequestError("Only pages, React apps, drawings and diagrams can have a public link.");
+			const known = (await tx.query("SELECT public_id, public FROM pim_app.published_artifacts WHERE artifact_id = $1 AND unpublished_at IS NULL FOR UPDATE", [id])).rows[0];
+			if (known) {
+				const open = opts.public ?? (known.public as boolean);
+				await tx.query("UPDATE pim_app.published_artifacts SET version = $2, public = $3, published_at = now() WHERE public_id = $1", [known.public_id, ref.version, open]);
+				return { publicId: known.public_id as string, version: ref.version, public: open };
+			}
+			const count = Number((await tx.query("SELECT count(*) AS n FROM pim_app.published_artifacts WHERE owner_id = $1 AND unpublished_at IS NULL", [p.ownerId])).rows[0]!.n);
+			if (count >= MAX_PUBLISHED) throw new PimError(429, "too_many", `You can publish up to ${MAX_PUBLISHED} apps.`);
 			const publicId = `pa_${secret(12)}`;
-			await tx.query("INSERT INTO pim_app.published_artifacts (public_id, owner_id, artifact_id, version) VALUES ($1,$2,$3,$4)", [publicId, p.ownerId, id, ref.version]);
-			return { publicId, version: ref.version };
+			await tx.query("INSERT INTO pim_app.published_artifacts (public_id, owner_id, artifact_id, version, public) VALUES ($1,$2,$3,$4,$5)", [publicId, p.ownerId, id, ref.version, opts.public === true]);
+			return { publicId, version: ref.version, public: opts.public === true };
 		});
 	}
 
@@ -205,7 +230,7 @@ export class Apps {
 	 * A page is served with a policy that lets it run its own script and style and reach nothing else.
 	 */
 	async servePublished(publicId: string, file?: string): Promise<{ status: number; headers: Record<string, string>; body: string }> {
-		const pub = await this.db.lookup(publicId, async (tx) => (await tx.query("SELECT owner_id, artifact_id, version FROM pim_app.published_artifacts WHERE public_id = $1 AND unpublished_at IS NULL", [publicId])).rows[0]);
+		const pub = await this.db.lookup(publicId, async (tx) => (await tx.query("SELECT owner_id, artifact_id, version FROM pim_app.published_artifacts WHERE public_id = $1 AND unpublished_at IS NULL AND public", [publicId])).rows[0]);
 		if (!pub) throw new NotFoundError();
 		const author = await this.authz.account(pub.owner_id);
 		if (!author || author.status === "deleting" || author.status === "deleted") throw new GoneError("The author of this has deleted their account");
@@ -215,6 +240,46 @@ export class Apps {
 	}
 
 	// ---- hosted (backend) apps ----
+
+	/**
+	 * What running a version of an app with a backend needs: its files, its manifest, and its port on the computer, which an app keeps for as long as it exists.
+	 * Nothing runs here: `Relay.deployApp` (a person's choice) or the `app_deploy` tool (the person's approval) does that and then says so with `backendRan`.
+	 */
+	async backendToRun(p: Principal, id: string, version?: number) {
+		await this.authz.enforce(p, "api:write");
+		return this.db.owner(p.ownerId, async (tx) => {
+			const a = (await tx.query("SELECT kind, backend_port FROM pim_app.artifacts WHERE id = $1 FOR UPDATE", [id])).rows[0];
+			if (!a) throw new NotFoundError("No such app");
+			if (a.kind !== "backend") throw new BadRequestError(`${id} is not an app with a backend.`);
+			const ref = await this.#ref(tx, id, version);
+			let port = a.backend_port as number | null;
+			if (port === null) {
+				const used = new Set((await tx.query("SELECT backend_port FROM pim_app.artifacts WHERE backend_port IS NOT NULL")).rows.map((r) => r.backend_port as number));
+				for (let candidate = PORT_FROM; candidate <= PORT_TO && port === null; candidate++) if (!used.has(candidate)) port = candidate;
+				if (port === null) throw new PimError(429, "too_many", "This space runs as many backends as it has ports for. Delete one first.");
+				await tx.query("UPDATE pim_app.artifacts SET backend_port = $2 WHERE id = $1", [id, port]);
+			}
+			return { id, title: ref.title, version: ref.version, files: ref.files, manifest: parseManifest(ref.files[MANIFEST_FILE]!), port };
+		});
+	}
+
+	/** A version's backend is running: it is the version the app's address opens from now on, and who may open it is what its manifest says. */
+	async backendRan(p: Principal, id: string, version: number, access: Access): Promise<void> {
+		await this.db.owner(p.ownerId, async (tx) => {
+			await tx.query("UPDATE pim_app.artifacts SET backend_version = $2, access = $3, circles = CASE WHEN $3 = 'shared' THEN circles ELSE '{}' END, updated_at = now() WHERE id = $1", [id, version, access === "owner" ? "private" : access === "circles" ? "shared" : "public"]);
+		});
+	}
+
+	/** The version whose backend was run last (null for one never run) and who may open it. */
+	async backendOf(p: Principal, id: string): Promise<{ version: number | null; access: Access; label: string | null }> {
+		await this.authz.enforce(p, "api:read");
+		return this.db.owner(p.ownerId, async (tx) => {
+			const a = (await tx.query("SELECT kind, backend_version, access, label FROM pim_app.artifacts WHERE id = $1", [id])).rows[0];
+			if (!a) throw new NotFoundError("No such app");
+			if (a.kind !== "backend") throw new BadRequestError(`${id} is not an app with a backend.`);
+			return { version: a.backend_version as number | null, access: a.access === "public" ? "public" : a.access === "shared" ? "circles" : "owner", label: a.label as string | null };
+		});
+	}
 
 	/** Opens an app with a backend for its owner: a token good for twelve hours that opens that app and nothing else, at `/hosted/<owner>/<id>/<token>/`. */
 	async openHosted(p: Principal, id: string, now = new Date()): Promise<{ path: string; expiresAt: Date }> {

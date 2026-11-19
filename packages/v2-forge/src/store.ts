@@ -48,6 +48,8 @@ export type ThreadRow = {
 	spentUsd: number;
 	consecutiveInterrupts: number;
 	profile: any;
+	/** The thread this one continues from, if any. */
+	parentId: string | null;
 	gatewayNonce: string;
 	leaseHolder: string | null;
 	leaseEpoch: number;
@@ -85,6 +87,7 @@ export const toThread = (r: Row): ThreadRow => ({
 	spentUsd: Number(r.spent_usd),
 	consecutiveInterrupts: r.consecutive_interrupts,
 	profile: r.profile,
+	parentId: r.limits?.parent ?? null,
 	gatewayNonce: r.gateway_nonce,
 	leaseHolder: r.lease_holder,
 	leaseEpoch: Number(r.lease_epoch),
@@ -97,6 +100,9 @@ export const toThread = (r: Row): ThreadRow => ({
 });
 
 export type EventInput = { kind: string; role?: string | null; data?: object; costUsd?: number; tokensIn?: number; tokensOut?: number; sourceCursor?: string | null };
+
+/** An inbox row is due unless it asks to wait (a turn's retry names the time, in ms since the epoch, in `notBefore`). */
+export const DUE = "coalesce((payload ->> 'notBefore')::bigint, 0) <= (extract(epoch from now()) * 1000)::bigint";
 
 export type OutboxTopic = "projection" | "wake" | "cost_ledger";
 
@@ -225,7 +231,7 @@ export class ForgeStore {
 	}
 
 	async takeInbox(q: Queryable, threadId: string): Promise<{ seq: number; operationId: string; kind: string; payload: any }[]> {
-		const r = await q.query<Row>("update pim_forge.forge_inbox set status = 'taken' where thread_id = $1 and status = 'pending' returning seq, operation_id, kind, payload", [threadId]);
+		const r = await q.query<Row>(`update pim_forge.forge_inbox set status = 'taken' where thread_id = $1 and status = 'pending' and ${DUE} returning seq, operation_id, kind, payload`, [threadId]);
 		return r.rows.map((x) => ({ seq: Number(x.seq), operationId: x.operation_id, kind: x.kind, payload: x.payload })).sort((a, b) => a.seq - b.seq);
 	}
 

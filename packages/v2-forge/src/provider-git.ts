@@ -40,15 +40,16 @@ export class ProviderGitHost implements GitHost {
 		return (await provider.listBranches(repo)).has(branch);
 	}
 
-	async remoteDiff(repoUrl: string, branch: string): Promise<string | null> {
+	async remoteDiff(repoUrl: string, branch: string, since?: string): Promise<string | null> {
 		const { provider, repo } = this.resolve(repoUrl);
-		if (!(await this.hasBranch(repoUrl, branch))) return null;
-		return (await provider.compareDiff(repo, await provider.defaultBranch(repo), branch))?.diff ?? null;
+		// A commit of the host is as good as a branch to compare to.
+		if (!(await this.hasBranch(repoUrl, branch)) && !/^[0-9a-f]{7,40}$/i.test(branch)) return null;
+		return (await provider.compareDiff(repo, since ?? (await provider.defaultBranch(repo)), branch))?.diff ?? null;
 	}
 
-	async openPullRequest(repoUrl: string, branch: string, base: string, title: string) {
+	async openPullRequest(repoUrl: string, branch: string, base: string, title: string, body = "") {
 		const { provider, repo } = this.resolve(repoUrl);
-		return provider.createPullRequest({ repo, head: branch, base, title, body: "" });
+		return provider.createPullRequest({ repo, head: branch, base, title, body });
 	}
 
 	async isAncestor(repoUrl: string, ancestor: string, descendant: string): Promise<boolean> {

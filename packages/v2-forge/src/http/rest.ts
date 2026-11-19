@@ -27,7 +27,8 @@ export function codingRest(d: RestDeps): Handler {
 	return async (req) => {
 		const url = new URL(req.url);
 		const path = url.pathname;
-		if (!path.startsWith("/api/coding/threads") && !path.startsWith("/api/coding/repos/") && !path.startsWith("/api/admin/coding/pools")) return null;
+		const attachment = /^\/api\/coding\/([^/]+)\/attachments\/([^/]+)$/.exec(path);
+		if (!path.startsWith("/api/coding/threads") && !path.startsWith("/api/coding/repos/") && !path.startsWith("/api/admin/coding/pools") && !attachment) return null;
 		return guarded(async () => {
 			const caller = await d.authenticate(req);
 			// Admin pools: a browser session of an admin only; an API token is refused.
@@ -40,11 +41,22 @@ export function codingRest(d: RestDeps): Handler {
 			const forge = d.scoped ? d.forge.scopedTo(actor.ownerId) : d.forge;
 			const get = req.method === "GET";
 			const post = req.method === "POST";
+			if (attachment && get) {
+				const found = await forge.attachment(actor, decodeURIComponent(attachment[1]!), attachment[2]!);
+				if (!found) throw new ForgeError("not_found", "No such attachment");
+				// Only what Amp attachments are mirrored as is shown inline; whatever else is a download, and nothing is sniffed into a page.
+				const shown = /^(image\/(png|jpeg|gif|webp)|video\/(mp4|webm))$/.test(found.contentType);
+				return new Response(found.bytes as BodyInit, { status: 200, headers: { "content-type": shown ? found.contentType : "application/octet-stream", "content-disposition": shown ? "inline" : "attachment", "x-content-type-options": "nosniff", "cache-control": "private, max-age=3600", "content-security-policy": "sandbox" } });
+			}
 			if ((m = match("/api/coding/threads", path))) {
 				if (get) return json(200, { threads: await forge.list(actor, { archived: url.searchParams.get("archived") === "1" }) });
 				if (post) {
 					const b = await readJson(req);
-					const r = await forge.start(actor, { operationId: typeof b.operationId === "string" ? b.operationId : randomUUID(), task: str(b.task, "task"), repo: str(b.repo, "repo"), ref: b.ref, harness: b.harness, chatId: b.chat, budgetUsd: b.budgetUsd ?? null, pool: b.pool ?? b.provider, profile: b.profile });
+					// What v1 refused before it made a thread, so a thread that could never run isn't made.
+					if (b.budgetUsd !== undefined && b.budgetUsd !== null && !(typeof b.budgetUsd === "number" && Number.isFinite(b.budgetUsd) && b.budgetUsd > 0)) throw new ForgeError("invalid", "budgetUsd must be a positive number of dollars");
+					if (b.ref !== undefined && (typeof b.ref !== "string" || b.ref.length > 200)) throw new ForgeError("invalid", "ref must be at most 200 characters");
+					for (const field of ["pool", "provider"]) if (b[field] !== undefined && (typeof b[field] !== "string" || b[field].length > 100)) throw new ForgeError("invalid", `${field} must be at most 100 characters`);
+					const r = await forge.start(actor, { operationId: typeof b.operationId === "string" ? b.operationId : randomUUID(), task: str(b.task, "task"), repo: str(b.repo, "repo"), ref: b.ref, harness: b.harness, chatId: b.chat, budgetUsd: b.budgetUsd ?? null, pool: b.pool ?? b.provider, profile: b.profile, parent: typeof b.parent === "string" ? b.parent : undefined });
 					return json(r.created ? 201 : 200, r);
 				}
 			}
@@ -65,8 +77,13 @@ export function codingRest(d: RestDeps): Handler {
 						const q = url.searchParams;
 						return json(200, await forge.transcriptOutput(actor, id, { id: q.get("id") ?? undefined, offset: num(q.get("offset")), limit: num(q.get("limit")) }));
 					}
-					case "GET diff":
-						return json(200, await forge.diff(actor, id));
+					case "GET diff": {
+						const since = url.searchParams.get("since") ?? undefined;
+						if (since !== undefined && !/^[0-9a-zA-Z]{4,64}$/.test(since)) throw new ForgeError("invalid", "since must be a commit");
+						const head = url.searchParams.get("head") ?? undefined;
+						if (head !== undefined && !/^[\w./-]{1,200}$/.test(head)) throw new ForgeError("invalid", "head must be a branch or a commit");
+						return json(200, await forge.diff(actor, id, { since, head }));
+					}
 					case "GET tests":
 						return json(200, { runs: await forge.tests(actor, id) });
 					case "GET log":
@@ -81,7 +98,8 @@ export function codingRest(d: RestDeps): Handler {
 						return json(200, { ok: true });
 					case "POST steer": {
 						const b = await readJson(req);
-						return json(202, await forge.steer(actor, id, str(b.text, "text"), typeof b.operationId === "string" ? b.operationId : randomUUID()));
+						if (b.interrupt !== undefined && typeof b.interrupt !== "boolean") throw new ForgeError("invalid", "interrupt must be true or false");
+						return json(202, await forge.steer(actor, id, str(b.text, "text"), typeof b.operationId === "string" ? b.operationId : randomUUID(), { interrupt: b.interrupt }));
 					}
 					case "POST continue": {
 						const b = await readJson(req);
@@ -100,7 +118,8 @@ export function codingRest(d: RestDeps): Handler {
 						return json(r.status === "approval_required" ? 202 : 200, r);
 					}
 					case "POST pull-request": {
-						const r = await forge.openPullRequest(actor, id, (await readJson(req)).title);
+						const b = await readJson(req);
+						const r = await forge.openPullRequest(actor, id, typeof b.title === "string" ? b.title : undefined, typeof b.body === "string" ? b.body : undefined);
 						return json(r.status === "approval_required" ? 202 : 200, r);
 					}
 				}

@@ -198,8 +198,10 @@ describe("credentials, archive and cancellation", () => {
 		await s.commit(t.threadId, "keep.txt", "keep");
 		const live = await s.forge.diff(ada, t.threadId);
 		expect(live).toMatchObject({ source: "workspace", unpushedOrb: false });
-		expect(live.diff).toBe(""); // committed work isn't a working-tree diff against HEAD
-		await s.sandboxes.exec(t.workspaceRef, ["sh", "-c", "echo wip > wip.txt && git add -N wip.txt"]);
+		// What the agent committed is the thread's work, as v1's diff from the base showed it.
+		expect(live.diff).toContain("+keep");
+		expect(live.head).toBeTruthy();
+		await s.sandboxes.exec(t.workspaceRef, ["sh", "-c", "echo wip > wip.txt"]);
 		expect((await s.forge.diff(ada, t.threadId)).diff).toContain("+wip");
 		expect(await s.forge.runTests(ada, t.threadId, ["sh", "-c", "echo ok && exit 0"])).toMatchObject({ exitCode: 0 });
 		await s.forge.autosave(t.threadId);

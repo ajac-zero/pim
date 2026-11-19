@@ -34,7 +34,7 @@ import { type Db as ForgeDb, scopedDb } from "@pim/v2-forge/db";
 import { CapabilityUnavailableError } from "@pim/v2-forge/errors";
 import { Forge } from "@pim/v2-forge/forge";
 import { GiteaConnection } from "@pim/v2-forge/gitea";
-import { prepareCheckout } from "@pim/v2-forge/git-checkout";
+import { prepareCheckout, refreshGitCredentials } from "@pim/v2-forge/git-checkout";
 import type { Authenticate, Handler } from "@pim/v2-forge/http/common";
 import { gitBroker, type GitUpstream } from "@pim/v2-forge/http/git-broker";
 import { modelGateway } from "@pim/v2-forge/http/gateway";
@@ -167,6 +167,9 @@ export function assembleForge(db: ForgeDb, objects: ObjectStore, env: Env, crypt
 		...(env.PIM_FORGE_ORB_POLL_MS ? { orbPollMs: Number(env.PIM_FORGE_ORB_POLL_MS) } : {}),
 		...(env.PIM_FORGE_LEASE_MS ? { leaseMs: Number(env.PIM_FORGE_LEASE_MS) } : {}),
 		computeSpec: (t) => ({ repo: { url: `${brokerUrl.replace(/\/$/, "")}/api/coding/git/${t.repo}.git`, ref: t.ref ?? "HEAD", branch: t.branch ?? "" } }),
+		// A sandbox that exists gets a fresh git grant before a turn of a thread that was aborted; a pushed branch outlives the sandbox unless `PIM_CODING_AUTOPUSH=0`.
+		refreshCredentials: compute ? async (thread, handle) => void (await refreshGitCredentials({ compute, credentials, publicUrl: brokerUrl }, thread, handle)) : undefined,
+		autopush: env.PIM_CODING_AUTOPUSH !== "0",
 		prepareWorkspace: compute
 			? async (thread, handle) => {
 					const save = (await db.query("select head_sha, object_key from pim_forge.forge_autosaves where thread_id = $1", [thread.threadId])).rows[0];
@@ -228,9 +231,11 @@ export async function startForgeLoops(parts: ForgeParts, o: ForgeLoopOptions): P
 	};
 	const listener = new pg.Client({ connectionString: o.databaseUrl });
 	listener.on("error", (e) => fail("listen", e));
-	listener.on("notification", tick);
+	// An abort, an archive or an interrupting steer is made in another process: a worker running that thread's turn looks at it at once.
+	listener.on("notification", (m) => (m.channel === "pim_forge_cancel" ? parts.worker.cancel(m.payload ?? "") : tick()));
 	await listener.connect();
 	await listener.query("LISTEN pim_forge_work");
+	await listener.query("LISTEN pim_forge_cancel");
 	const poll = setInterval(tick, o.pollMs ?? 1000);
 	const stalls = setInterval(async () => {
 		const ids = (await parts.db.query<{ thread_id: string }>("select thread_id from pim_forge.forge_threads where state = 'running'").catch(() => ({ rows: [] }))).rows;

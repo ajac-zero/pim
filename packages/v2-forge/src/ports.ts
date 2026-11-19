@@ -16,12 +16,14 @@ export type TurnRequest = {
 	workspace: ComputeHandle | null;
 	/** The lease epoch the worker holds for this turn; storage written for it is fenced by it. */
 	epoch: number;
-	/** Aborted when the thread is cancelled on this worker. */
+	/** Aborted when the thread is aborted or archived, or an interrupting steer comes. */
 	signal: AbortSignal;
 	/** Records a transcript event of the turn (an assistant message, a tool result, a notice) under the thread's lease; a worker that lost the lease gets an error. */
 	emit(event: EventInput): Promise<unknown>;
 	/** Records a test run the agent made. */
 	recordTest(run: { command: string; exitCode: number | null; output: string }): Promise<void>;
+	/** The steers that wait for this thread, which a harness that takes input mid-turn (pi) reads while it runs and marks `sent` once its turn has them; a harness that doesn't leaves them for the next turn. */
+	steers?: { next(): Promise<{ operationId: string; text: string }[]>; sent(operationId: string, text: string): Promise<unknown> };
 };
 
 export type TurnResult = {
@@ -89,9 +91,9 @@ export interface GitHost {
 	push(workspace: ComputeHandle, repo: string, branch: string): Promise<PushOutcome>;
 	/** Integrates `branch`, already on the host, onto the default branch by fast-forward, else rebase, in a throwaway clone; a conflict aborts and leaves the default branch alone. Works for any thread, including an Amp orb's. */
 	mergeBranch(repo: string, branch: string): Promise<MergeOutcome>;
-	openPullRequest(repo: string, branch: string, base: string, title: string): Promise<{ url: string; number: number }>;
-	/** The diff of `branch` against the default branch as the host has it (for remote orbs); null when the branch is not on the host. */
-	remoteDiff(repo: string, branch: string): Promise<string | null>;
+	openPullRequest(repo: string, branch: string, base: string, title: string, body?: string): Promise<{ url: string; number: number }>;
+	/** The diff of `branch` (or a commit) against `since`, by default the default branch, as the host has it (for remote orbs); null when the branch is not on the host. */
+	remoteDiff(repo: string, branch: string, since?: string): Promise<string | null>;
 	/** Whether `ancestor` is reachable from `descendant`, a commit the host already has: how the broker tells a fast-forward from a force. A host that can't say leaves this out, and the broker then takes only a branch's first push. */
 	isAncestor?(repoUrl: string, ancestor: string, descendant: string): Promise<boolean>;
 	/** Deletes a branch on the host; a separate explicit operation from archiving. */

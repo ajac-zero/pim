@@ -7,10 +7,15 @@ import { createHash } from "node:crypto";
 import { type Row, type Queryable } from "./db";
 import { CapabilityUnavailableError, ForgeError, LeaseLostError } from "./errors";
 import { capabilitiesOf, LEGACY_AMP_WORKSPACE_MESSAGE, MAX_RESUMES, MAX_SESSION_RESTARTS, type Harness } from "./harnesses";
-import { type AttachmentFetcher, type Objects, type OrbClients, type TurnPort, type TurnResult } from "./ports";
+import { type AttachmentFetcher, type Objects, type OrbClients, type TurnPort, type TurnRequest, type TurnResult } from "./ports";
 import { Provisioner, type ComputeHandle, type ComputeProvider, type ComputeSpec } from "./compute";
 import { type ForgeScheduler } from "./scheduler";
-import { type ForgeStore, type ThreadRow } from "./store";
+import { DUE, type ForgeStore, type ThreadRow } from "./store";
+import { type CheckpointDeps, checkpointWorkspace, ensureBase, gitIn } from "./checkpoint";
+import { REPO_DIR } from "./git-checkout";
+import { retryPlan } from "./retry";
+import { repoName } from "./authz";
+import { SETUP_ENV, SETUP_TIMEOUT_MS } from "@pim/coding/environment-cache";
 
 export type WorkerDeps = {
 	store: ForgeStore;
@@ -25,6 +30,16 @@ export type WorkerDeps = {
 	orbs: OrbClients;
 	objects: Objects;
 	attachments?: AttachmentFetcher;
+	/** Brings the git grant in a sandbox that already exists up to date (see `refreshGitCredentials`): before a turn of a thread that was aborted, whose grant was cut off. */
+	refreshCredentials?: (thread: ThreadRow, handle: ComputeHandle) => Promise<void>;
+	/** Where the checkout is in a sandbox. */
+	repoDir?: string;
+	/** Pushes a thread's own branch from its sandbox when a turn ends (through the git broker, never forced), so its commits outlive the sandbox. Off unless asked for. */
+	autopush?: boolean;
+	/** How often a running turn is checked for an abort, an interrupting steer and (for pi) a steer to join, in ms. */
+	watchMs?: number;
+	/** How long a failed turn waits before its retry, in ms; 30 to 60 seconds (a rate limit waits longer) unless given. */
+	retryDelayMs?: number;
 	/** How often a remote orb's running thread is looked at (an idle one, ten times less often), in ms. */
 	orbPollMs?: number;
 	/** Amp's origin, which attachment links are recognized by; https://ampcode.com when absent. */
@@ -65,7 +80,7 @@ export class ForgeWorker {
 		const ids = (
 			await this.d.store.db.query<Row>(
 				`select thread_id from pim_forge.forge_threads t where state in ('provisioning', 'running')
-				 or (state in ('idle', 'queued', 'waiting_input') and exists (select 1 from pim_forge.forge_inbox i where i.thread_id = t.thread_id and i.status = 'pending'))
+				 or (state in ('idle', 'queued', 'waiting_input') and exists (select 1 from pim_forge.forge_inbox i where i.thread_id = t.thread_id and i.status = 'pending' and ${DUE}))
 				 order by created_at`,
 			)
 		).rows.map((r) => r.thread_id as string);
@@ -76,7 +91,7 @@ export class ForgeWorker {
 
 	/**
 	 * Gives back the sandboxes of threads that have been idle past the grace: the checkout is bundled to Objects, the sandbox deleted, its slot freed, and the thread keeps its transcript and branch.
-	 * The next turn is provisioned again and restored from that bundle; a CLI's vendor session lived in the sandbox and starts anew.
+	 * The next turn is provisioned again and restored from that bundle; a CLI's vendor session lived in the sandbox and starts anew (the first turn after tells it what it was asked and what it last said, as v1 did for a lost session).
 	 */
 	async reap(autosave?: (threadId: string) => Promise<void>): Promise<string[]> {
 		const { store, scheduler } = this.d;
@@ -107,6 +122,19 @@ export class ForgeWorker {
 		return reaped;
 	}
 
+	/** The turns this worker is running, by thread: what `cancel` stops. */
+	private readonly turns = new Map<string, { controller: AbortController; interrupted: boolean }>();
+
+	/** Looks at the thread now if this worker is running a turn of it, instead of at the next tick: a person aborted or archived it, or sent a steer that interrupts. */
+	cancel(threadId: string): void {
+		const live = this.turns.get(threadId);
+		if (live) void this.watch(threadId, live).catch(() => {});
+	}
+
+	private get dep(): CheckpointDeps {
+		return { db: this.d.store.db, compute: this.d.compute!, repoDir: this.d.repoDir };
+	}
+
 	/** Threads this worker is stepping now: `dispatch` never starts a second step of one. */
 	private readonly stepping = new Map<string, Promise<StepResult>>();
 
@@ -118,7 +146,7 @@ export class ForgeWorker {
 		const ids = (
 			await this.d.store.db.query<Row>(
 				`select thread_id from pim_forge.forge_threads t where state in ('provisioning', 'running')
-				 or (state in ('idle', 'queued', 'waiting_input') and exists (select 1 from pim_forge.forge_inbox i where i.thread_id = t.thread_id and i.status in ('pending', 'sending', 'uncertain')))
+				 or (state in ('idle', 'queued', 'waiting_input') and exists (select 1 from pim_forge.forge_inbox i where i.thread_id = t.thread_id and i.status in ('pending', 'sending', 'uncertain') and ${DUE}))
 				 or (harness = 'amp' and orb is not null and state in ('running', 'waiting_input', 'idle') and (last_seen_at is null or last_seen_at < now() - (case when state = 'running' then $1 else $2 end)::interval))
 				 order by updated_at`,
 				[`${this.d.orbPollMs ?? 3000} milliseconds`, `${(this.d.orbPollMs ?? 3000) * 10} milliseconds`],
@@ -195,6 +223,7 @@ export class ForgeWorker {
 				await scheduler.release(thread.threadId, "provision_failed");
 				return "done";
 			}
+			let environment: { state: "ready" | "failed"; error?: string; setupMs?: number } | null = null;
 			if (this.d.prepareWorkspace) {
 				const fresh = (await store.get(thread.threadId))!;
 				try {
@@ -204,29 +233,74 @@ export class ForgeWorker {
 					await scheduler.release(thread.threadId, "checkout_failed");
 					return "done";
 				}
+				// What the thread started from, and the repository's setup script, once per workspace (there are no snapshots to restore a prepared one from).
+				const based = await ensureBase(this.dep, store, fresh).catch(() => fresh);
+				environment = await this.setup(based, epoch);
 			}
-			await store.fenced(thread.threadId, epoch, async (q) => {
-				await store.patch(q, thread.threadId, { placement: { pool: poolId } });
-				await store.setState(q, thread.threadId, "idle");
+			await store.fenced(thread.threadId, epoch, async (q, t) => {
+				await store.patch(q, thread.threadId, { placement: { pool: poolId }, ...(environment ? { provisioning: { ...(t.provisioning ?? {}), environment } } : {}) });
+				if (environment?.state === "failed") await store.setState(q, thread.threadId, "idle", "environment_failed", environment.error ?? null);
+				else await store.setState(q, thread.threadId, "idle");
 			});
 		}
 		await this.recover(thread.threadId, epoch);
 		for (;;) {
+			let revived = false;
 			const next = await store.fenced(thread.threadId, epoch, async (q, t) => {
-				if (t.state === "archived" || t.cancelState !== "none") return null;
+				if (t.state === "archived") return null;
 				const [item] = await store.takeInbox(q, thread.threadId).then(async (items) => {
 					// One turn at a time: put the rest back.
 					for (const rest of items.slice(1)) await q.query("update pim_forge.forge_inbox set status = 'pending' where thread_id = $1 and operation_id = $2", [thread.threadId, rest.operationId]);
 					return items.slice(0, 1);
 				});
-				return item ?? null;
+				if (!item) return null;
+				if (t.cancelState === "requested") {
+					await q.query("update pim_forge.forge_inbox set status = 'pending' where thread_id = $1 and operation_id = $2", [thread.threadId, item.operationId]);
+					return null;
+				}
+				// An abort clears what waited, so an input that is here after one was sent after it: the thread goes on, with a grant of its own again.
+				if (t.cancelState !== "none") {
+					await store.patch(q, thread.threadId, { cancel_state: "none" });
+					revived = true;
+				}
+				return item;
 			});
 			if (!next) break;
+			if (revived) await this.refresh(thread.threadId);
 			if (!(await this.runTurn(thread.threadId, epoch, next))) return "retry";
 		}
 		const after = await store.get(thread.threadId);
 		if (after && after.state === "idle") await scheduler.markIdle(thread.threadId);
 		return "done";
+	}
+
+	/** Gives a sandbox that exists a fresh git grant, for a thread whose grant was cut off by an abort. */
+	private async refresh(threadId: string): Promise<void> {
+		const t = await this.d.store.get(threadId);
+		if (t?.workspaceRef && this.d.refreshCredentials) await this.d.refreshCredentials(t, t.workspaceRef).catch(() => {});
+	}
+
+	/**
+	 * Runs the repository's setup script in a new checkout: the person's setting for the repository, else the repository's own `.pim/setup.sh`. A script that fails is recorded and shown (state reason `environment_failed`), and the thread goes on, as in v1.
+	 * Null when there is no script to run.
+	 */
+	private async setup(t: ThreadRow, epoch: number): Promise<{ state: "ready" | "failed"; error?: string; setupMs?: number } | null> {
+		const { store } = this.d;
+		const handle = t.workspaceRef as ComputeHandle;
+		const name = repoName(t.repo);
+		const saved = name ? ((await store.db.query<Row>("select setup_script from pim_forge.forge_repo_settings where owner_id = $1 and repo = $2", [t.ownerId, name])).rows[0]?.setup_script as string | undefined) : undefined;
+		let script = saved?.trim() ? saved : null;
+		const cwd = this.d.repoDir ?? REPO_DIR;
+		if (!script && (await this.d.compute!.exec(handle, ["test", "-f", ".pim/setup.sh"], { cwd }).catch(() => ({ code: 1 }))).code === 0) script = "bash .pim/setup.sh";
+		if (!script) return null;
+		const started = this.clock();
+		const r = await this.d.compute!.exec(handle, ["bash", "-c", script], { cwd, env: { ...SETUP_ENV }, timeoutMs: SETUP_TIMEOUT_MS }).catch((error) => ({ code: null as number | null, stdout: "", stderr: String(error instanceof Error ? error.message : error), timedOut: false }));
+		const setupMs = this.clock() - started;
+		const ok = r.code === 0 && !r.timedOut;
+		const tail = `${r.stdout}${r.stderr}`.replace(/pimgit_[\w.-]+/g, "[redacted]").slice(-600).trim();
+		const error = ok ? undefined : `The setup script ${r.timedOut ? `didn't finish in ${Math.round(SETUP_TIMEOUT_MS / 60_000)} minutes` : r.code === null ? "couldn't run" : `exited with code ${r.code}`}${tail ? `: ${tail}` : ""}`.slice(0, 700);
+		await store.fenced(t.threadId, epoch, (q) => store.appendEvent(q, t.threadId, { kind: ok ? "environment.ready" : "environment.failed", data: { setupMs, ...(error ? { error } : {}) } }));
+		return ok ? { state: "ready", setupMs } : { state: "failed", error, setupMs };
 	}
 
 	/** A run left `running` by a worker that died: it settles as interrupted, and resumes (bounded) without a turn_ended. */
@@ -255,19 +329,27 @@ export class ForgeWorker {
 			const session = (await q.query<Row>("select session_id from pim_forge.forge_harness_sessions where thread_id = $1 and harness = $2", [threadId, t.harness])).rows[0];
 			await store.setState(q, threadId, "running");
 			await store.appendEvent(q, threadId, { kind: "thread.turn_started", data: { operationId: item.operationId, harness: t.harness } });
-			if (item.payload?.prompt && !item.operationId.startsWith("resume-")) await store.appendEvent(q, threadId, { kind: "message", role: "user", data: { text: item.payload.prompt, operationId: item.operationId } });
+			if (item.payload?.prompt && !item.operationId.startsWith("resume-") && !item.operationId.startsWith("retry-")) await store.appendEvent(q, threadId, { kind: "message", role: "user", data: { text: item.payload.prompt, operationId: item.operationId } });
 			return { thread: t, sessionId: (session?.session_id as string | undefined) ?? null };
 		});
 		if (!prep) return true;
 		await this.d.scheduler.markBusy(threadId);
 		const port = this.d.turns[prep.thread.harness];
 		const abort = new AbortController();
+		const live = { controller: abort, interrupted: false };
+		this.turns.set(threadId, live);
+		// A person's abort or archive, and a steer that interrupts, are written by another process: they are looked for while the turn runs (and `cancel` is told at once when it is this worker's).
+		const watch = setInterval(() => void this.watch(threadId, live).catch(() => {}), this.d.watchMs ?? 1000);
 		let result: TurnResult;
 		try {
 			if (!port) throw new CapabilityUnavailableError("coding:runner", `no turn runner for ${prep.thread.harness}`);
-			result = await port.run({ threadId, operationId: item.operationId, prompt: item.payload?.prompt ?? "Continue.", sessionId: prep.sessionId, resume: prep.sessionId !== null, maxBudgetUsd: prep.thread.budgetUsd === null ? null : Math.max(0, prep.thread.budgetUsd - prep.thread.spentUsd), workspace: prep.thread.workspaceRef, epoch, signal: abort.signal, emit: (e) => store.fenced(threadId, epoch, (q) => store.appendEvent(q, threadId, e)), recordTest: (r) => store.fenced(threadId, epoch, async (q) => void (await q.query("insert into pim_forge.forge_test_runs (thread_id, seq, command, exit_code, output) select $1, coalesce(max(seq), 0) + 1, $2, $3, $4 from pim_forge.forge_test_runs where thread_id = $1", [threadId, r.command, r.exitCode, r.output.slice(-20_000)]))) });
+			const prompt = item.payload?.prompt ?? "Continue.";
+			result = await port.run({ threadId, operationId: item.operationId, prompt: prep.sessionId === null ? await this.recap(prep.thread, prompt) : prompt, sessionId: prep.sessionId, resume: prep.sessionId !== null, maxBudgetUsd: prep.thread.budgetUsd === null ? null : Math.max(0, prep.thread.budgetUsd - prep.thread.spentUsd), workspace: prep.thread.workspaceRef, epoch, signal: abort.signal, emit: (e) => store.fenced(threadId, epoch, (q) => store.appendEvent(q, threadId, e)), recordTest: (r) => store.fenced(threadId, epoch, async (q) => void (await q.query("insert into pim_forge.forge_test_runs (thread_id, seq, command, exit_code, output) select $1, coalesce(max(seq), 0) + 1, $2, $3, $4 from pim_forge.forge_test_runs where thread_id = $1", [threadId, r.command, r.exitCode, r.output.slice(-20_000)]))), steers: this.steers(threadId, epoch) });
 		} catch (error) {
 			result = { outcome: "failed", detail: String(error instanceof Error ? error.message : error).slice(0, 500) };
+		} finally {
+			clearInterval(watch);
+			this.turns.delete(threadId);
 		}
 		if (result.outcome === "busy") {
 			await store.fenced(threadId, epoch, async (q, t) => {
@@ -278,16 +360,92 @@ export class ForgeWorker {
 			});
 			return false;
 		}
-		await store.fenced(threadId, epoch, (q, t) => this.settle(q, t, item.operationId, result));
+		// The work the turn left is committed as a checkpoint, saved, and pushed to the thread's own branch, whatever the turn's end (the person's abort too).
+		await this.keepWork(threadId, epoch, item.operationId, result);
+		await store.fenced(threadId, epoch, (q, t) => this.settle(q, t, item.operationId, result, { steered: live.interrupted }));
 		return true;
 	}
 
+	/** Looks at the thread while its turn runs: an abort stops the turn, and so does a steer that asks to interrupt it (the steer then starts the next turn). */
+	private async watch(threadId: string, live: { controller: AbortController; interrupted: boolean }): Promise<void> {
+		const r = (await this.d.store.db.query<Row>("select t.cancel_state, (select count(*) from pim_forge.forge_inbox i where i.thread_id = t.thread_id and i.status = 'pending' and i.payload ->> 'interrupt' = 'true') as interrupts from pim_forge.forge_threads t where t.thread_id = $1", [threadId])).rows[0];
+		if (!r || live.controller.signal.aborted) return;
+		if (r.cancel_state !== "none") live.controller.abort();
+		else if (Number(r.interrupts) > 0) {
+			live.interrupted = true;
+			live.controller.abort();
+		}
+	}
+
+	/** The steers that join a running turn instead of waiting for the next one (for a harness that takes them mid-turn): each is read, and marked sent once the turn has it. */
+	private steers(threadId: string, epoch: number): NonNullable<TurnRequest["steers"]> {
+		const { store } = this.d;
+		return {
+			next: async () => (await store.db.query<Row>(`select operation_id, payload from pim_forge.forge_inbox where thread_id = $1 and status = 'pending' and kind = 'steer' and coalesce(payload ->> 'interrupt', '') <> 'true' and ${DUE} order by seq`, [threadId])).rows.map((r) => ({ operationId: r.operation_id as string, text: String(r.payload?.prompt ?? "") })),
+			sent: (operationId, text) =>
+				store.fenced(threadId, epoch, async (q) => {
+					await q.query("update pim_forge.forge_inbox set status = 'done' where thread_id = $1 and operation_id = $2", [threadId, operationId]);
+					await store.appendEvent(q, threadId, { kind: "message", role: "user", data: { text, operationId, steeredMidTurn: true } });
+				}),
+		};
+	}
+
+	/**
+	 * What a CLI that starts a session anew is told, when its earlier session went with its sandbox (a thread's sandbox is given back when it has been idle): the task it was given and what it last said, as v1 told a lost session.
+	 * The first turn of a thread, and a harness that holds its own state (pi), get the prompt as it is.
+	 */
+	private async recap(t: ThreadRow, prompt: string): Promise<string> {
+		if (capabilitiesOf(t.harness).family !== "sandbox-cli") return prompt;
+		const said = (await this.d.store.db.query<Row>("select data ->> 'text' as text from pim_forge.forge_events where thread_id = $1 and kind = 'message' and role = 'assistant' and coalesce(data ->> 'text', '') <> '' order by seq desc limit 1", [t.threadId])).rows[0]?.text as string | undefined;
+		if (!said) return prompt;
+		return [prompt, "Your earlier session was lost with the workspace, so this is a new one; the repository holds your work as it was last saved.", "The task you were given:", t.task, "What you last said:", said.length > 2000 ? `${said.slice(0, 1200)}\n…\n${said.slice(-700)}` : said].join("\n\n");
+	}
+
+	/** Commits what a turn left as a checkpoint, bundles it for the next sandbox, and pushes the thread's branch. None of it can fail the turn. */
+	private async keepWork(threadId: string, epoch: number, operationId: string, result: TurnResult): Promise<void> {
+		const { store } = this.d;
+		if (!this.d.compute || result.outcome === "interrupted") return;
+		try {
+			const t = (await store.get(threadId))!;
+			if (!t.workspaceRef) return;
+			const made = await checkpointWorkspace(this.dep, await ensureBase(this.dep, store, t), operationId);
+			if (made) await store.fenced(threadId, epoch, (q) => store.appendEvent(q, threadId, { kind: "thread.checkpoint", data: { operationId, seq: made.seq, sha: made.sha, message: made.message } }));
+			const now = (await store.get(threadId)) ?? t;
+			if (this.d.autopush && result.outcome !== "login_required" && now.cancelState === "none") await this.autopush(now, epoch);
+		} catch (error) {
+			console.warn(JSON.stringify({ event: "pim.forge.checkpoint_failed", thread: threadId, error: String(error instanceof Error ? error.message : error).slice(0, 300) }));
+		}
+	}
+
+	/** `git push origin HEAD:refs/heads/<branch>` in the sandbox, through the git broker (which allows only the thread's own branch and never a force), when HEAD is on that branch past its base and not yet pushed. A failure is recorded and never fails the turn. */
+	private async autopush(t: ThreadRow, epoch: number): Promise<void> {
+		const { store } = this.d;
+		if (!t.workspaceRef || !t.branch || !capabilitiesOf(t.harness).forgePush) return;
+		const handle = t.workspaceRef as ComputeHandle;
+		const branch = (await gitIn(this.dep, handle, ["symbolic-ref", "--short", "-q", "HEAD"])).stdout.trim();
+		if (branch !== t.branch) return;
+		const head = (await gitIn(this.dep, handle, ["rev-parse", "HEAD"])).stdout.trim();
+		if (!head || head === t.lastPushedSha || head === t.baseSha) return;
+		const pushed = await gitIn(this.dep, handle, ["push", "origin", `HEAD:refs/heads/${t.branch}`], 5 * 60_000);
+		await store.fenced(t.threadId, epoch, async (q) => {
+			if (pushed.code === 0) {
+				await store.patch(q, t.threadId, { last_pushed_sha: head });
+				await store.appendEvent(q, t.threadId, { kind: "thread.pushed", data: { branch: t.branch, sha: head, automatic: true } });
+			} else {
+				const error = `${pushed.stderr}${pushed.stdout}`.replace(/pimgit_[\w.~+/=-]+/g, "[redacted]").replace(/(Bearer\s+)\S+/gi, "$1[redacted]").trim().slice(-300);
+				await store.appendEvent(q, t.threadId, { kind: "thread.autopush_failed", data: { branch: t.branch, sha: head, error } });
+			}
+		});
+	}
+
 	/** Settles a run and moves the thread, in the caller's fenced transaction. An interrupted run never ends the turn: it queues a bounded resume. */
-	private async settle(q: Queryable, t: ThreadRow, operationId: string, r: TurnResult): Promise<void> {
+	private async settle(q: Queryable, t: ThreadRow, operationId: string, r: TurnResult, o: { steered?: boolean } = {}): Promise<void> {
 		const { store } = this.d;
 		const root = rootOperation(operationId);
 		const cancelled = t.cancelState !== "none";
-		const status = cancelled ? "cancelled" : r.outcome === "completed" ? "completed" : r.outcome === "interrupted" || r.outcome === "session_limit" ? "interrupted" : "failed";
+		// A steer that asked to interrupt stopped the turn: it ends here without a word to the chat, and the steer's own turn is next.
+		const steered = o.steered === true && !cancelled;
+		const status = cancelled || steered ? "cancelled" : r.outcome === "completed" ? "completed" : r.outcome === "interrupted" || r.outcome === "session_limit" ? "interrupted" : "failed";
 		await q.query("update pim_forge.forge_harness_runs set status = $3, ended_at = now() where thread_id = $1 and operation_id = $2", [t.threadId, operationId, status]);
 		if (r.sessionId) await q.query("insert into pim_forge.forge_harness_sessions (thread_id, harness, session_id, cost_usd, usage) values ($1,$2,$3,coalesce($4::numeric, 0),$5) on conflict (thread_id, harness) do update set session_id = $3, cost_usd = case when $4::numeric is null then pim_forge.forge_harness_sessions.cost_usd else $4 end, usage = coalesce($5, pim_forge.forge_harness_sessions.usage), updated_at = now()", [t.threadId, t.harness, r.sessionId, r.sessionCostUsd ?? null, r.sessionUsage ?? null]);
 		if (r.costUsd || r.tokensIn || r.tokensOut) await store.appendEvent(q, t.threadId, { kind: "model_call", costUsd: r.costUsd, tokensIn: r.tokensIn, tokensOut: r.tokensOut, data: { operationId, via: "harness", harness: t.harness } });
@@ -297,6 +455,11 @@ export class ForgeWorker {
 		}
 		await q.query("delete from pim_forge.forge_stall_episodes where source = $1", [t.threadId]);
 		const wake = (outcome: "completed" | "failed", summary?: string | null) => store.emitCompletionWake(q, t, root, outcome, summary);
+		if (steered) {
+			await store.appendEvent(q, t.threadId, { kind: "thread.turn_ended", data: { operationId: root, outcome: "cancelled", reason: "steered" } });
+			await store.setState(q, t.threadId, "idle");
+			return;
+		}
 		if (cancelled) {
 			await store.setState(q, t.threadId, "idle", "aborted");
 			await store.patch(q, t.threadId, { cancel_state: "cancelled" });
@@ -332,6 +495,15 @@ export class ForgeWorker {
 			await store.setState(q, t.threadId, "waiting_input", "login_required", r.detail ?? null);
 			await wake("failed", "login_required");
 		} else {
+			// Provider trouble, a rate limit, a dropped connection: the turn is tried again after a wait (once; a rate limit more often) before it counts as failed.
+			const plan = r.outcome === "failed" && !(t.budgetUsd !== null && t.spentUsd + (r.costUsd ?? 0) >= t.budgetUsd) ? retryPlan(operationId, r.detail, this.d.retryDelayMs) : null;
+			if (plan) {
+				const retryAt = Date.now() + plan.delayMs;
+				await store.enqueueInbox(q, t.threadId, `retry-${root}-${plan.attempt}`, "retry", { prompt: "Continue where you left off.", notBefore: retryAt });
+				await store.appendEvent(q, t.threadId, { kind: "thread.retrying", data: { operationId, error: (r.detail ?? "error").slice(0, 500), retryAt, attempt: plan.attempt } });
+				await store.setState(q, t.threadId, "idle", "retrying", (r.detail ?? "error").slice(0, 500));
+				return;
+			}
 			await store.appendEvent(q, t.threadId, { kind: "thread.turn_ended", data: { operationId: root, outcome: r.outcome } });
 			await store.setState(q, t.threadId, "failed", r.outcome === "budget" ? "budget" : "error", r.detail ?? null);
 			await wake("failed", r.outcome === "budget" ? "budget" : (r.detail ?? "error"));

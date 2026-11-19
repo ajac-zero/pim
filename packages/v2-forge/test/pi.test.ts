@@ -1,5 +1,6 @@
 // Family A: a real pi-durable 1.1.0 Harness per thread, on PostgreSQL, with the coding tools running in the sandbox.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { fakeManager, TOKEN, URL_BASE } from "@pim/coding/support/fake-manager";
@@ -23,12 +24,13 @@ describe("pi on pi-durable and PostgreSQL", () => {
 		const manager = fakeManager(5);
 		manager.backing.register("sh", async (ctx) => {
 			ran.push(ctx.argv);
+			if (ctx.argv.join(" ").includes("sleepy")) await new Promise((r) => setTimeout(r, 800));
 			return { stdout: "built ok\n", code: 0 };
 		});
 		agent = new Seeded(new ComposeWorkspaceProvider({ managerUrl: URL_BASE, token: TOKEN, fetch: manager.fetch, sleep: async () => {} }));
 		const models = createModels();
 		models.setProvider(faux.provider);
-		port = new PiTurnPort({ store: s.store, compute: agent, models: async () => models, defaultModel: { provider: "faux", modelId: "faux-model" } });
+		port = new PiTurnPort({ store: s.store, compute: agent, models: async () => models, defaultModel: { provider: "faux", modelId: "faux-model" }, lookMs: 50 });
 	});
 	afterAll(async () => s.close());
 
@@ -85,5 +87,44 @@ describe("pi on pi-durable and PostgreSQL", () => {
 		const stale = await PgPiStorage.open(s.store, a, epoch - 1);
 		await expect(stale.commit([], undefined as never)).rejects.toMatchObject({ code: "lease_lost" });
 		expect(await piCommitCount(s.store, a)).toBe(before);
+	});
+
+	it("stops a turn when its spend crosses the budget, mid-turn, and fails the thread for it", async () => {
+		// The faux provider reports no cost, so every call it answers is billed $2 here.
+		const priced = fauxProvider({ provider: "priced", models: [{ id: "m", contextWindow: 200_000 }] });
+		const bill = <M extends { usage: any }>(m: M): M => ({ ...m, usage: { ...m.usage, cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, total: 2 } } });
+		const billed = (stream: (...a: any[]) => any) => (...a: any[]) => {
+			const out = createAssistantMessageEventStream();
+			void (async () => {
+				const inner = stream(...a);
+				for await (const e of inner) out.push("message" in e ? { ...e, message: bill(e.message) } : "error" in e ? { ...e, error: bill(e.error) } : e);
+				out.end(bill(await inner.result()));
+			})();
+			return out;
+		};
+		const models = createModels();
+		models.setProvider({ ...priced.provider, stream: billed(priced.provider.stream), streamSimple: billed(priced.provider.streamSimple) } as never);
+		const pricey = new PiTurnPort({ store: s.store, compute: agent, models: async () => models, defaultModel: { provider: "priced", modelId: "m" }, lookMs: 50 });
+		priced.setResponses([fauxAssistantMessage(fauxToolCall("bash", { command: "sleepy one" }), { stopReason: "toolUse" }), fauxAssistantMessage("never reached")]);
+		const { threadId } = await s.forge.start(ada, startReq("pi-budget", { harness: "pi", budgetUsd: 0.5 }));
+		await s.worker({ compute: agent, turns: { pi: pricey } }).step(threadId);
+		// The first call alone cost $2 of the $0.50: the second was never made.
+		expect(priced.getPendingResponseCount()).toBe(1);
+		expect(await s.store.get(threadId)).toMatchObject({ state: "failed", stateReason: "budget" });
+	});
+
+	it("a steer sent while the turn runs joins it after its current step, instead of waiting for a second turn", async () => {
+		faux.setResponses([fauxAssistantMessage(fauxToolCall("bash", { command: "sleepy two" }), { stopReason: "toolUse" }), fauxAssistantMessage("Did both.")]);
+		const { threadId } = await s.forge.start(ada, startReq("pi-steer", { harness: "pi" }));
+		const running = worker().step(threadId);
+		for (let i = 0; i < 200 && !ran.some((a) => a.join(" ").includes("sleepy two")); i++) await new Promise((r) => setTimeout(r, 25));
+		await s.forge.steer(ada, threadId, "also add tests", "pi-steer-1");
+		await running;
+		expect(faux.getPendingResponseCount()).toBe(0);
+		const events = (await s.forge.transcript(ada, threadId)).events;
+		expect(events.filter((e) => e.role === "user").map((e) => e.data.text)).toEqual(["Fix the login bug", "also add tests"]);
+		expect((await s.pool.query("select status from pim_forge.forge_inbox where thread_id = $1 and operation_id = 'pi-steer-1'", [threadId])).rows[0]!.status).toBe("done");
+		// One turn, not two.
+		expect((await s.pool.query("select count(*) c from pim_forge.forge_harness_runs where thread_id = $1", [threadId])).rows[0]!.c).toBe("1");
 	});
 });

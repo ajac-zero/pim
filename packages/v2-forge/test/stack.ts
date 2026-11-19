@@ -57,10 +57,11 @@ export async function stack(o: { allowedRepos?: string[]; ampConfigured?: boolea
 	const objects = new MemoryObjects();
 	const orb = new FakeOrbClient();
 	const orbs = () => orb;
-	const forge = new Forge({ db, store, authz, scheduler, credentials, git: gitHost, objects, orbs, compute: sandboxes, ampConfigured: o.ampConfigured ?? true });
+	// The local sandbox is the checkout itself: its working directory is the repository.
+	const forge = new Forge({ db, store, authz, scheduler, credentials, git: gitHost, objects, orbs, compute: sandboxes, ampConfigured: o.ampConfigured ?? true, repoDir: "." });
 	await scheduler.upsertPool({ poolId: "default", provider: "local", size: 50 });
 
-	const worker = (deps: Partial<WorkerDeps> = {}, holder?: string) => new ForgeWorker({ store, scheduler, turns: {}, compute: sandboxes, orbs, objects, defaultPool: "default", clock, holder, ...deps });
+	const worker = (deps: Partial<WorkerDeps> = {}, holder?: string) => new ForgeWorker({ store, scheduler, turns: {}, compute: sandboxes, orbs, objects, defaultPool: "default", clock, holder, repoDir: ".", watchMs: 25, ...deps });
 
 	/** Gives the person every coding permission, as an admin would. */
 	const grantAll = async (owner = "ada", opts: { requiresApproval?: boolean } = {}) => {

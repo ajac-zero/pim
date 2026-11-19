@@ -12,7 +12,7 @@ const run = promisify(execFile);
 const ID = ["-c", "user.name=Forge", "-c", "user.email=forge@example.invalid"];
 
 export class LocalGitHost implements GitHost {
-	readonly pullRequests: { repo: string; branch: string; base: string; title: string; number: number }[] = [];
+	readonly pullRequests: { repo: string; branch: string; base: string; title: string; body: string; number: number }[] = [];
 
 	/** `bare` maps `owner/name` to a bare repository directory. */
 	constructor(
@@ -65,15 +65,15 @@ export class LocalGitHost implements GitHost {
 		await this.host(repo, "update-ref", "-d", `refs/heads/${branch}`);
 	}
 
-	async openPullRequest(repo: string, branch: string, base: string, title: string) {
+	async openPullRequest(repo: string, branch: string, base: string, title: string, body = "") {
 		if (!(await this.hasBranch(repo, branch))) throw new ForgeError("not_pushed", `${branch} isn't on the host yet`);
 		const number = this.pullRequests.length + 1;
-		this.pullRequests.push({ repo, branch, base, title, number });
+		this.pullRequests.push({ repo, branch, base, title, body, number });
 		return { url: `https://git.example.test/${repoName(repo)}/pull/${number}`, number };
 	}
 
-	async remoteDiff(repo: string, branch: string): Promise<string | null> {
+	async remoteDiff(repo: string, branch: string, since?: string): Promise<string | null> {
 		if (!(await this.hasBranch(repo, branch))) return null;
-		return this.host(repo, "diff", `${await this.defaultBranch(repo)}...${branch}`);
+		return this.host(repo, "diff", `${since ?? (await this.defaultBranch(repo))}...${branch}`);
 	}
 }

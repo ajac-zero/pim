@@ -37,6 +37,8 @@ export type PiPortDeps = {
 	/** The models this thread may use (the person's providers, the deployment's default); the port asks once per turn. */
 	models: (thread: ThreadRow) => Promise<Models>;
 	defaultModel: { provider: string; modelId: string };
+	/** How often a running turn is looked at for its spend and for steers, in ms. */
+	lookMs?: number;
 };
 
 const costOf = (usage: { models: Record<string, any> }) => Object.values(usage.models).reduce((sum: number, u: any) => sum + Number(u?.cost?.total ?? 0), 0);
@@ -69,32 +71,62 @@ export class PiTurnPort implements TurnPort {
 			const root = await harness.root(BACKGROUND_CONTEXT, { agent: { model } });
 			harness.resume();
 			const before = costOf(await harness.usage(BACKGROUND_CONTEXT));
-			// The request id is the turn's root operation: a resumed turn finds the submission the dead worker made instead of submitting twice.
-			const submission = await root.submit({ type: "input", content: turn.prompt, requestId: rootOperation(turn.operationId), whenBusy: "steer" }, BACKGROUND_CONTEXT);
+			// The request id is the turn's root operation: a resumed turn finds the submission the dead worker made instead of submitting twice. A retry after a failure is a new submission.
+			const submission = await root.submit({ type: "input", content: turn.prompt, requestId: turn.operationId.startsWith("retry-") ? turn.operationId : rootOperation(turn.operationId), whenBusy: "steer" }, BACKGROUND_CONTEXT);
 			const onAbort = () => void root.abort(BACKGROUND_CONTEXT);
 			turn.signal.addEventListener("abort", onAbort);
+			// The transcript: every message of the log not yet recorded (a replayed cursor is dropped), written as the turn goes so the page follows it.
+			const flush = async () => {
+				const page = await root.entries({ order: "ascending" }, 1000, undefined, BACKGROUND_CONTEXT);
+				for (const e of page.items) {
+					const m = (e.model?.[0] ?? null) as any;
+					if (AssistantEntry.is(e) && m) {
+						const calls = (m.content as any[]).filter((c) => c.type === "toolCall").map((c) => ({ id: c.id, name: c.name, arguments: c.arguments }));
+						await turn.emit({ kind: "message", role: "assistant", sourceCursor: `pi:${e.id}`, data: { text: textOf(m.content), operationId: turn.operationId, ...(calls.length ? { toolCalls: calls } : {}) } });
+					} else if (ToolResultEntry.is(e) && m) {
+						await turn.emit({ kind: "message", role: "tool", sourceCursor: `pi:${e.id}`, data: { toolCallId: m.toolCallId, name: m.toolName, text: textOf(m.content), isError: !!m.isError, operationId: turn.operationId } });
+					}
+				}
+			};
+			// While the turn runs: what it has spent is held to the budget (a call that crosses it is the last), and the steers that arrive join the turn after its current step.
+			let overBudget = false;
+			let looking: Promise<void> | null = null;
+			const joined: (typeof submission)[] = [];
+			const lookOnce = async () => {
+				try {
+					if (turn.maxBudgetUsd !== null && costOf(await harness.usage(BACKGROUND_CONTEXT)) - before >= turn.maxBudgetUsd) {
+						overBudget = true;
+						await root.abort(BACKGROUND_CONTEXT);
+						return;
+					}
+					for (const steer of (await turn.steers?.next()) ?? []) {
+						joined.push(await root.submit({ type: "input", content: steer.text, requestId: steer.operationId, whenBusy: "steer" }, BACKGROUND_CONTEXT));
+						await turn.steers!.sent(steer.operationId, steer.text);
+					}
+					await flush();
+				} catch {
+					// Looked at again at the next tick.
+				}
+			};
+			const look = () => {
+				if (!looking && !overBudget) looking = lookOnce().finally(() => (looking = null));
+			};
+			const ticker = setInterval(look, this.d.lookMs ?? 1000);
 			let settled;
 			try {
 				settled = await submission.wait(BACKGROUND_CONTEXT);
+				// A steer that came as the turn ended is part of it: it is waited for, not cut off.
+				while (joined.length) await joined.shift()!.wait(BACKGROUND_CONTEXT);
 			} finally {
+				clearInterval(ticker);
 				turn.signal.removeEventListener("abort", onAbort);
+				await looking;
 			}
-			// The transcript: every message of the log not yet recorded (a replayed cursor is dropped).
-			let text: string | null = null;
-			const page = await root.entries({ order: "ascending" }, 1000, undefined, BACKGROUND_CONTEXT);
-			for (const e of page.items) {
-				const m = (e.model?.[0] ?? null) as any;
-				if (AssistantEntry.is(e) && m) {
-					const calls = (m.content as any[]).filter((c) => c.type === "toolCall").map((c) => ({ id: c.id, name: c.name, arguments: c.arguments }));
-					text = textOf(m.content) || text;
-					await turn.emit({ kind: "message", role: "assistant", sourceCursor: `pi:${e.id}`, data: { text: textOf(m.content), operationId: turn.operationId, ...(calls.length ? { toolCalls: calls } : {}) } });
-				} else if (ToolResultEntry.is(e) && m) {
-					await turn.emit({ kind: "message", role: "tool", sourceCursor: `pi:${e.id}`, data: { toolCallId: m.toolCallId, name: m.toolName, text: textOf(m.content), isError: !!m.isError, operationId: turn.operationId } });
-				}
-			}
+			await flush();
 			const costUsd = Math.max(0, costOf(await harness.usage(BACKGROUND_CONTEXT)) - before);
+			if (overBudget) return { outcome: "budget", costUsd, detail: `Spent $${costUsd.toFixed(4)} of the turn's $${turn.maxBudgetUsd?.toFixed(4)}` };
 			if (settled.status === "done") return { outcome: "completed", costUsd, text: null, detail: null, progress: true };
-			return { outcome: turn.signal.aborted ? "failed" : "failed", costUsd, detail: `The run ended unanswered${(settled as any).reason ? `: ${JSON.stringify((settled as any).reason).slice(0, 300)}` : ""}` };
+			return { outcome: "failed", costUsd, detail: `The run ended unanswered${(settled as any).reason ? `: ${JSON.stringify((settled as any).reason).slice(0, 300)}` : ""}` };
 		} finally {
 			await harness.close(BACKGROUND_CONTEXT).catch(() => {});
 		}

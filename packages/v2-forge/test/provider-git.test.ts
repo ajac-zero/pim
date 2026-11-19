@@ -37,7 +37,7 @@ describe("ProviderGitHost", () => {
 		} as unknown as GitProvider;
 		const registry = new ProviderRegistry([provider]);
 		const gitHost = new ProviderGitHost({ registry, compute: s.sandboxes, repoDir: "", scratchDir: s.dir });
-		forge = new Forge({ db: s.db, store: s.store, authz: s.authz, scheduler: s.scheduler, credentials: s.credentials, git: gitHost, objects: s.objects, orbs: () => s.orb, compute: s.sandboxes, ampConfigured: true });
+		forge = new Forge({ db: s.db, store: s.store, authz: s.authz, scheduler: s.scheduler, credentials: s.credentials, git: gitHost, objects: s.objects, orbs: () => s.orb, compute: s.sandboxes, ampConfigured: true, repoDir: "." });
 		(globalThis as any).__registry = registry;
 	});
 	afterAll(async () => {

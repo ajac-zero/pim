@@ -11,6 +11,9 @@ import { type GitHost, type Objects, type OrbClients } from "./ports";
 import { ForgeScheduler } from "./scheduler";
 import { ForgeStore, type OutboxTopic, type ThreadRow } from "./store";
 import { type Credentials } from "./tokens";
+import { MAX_DIFF_CHARS, autosaveWorkspace, checkpointWorkspace, ensureBase, gitIn, keepDiff, makeDiff } from "./checkpoint";
+import { REPO_DIR } from "./git-checkout";
+import { parseTestSummary } from "@pim/coding/tools/test-results";
 
 export type ForgeConfig = {
 	db: Db;
@@ -26,13 +29,23 @@ export type ForgeConfig = {
 	ampConfigured: boolean;
 	/** Whether freeing a slot also admits the next waiters. False for a Forge scoped to one owner (the Gate's), which can't see theirs; the worker's sweep does it. */
 	promoteOnRelease?: boolean;
+	/** Where the checkout is in a sandbox; `/workspace/repo`, where `prepareCheckout` makes it, unless a provider lays it out otherwise. */
+	repoDir?: string;
 };
 
-export type StartRequest = { operationId: string; harness?: Harness; task: string; repo: string; ref?: string; chatId?: string; budgetUsd?: number | null; pool?: string; profile?: object };
+/** A thread as a person or an agent reads it: the row without what signs its credentials or says who steps it. */
+export type ThreadView = Omit<ThreadRow, "gatewayNonce" | "leaseHolder"> & { capabilities: ReturnType<typeof capabilitiesOf> };
+
+export type StartRequest = { operationId: string; harness?: Harness; task: string; repo: string; ref?: string; chatId?: string; budgetUsd?: number | null; pool?: string; profile?: object; /** A thread of the same person that this one continues from. */ parent?: string };
+export type ThreadDiff = { source: "workspace" | "orb"; diff: string; unpushedOrb: boolean; since: string | null; head: string | null; truncated: boolean };
 export type Gated<T> = ({ status: "done" } & T) | { status: "approval_required"; approvalId: string };
 
 export class Forge {
 	constructor(private readonly c: ForgeConfig) {}
+
+	private get repoDir() {
+		return this.c.repoDir ?? REPO_DIR;
+	}
 
 	/** This Forge as one owner's requests see it: every query runs under that owner's row-level security scope (see `scopedDb`). */
 	scopedTo(ownerId: string): Forge {
@@ -68,7 +81,7 @@ export class Forge {
 	async unpushed(actor: Actor, ref: string): Promise<{ commits: number; sha: string; message: string; at: number } | null> {
 		const t = await this.own(actor, ref);
 		if ((t.state !== "idle" && t.state !== "waiting_input") || !capabilitiesOf(t.harness).forgePush || !t.workspaceRef || !this.c.compute || t.computeTornDownAt) return null;
-		const git = (...args: string[]) => this.c.compute!.exec(t.workspaceRef!, ["git", ...args], { cwd: "/workspace/repo", timeoutMs: 10_000 });
+		const git = (...args: string[]) => this.c.compute!.exec(t.workspaceRef!, ["git", ...args], { cwd: this.repoDir, timeoutMs: 10_000 });
 		try {
 			const ahead = await git("rev-list", "--count", "HEAD", "--not", "--remotes");
 			const commits = Number(ahead.stdout.trim());
@@ -101,7 +114,8 @@ export class Forge {
 		await this.c.authz.check(actor, "coding:start", { repo: req.repo, pool: harness === "amp" ? null : (req.pool ?? null) });
 		await assertCapability(this.c.db, harness, this.c.ampConfigured, req.pool);
 		await tx(this.c.db, (q) => this.c.scheduler.checkQuota(q, actor.ownerId, actor.tenantId ?? null, { startingWorkspaceThread: false }));
-		const { thread, created } = await this.c.store.start({ ownerId: actor.ownerId, operationId: req.operationId, harness, task: req.task, repo: req.repo, ref: req.ref, chatId: req.chatId, createdBy: actor.agent ? `agent:${actor.agent}` : actor.ownerId, budgetUsd: req.budgetUsd, profile: req.profile }, this.c.authz.policy.branchPrefix);
+		const parent = req.parent ? (await this.own(actor, req.parent)).threadId : null;
+		const { thread, created } = await this.c.store.start({ ownerId: actor.ownerId, operationId: req.operationId, harness, task: req.task, repo: req.repo, ref: req.ref, chatId: req.chatId, createdBy: actor.agent ? `agent:${actor.agent}` : actor.ownerId, budgetUsd: req.budgetUsd, profile: req.profile, limits: parent ? { parent } : null }, this.c.authz.policy.branchPrefix);
 		if (created) {
 			await this.c.store.locked(thread.threadId, async (q) => {
 				if (req.pool) await this.c.store.patch(q, thread.threadId, { placement: { pool: req.pool } });
@@ -183,17 +197,28 @@ export class Forge {
 		return { repo: name, setupScript: r?.setup_script ?? "", updatedAt: r ? new Date(r.updated_at).getTime() : null };
 	}
 
-	async status(actor: Actor, ref: string) {
-		const t = await this.own(actor, ref);
+	async status(actor: Actor, ref: string): Promise<ThreadView> {
+		const { gatewayNonce: _nonce, leaseHolder: _holder, ...t } = await this.own(actor, ref);
 		return { ...t, capabilities: capabilitiesOf(t.harness) };
 	}
 
-	async steer(actor: Actor, ref: string, text: string, operationId: string): Promise<{ queued: boolean }> {
+	/**
+	 * Sends the thread something to do. A thread between turns starts a new turn with it; one that failed, or waits for the person, goes on with it. During a turn it is read after the current step (pi) or is the next turn (a vendor CLI),
+	 * and with `interrupt` it stops the turn and starts on it at once. An Amp thread can't be cut short: its steer is queued at the remote.
+	 */
+	async steer(actor: Actor, ref: string, text: string, operationId: string, o: { interrupt?: boolean } = {}): Promise<{ queued: boolean }> {
 		const t = await this.own(actor, ref);
 		await this.allow(actor, "coding:steer", t);
 		if (t.state === "archived") throw new ForgeError("archived", "This thread is archived");
 		if (t.state === "failed" && t.stateReason === "budget" ) throw new ForgeError("budget_spent", "The thread's budget is spent");
-		return this.c.store.locked(t.threadId, async (q) => ({ queued: await this.c.store.enqueueInbox(q, t.threadId, operationId, "steer", { prompt: text }) }));
+		const interrupt = o.interrupt === true && capabilitiesOf(t.harness).family !== "remote-orb";
+		const out = await this.c.store.locked(t.threadId, async (q, cur) => {
+			const queued = await this.c.store.enqueueInbox(q, t.threadId, operationId, "steer", { prompt: text, ...(interrupt && cur.state === "running" ? { interrupt: true } : {}) });
+			if (queued && cur.state === "failed") await this.c.store.setState(q, t.threadId, "idle");
+			return { queued };
+		});
+		if (interrupt) await this.c.db.query("select pg_notify('pim_forge_cancel', $1)", [t.threadId]);
+		return out;
 	}
 
 	/** Sends an uncertain steer again, on the person's word: the old row is closed as superseded and a new operation carries the same text. */
@@ -219,6 +244,8 @@ export class Forge {
 			await this.c.store.revokeCredentials(q, t.threadId);
 			await q.query("delete from pim_forge.forge_inbox where thread_id = $1 and status = 'pending'", [t.threadId]);
 		});
+		// A worker stepping the thread stops its turn at once; one that isn't told finds out on its next look at the thread.
+		await this.c.db.query("select pg_notify('pim_forge_cancel', $1)", [t.threadId]);
 		let state: ThreadRow["cancelState"] = "requested";
 		if (capabilitiesOf(t.harness).family === "remote-orb" && t.orb) {
 			const client = await this.c.orbs(t);
@@ -288,42 +315,70 @@ export class Forge {
 		});
 	}
 
-	async diff(actor: Actor, ref: string): Promise<{ source: "workspace" | "orb"; diff: string; unpushedOrb: boolean }> {
-		const t = await this.own(actor, ref);
+	/** The checkpoint helpers' view of the config: where the checkout is, and what runs commands in it. */
+	private get dep() {
+		return { db: this.c.db, compute: this.c.compute!, repoDir: this.repoDir };
+	}
+
+	/**
+	 * What a thread changed: `git diff` from `since` (the commit it started from, by default) to its latest checkpoint (or `head`), at most 256 KiB. While a turn runs the work tree is the end of it. Each checkpoint's diff from the start is kept,
+	 * so it is there once the sandbox is gone; another needs the workspace. An Amp thread has no workspace: its diff is read from the git host, of its branch (or `head`), from `since` (the default branch by default).
+	 */
+	async diff(actor: Actor, ref: string, o: { since?: string; head?: string } = {}): Promise<ThreadDiff> {
+		let t = await this.own(actor, ref);
 		if (capabilitiesOf(t.harness).diff === "remote-git-host") {
-			const branch = t.orb?.branch as string | undefined;
-			const diff = branch ? await this.c.git.remoteDiff(t.repo, branch) : null;
+			const branch = o.head ?? (t.orb?.branch as string | undefined);
+			const raw = branch ? await this.c.git.remoteDiff(t.repo, branch, o.since) : null;
 			// The orb's work is only visible once it's on the git host: say so instead of showing an empty diff.
-			const out = { source: "orb" as const, diff: diff ?? "", unpushedOrb: diff === null };
-			await this.saveDiff(t, out);
+			const out = { source: "orb" as const, diff: (raw ?? "").slice(0, MAX_DIFF_CHARS), unpushedOrb: raw === null, since: o.since ?? null, head: raw === null ? null : (branch ?? null), truncated: (raw ?? "").length > MAX_DIFF_CHARS };
+			await keepDiff(this.c.db, t.threadId, { ...out, source: "orb" });
 			return out;
 		}
 		if (t.workspaceRef && this.c.compute && !t.computeTornDownAt) {
-			const r = await this.c.compute.exec(t.workspaceRef, ["git", "diff", "HEAD"], {});
-			const out = { source: "workspace" as const, diff: r.stdout, unpushedOrb: false };
-			await this.saveDiff(t, out);
-			return out;
+			const running = t.state === "running" || t.state === "provisioning";
+			t = await ensureBase(this.dep, this.c.store, t);
+			if (!running) await checkpointWorkspace(this.dep, t, null).catch(() => null);
+			const handle = t.workspaceRef;
+			const from = o.since ?? t.baseSha;
+			const sha = async (x: string) => (await gitIn(this.dep, handle, ["rev-parse", "--verify", "--quiet", `${x}^{commit}`])).stdout.trim() || null;
+			const head = o.head ? await sha(o.head) : running ? null : await sha("HEAD");
+			if (o.head && !head) throw new ForgeError("invalid", `${o.head} isn't a commit of this thread's checkout`);
+			// Without a recorded start the diff is of the work tree against HEAD, as it always was.
+			const made = from === head ? { diff: "", truncated: false } : await makeDiff(this.dep, handle, from ?? "HEAD", from ? head : null);
+			if (!made) throw new ForgeError("invalid", `${from} isn't a commit of this thread's checkout`);
+			return { source: "workspace", diff: made.diff, unpushedOrb: false, since: from, head, truncated: made.truncated };
 		}
-		const last = (await this.c.db.query<Row>("select source, diff, unpushed_orb from pim_forge.forge_diffs where thread_id = $1 order by seq desc limit 1", [t.threadId])).rows[0];
-		return { source: last?.source ?? "workspace", diff: last?.diff ?? "", unpushedOrb: last?.unpushed_orb ?? false };
+		const kept = (await this.c.db.query<Row>("select source, diff, unpushed_orb, files from pim_forge.forge_diffs where thread_id = $1 and ($2::text is null or files ->> 'since' = $2) and ($3::text is null or files ->> 'head' = $3) order by seq desc limit 1", [t.threadId, o.since ?? null, o.head ?? null])).rows[0];
+		if (!kept && (o.since || o.head)) throw new ForgeError("workspace_not_running", "That diff isn't kept and this thread has no running workspace");
+		const meta = (kept?.files ?? {}) as { since?: string | null; head?: string | null; truncated?: boolean };
+		return { source: kept?.source ?? "workspace", diff: kept?.diff ?? "", unpushedOrb: kept?.unpushed_orb ?? false, since: meta.since ?? null, head: meta.head ?? null, truncated: meta.truncated ?? false };
 	}
 
-	private async saveDiff(t: ThreadRow, d: { source: string; diff: string; unpushedOrb: boolean }) {
-		await this.c.db.query("insert into pim_forge.forge_diffs (thread_id, seq, source, unpushed_orb, diff) select $1, coalesce(max(seq), 0) + 1, $2, $3, $4 from pim_forge.forge_diffs where thread_id = $1", [t.threadId, d.source, d.unpushedOrb, d.diff]);
-	}
-
+	/** Runs a command in the thread's checkout (its tests, say) and keeps the run among the thread's test runs. */
 	async runTests(actor: Actor, ref: string, command: string[]) {
 		const t = await this.own(actor, ref);
 		await this.allow(actor, "coding:steer", t);
 		if (!t.workspaceRef || !this.c.compute || t.computeTornDownAt) throw new ForgeError("workspace_not_running", "This thread has no running workspace");
-		const r = await this.c.compute.exec(t.workspaceRef, command, { timeoutMs: 15 * 60_000 });
-		await this.c.db.query("insert into pim_forge.forge_test_runs (thread_id, seq, command, exit_code, output) select $1, coalesce(max(seq), 0) + 1, $2, $3, $4 from pim_forge.forge_test_runs where thread_id = $1", [t.threadId, command.join(" "), r.code, (r.stdout + r.stderr).slice(-20_000)]);
-		return { exitCode: r.code, output: r.stdout + r.stderr };
+		const r = await this.c.compute.exec(t.workspaceRef, command, { cwd: this.repoDir, timeoutMs: 15 * 60_000 });
+		const output = (r.stdout + r.stderr).slice(-20_000);
+		await this.c.db.query("insert into pim_forge.forge_test_runs (thread_id, seq, command, exit_code, output) select $1, coalesce(max(seq), 0) + 1, $2, $3, $4 from pim_forge.forge_test_runs where thread_id = $1", [t.threadId, command.join(" "), r.code, output]);
+		return { exitCode: r.code, timedOut: r.timedOut === true, summary: parseTestSummary(output) ?? null, output };
 	}
 
+	/** The thread's test runs, oldest first, each with the counts its runner printed when they can be read. */
 	async tests(actor: Actor, ref: string) {
 		const t = await this.own(actor, ref);
-		return (await this.c.db.query<Row>("select seq, command, exit_code, output, at from pim_forge.forge_test_runs where thread_id = $1 order by seq", [t.threadId])).rows;
+		return (await this.c.db.query<Row>("select seq, command, exit_code, output, at from pim_forge.forge_test_runs where thread_id = $1 order by seq", [t.threadId])).rows.map((r) => ({ ...r, summary: parseTestSummary(r.output) ?? null }));
+	}
+
+	/** What a push takes is HEAD, so the work the agent left uncommitted is committed first (a checkpoint); a thread whose turn is running is left alone, its work isn't finished. */
+	private async commitWork(t: ThreadRow): Promise<void> {
+		if (t.state === "running" || t.state === "provisioning" || !t.workspaceRef) return;
+		try {
+			await checkpointWorkspace(this.dep, await ensureBase(this.dep, this.c.store, t), null);
+		} catch {
+			// A workspace that can't be looked at is pushed as it is.
+		}
 	}
 
 	/** Permission, then (when the grant says so) a human's yes. A permission is not an approval: both are required where policy says. */
@@ -346,19 +401,23 @@ export class Forge {
 		if (pending) return { status: "approval_required", ...pending };
 		const branch = t.branch!;
 		assertPushBranch(this.c.authz.policy, branch, await this.c.git.defaultBranch(t.repo));
+		await this.commitWork(t);
 		const r = await this.c.git.push(ws, t.repo, branch);
 		await this.c.store.locked(t.threadId, (q) => this.c.store.patch(q, t.threadId, { last_pushed_sha: r.sha }));
 		await this.c.authz.consumeApproval(t.threadId, "push");
 		return { status: "done", ...r, branch };
 	}
 
-	async openPullRequest(actor: Actor, ref: string, title?: string): Promise<Gated<{ url: string; number: number }>> {
+	async openPullRequest(actor: Actor, ref: string, title?: string, body?: string): Promise<Gated<{ url: string; number: number }>> {
 		const t = await this.own(actor, ref);
 		const pending = await this.gate(actor, "coding:pr", "pr", t);
 		if (pending) return { status: "approval_required", ...pending };
 		const branch = (t.branch ?? (t.orb?.branch as string | undefined)) ?? null;
 		if (!branch || !(await this.c.git.hasBranch(t.repo, branch))) throw new ForgeError("not_pushed", "The thread's branch isn't on the git host yet");
-		const pr = await this.c.git.openPullRequest(t.repo, branch, await this.c.git.defaultBranch(t.repo), title ?? t.task.slice(0, 120));
+		// Into the branch the thread started from, or the default branch when it started from a commit (or from main, which is the default's usual name).
+		const base = !t.ref || t.ref === "main" || /^[0-9a-f]{40}$/i.test(t.ref) ? await this.c.git.defaultBranch(t.repo) : t.ref;
+		const first = t.task.split("\n")[0]!.trim().slice(0, 100) || branch;
+		const pr = await this.c.git.openPullRequest(t.repo, branch, base, title?.trim() || first, body ?? `${t.task.length > 2000 ? `${t.task.slice(0, 2000)}…` : t.task}\n\n---\nOpened by Pim from a coding thread.`);
 		await this.c.store.locked(t.threadId, (q) => this.c.store.patch(q, t.threadId, { pull_request: pr }));
 		await this.c.authz.consumeApproval(t.threadId, "pr");
 		return { status: "done", ...pr };
@@ -382,6 +441,7 @@ export class Forge {
 		if (branch === base) throw new ForgeError("push_refused", `${base} is the default branch`);
 		assertPushBranch(this.c.authz.policy, branch!, base);
 		if (ws) {
+			await this.commitWork(t);
 			const pushed = await this.c.git.push(ws, t.repo, branch!);
 			await this.c.store.locked(t.threadId, (q) => this.c.store.patch(q, t.threadId, { last_pushed_sha: pushed.sha }));
 		}
@@ -401,6 +461,7 @@ export class Forge {
 			await q.query("update pim_forge.forge_threads set state = 'archived', archived_at = now(), updated_at = now() where thread_id = $1", [t.threadId]);
 			await this.c.store.emit(q, "projection", `archived:${t.threadId}`, t.threadId, { type: "coding.archived", threadId: t.threadId });
 		});
+		await this.c.db.query("select pg_notify('pim_forge_cancel', $1)", [t.threadId]);
 		await this.c.scheduler.release(t.threadId, "archived", { promote: this.c.promoteOnRelease !== false });
 		await this.teardownCompute(actor, ref);
 	}
@@ -421,6 +482,14 @@ export class Forge {
 		}
 	}
 
+	/** An Amp attachment the worker mirrored into Objects (an image or a video the remote agent made), for the person who owns the thread. Null when there is none by that name. */
+	async attachment(actor: Actor, ref: string, hash: string): Promise<{ bytes: Uint8Array; contentType: string } | null> {
+		const t = await this.own(actor, ref);
+		if (!/^[0-9a-f]{32}$/.test(hash)) return null;
+		const got = await this.c.objects.get(`forge/${t.threadId}/attachments/${hash}`);
+		return got ? { bytes: got.body, contentType: got.metadata.contentType } : null;
+	}
+
 	/** Deletes stored artifacts (autosave bundle) only; the transcript stays. */
 	async deleteArtifacts(actor: Actor, ref: string): Promise<void> {
 		const t = await this.own(actor, ref);
@@ -437,17 +506,12 @@ export class Forge {
 		await this.c.git.deleteBranch(t.repo, t.branch);
 	}
 
-	/** A git bundle of the checkout goes to Objects; PostgreSQL keeps only the row that finds it. */
+	/** The checkout's work is committed (a checkpoint) and bundled to Objects; PostgreSQL keeps only the row that finds the bundle. */
 	async autosave(threadId: string): Promise<void> {
 		const t = await this.c.store.get(threadId);
 		if (!t?.workspaceRef || !this.c.compute || t.computeTornDownAt) return;
-		const r = await this.c.compute.exec(t.workspaceRef, ["sh", "-c", "git bundle create ../autosave.bundle HEAD >&2 && base64 -w0 ../autosave.bundle"], {});
-		if (r.code !== 0) return;
-		const bytes = Buffer.from(r.stdout, "base64");
-		const head = (await this.c.compute.exec(t.workspaceRef, ["git", "rev-parse", "HEAD"], {})).stdout.trim();
-		const key = `forge/${threadId}/autosave/${head}.bundle`;
-		await this.c.objects.put(key, bytes, { contentType: "application/x-git-bundle" });
-		await this.c.db.query("insert into pim_forge.forge_autosaves (thread_id, head_sha, object_key, bytes) values ($1,$2,$3,$4) on conflict (thread_id) do update set head_sha = $2, object_key = $3, bytes = $4, at = now()", [threadId, head, key, bytes.length]);
+		await this.commitWork(t);
+		await autosaveWorkspace({ ...this.dep, objects: this.c.objects }, t);
 	}
 
 	/** Hands undelivered outbox rows to `deliver` (the originating chat's inbox, the cost ledger), exactly one consumer per row. A consumer names the `topics` it handles; Live reads projections from the outbox without consuming them (see `@pim/v2-server`). */

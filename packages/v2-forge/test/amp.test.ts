@@ -202,7 +202,7 @@ describe("Amp: a remote orb Forge adopts and never restarts", () => {
 		await expect(s.forge.push(ada, id)).rejects.toMatchObject({ code: "unsupported" });
 		// Merging is different: Amp's work is on the host, so Forge merges it from there. Not until the branch exists.
 		await expect(s.forge.merge(ada, id)).rejects.toMatchObject({ code: "not_pushed" });
-		expect(await s.forge.diff(ada, id)).toEqual({ source: "orb", diff: "", unpushedOrb: true });
+		expect(await s.forge.diff(ada, id)).toEqual({ source: "orb", diff: "", unpushedOrb: true, since: null, head: null, truncated: false });
 		await s.forge.recordOrbBranch(id, "amp/feature");
 		expect(await s.forge.diff(ada, id)).toMatchObject({ unpushedOrb: true });
 		// Once the orb has pushed to the host, the diff is the host's.

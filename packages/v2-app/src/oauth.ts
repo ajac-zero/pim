@@ -317,6 +317,7 @@ export class ExternalSignIn {
 			const linked = await this.signin.linkIdentity(owner, flow.provider, identity, now);
 			if (!linked) return back(to, taken);
 			if (account.status === "pending") await this.db.owner(owner, (tx) => tx.query("UPDATE pim_app.accounts SET status = 'active', activated_at = $2 WHERE owner_id = $1", [owner, now]));
+			await this.signin.voidRegistrationLinks(owner, now);
 			return back(to, undefined, await this.identity.createSession(owner, { credentialId: linked.id, now }));
 		}
 		const owner = await this.signin.identityOwner(identity);

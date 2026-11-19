@@ -300,3 +300,15 @@ describe("a scheduled task that fired", () => {
 		expect(await queue()).toHaveLength(queued);
 	});
 });
+
+describe("a guest's ask of the host", () => {
+	it("tells the host, in the bell and on their devices, who asked and through which bot", async () => {
+		const ada = people.ada!;
+		await gate.db.owner(ada.ownerId, (tx) => tx.query("INSERT INTO pim_app.approvals (id, owner_id, public_chat_id, tool, args) VALUES ('g-ask1',$1,NULL,'connector:call',$2)", [ada.ownerId, JSON.stringify({ summary: "visitor asks to use create_ticket of Tickets", requestedBy: { ownerId: "x", username: "visitor", circle: "bot_1", circleName: "Front desk", bot: "bot_1" } })]));
+		expect(await notifyPass(maint, maintPool, options)).toBeGreaterThanOrEqual(1);
+		const note = (await call(ada.token, "GET", "/api/notifications")).body.notifications.find((n: { title: string }) => n.title === "visitor asked Front desk");
+		expect(note.body).toBe("visitor (Front desk) wants: visitor asks to use create_ticket of Tickets");
+		// The device alert is queued with the same words.
+		expect((await stack.admin.query("SELECT title, body FROM pim_app.push_queue WHERE id = 'approval-g-ask1'")).rows).toEqual([{ title: "visitor asked Front desk", body: note.body }]);
+	});
+});

@@ -174,6 +174,9 @@ export class Agents {
 		await this.authz.enforce(p, "api:write");
 		await this.db.owner(p.ownerId, async (tx) => {
 			if (!(await tx.query("UPDATE pim_app.agents SET deleted_at = now() WHERE id = $1 AND deleted_at IS NULL", [id])).rowCount) throw new NotFoundError("No such agent");
+			// What was published of it is taken down with it: its template leaves the gallery and its bot's link is off.
+			await tx.query("DELETE FROM pim_app.templates WHERE owner_id = $1 AND agent_id = $2", [p.ownerId, id]);
+			await tx.query("DELETE FROM pim_app.bots WHERE owner_id = $1 AND agent_id = $2", [p.ownerId, id]);
 			// Its triggers have nothing to run as now: they say so, instead of looking well until they fire.
 			await tx.query("UPDATE pim_app.triggers SET health = 'configuration_error', health_detail = 'The trigger''s agent was deleted' WHERE agent_id = $1 AND lifecycle IN ('draft', 'enabled', 'paused')", [id]);
 			for (const key of ["contacts", "delegates"]) {

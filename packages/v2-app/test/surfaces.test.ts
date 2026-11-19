@@ -119,6 +119,48 @@ describe("what an adopted agent keeps", () => {
 		expect(used).toMatchObject({ role: "Lead", description: "Runs the team", color: "#aa3300" });
 	});
 
+	it("keeps a template's id when its agent is published again, and takes what was published down with the agent", async () => {
+		const u = await mk("republisher");
+		const agent = await app.agents.create(u.principal, { name: "Coach", instructions: "v1" });
+		const { id } = await app.sharing.publishTemplate(u.principal, agent.id);
+		await app.agents.update(u.principal, agent.id, { instructions: "v2" });
+		expect((await app.sharing.publishTemplate(u.principal, agent.id, "Coach 2")).id).toBe(id);
+		const row = (await app.db.owner(u.account.ownerId, (tx) => tx.query("SELECT title, bundle FROM pim_app.templates WHERE owner_id = $1", [u.account.ownerId]))).rows;
+		expect(row).toEqual([expect.objectContaining({ title: "Coach 2", bundle: expect.objectContaining({ agent: expect.objectContaining({ instructions: "v2" }) }) })]);
+		// Deleted, the agent's template leaves the gallery and its bot's link is off.
+		const bot = await app.sharing.createBot(u.principal, agent.id);
+		await app.agents.remove(u.principal, agent.id);
+		expect(await app.sharing.templates(u.principal)).not.toContainEqual(expect.objectContaining({ id }));
+		await expect(app.sharing.bot(bot.id)).rejects.toMatchObject({ status: 404 });
+	});
+
+	it("gives a copy a role and name of its own beside the person's agents, shares the copies' memory scope, and counts the agents that come with it against the cap", async () => {
+		const dietitian = await app.agents.create(admin.principal, { name: "Dietitian", instructions: "meals" });
+		const physio = await app.agents.create(admin.principal, { name: "Physio", instructions: "knees", contacts: [dietitian.id] });
+		const coach = await app.agents.create(admin.principal, { name: "Marathon coach", instructions: "plan", contacts: [physio.id] });
+		const { id } = await app.sharing.publishTemplate(admin.principal, coach.id);
+		const u = await mk("eli");
+		await app.agents.create(u.principal, { name: "Physio", instructions: "mine" });
+		const first = await app.sharing.useTemplate(u.principal, id);
+		const mine = await app.agents.list(u.principal);
+		const copyOfPhysio = mine.find((a) => a.id === first.contacts[0])!;
+		expect(copyOfPhysio).toMatchObject({ role: "Physio (Marathon coach)", name: "Physio (Marathon coach)" });
+		expect(mine.find((a) => a.name === "Physio")!.contacts).toEqual([]);
+		expect(copyOfPhysio.contacts).toHaveLength(1);
+		// Copies of one agent keep their notes together, under the first copy's scope.
+		const second = await app.sharing.useTemplate(u.principal, id);
+		const all = await app.agents.list(u.principal);
+		const physioAgain = all.find((a) => a.id === second.contacts[0])!;
+		expect(second.memoryScope).toBe(first.memoryScope);
+		expect(physioAgain.memoryScope).toBe(copyOfPhysio.memoryScope);
+		expect(new Set(all.map((a) => a.memoryScope)).size).toBe(all.length - 3);
+		expect(second.name).not.toBe(first.name);
+		// 1 + 3 + 3 agents so far; 4 more would pass 50 only when the person is near it.
+		for (let i = all.length; i < 48; i++) await app.agents.create(u.principal, { name: `Filler ${i}` });
+		await expect(app.sharing.useTemplate(u.principal, id)).rejects.toMatchObject({ status: 429 });
+		expect((await app.agents.list(u.principal)).length).toBe(48);
+	});
+
 	it("holds a person to 20 published agents and 20 bots", async () => {
 		const u = await mk("publisher");
 		const made = [];

@@ -1,6 +1,6 @@
 // The Gate's own limits (sign-in and registration per address, the API per owner, public addresses per address; a limit that cannot be read is 0) and the providers an
 // admin shares with everyone: listed beside a person's own, never with a key, usable by a Runner for anyone with the key opened under the admin's id.
-import { createServer, type Server } from "node:http";
+import { createServer, request as httpRequest, type Server } from "node:http";
 import { randomBytes } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { App } from "@pim/v2-app/app";
@@ -70,6 +70,25 @@ describe("limits and shared providers", () => {
 		// A limit that cannot be read is 0: refusing everything, never lifting the limit.
 		const zero = await listen((a) => createGate(a, { first: adminCompatRoutes, before: gateBefore(a, { PIM_RATE_API: "lots" }) }));
 		expect((await call(zero, "bob", "GET", "/api/builtin-apps")).status).toBe(429);
+	});
+
+	it("answers 421 for a Host that is not the Pim's address, and lets the public host, loopback, the stack's own names and the allowed aliases through", async () => {
+		const gate = await listen((a) => createGate(a, { first: adminCompatRoutes, before: gateBefore(a, { PIM_PUBLIC_URL: "https://pim.example.com", PIM_ALLOWED_HOSTS: "alias.example.org" }) }));
+		const port = Number(new URL(gate).port);
+		const asHost = (host: string, path = "/api/builtin-apps") =>
+			new Promise<{ status: number; body: any }>((resolve, reject) => {
+				const req = httpRequest({ host: "127.0.0.1", port, path, headers: { host, authorization: `Bearer ${people.bob!.token}` } }, (res) => {
+					let raw = "";
+					res.on("data", (c) => (raw += c));
+					res.on("end", () => resolve({ status: res.statusCode!, body: raw ? JSON.parse(raw) : null }));
+				});
+				req.on("error", reject).end();
+			});
+		expect(await asHost("elsewhere.example.net")).toEqual({ status: 421, body: { error: "This Pim is at https://pim.example.com", url: "https://pim.example.com" } });
+		expect((await asHost("pim.example.com")).status).toBe(200);
+		for (const host of ["PIM.example.com:443", "localhost:8787", "127.0.0.1:8080", "[::1]:8080", "gate:8080", "front.pim.internal:8088", "alias.example.org"]) expect([host, (await asHost(host)).status]).toEqual([host, 200]);
+		// The app's look answers anywhere.
+		expect((await asHost("elsewhere.example.net", "/api/themes.css")).status).not.toBe(421);
 	});
 
 	it("counts by the address the proxy sets only when the deployment trusts the proxy, and a window ends", async () => {

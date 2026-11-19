@@ -171,6 +171,8 @@ export class SignIn {
 				registration.id, owner, userHandle(owner), site.rpId, key.spki, key.algorithm, registration.name.trim().slice(0, 64) || "Passkey", now,
 			]);
 			if (account.status === "pending") await tx.query("UPDATE pim_app.accounts SET status = 'active', activated_at = $2, pending_until = NULL WHERE owner_id = $1 AND pending_until > $2", [owner, now]);
+			// With a passkey the account has a way in: the link its registration handed back, if still unused, dies.
+			await tx.query("UPDATE pim_app.setup_codes SET used_at = $2 WHERE owner_id = $1 AND kind = 'registration' AND used_at IS NULL", [owner, now]);
 		});
 		const rows = await this.passkeys(owner);
 		const passkey = rows.find((p) => p.id === registration.id)!;
@@ -199,11 +201,29 @@ export class SignIn {
 	// ---- setup codes, device links, recovery codes ----
 
 	/** An admin (or the operator's CLI) issues a setup code for an account that has no credential yet. Returns the `<owner>.<code>` to put in a link. */
-	async issueSetupCode(ownerId: string, now = new Date()): Promise<{ code: string; expiresAt: Date }> {
+	async issueSetupCode(ownerId: string, now = new Date(), kind: "registration" | "admin" = "admin"): Promise<{ code: string; expiresAt: Date }> {
 		const code = secret(16);
 		const expiresAt = new Date(now.getTime() + SETUP_CODE_MS);
-		await this.db.owner(ownerId, (tx) => tx.query("INSERT INTO pim_app.setup_codes (code_hash, owner_id, expires_at) VALUES ($1, $2, $3)", [digest(code), ownerId, expiresAt]));
+		await this.db.owner(ownerId, (tx) => tx.query("INSERT INTO pim_app.setup_codes (code_hash, owner_id, expires_at, kind) VALUES ($1, $2, $3, $4)", [digest(code), ownerId, expiresAt, kind]));
 		return { code: ownedCode(ownerId, code), expiresAt };
+	}
+
+	/**
+	 * The setup code the operator's log gets for an account (`POST /auth/setup-link`): the one still live, so asking again logs the same link until it expires or is used,
+	 * else a new one.
+	 */
+	async operatorSetupCode(ownerId: string, now = new Date()): Promise<{ code: string; expiresAt: Date }> {
+		const live = await this.db.owner(ownerId, async (tx) => (await tx.query("SELECT plain, expires_at FROM pim_app.setup_codes WHERE owner_id = $1 AND kind = 'operator' AND used_at IS NULL AND expires_at > $2 AND plain IS NOT NULL ORDER BY created_at DESC LIMIT 1", [ownerId, now])).rows[0]);
+		if (live) return { code: ownedCode(ownerId, live.plain as string), expiresAt: live.expires_at as Date };
+		const code = secret(16);
+		const expiresAt = new Date(now.getTime() + SETUP_CODE_MS);
+		await this.db.owner(ownerId, (tx) => tx.query("INSERT INTO pim_app.setup_codes (code_hash, owner_id, expires_at, kind, plain) VALUES ($1, $2, $3, 'operator', $4)", [digest(code), ownerId, expiresAt, code]));
+		return { code: ownedCode(ownerId, code), expiresAt };
+	}
+
+	/** The account has a way in now, so the link its registration handed back dies. Never the ones an admin or the operator issued. */
+	async voidRegistrationLinks(ownerId: string, now = new Date()): Promise<void> {
+		await this.db.owner(ownerId, (tx) => tx.query("UPDATE pim_app.setup_codes SET used_at = $2 WHERE owner_id = $1 AND kind = 'registration' AND used_at IS NULL", [ownerId, now]));
 	}
 
 	async #setupLive(ownerId: string, code: string, now: Date): Promise<boolean> {

@@ -145,7 +145,7 @@ export function guestRoutes(): Route[] {
 			await app.identity.authz.enforce(p, "api:read");
 			const g = await app.guests.guestBot(p.ownerId);
 			if (!g.joined) return ok({ bot: null, agent: null });
-			const card = g.bot && { id: g.bot.id, author: g.bot.hostName, authorName: null, name: g.bot.name, description: "", symbol: null, color: null, icon: null, dailyMessages: g.bot.settings.dailyMessages === undefined ? 50 : g.bot.settings.dailyMessages, dailyToolCalls: g.bot.settings.dailyToolCalls === undefined ? 20 : g.bot.settings.dailyToolCalls };
+			const card = g.bot && { id: g.bot.id, author: g.bot.hostName, authorName: null, name: g.bot.name, description: g.bot.snapshot?.description ?? g.bot.snapshot?.agent?.description ?? "", symbol: g.bot.snapshot?.agent?.emoji ?? null, color: g.bot.snapshot?.agent?.color ?? null, icon: g.bot.snapshot?.agent?.icon || g.bot.snapshot?.icon ? g.bot.sharedAt.getTime() : null, dailyMessages: g.bot.settings.dailyMessages === undefined ? 50 : g.bot.settings.dailyMessages, dailyToolCalls: g.bot.settings.dailyToolCalls === undefined ? 20 : g.bot.settings.dailyToolCalls };
 			return ok({ bot: card, agent: g.agent });
 		}),
 	];

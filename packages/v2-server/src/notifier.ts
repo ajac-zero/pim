@@ -104,7 +104,7 @@ export function lastSaid(entries: readonly Entry[]): { message: string; asked: b
 /** One pass: announce what is new, then send what is due. How many notifications and device alerts it made or sent. */
 export async function notifyPass(app: App, pool: Pool, options: NotifierOptions): Promise<number> {
 	const now = (options.now ?? (() => new Date()))();
-	return (await announceApprovals(app, pool, now)) + (await announceSchedules(app, pool, now)) + (await announceReplies(app, pool, now)) + (await deliver(app, pool, options, now));
+	return (await announceApprovals(app, pool, now)) + (await announceLostSignIns(app, pool, now)) + (await announceSchedules(app, pool, now)) + (await announceReplies(app, pool, now)) + (await deliver(app, pool, options, now));
 }
 
 /** The bell entry and, as a row of the same id, the device alert; once however often the event is seen. */
@@ -129,7 +129,31 @@ async function announceApprovals(app: App, pool: Pool, now: Date): Promise<numbe
 	let made = 0;
 	for (const row of rows) {
 		const approval = webApproval(row);
-		if (await announce(app, row.owner_id, { id: `approval-${row.id}`, kind: "general", chat: row.public_chat_id ?? null, title: "Pim needs your approval", body: approval.summary }, now)) made++;
+		// A guest's or a circle member's call that asks the host says who asked and through what, as v1's alert did.
+		const by = approval.requestedBy as { username?: unknown; circleName?: unknown } | null;
+		const asked = typeof by?.username === "string" && typeof by.circleName === "string" ? { username: by.username, via: by.circleName } : null;
+		const title = asked ? `${asked.username} asked ${asked.via}` : "Pim needs your approval";
+		const body = asked ? `${asked.username} (${asked.via}) wants: ${typeof row.args?.summary === "string" ? row.args.summary : approval.summary}` : approval.summary;
+		if (await announce(app, row.owner_id, { id: `approval-${row.id}`, kind: "general", chat: row.public_chat_id ?? null, title, body }, now)) made++;
+	}
+	return made;
+}
+
+/**
+ * A connector whose sign-in the service revoked (`connector-credential.ts`) is a notification, once for each time it was lost: the person has to connect it again, and nothing
+ * else tells them until an agent next tries to use it.
+ */
+async function announceLostSignIns(app: App, pool: Pool, now: Date): Promise<number> {
+	const rows = await acrossOwners(
+		pool,
+		`SELECT c.owner_id, c.id, c.name, c.signin_lost_at FROM pim_app.connectors c WHERE c.signin_lost_at > $1 AND c.credential IS NULL
+		   AND NOT EXISTS (SELECT 1 FROM pim_app.notifications n WHERE n.owner_id = c.owner_id AND n.id = 'connector-' || c.id || '-' || floor(extract(epoch FROM c.signin_lost_at) * 1000)::bigint) ORDER BY c.signin_lost_at LIMIT 100`,
+		[new Date(now.getTime() - LOOKBACK_MS)],
+	);
+	let made = 0;
+	for (const row of rows) {
+		const id = `connector-${row.id}-${Math.floor(new Date(row.signin_lost_at).getTime())}`;
+		if (await announce(app, row.owner_id, { id, kind: "general", chat: null, title: `${row.name} needs you to sign in again`, body: "Its sign-in was revoked or has expired. Connect it again from Connectors." }, now)) made++;
 	}
 	return made;
 }

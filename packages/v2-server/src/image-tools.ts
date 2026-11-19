@@ -83,6 +83,20 @@ async function generateOnEndpoint(fetcher: typeof fetch, endpoint: ImageEndpoint
 	throw new Error("The image model answered without an image.");
 }
 
+/** Who draws for an owner: their ChatGPT sign-in, else the named or default image model on a configured endpoint. */
+export async function pickImageModel(sources: ImageSources, fetcher: typeof fetch): Promise<{ id: string; draw: (prompt: string, shape: Shape, signal?: AbortSignal) => Promise<Uint8Array> } | undefined> {
+	const codex = sources.codex();
+	if (codex && (await codex.connected().catch(() => false))) return { id: CODEX_IMAGE_MODEL, draw: (prompt, shape, signal) => codex.generate(prompt, shape, signal) };
+	const endpoints = await sources.endpoints();
+	const [provider, ...rest] = (sources.model ?? "openai/gpt-image-1").split("/");
+	const endpoint = endpoints.find((e) => e.id === provider) ?? endpoints.find((e) => e.name?.toLowerCase() === provider?.toLowerCase());
+	const model = rest.join("/");
+	if (!endpoint || model === "") return undefined;
+	return { id: `${provider}/${model}`, draw: (prompt, shape, signal) => generateOnEndpoint(fetcher, endpoint, model, prompt, shape, signal) };
+}
+
+export const IMAGE_EXTENSIONS = EXTENSIONS;
+
 export type ImageToolDeps = {
 	ownerId: string;
 	partitionId: string;
@@ -113,17 +127,7 @@ export function imageTools(deps: ImageToolDeps, kit: ImageToolKit): ToolRegistra
 	const describe =
 		"Describe what to draw in detail, in English: the subject, the setting, the style (photo, illustration, watercolor...), composition, lighting and colors, and any words it should show, in quotes. Make one image unless they ask for more: each one costs. It can't change an existing image; describe a new one instead.";
 
-	/** Who draws: the person's ChatGPT sign-in, else the named or default image model on a configured endpoint. */
-	async function pick(): Promise<{ id: string; draw: (prompt: string, shape: Shape, signal?: AbortSignal) => Promise<Uint8Array> } | undefined> {
-		const codex = sources.codex();
-		if (codex && (await codex.connected().catch(() => false))) return { id: CODEX_IMAGE_MODEL, draw: (prompt, shape, signal) => codex.generate(prompt, shape, signal) };
-		const endpoints = await sources.endpoints();
-		const [provider, ...rest] = (sources.model ?? "openai/gpt-image-1").split("/");
-		const endpoint = endpoints.find((e) => e.id === provider) ?? endpoints.find((e) => e.name?.toLowerCase() === provider?.toLowerCase());
-		const model = rest.join("/");
-		if (!endpoint || model === "") return undefined;
-		return { id: `${provider}/${model}`, draw: (prompt, shape, signal) => generateOnEndpoint(deps.fetch, endpoint, model, prompt, shape, signal) };
-	}
+	const pick = () => pickImageModel(sources, deps.fetch);
 
 	/** Writes the image onto the person's computer when one is connected and this agent may use it; false when there is none or it could not be written. */
 	async function saveOnComputer(app: App, p: Principal, path: string, bytes: Uint8Array): Promise<boolean> {

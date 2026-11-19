@@ -36,7 +36,7 @@ export const authRoutes: Route[] = [
 			console.log(`Pim setup link. Open it to set this Pim up and become its admin; it works once, for 15 minutes: ${origin}/#claim=${code}`);
 			return ok({ expiresAt: new Date(Date.now() + 15 * 60_000).toISOString() });
 		}
-		const { code, expiresAt } = await app.signin.issueSetupCode(admin.owner_id);
+		const { code, expiresAt } = await app.signin.operatorSetupCode(admin.owner_id);
 		console.log(`Pim setup link for ${admin.username}, the admin. Open it to add a passkey; it works once, until ${expiresAt.toISOString()}: ${origin}/#setup=${code}`);
 		return ok({ expiresAt: expiresAt.toISOString() });
 	}),

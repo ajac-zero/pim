@@ -1,7 +1,7 @@
 // The web app's apps, gallery and admin routes over a real PostgreSQL with every migration applied: shapes the web app reads, who may see what
 // (a circle's members, the admin), and that the last admin cannot be suspended through the admin screens.
 import type { Server } from "node:http";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { App } from "@pim/v2-app/app";
 import { connect as connectApp } from "@pim/v2-app/db";
 import { createGate } from "@pim/v2-app/gate";
@@ -152,6 +152,51 @@ describe("the web app's apps, gallery and admin routes", () => {
 		expect((await call("ada", "DELETE", `/api/admin/templates/${published.id}`)).json).toEqual({ deleted: true });
 		expect((await call("ada", "GET", "/api/templates")).json.templates.some((t: { id: string }) => t.id === published.id)).toBe(false);
 		expect((await call("ada", "DELETE", `/api/admin/templates/${published.id}`)).status).toBe(404);
+	});
+
+	it("adds a custom connector with its site's icon, a known category and a name and address of its own, and takes only an https icon", async () => {
+		const real = globalThis.fetch;
+		const sites: Record<string, () => Response> = {
+			"https://crm.example.test/": () => Object.defineProperty(new Response(`<head><link rel="icon" href="/favicon.png" sizes="32x32"><link href="static/logo.svg?v=2&amp;x=1" rel="icon" type="image/svg+xml"></head>`, { headers: { "content-type": "text/html; charset=utf-8" } }), "url", { value: "https://www.acme.example.test/crm/" }),
+			"https://www.acme.example.test/crm/static/logo.svg?v=2&x=1": () => new Response("<svg/>", { headers: { "content-type": "image/svg+xml" } }),
+		};
+		const spy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+			const url = new Request(input, init).url;
+			if (url.startsWith(base)) return real(input, init);
+			return sites[url]?.() ?? new Response("Not found", { status: 404 });
+		});
+		try {
+			const crm = { name: "Acme CRM", description: "Customers and deals.", url: "https://crm.example.test/mcp" };
+			expect((await call("bob", "POST", "/api/admin/apps", crm)).status).toBe(403);
+			expect((await call("ada", "POST", "/api/admin/apps", { ...crm, category: "crm" })).status).toBe(400);
+			const made = await call("ada", "POST", "/api/admin/apps", { ...crm, category: "customers" });
+			expect(made).toMatchObject({ status: 201, json: { app: { id: "custom/acme-crm", icon: "https://www.acme.example.test/crm/static/logo.svg?v=2&x=1", category: "customers" } } });
+			// The same address or the same name is refused, not added twice.
+			expect((await call("ada", "POST", "/api/admin/apps", { ...crm, name: "Other" })).status).toBe(400);
+			expect((await call("ada", "POST", "/api/admin/apps", { ...crm, url: "https://other.example.test/mcp", name: "acme crm" })).status).toBe(400);
+			// An icon is an https address.
+			const logo = "https://cdn.acme.example.test/logo.png";
+			expect((await call("ada", "PUT", "/api/admin/apps/acme-crm", { icon: "javascript:alert(1)" })).status).toBe(400);
+			expect((await call("ada", "PUT", "/api/admin/apps/acme-crm", { icon: "data:image/svg+xml,<svg/>" })).status).toBe(400);
+			expect((await call("ada", "PUT", "/api/admin/apps/acme-crm", { icon: logo })).json).toMatchObject({ app: { icon: logo } });
+			expect((await call("ada", "PUT", "/api/admin/apps/nope", { icon: logo })).status).toBe(404);
+			expect((await call("bob", "GET", "/api/app-directory")).json.apps).toContainEqual(expect.objectContaining({ ref: "custom/acme-crm", icon: logo, category: "customers" }));
+			expect((await call("ada", "DELETE", "/api/admin/apps/acme-crm")).json).toEqual({ deleted: true });
+		} finally {
+			spy.mockRestore();
+		}
+	});
+
+	it("keeps a published agent's template, id and uses, when it is published again", async () => {
+		const agent = (await call("bob", "POST", "/api/agents", { name: "Cook", instructions: "v1" })).json;
+		const first = (await call("bob", "POST", `/api/agents/${agent.id}/publish`, {})).json;
+		await call("ada", "POST", `/api/templates/${first.id}/use`);
+		await call("bob", "PUT", `/api/agents/${agent.id}`, { instructions: "v2" });
+		const again = (await call("bob", "POST", `/api/agents/${agent.id}/publish`, {})).json;
+		expect(again).toMatchObject({ id: first.id, uses: 1, instructions: "v2" });
+		// Deleting the agent takes its template down.
+		expect((await call("bob", "DELETE", `/api/agents/${agent.id}`)).status).toBeLessThan(300);
+		expect((await call("ada", "GET", `/api/templates/${first.id}`)).status).toBe(404);
 	});
 
 	it("keeps the connector directory in the instance's settings, and answers compute and the computer host as not set up", async () => {

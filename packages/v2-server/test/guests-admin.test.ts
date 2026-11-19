@@ -52,6 +52,17 @@ real("guests, circles and the admin's majordomo", () => {
 	let runner: Process;
 	let app: App;
 	const mcp = fakeMcp();
+	// The host's image model: an OpenAI-compatible endpoint that answers every request with one tiny picture.
+	const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==";
+	const drawn: unknown[] = [];
+	const images: Server = createServer((req, res) => {
+		let raw = "";
+		req.on("data", (c) => (raw += c));
+		req.on("end", () => {
+			drawn.push(JSON.parse(raw));
+			res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ data: [{ b64_json: PNG }] }));
+		});
+	});
 	const faux = fauxProvider({ provider: "faux", models: [{ id: "m" }] });
 	const toolUse = (...calls: ReturnType<typeof fauxToolCall>[]) => fauxAssistantMessage(calls, { stopReason: "toolUse" });
 	let n = 0;
@@ -64,6 +75,7 @@ real("guests, circles and the admin's majordomo", () => {
 	let botId: string;
 	let circleId: string;
 	let agentId: string;
+	let guestAgent: string;
 
 	const transcript = async (who: Person) => {
 		const c = (await d.stack.admin.query("SELECT partition_id, conversation_id FROM pim_runtime.conversation_partitions WHERE public_chat_id = $1", [who.chat])).rows[0];
@@ -83,13 +95,16 @@ real("guests, circles and the admin's majordomo", () => {
 
 	beforeAll(async () => {
 		await new Promise<void>((r) => mcp.server.listen(0, "127.0.0.1", r));
+		await new Promise<void>((r) => images.listen(0, "127.0.0.1", r));
 		const url = `http://127.0.0.1:${(mcp.server.address() as { port: number }).port}/mcp`;
 		const stack = await createStack();
 		d = { stack, nats: await startNats(), s3: await startS3(), gatePort: await freePort(), ingressSecret: "ingress" };
 		const keys = { PIM_KEK_T1: randomBytes(32).toString("base64"), PIM_KEK_CURRENT: "t1", PIM_CONNECTOR_ALLOW_PRIVATE: "1" };
 		app = new App(connectApp(stack.url("gate"), 4), new MemoryObjectStore());
-		gate = await start(d, "gate", {}, keys);
-		runner = await start(d, "runner", { pollMs: 40, providers: () => [faux.provider] }, { PIM_DEFAULT_MODEL: "faux/m", PIM_APP_DATABASE_URL: stack.url("gate"), ...keys });
+		// The compat routes read the process environment: the deployment's default model is one it offers everyone.
+		process.env.PIM_DEFAULT_MODEL = "faux/m";
+		gate = await start(d, "gate", {}, { ...keys, PIM_REGISTRATIONS_PER_ADDRESS: "1000" });
+		runner = await start(d, "runner", { pollMs: 40, providers: () => [faux.provider] }, { PIM_DEFAULT_MODEL: "faux/m", PIM_APP_DATABASE_URL: stack.url("gate"), PIM_AI_GATEWAY_URL: `http://127.0.0.1:${(images.address() as { port: number }).port}`, PIM_IMAGE_MODEL: "gateway/draw-1", ...keys });
 		host.web = new Client(base(gate), d.ingressSecret);
 		const claim = await app.identity.issueClaim("bootstrap", null, 3_600_000);
 		const registered = await host.web.call("POST", "/auth/register", { username: "anibal", bootstrap: claim, session: true });
@@ -101,11 +116,13 @@ real("guests, circles and the admin's majordomo", () => {
 		connector = made.json.connector.id;
 		await host.web.call("POST", `/api/connectors/${connector}/discover`);
 		expect((await host.web.call("PUT", `/api/connectors/${connector}/tools`, { tools: ["search", "create_ticket", "delete_all"] })).status).toBe(200);
-		agentId = (await host.web.call("POST", "/api/agents", { name: "Helper", instructions: "Help with tickets." })).json.id;
+		agentId = (await host.web.call("POST", "/api/agents", { name: "Helper", description: "Helps with tickets.", instructions: "Help with tickets.", apps: [connector] })).json.id;
 	}, 180_000);
 	afterAll(async () => {
 		await Promise.allSettled([runner?.close(), gate?.close()]);
 		await new Promise((r) => mcp.server.close(r));
+		await new Promise((r) => images.close(r));
+		delete process.env.PIM_DEFAULT_MODEL;
 		await app?.db.end();
 		d?.nats.stop();
 		await d?.s3.stop();
@@ -136,6 +153,7 @@ real("guests, circles and the admin's majordomo", () => {
 		// On the model the bot was given.
 		expect(agents.find((a) => a.id === mine.agent)).toMatchObject({ model: { provider: "faux", id: "m" } });
 		guest.chat = (await guest.web.call("POST", "/api/sessions", { title: "Hi", agentId: mine.agent })).json.id;
+		guestAgent = mine.agent;
 	});
 
 	it("keeps a guest to its allow-list: no agents of its own, circles, connectors or tokens", async () => {
@@ -156,6 +174,50 @@ real("guests, circles and the admin's majordomo", () => {
 		const bobAgent = (await bob.web.call("POST", "/api/agents", { name: "B" })).json.id;
 		expect((await bob.web.call("PUT", `/api/agents/${bobAgent}/bot`, { tools: [] })).status).toBe(403);
 	});
+
+	it("checks what a bot shares, keeps what a later sharing leaves out, and has a guest's copy follow the bot on their next request", async () => {
+		const bad = (body: unknown) => host.web.call("PUT", `/api/agents/${agentId}/bot`, body);
+		expect((await bad({ dailyMessages: 0 })).status).toBe(400);
+		expect((await bad({ model: { provider: "faux", id: "not-offered" } })).status).toBe(400);
+		const unknown = await bad({ tools: ["search", "format_disk"] });
+		expect(unknown.status).toBe(400);
+		expect(unknown.json.message).toContain("can't share format_disk");
+		expect((await bad({ tools: ["search"], ask: ["create_ticket"] })).status).toBe(400);
+		expect((await host.web.call("GET", `/api/agents/${agentId}/bot`)).json).toMatchObject({ dailyMessages: 5, dailyToolCalls: 4, tools: ["search", "create_ticket", "delete_all"], ask: ["create_ticket"], model: { provider: "faux", id: "m" } });
+		// The card carries the agent's description.
+		expect((await new Client(base(gate), d.ingressSecret).call("GET", `/api/bots/${botId}`)).json).toMatchObject({ name: "Helper", description: "Helps with tickets." });
+		expect((await guest.web.call("GET", "/api/bot")).json.bot).toMatchObject({ description: "Helps with tickets." });
+
+		// Shared again after the agent changed, with settings left out: the tools, the ask list, the limits and the model stay, and the guest's copy follows at its next request. generate_image is shareable too.
+		await host.web.call("PUT", `/api/agents/${agentId}`, { instructions: "Help with tickets, politely.", description: "Helps politely." });
+		const before = (await guest.web.call("GET", "/api/agents")).json.agents.find((a: any) => a.id === guestAgent);
+		expect(before.instructions).toBe("Help with tickets."); // the bot is what was last shared, not the agent as it is now
+		const again = await host.web.call("PUT", `/api/agents/${agentId}/bot`, { tools: ["search", "create_ticket", "delete_all", "generate_image"] });
+		expect(again.json).toMatchObject({ id: botId, dailyMessages: 5, dailyToolCalls: 4, tools: ["search", "create_ticket", "delete_all", "generate_image"], ask: ["create_ticket"], model: { provider: "faux", id: "m" } });
+		const after = (await guest.web.call("GET", "/api/agents")).json.agents.find((a: any) => a.id === guestAgent);
+		expect(after).toMatchObject({ instructions: "Help with tickets, politely.", description: "Helps politely.", model: { provider: "faux", id: "m" } });
+		expect((await guest.web.call("GET", "/api/bot")).json.bot).toMatchObject({ description: "Helps politely." });
+		expect((await host.web.call("PUT", `/api/agents/${agentId}/bot`, {})).json).toMatchObject({ tools: ["search", "create_ticket", "delete_all", "generate_image"], ask: ["create_ticket"] });
+	});
+
+	it("lets a bot share generate_image: the host's image model draws it, the host keeps it under bots/, and the guest's chat has its own copy", async () => {
+		const painter = {} as Person;
+		painter.web = new Client(base(gate), d.ingressSecret);
+		const joined = await painter.web.call("POST", "/auth/register", { username: "painter", bot: botId, session: true });
+		expect(joined.status).toBe(201);
+		painter.ownerId = joined.json.account.ownerId;
+		const mine = (await painter.web.call("GET", "/api/bot")).json.agent as string;
+		painter.chat = (await painter.web.call("POST", "/api/sessions", { title: "Art", agentId: mine })).json.id;
+		await send(painter, "what can I use?", false, toolUse(fauxToolCall("guest_tools", {})), toolUse(fauxToolCall("guest_call", { connector: "pim", tool: "generate_image", arguments: { prompt: "a cat in a hat", shape: "landscape" } })));
+		expect((await results(painter, "guest_tools"))[0]).toContain('"tool": "generate_image"');
+		const made = JSON.parse((await results(painter, "guest_call"))[0]!);
+		expect(made.image).toMatchObject({ type: "image/png", path: expect.stringMatching(/^\/workspace\/images\/.+\.png$/) });
+		expect(drawn).toEqual([expect.objectContaining({ prompt: "a cat in a hat", size: "1536x1024" })]);
+		const keys = (await d.stack.admin.query("SELECT key FROM pim_app.objects WHERE key LIKE $1 OR key LIKE $2 ORDER BY key", [`${host.ownerId}/files/workspace/bots/${botId}/${painter.ownerId}/%`, `${painter.ownerId}/files/workspace/images/%`])).rows.map((r) => r.key as string);
+		expect(keys).toHaveLength(2);
+		expect(keys.some((k) => k.startsWith(`${host.ownerId}/files/workspace/bots/${botId}/${painter.ownerId}/`))).toBe(true);
+		expect(keys.some((k) => k === `${painter.ownerId}${made.image.path.replace(/^/, "/files")}`)).toBe(true);
+	}, 180_000);
 
 	it("gives a guest's agent only the host's shared tools: a read runs, a call that asks waits for the host, a tool it was not given does not exist", async () => {
 		await send(guest, "what can I use?", false, toolUse(fauxToolCall("guest_tools", {})), toolUse(fauxToolCall("fetch_url", { url: "https://example.com" })), toolUse(fauxToolCall("connector_tools", {})), toolUse(fauxToolCall("guest_call", { connector, tool: "search", arguments: { q: "printer" } })), toolUse(fauxToolCall("guest_call", { connector, tool: "internal", arguments: {} })));
@@ -199,7 +261,7 @@ real("guests, circles and the admin's majordomo", () => {
 		expect(mcpCalls()).toEqual(["search", "create_ticket", "search"]);
 		const log = (await host.web.call("GET", "/api/circles/activity")).json.activity as { username: string; tool: string; outcome: string }[];
 		expect(log.map((a) => `${a.tool}:${a.outcome}`)).toEqual(expect.arrayContaining(["search:ran", "create_ticket:asked", "internal:refused", "search:refused"]));
-		expect(log.every((a) => a.username === "visitor")).toBe(true);
+		expect(log.filter((a) => a.username !== "painter").every((a) => a.username === "visitor")).toBe(true);
 	}, 180_000);
 
 	it("stops a guest's messages at the bot's daily limit and its tools when the link is turned off", async () => {
@@ -287,7 +349,7 @@ real("guests, circles and the admin's majordomo", () => {
 	it("gives the admin's majordomo the admin API as three tools, and no one else", async () => {
 		await send(host, "how is the deployment?", false, toolUse(fauxToolCall("admin_read", { path: "/api/admin/stats" })), toolUse(fauxToolCall("admin_read", { path: "/api/admin/deployment" })), toolUse(fauxToolCall("admin_read", { path: "/api/other" })));
 		const read = await results(host, "admin_read");
-		expect(JSON.parse(read[0]!)).toMatchObject({ status: 200, body: { accounts: { active: 3, admins: 1, guests: 1 }, registrationsLastDay: expect.any(Number), invitesUnused: 0, cleanups: { queued: 0, failing: 0 } } });
+		expect(JSON.parse(read[0]!)).toMatchObject({ status: 200, body: { accounts: { active: 4, admins: 1, guests: 2 }, registrationsLastDay: expect.any(Number), invitesUnused: 0, cleanups: { queued: 0, failing: 0 } } });
 		expect(read[1]).toContain("PIM_PUBLIC_URL");
 		expect(read[2]).toMatch(/starting \/api\/admin|A path is/);
 

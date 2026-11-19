@@ -206,14 +206,29 @@ export class Sharing {
 
 	/** Shares one of your agents as a bot anyone signed in may visit. */
 	async createBot(p: Principal, agentId: string, name?: string) {
+		const { id } = await this.shareBot(p, agentId, name);
+		return { id };
+	}
+
+	/**
+	 * Shares one of your agents as a bot, or shares it again: a bot is the agent, and the agents that come with it, as they are when it is shared, under the same
+	 * link, so a later edit of the agent reaches guests only when it is shared again (their copies follow at their next request). Its name is the agent's name then.
+	 */
+	async shareBot(p: Principal, agentId: string, name?: string): Promise<{ id: string; created: boolean }> {
 		await this.authz.enforce(p, "api:write");
 		const agent = await this.agents.get(p, agentId);
-		const id = `bot_${secret(9)}`;
-		await this.db.owner(p.ownerId, async (tx) => {
+		return this.db.owner(p.ownerId, async (tx) => {
+			const snapshot = (await this.bundles?.of(tx, p.ownerId, agentId)) ?? null;
+			const known = (await tx.query("SELECT id FROM pim_app.bots WHERE owner_id = $1 AND agent_id = $2 FOR UPDATE", [p.ownerId, agentId])).rows[0];
+			if (known) {
+				await tx.query("UPDATE pim_app.bots SET name = $3, snapshot = $4, shared_at = now() WHERE id = $1 AND owner_id = $2", [known.id, p.ownerId, name?.trim() || agent.name, JSON.stringify(snapshot)]);
+				return { id: known.id as string, created: false };
+			}
 			if ((await tx.query("SELECT count(*)::int AS n FROM pim_app.bots WHERE owner_id = $1", [p.ownerId])).rows[0].n >= MAX_PUBLISHED) throw new PimError(409, "limit", `You can share ${MAX_PUBLISHED} agents as bots. Stop sharing one first.`);
-			await tx.query("INSERT INTO pim_app.bots (id, owner_id, name, agent_id) VALUES ($1,$2,$3,$4)", [id, p.ownerId, name?.trim() || agent.name, agentId]);
+			const id = `bot_${secret(9)}`;
+			await tx.query("INSERT INTO pim_app.bots (id, owner_id, name, agent_id, snapshot) VALUES ($1,$2,$3,$4,$5)", [id, p.ownerId, name?.trim() || agent.name, agentId, JSON.stringify(snapshot)]);
+			return { id, created: true };
 		});
-		return { id };
 	}
 
 	async bots(p: Principal) {
@@ -267,10 +282,16 @@ export class Sharing {
 	async publishTemplate(p: Principal, agentId: string, title?: string) {
 		await this.authz.enforce(p, "api:write");
 		const agent = await this.agents.get(p, agentId);
-		const id = `tpl_${secret(9)}`;
+		let id = `tpl_${secret(9)}`;
 		await this.db.owner(p.ownerId, async (tx) => {
 			const bundle = (await this.bundles?.of(tx, p.ownerId, agentId)) ?? { agent: { name: agent.name, instructions: agent.instructions, emoji: agent.emoji, color: agent.color } };
-			await tx.query("DELETE FROM pim_app.templates WHERE owner_id = $1 AND agent_id = $2", [p.ownerId, agentId]);
+			// Publishing again replaces what was published, under the same id: its links, its default-for-everyone mark and the count of its uses stay.
+			const current = (await tx.query("SELECT id FROM pim_app.templates WHERE owner_id = $1 AND agent_id = $2", [p.ownerId, agentId])).rows[0];
+			if (current) {
+				id = current.id as string;
+				await tx.query("UPDATE pim_app.templates SET title = $3, bundle = $4, published_at = now() WHERE id = $1 AND owner_id = $2", [id, p.ownerId, title?.trim() || agent.name, JSON.stringify(bundle)]);
+				return;
+			}
 			if ((await tx.query("SELECT count(*)::int AS n FROM pim_app.templates WHERE owner_id = $1", [p.ownerId])).rows[0].n >= MAX_PUBLISHED) throw new PimError(409, "limit", `You can publish ${MAX_PUBLISHED} agents. Unpublish one first.`);
 			await tx.query("INSERT INTO pim_app.templates (id, owner_id, agent_id, title, bundle) VALUES ($1,$2,$3,$4,$5)", [id, p.ownerId, agentId, title?.trim() || agent.name, JSON.stringify(bundle)]);
 		});

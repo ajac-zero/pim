@@ -1,4 +1,5 @@
 import type { Db, Tx } from "./db.ts";
+import { PimError } from "./errors.ts";
 import { newId } from "./ids.ts";
 import type { Objects } from "./objects.ts";
 
@@ -22,6 +23,16 @@ export type BundleAgent = {
  * its contacts and theirs. `description`, `apps` and `icon` repeat the agent's own for the gallery's cards.
  */
 export type Bundle = { agent: Partial<BundleAgent> & Pick<BundleAgent, "name" | "instructions">; description?: string; apps?: string[]; icon?: string; bundle?: BundleAgent[] };
+
+/** At most this many agents in one space, as in v1; the agents that come with a template count against it. */
+export const MAX_AGENTS = 50;
+const MAX_NAME = 60;
+
+/** `name`, or, when one of the person's agents has it already, the name with the copied agent's after it, or a number. */
+export function freeName(name: string, of: string, taken: ReadonlySet<string>): string {
+	const candidates = [name, `${name} (${of})`.slice(0, MAX_NAME), ...Array.from({ length: MAX_AGENTS * 2 }, (_, n) => `${name.slice(0, MAX_NAME - 4)} ${n + 2}`)];
+	return candidates.find((candidate) => !taken.has(candidate.toLowerCase())) ?? name;
+}
 
 const roleOf = (r: any) => (r.role ?? r.config?.legacy?.role ?? r.name) as string;
 
@@ -54,25 +65,60 @@ export class Bundles {
 	}
 
 	/**
+	 * Brings a copy of the bundle's agent up to date: its name, description, instructions, look and model, and its icon (copied again, or none). Its role, contacts,
+	 * connectors and memory stay as they are, and so do the agents that came with it.
+	 */
+	async follow(ownerId: string, agentId: string, bundle: Bundle, model: { provider: string; id: string } | null): Promise<void> {
+		const a = bundle.agent as BundleAgent;
+		const icon = a.icon ?? bundle.icon;
+		const copy = icon ? ((await this.objects?.copyPublic(ownerId, icon).catch(() => null)) ?? null) : null;
+		await this.db.owner(ownerId, (tx) => tx.query(
+			"UPDATE pim_app.agents SET name = $2, instructions = $3, description = $4, emoji = $5, color = $6, icon_key = $7, config = CASE WHEN $8::jsonb IS NULL THEN config - 'model' ELSE jsonb_set(config, '{model}', $8::jsonb) END, updated_at = now() WHERE id = $1 AND deleted_at IS NULL",
+			[agentId, a.name, a.instructions, a.description ?? bundle.description ?? "", a.emoji ?? null, a.color ?? null, copy, model && JSON.stringify(model)],
+		));
+	}
+
+	/**
 	 * Makes the bundle's agents `ownerId`'s own: copies that remember the template they came from (the agent itself alone), their contacts pointing at the
 	 * copies of the agents that came with it. Nothing is checked against what the person may do, so it works while an account is still being made; the callers
-	 * are the ones that decided to give it. Icons are copied afterwards. Returns the new agent's id.
+	 * are the ones that decided to give it. A copy whose role or name one of the person's agents already has gets another (`Physio (Marathon coach)`), so that
+	 * agents hand it work by its role without doubt; copies of one agent share a memory scope, the first copy's; and the agents that come with the template
+	 * count against the cap on agents. Icons are copied afterwards. Returns the new agent's id.
 	 */
 	async adopt(ownerId: string, bundle: Bundle, opts: { adoptedFrom: string; apps?: string[]; model?: { provider: string; id: string } | null }): Promise<string> {
 		const agents = [bundle.agent as BundleAgent, ...(bundle.bundle ?? [])];
 		const ids = agents.map(() => newId("a"));
+		const originalRole = (a: BundleAgent) => (a.role ?? a.name).trim();
 		const byRole = new Map<string, string>();
 		agents.forEach((a, i) => {
-			const role = a.role ?? a.name;
-			if (i > 0 && !byRole.has(role)) byRole.set(role, ids[i]!);
+			const role = originalRole(a).toLowerCase();
+			if (!byRole.has(role)) byRole.set(role, ids[i]!);
 		});
+		const copyOf = (a: BundleAgent, i: number) => (i === 0 ? opts.adoptedFrom : `${opts.adoptedFrom}/${originalRole(a).toLowerCase()}`);
 		const icons: { id: string; key: string }[] = [];
 		await this.db.owner(ownerId, async (tx) => {
+			const have = (await tx.query("SELECT id, name, role, config FROM pim_app.agents WHERE deleted_at IS NULL")).rows;
+			if (have.length + agents.length > MAX_AGENTS) throw new PimError(429, "limit", agents.length > 1 ? `You can have up to ${MAX_AGENTS} agents, and ${bundle.agent.name} comes with ${agents.length - 1} more.` : `You can have up to ${MAX_AGENTS} agents.`);
+			const roles = new Set<string>(have.map((r) => roleOf(r).toLowerCase()));
+			const names = new Set<string>(have.map((r) => (r.name as string).toLowerCase()));
 			for (const [i, a] of agents.entries()) {
-				const config = { apps: i === 0 && opts.apps ? opts.apps : (a.apps ?? bundle.apps ?? []), contacts: (a.contacts ?? []).flatMap((role) => byRole.get(role) ?? []), delegates: [], fallbacks: [], skills: [], memoryScopes: [], ...(i === 0 && opts.model ? { model: opts.model } : {}) };
+				const role = freeName(originalRole(a), bundle.agent.name, roles);
+				roles.add(role.toLowerCase());
+				const name = freeName(a.name.trim(), i === 0 ? role : bundle.agent.name, names);
+				names.add(name.toLowerCase());
+				// Copies of one agent keep their notes together: with an earlier copy of it, or with the agent of the person's own it was published from.
+				const key = copyOf(a, i);
+				const sibling = (await tx.query("SELECT id, config FROM pim_app.agents WHERE deleted_at IS NULL AND config->>'copyOf' = $1 ORDER BY created_at, id LIMIT 1", [key])).rows[0]
+					?? (i === 0 ? (await tx.query("SELECT a.id, a.config FROM pim_app.templates t JOIN pim_app.agents a ON a.id = t.agent_id AND a.deleted_at IS NULL WHERE t.id = $1 AND t.owner_id = $2", [key, ownerId])).rows[0] : undefined);
+				const memoryScope = sibling ? ((sibling.config?.memoryScope ?? `agent-${sibling.id}`) as string) : undefined;
+				const config = {
+					apps: i === 0 && opts.apps ? opts.apps : (a.apps ?? bundle.apps ?? []),
+					contacts: (a.contacts ?? []).flatMap((c) => byRole.get(c.trim().toLowerCase()) ?? []).filter((id) => id !== ids[i]), delegates: [], fallbacks: [], skills: [], memoryScopes: [], copyOf: key,
+					...(memoryScope ? { memoryScope } : {}), ...(i === 0 && opts.model ? { model: opts.model } : {}),
+				};
 				await tx.query(
 					"INSERT INTO pim_app.agents (id, owner_id, name, instructions, config, emoji, color, role, description, adopted_from) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
-					[ids[i], ownerId, a.name, a.instructions, JSON.stringify(config), a.emoji ?? null, a.color ?? null, (a.role ?? a.name).trim(), a.description ?? (i === 0 ? bundle.description : "") ?? "", i === 0 ? opts.adoptedFrom : null],
+					[ids[i], ownerId, name, a.instructions, JSON.stringify(config), a.emoji ?? null, a.color ?? null, role, a.description ?? (i === 0 ? bundle.description : "") ?? "", i === 0 ? opts.adoptedFrom : null],
 				);
 				const icon = a.icon ?? (i === 0 ? bundle.icon : null);
 				if (icon) icons.push({ id: ids[i]!, key: icon });

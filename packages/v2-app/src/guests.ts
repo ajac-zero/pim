@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import type { Principal } from "@pim/v2-contracts/identity";
 import { OwnerId } from "@pim/v2-contracts/identity";
 import type { Agents } from "./agents.ts";
-import type { Bundles } from "./bundles.ts";
+import type { Bundle, Bundles } from "./bundles.ts";
 import type { Db } from "./db.ts";
 import { NotFoundError, RefusedError } from "./errors.ts";
 import { choiceChanged } from "./tool-permissions.ts";
@@ -14,6 +14,8 @@ export const CIRCLE_DAILY_CALLS = 200;
 /** A guest's approval waits a day for the host and is then denied; it is never approved by timing out. */
 export const GUEST_APPROVAL_MS = 24 * 3600_000;
 const ACTIVITY_KEPT = 500;
+
+const modelOf = (s: BotSettings) => (s.model && typeof s.model.provider === "string" && typeof s.model.id === "string" ? { provider: s.model.provider, id: s.model.id } : null);
 
 export type BotSettings = { dailyMessages?: number | null; dailyToolCalls?: number | null; model?: { provider: string; id: string } | null; tools?: string[]; ask?: string[] };
 
@@ -55,19 +57,40 @@ export class Guests {
 
 	/** A bot whose link is live: its author is an active admin and the bot is still shared. Anything else is a 404, as v1's was. */
 	async liveBot(botId: string) {
-		const row = await this.db.lookup(botId, async (tx) => (await tx.query("SELECT b.id, b.owner_id, b.name, b.agent_id, b.settings, b.created_at, a.username, a.role, a.status FROM pim_app.bots b JOIN pim_app.accounts a ON a.owner_id = b.owner_id WHERE b.id = $1", [botId])).rows[0]);
+		const row = await this.db.lookup(botId, async (tx) => (await tx.query("SELECT b.id, b.owner_id, b.name, b.agent_id, b.settings, b.shared_at, b.snapshot, a.username, a.role, a.status FROM pim_app.bots b JOIN pim_app.accounts a ON a.owner_id = b.owner_id WHERE b.id = $1", [botId])).rows[0]);
 		if (!row || row.status !== "active" || row.role !== "admin") throw new NotFoundError("That bot isn't shared");
-		return { id: row.id as string, host: row.owner_id as string, hostName: row.username as string, name: row.name as string, agentId: row.agent_id as string | null, settings: (row.settings ?? {}) as BotSettings, sharedAt: row.created_at as Date };
+		return { id: row.id as string, host: row.owner_id as string, hostName: row.username as string, name: row.name as string, agentId: row.agent_id as string | null, settings: (row.settings ?? {}) as BotSettings, sharedAt: row.shared_at as Date, snapshot: (row.snapshot ?? null) as Bundle | null };
 	}
 
 	/** After a guest's account is made: their copy of the bot's agent, which is what they chat with. */
 	async enroll(guest: string, botId: string): Promise<void> {
 		const bot = await this.liveBot(botId);
-		// Their copy of the bot's agent and the agents that come with it, on the model the bot was given; it connects none of the host's connectors (the bot's tools are the host's to share).
-		const bundle = bot.agentId ? await this.db.owner(bot.host, (tx) => this.bundles!.of(tx, bot.host, bot.agentId!)) : null;
-		const model = bot.settings.model && typeof bot.settings.model.provider === "string" && typeof bot.settings.model.id === "string" ? { provider: bot.settings.model.provider, id: bot.settings.model.id } : null;
+		// Their copy of the bot's agent and the agents that come with it, as they were when the bot was last shared, on the model the bot was given; it connects none of the host's connectors (the bot's tools are the host's to share).
+		const bundle = await this.shared(bot);
+		const model = modelOf(bot.settings);
 		const copy = { id: await this.bundles!.adopt(guest, bundle ?? { agent: { name: bot.name, instructions: "" } }, { adoptedFrom: bot.id, apps: [], model }) };
 		await this.db.owner(guest, (tx) => tx.query("INSERT INTO pim_app.guest_bots (owner_id, bot_id, host_owner, agent_id, shared_at) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (owner_id) DO NOTHING", [guest, bot.id, bot.host, copy.id, bot.sharedAt]));
+	}
+
+	/** What the bot shared of its agent: the snapshot made when it was shared, else (a bot shared before snapshots) the agent as it is now. */
+	private async shared(bot: { host: string; agentId: string | null; snapshot: Bundle | null }): Promise<Bundle | null> {
+		if (bot.snapshot) return bot.snapshot;
+		return bot.agentId ? this.db.owner(bot.host, (tx) => this.bundles!.of(tx, bot.host, bot.agentId!)) : null;
+	}
+
+	/**
+	 * Brings a guest's copy of the bot up to what its author shared last: its name, description, instructions, look and model. The agents that came with it stay as
+	 * they came. The bot's daily limits are read live, so they need no copying. Does nothing for a guest whose bot is turned off (their chats stay to read) or whose
+	 * copy already follows the latest sharing.
+	 */
+	async syncBot(guest: string): Promise<void> {
+		const joined = await this.db.owner(guest, async (tx) => (await tx.query("SELECT bot_id, host_owner, agent_id, shared_at FROM pim_app.guest_bots WHERE owner_id = $1", [guest])).rows[0]);
+		if (!joined) return;
+		const bot = await this.liveBot(joined.bot_id).catch(() => null);
+		if (!bot || bot.host !== joined.host_owner || bot.sharedAt.getTime() === (joined.shared_at as Date).getTime()) return;
+		const bundle = await this.shared(bot);
+		await this.bundles!.follow(guest, joined.agent_id, bundle ?? { agent: { name: bot.name, instructions: "" } }, modelOf(bot.settings));
+		await this.db.owner(guest, (tx) => tx.query("UPDATE pim_app.guest_bots SET shared_at = $2 WHERE owner_id = $1", [guest, bot.sharedAt]));
 	}
 
 	/** `GET /api/bot` for a guest: the bot they joined through, with what it allows a day (null once its link is off), and their copy of the agent. */

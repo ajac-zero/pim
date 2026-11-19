@@ -5,10 +5,12 @@
  */
 import type { App } from "@pim/v2-app/app";
 import { BadRequestError, NotFoundError } from "@pim/v2-app/errors";
+import { BOT_DAILY_MESSAGES, BOT_DAILY_TOOL_CALLS } from "@pim/v2-app/guests";
 import { route, type Route } from "@pim/v2-app/http";
 import type { Principal } from "@pim/v2-contracts/identity";
 import type { Bundle } from "@pim/v2-app/bundles";
 import { offeredModels } from "../deployment.ts";
+import { everyoneModels } from "./model.ts";
 import { bytesReply, deleted, isUploadedIcon, ms, ok } from "./admin-util.ts";
 
 type Env = Readonly<Record<string, string | undefined>>;
@@ -20,6 +22,8 @@ export const customApps = async (app: App): Promise<CustomApp[]> => ((await app.
 
 /** The models the deployment's AI gateway offers, narrowed by `PIM_MODELS` when it sets an allow-list. */
 export const gatewayModels = offeredModels;
+/** The tool a bot shares to let its guests make images, which the host's own image model draws. */
+export const SHARED_IMAGE_TOOL = "generate_image";
 
 type TemplateRow = { id: string; owner_id: string; agent_id: string; title: string; bundle: Bundle; published_at: Date; uses: number; username: string; display_name: string | null };
 
@@ -56,20 +60,29 @@ export function galleryRoutes(env: Env): Route[] {
 		return bytesReply(await app.objects.serve(null, key));
 	};
 	const botOf = async (app: App, id: string) => {
-		const r = await app.db.anonymous(async (tx) => (await tx.query("SELECT b.id, b.owner_id, b.name, b.agent_id, b.settings, b.created_at, a.username, a.status, pr.display_name FROM pim_app.bots b JOIN pim_app.accounts a ON a.owner_id = b.owner_id LEFT JOIN pim_app.profiles pr ON pr.owner_id = b.owner_id AND pr.published WHERE b.id = $1", [id])).rows[0]);
+		const r = await app.db.anonymous(async (tx) => (await tx.query("SELECT b.id, b.owner_id, b.name, b.agent_id, b.settings, b.created_at, b.shared_at, b.snapshot, a.username, a.status, pr.display_name FROM pim_app.bots b JOIN pim_app.accounts a ON a.owner_id = b.owner_id LEFT JOIN pim_app.profiles pr ON pr.owner_id = b.owner_id AND pr.published WHERE b.id = $1", [id])).rows[0]);
 		if (!r || r.status === "deleted" || r.status === "deleting") throw new NotFoundError();
 		return r;
 	};
 	const sharingOf = async (app: App, p: Principal, origin: string, agentId: string) => {
 		const r = await app.db.owner(p.ownerId, async (tx) => {
-			const bot = (await tx.query("SELECT id, settings, created_at FROM pim_app.bots WHERE owner_id = $1 AND agent_id = $2", [p.ownerId, agentId])).rows[0];
+			const bot = (await tx.query("SELECT id, settings, shared_at FROM pim_app.bots WHERE owner_id = $1 AND agent_id = $2", [p.ownerId, agentId])).rows[0];
 			if (!bot) return null;
 			const guests = (await tx.query("SELECT count(DISTINCT visitor)::int AS n FROM pim_app.visits WHERE bot_id = $1", [bot.id])).rows[0].n as number;
 			return { bot, guests };
 		});
 		if (!r) return null;
 		const s = r.bot.settings as { dailyMessages?: number | null; dailyToolCalls?: number | null; model?: { provider: string; id: string } | null; tools?: string[]; ask?: string[] };
-		return { id: r.bot.id as string, url: `${origin}/b/${r.bot.id}`, dailyMessages: s.dailyMessages ?? null, dailyToolCalls: s.dailyToolCalls ?? null, model: s.model ?? null, tools: s.tools ?? [], ask: s.ask ?? [], sharedAt: ms(r.bot.created_at), guests: r.guests };
+		return { id: r.bot.id as string, url: `${origin}/b/${r.bot.id}`, dailyMessages: s.dailyMessages ?? null, dailyToolCalls: s.dailyToolCalls ?? null, model: s.model ?? null, tools: s.tools ?? [], ask: s.ask ?? [], sharedAt: ms(r.bot.shared_at), guests: r.guests };
+	};
+
+	/** What of an agent's a bot can share: the tools of the connectors it uses that their owner has switched on, and `generate_image` unless this Pim makes no images. */
+	const shareableTools = async (app: App, p: Principal, agentId: string) => {
+		const agent = await app.agents.get(p, agentId);
+		const used = (await app.connectors.list(p)).filter((c) => agent.apps.includes(c.id) || agent.apps.includes(c.name));
+		const tools = used.flatMap((c) => c.enabledTools.map((name) => ({ name, appName: c.name as string | null, description: c.discoveredTools.find((t) => t.name === name)?.description ?? "", destructive: false })));
+		if (env.PIM_IMAGE_MODEL?.trim() !== "off") tools.push({ name: SHARED_IMAGE_TOOL, appName: null, description: "Make an image from a description; the chat shows it to the person.", destructive: false });
+		return { agent, tools };
 	};
 
 	return [
@@ -149,8 +162,8 @@ export function galleryRoutes(env: Env): Route[] {
 		// What a bot's public link shows, to anyone.
 		route("GET", "/api/bots/:id", async ({ app, params }) => {
 			const bot = await botOf(app, params[0]!);
-			const agent = bot.agent_id ? await app.db.owner(bot.owner_id, async (tx) => (await tx.query("SELECT instructions, emoji, color, icon_key FROM pim_app.agents WHERE id = $1 AND deleted_at IS NULL", [bot.agent_id])).rows[0]) : null;
-			return ok({ id: bot.id, author: bot.username, authorName: bot.display_name, name: bot.name, description: "", symbol: agent?.emoji ?? null, color: agent?.color ?? null, icon: isUploadedIcon(bot.owner_id, agent?.icon_key) ? ms(bot.created_at) : null });
+			const agent = bot.agent_id ? await app.db.owner(bot.owner_id, async (tx) => (await tx.query("SELECT description, emoji, color, icon_key FROM pim_app.agents WHERE id = $1 AND deleted_at IS NULL", [bot.agent_id])).rows[0]) : null;
+			return ok({ id: bot.id, author: bot.username, authorName: bot.display_name, name: bot.name, description: bot.snapshot?.description ?? bot.snapshot?.agent?.description ?? agent?.description ?? "", symbol: agent?.emoji ?? null, color: agent?.color ?? null, icon: isUploadedIcon(bot.owner_id, agent?.icon_key) ? ms(bot.created_at) : null });
 		}),
 		route("GET", "/api/agents/:id/bot", async ({ app, principal, params, origin }) => {
 			const p = await principal();
@@ -164,15 +177,40 @@ export function galleryRoutes(env: Env): Route[] {
 			// Only the admin shares an agent as a bot: anyone may join through its link, and what it shares is the deployment's to give.
 			await app.identity.authz.enforce(p, "admin:bots");
 			const b = await json();
-			const limit = (v: unknown) => (v === null || v === undefined ? null : Number.isInteger(v) && (v as number) >= 0 ? (v as number) : Number.NaN);
-			const settings = { dailyMessages: limit(b.dailyMessages), dailyToolCalls: limit(b.dailyToolCalls), model: b.model ?? null, tools: Array.isArray(b.tools) ? b.tools.map(String) : [], ask: Array.isArray(b.ask) ? b.ask.map(String) : [] };
-			if (Number.isNaN(settings.dailyMessages) || Number.isNaN(settings.dailyToolCalls)) throw new BadRequestError("Limits are whole numbers or null");
-			if (settings.model && (typeof settings.model.provider !== "string" || typeof settings.model.id !== "string")) throw new BadRequestError("model is { provider, id } or null");
-			// Guests can't use the admin's own ChatGPT plan or providers: choose a model this Pim offers everyone.
-			if (settings.model && (settings.model.provider === "chatgpt" || settings.model.provider.startsWith("own:"))) throw new BadRequestError("Guests can't use your ChatGPT plan or your own providers: choose a model this Pim offers everyone.");
-			await app.agents.get(p, params[0]!);
-			if (!(await sharingOf(app, p, origin, params[0]!))) await app.sharing.createBot(p, params[0]!);
-			await app.db.owner(p.ownerId, (tx) => tx.query("UPDATE pim_app.bots SET settings = $3 WHERE owner_id = $1 AND agent_id = $2", [p.ownerId, params[0]!, JSON.stringify(settings)]));
+			const shared = await sharingOf(app, p, origin, params[0]!);
+			const { agent, tools: shareable } = await shareableTools(app, p, params[0]!);
+			// Left out, a setting keeps what was shared before (a first sharing starts from v1's defaults); null is "this Pim's own limit".
+			const limit = (v: unknown, name: string, least: number, fallback: number | null) => {
+				if (v === undefined) return shared ? (shared as Record<string, any>)[name] : fallback;
+				if (v === null) return null;
+				if (typeof v !== "number" || !Number.isSafeInteger(v) || v < least || v > 10_000) throw new BadRequestError(`${name} must be a whole number from ${least} to 10000, or null for this Pim's own limit`);
+				return v;
+			};
+			const dailyMessages = limit(b.dailyMessages, "dailyMessages", 1, BOT_DAILY_MESSAGES);
+			const dailyToolCalls = limit(b.dailyToolCalls, "dailyToolCalls", 0, BOT_DAILY_TOOL_CALLS);
+			let model: { provider: string; id: string } | null = shared?.model ?? null;
+			if (b.model === null) model = null;
+			else if (b.model !== undefined) {
+				if (typeof b.model.provider !== "string" || typeof b.model.id !== "string") throw new BadRequestError("model must be { provider, id }, or null for this Pim's default");
+				// Guests can't use the admin's own ChatGPT plan or providers: choose a model this Pim offers everyone.
+				if (b.model.provider === "chatgpt" || b.model.provider.startsWith("own:")) throw new BadRequestError("Guests can't use your ChatGPT plan or your own providers: choose a model this Pim offers everyone.");
+				if (!(await everyoneModels(app, p, env)).some((m) => m.provider === b.model.provider && m.id === b.model.id)) throw new BadRequestError(`${b.model.provider}/${b.model.id} isn't a model this Pim offers everyone: choose one of those.`);
+				model = { provider: b.model.provider, id: b.model.id };
+			}
+			const names = (v: unknown, what: string) => {
+				if (!Array.isArray(v) || !v.every((x) => typeof x === "string")) throw new BadRequestError(what);
+				return [...new Set(v as string[])];
+			};
+			const tools = b.tools === undefined ? (shared?.tools ?? []).filter((t) => shareable.some((s) => s.name === t)) : names(b.tools, "tools must be the names of the agent's tools to share");
+			const missing = b.tools === undefined ? [] : tools.filter((t) => !shareable.some((s) => s.name === t));
+			if (missing.length > 0) throw new BadRequestError(`${agent.name} can't share ${missing.join(", ")}: it isn't one of its tools you can share.`);
+			// Left out, the tools asked about before still are.
+			const ask = b.ask === undefined ? (shared?.ask ?? []).filter((t) => tools.includes(t)) : names(b.ask, "ask must be the names of the shared tools you approve each call to first");
+			const unshared = ask.filter((t) => !tools.includes(t));
+			if (unshared.length > 0) throw new BadRequestError(`${unshared.join(", ")} isn't shared: only a shared tool can ask you first.`);
+			if (!shared) await app.sharing.createBot(p, params[0]!);
+			else await app.sharing.shareBot(p, params[0]!);
+			await app.db.owner(p.ownerId, (tx) => tx.query("UPDATE pim_app.bots SET settings = $3 WHERE owner_id = $1 AND agent_id = $2", [p.ownerId, params[0]!, JSON.stringify({ dailyMessages, dailyToolCalls, model, tools, ask })]));
 			return ok(await sharingOf(app, p, origin, params[0]!));
 		}),
 		route("DELETE", "/api/agents/:id/bot", async ({ app, principal, params }) => {
@@ -182,13 +220,7 @@ export function galleryRoutes(env: Env): Route[] {
 			return ok({ deleted: !!n });
 		}),
 		// What of an agent's a bot can share: the tools of the connectors it uses that their owner has switched on.
-		route("GET", "/api/agents/:id/bot-tools", async ({ app, principal, params }) => {
-			const p = await principal();
-			const agent = await app.agents.get(p, params[0]!);
-			const connectors = await app.connectors.list(p);
-			const used = connectors.filter((c) => agent.apps.includes(c.id) || agent.apps.includes(c.name));
-			return ok({ tools: used.flatMap((c) => c.enabledTools.map((name) => ({ name, appName: c.name, description: c.discoveredTools.find((t) => t.name === name)?.description ?? "", destructive: false }))) });
-		}),
+		route("GET", "/api/agents/:id/bot-tools", async ({ app, principal, params }) => ok({ tools: (await shareableTools(app, await principal(), params[0]!)).tools })),
 
 		// ---- the connector directory and the model catalog ----
 		route("GET", "/api/app-directory", async ({ app, principal }) => {

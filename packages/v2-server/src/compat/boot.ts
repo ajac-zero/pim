@@ -201,7 +201,7 @@ export const bootRoutes: Route[] = [
 			// Everyone else gets a copy of the agent the admin chose, if they chose one, besides the majordomo they name next.
 			else await app.agents.adoptDefault({ kind: "user", ownerId: account.ownerId, role: account.role, sessionId: "registration" });
 			recoveryCodes = await app.signin.newRecoveryCodes(account.ownerId);
-			setup = await app.signin.issueSetupCode(account.ownerId);
+			setup = await app.signin.issueSetupCode(account.ownerId, new Date(), "registration");
 			if (b.session === true) await app.identity.activate(account.ownerId);
 		} catch (error) {
 			// Half a registration helps nobody: give the username and invite back now, not in a day.

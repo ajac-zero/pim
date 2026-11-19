@@ -169,6 +169,28 @@ describe("setup codes, recovery codes and device links", () => {
 		expect((await new Client(base).call("POST", "/auth/passkeys/options", {})).status).toBe(401);
 	});
 
+	it("voids the registration's setup link once the first passkey is made another way, and leaves an admin's link alone", async () => {
+		const { c, ownerId } = await join("pk-voided");
+		const registration = await app.signin.issueSetupCode(ownerId, new Date(), "registration");
+		const issued = await app.signin.issueSetupCode(ownerId);
+		await c.call("POST", "/auth/recovery-codes");
+		// Activated another way (a device already signed in adds a passkey): the link from registration makes nothing now.
+		await enroll(c, new Authenticator("EdDSA"));
+		expect((await new Client(base).call("POST", "/auth/passkeys/options", { setup: registration.code })).status).toBe(401);
+		expect((await new Client(base).call("POST", "/auth/passkeys/options", { setup: issued.code })).status).toBe(200);
+	});
+
+	it("logs the operator the same setup link until it expires, and a new one after", async () => {
+		const { ownerId } = await join("pk-operator");
+		const now = new Date();
+		const first = await app.signin.operatorSetupCode(ownerId, now);
+		expect((await app.signin.operatorSetupCode(ownerId, new Date(now.getTime() + 60_000))).code).toBe(first.code);
+		const later = await app.signin.operatorSetupCode(ownerId, new Date(first.expiresAt.getTime() + 1000));
+		expect(later.code).not.toBe(first.code);
+		// What it logs is a live link.
+		expect((await new Client(base).call("POST", "/auth/passkeys/options", { setup: later.code })).status).toBe(200);
+	});
+
 	it("races two tabs on one setup code: one passkey wins", async () => {
 		const { ownerId } = await join("pk-race");
 		const { code } = await app.signin.issueSetupCode(ownerId);

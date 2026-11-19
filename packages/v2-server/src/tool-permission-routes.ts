@@ -112,7 +112,6 @@ export function permissionRoutes(): Route[] {
 				const c = connectors.find((x) => x.id === app_);
 				const tool = c?.discovered.find((t) => t.name === b.tool);
 				if (!c || !tool) throw new NotFoundError("No such connector tool");
-				if (circle && b.permission === "on" && tool.annotations?.destructiveHint === true) throw new BadRequestError("This tool can only be off or ask: every call requires explicit approval");
 				await app.db.owner(p.ownerId, (tx) => store(tx, tool.definition ?? null));
 				const after = (await rows(app, p.ownerId)).permissions;
 				return ok(circle ? circleInfo(c, tool, after, circle) : info(c, tool, after, agent));

@@ -453,6 +453,9 @@ describe("an approval's card", () => {
 		expect(webApproval(row({ state: "denied", decided_by: "user:s1", args: { summary: "GET x", note: "Not this week." } }))).toMatchObject({ status: "denied", note: "Not this week.", result: null, args: { summary: "GET x" } });
 		expect(webApproval(row({ state: "approved", decided_by: "user:s1", args: { result: "200 ok" } }))).toMatchObject({ status: "approved", note: null, result: "200 ok" });
 		expect(webApproval(row({ state: "approved", decided_by: "majordomo", args: { review: { status: "decided", note: "Routine." } } }))).toMatchObject({ decidedBy: "majordomo", note: "Routine." });
+		// An approval every call of which needs a person's own decision names no tool, so its card offers no "always approve".
+		expect(webApproval(row({ state: "waiting", args: { explicit: true, summary: "Install a skill" } })).tool).toBeNull();
+		expect(webApproval(row({ state: "waiting", args: { summary: "Run ls" } })).tool).toBe("http:request");
 	});
 });
 

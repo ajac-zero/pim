@@ -76,7 +76,7 @@ export function hostopsTools(deps: HostOpsToolDeps): ToolRegistration[] {
 		if (!filed) {
 			// Always filed, never covered by a standing approval: an operation on the host is approved one at a time.
 			await app.db.owner(ownerId, (tx) =>
-				tx.query("INSERT INTO pim_app.approvals (id, owner_id, public_chat_id, tool, args, timeout_policy, expires_at) VALUES ($1,$2,$3,$4,$5,'deny', now() + interval '24 hours')", [newId("ap"), ownerId, chat, `hostops_${op}`, JSON.stringify({ taskId, callId, op, args: checked.args, summary: summarize(op, checked.args), resource: {} })]),
+				tx.query("INSERT INTO pim_app.approvals (id, owner_id, public_chat_id, tool, args, timeout_policy, expires_at) VALUES ($1,$2,$3,$4,$5,'deny', now() + interval '24 hours')", [newId("ap"), ownerId, chat, `hostops_${op}`, JSON.stringify({ explicit: true, taskId, callId, op, args: checked.args, summary: summarize(op, checked.args), resource: {} })]),
 			);
 			return waiting;
 		}

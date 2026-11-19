@@ -8,7 +8,7 @@ import {
 	normalizeGmailMessage,
 	normalizeGmailMessageList,
 	normalizeGmailThread,
-} from "../src/extensions/gmail-content";
+} from "../src/native/gmail-content";
 
 /** Text or bytes as Gmail's API encodes a body: base64url without padding. */
 function b64(content: string | Uint8Array): string {

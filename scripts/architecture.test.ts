@@ -1,4 +1,4 @@
-// Runs in Node, reading the source: where the code's imports may point. The Worker's entry router, the space's collaborators, the packages and the web app each have a direction their imports may go.
+// Runs in Node, reading the source: where the code's imports may point. The packages and the web app each have a direction their imports may go.
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -49,37 +49,6 @@ function resolve(from: string, specifier: string): string | null {
 const rel = (file: string) => path.relative(root, file);
 
 describe("architecture", () => {
-	it("serves the Worker's requests from src/gateway.ts, which only src/index.ts imports", () => {
-		const gateway = path.join(root, "src/gateway.ts");
-		const importers = sourcesIn(path.join(root, "src")).filter((file) => importsOf(file).some(({ specifier }) => resolve(file, specifier) === gateway));
-		expect(importers.map(rel)).toEqual(["src/index.ts"]);
-	});
-
-	it("keeps the space's collaborators from loading Pim: they import its type at most, and nothing they load imports it back", () => {
-		const pim = path.join(root, "src/pim.ts");
-		const collaborators = sourcesIn(path.join(root, "src/space"));
-		expect(collaborators.length).toBeGreaterThan(0);
-		// The files a file loads when it runs: its value imports.
-		const loads = (file: string) => importsOf(file).filter(({ typeOnly }) => !typeOnly).flatMap(({ specifier }) => resolve(file, specifier) ?? []);
-		const reach = (start: string) => {
-			const seen = new Set<string>();
-			const queue = [start];
-			for (let file = queue.pop(); file !== undefined; file = queue.pop()) {
-				if (seen.has(file)) continue;
-				seen.add(file);
-				queue.push(...loads(file));
-			}
-			return seen;
-		};
-		for (const file of collaborators) expect(reach(file).has(pim), `${rel(file)} loads src/pim.ts`).toBe(false);
-	});
-
-	it("keeps the space's collaborators from loading one another in a circle", () => {
-		const loads = (file: string) => importsOf(file).filter(({ typeOnly }) => !typeOnly).flatMap(({ specifier }) => resolve(file, specifier) ?? []);
-		const reaches = (from: string, target: string, seen = new Set<string>()): boolean => loads(from).some((next) => next === target || (!seen.has(next) && seen.add(next) && reaches(next, target, seen)));
-		for (const file of sourcesIn(path.join(root, "src/space"))) expect(reaches(file, file), `${rel(file)} loads itself`).toBe(false);
-	});
-
 	it("gives the packages no import of src/ or web/", () => {
 		const files = fs.readdirSync(path.join(root, "packages")).flatMap((name) => sourcesIn(path.join(root, "packages", name)));
 		expect(files.length).toBeGreaterThan(0);

@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { handle, type Machine, newerProgram, supervision } from "../computer/pim-computer";
+import { handle, type Machine, newerProgram, supervision } from "../pim-computer";
 
 let root: string;
 let machine: Machine;

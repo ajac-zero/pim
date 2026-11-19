@@ -1,15 +1,17 @@
 // pim-computer's triggers host, in Node: how pim-computer gets and loads it, and runs nothing without it; and over a fake socket, with fake launchers on a fake clock for the protocol and the grants, the real runtime and spool in a temporary folder, and a few tiny real children for what only a real process group shows. Nothing here opens a socket or reaches the network.
 import { type ChildProcess, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { grantScopeHash as spaceGrantScope, PROTOCOL as SPACE_PROTOCOL, runtimeIdOf, sourceConfigHash as spaceConfigHash, TRIGGERS_ENVELOPE as SPACE_ENVELOPE } from "@pim/triggers/computer";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { Link, loadTriggers, TRIGGERS_MODULES } from "../computer/pim-computer";
-import type { ChildEvents, ChildExit, OwnedChild } from "../computer/triggers-adapters/poll";
-import type { StreamChild, StreamChildEvents } from "../computer/triggers-adapters/stream";
-import { ENVELOPE_BYTES, MAX_BUFFERED_BYTES, startTriggers, TRIGGERS_ENVELOPE, type TriggersHost, type TriggersSocket, grantScopeHash, triggersBinding } from "../computer/triggers-host";
-import { type Binding, type ComputerSource, type DesiredSource, HARD_LIMITS, PROTOCOL, type RuntimeClock, SPOOL_FILE, sourceConfigHash } from "../computer/triggers-runtime";
+import { Link, loadTriggers, TRIGGERS_MODULES } from "../pim-computer";
+import type { ChildEvents, ChildExit, OwnedChild } from "../triggers-adapters/poll";
+import type { StreamChild, StreamChildEvents } from "../triggers-adapters/stream";
+import { ENVELOPE_BYTES, MAX_BUFFERED_BYTES, startTriggers, TRIGGERS_ENVELOPE, type TriggersHost, type TriggersSocket, grantScopeHash, triggersBinding } from "../triggers-host";
+import { type Binding, type ComputerSource, type DesiredSource, HARD_LIMITS, PROTOCOL, type RuntimeClock, SPOOL_FILE, sourceConfigHash } from "../triggers-runtime";
 
 const T0 = Date.UTC(2026, 10, 7);
 const OWNER = `o_${"a".repeat(26)}`;
@@ -224,11 +226,11 @@ async function close(h: Harness): Promise<void> {
 describe("triggers in pim-computer, loaded", () => {
 	it("gets the runtime from the Pim when it isn't beside pim-computer, all of it or none, and runs no triggers without it", async () => {
 		// pim-computer.ts alone, as the Pim's install and update leave it, with the Pim's files behind a fetch that reaches no network.
-		const computer = path.join(import.meta.dirname, "..", "computer");
+		const computer = path.join(import.meta.dirname, "..");
 		const alone = path.join(dir, "installed");
 		await fs.mkdir(alone);
 		await fs.copyFile(path.join(computer, "pim-computer.ts"), path.join(alone, "pim-computer.ts"));
-		const installed = (await import(path.join(alone, "pim-computer.ts"))) as typeof import("../computer/pim-computer");
+		const installed = (await import(path.join(alone, "pim-computer.ts"))) as typeof import("../pim-computer");
 		let served = true;
 		const asked: string[] = [];
 		const realFetch = globalThis.fetch;
@@ -277,7 +279,7 @@ describe("triggers in pim-computer, loaded", () => {
 
 	it("keeps pim-computer one file that imports only Node's own modules, and leaves a triggers message to a Link that ignores it", async () => {
 		// The Pim's install and update download pim-computer.ts alone: a value import of a module beside it would break every installed computer.
-		const source = await fs.readFile(path.join(import.meta.dirname, "..", "computer", "pim-computer.ts"), "utf8");
+		const source = await fs.readFile(path.join(import.meta.dirname, "..", "pim-computer.ts"), "utf8");
 		const imports = [...source.matchAll(/^import (?!type )[^;]*? from "([^"]+)";$/gm)].map((match) => match[1]);
 		expect(imports.length).toBeGreaterThan(0);
 		expect(imports.filter((name) => !name!.startsWith("node:"))).toEqual([]);
@@ -625,5 +627,23 @@ describe("triggers in pim-computer, on real children", () => {
 			bystander?.kill();
 			await host.close();
 		}
+	});
+});
+
+describe("triggers in pim-computer, against the space's side", () => {
+	it("computes the same digests, runtime id and envelope as the space's @pim/triggers/computer", () => {
+		const sources: ComputerSource[] = [
+			{ kind: "stream", command: "tail -F log | jq -c .", cwd: null },
+			{ kind: "poll", command: "./price.sh", cwd: "/srv", intervalMs: 300_000, deadlineMs: 30_000 },
+			{ kind: "process", handle: "proc-1", expiresAt: T0 + 3_600_000 },
+			{ kind: "file", path: "/home/ada/inbox", events: ["created", "deleted"], recursive: true },
+		];
+		for (const source of sources) expect(sourceConfigHash(source)).toBe(spaceConfigHash(source));
+		const scope = { space: OWNER, runtimeId: BINDING.runtimeId, triggerId: "watch", sourceId: "watch#3", configHash: sourceConfigHash(sources[0]!), grantRef: "approval-9" };
+		expect(grantScopeHash(scope)).toBe(spaceGrantScope(scope));
+		expect(runtimeIdOf(createHash("sha256").update(TOKEN).digest("hex"))).toBe(BINDING.runtimeId);
+		expect(runtimeIdOf(null)).toBeNull();
+		expect(TRIGGERS_ENVELOPE).toBe(SPACE_ENVELOPE);
+		expect(PROTOCOL).toBe(SPACE_PROTOCOL);
 	});
 });

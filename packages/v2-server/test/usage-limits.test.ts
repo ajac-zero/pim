@@ -11,7 +11,7 @@ const CODEX_LIMIT = "You have hit your ChatGPT usage limit (plus plan). Try agai
 
 describe("usage limit errors", () => {
 	it("are told from other errors, and Pim's own daily limits are not the provider's", () => {
-		for (const message of [CODEX_LIMIT, '{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached","resets_in_seconds":259200}}', "429 You exceeded your current quota, please check your plan and billing details.", "OpenAI API error: rate_limit_exceeded", "Too Many Requests"]) expect(isUsageLimitError(message), message).toBe(true);
+		for (const message of [CODEX_LIMIT, '{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached","resets_in_seconds":259200}}', "429 You exceeded your current quota, please check your plan and billing details.", "OpenAI API error: rate_limit_exceeded", "subscription_sharing_usage_limit_exceeded\nCheck your ChatGPT usage", "Too Many Requests"]) expect(isUsageLimitError(message), message).toBe(true);
 		for (const message of ["This model's maximum context length was exceeded: 210000 tokens", "Space usage quota exceeded: 100 model requests a day. It resets at midnight UTC.", "Invalid request: bad schema", "500 Internal server error", undefined]) expect(isUsageLimitError(message), message).toBe(false);
 		// A plan that is used up moves the request on to the next model, like an overloaded one; Pim's own limit does not.
 		const failed = (errorMessage: string) => ({ role: "assistant", content: [], stopReason: "error", errorMessage }) as never;
@@ -27,7 +27,10 @@ describe("when a limit resets", () => {
 		expect(at('{"error":{"type":"usage_limit_reached","resets_in_seconds":259200}}')).toBe(NOW + 72 * HOUR);
 		expect(at(CODEX_LIMIT)).toBe(NOW + 42 * MINUTE);
 		expect(at("Limit reached. Please try again in 1h 30m.")).toBe(NOW + 90 * MINUTE);
+		expect(at("Rate limit reached for requests. Please try again in 6m0s.")).toBe(NOW + 6 * MINUTE);
 		expect(at("You've hit your usage limit. Upgrade to Pro or try again in 3 days.")).toBe(NOW + 72 * HOUR);
+		expect(at("Server requested 10800s retry delay (max: 60s)")).toBe(NOW + 3 * HOUR);
+		expect(at("You've hit your usage limit. Try again at Nov 11, 2026 3:00 PM UTC.")).toBe(Date.UTC(2026, 10, 11, 15));
 		expect(at("Usage limit reached, try again at 2026-11-10T20:00:00Z.")).toBe(Date.UTC(2026, 10, 10, 20));
 		// A bare time of day is read as UTC, the next time it comes: later today, or tomorrow once it has passed.
 		expect(at("You've hit your usage limit. Try again at 5:32 PM.")).toBe(Date.UTC(2026, 10, 10, 17, 32));

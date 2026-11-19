@@ -5,7 +5,7 @@ import type { AddressInfo } from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { type ChromeLaunch, type ChromeProcess, DisplayClient, type DevToolsSocket, Link, type Machine, SIGNED_OUT, ThreadBrowsers, threadFolder } from "../computer/pim-computer";
+import { type ChromeLaunch, type ChromeProcess, DisplayClient, type DevToolsSocket, Link, type Machine, SIGNED_OUT, ThreadBrowsers, threadFolder } from "../pim-computer";
 
 const DAY = 24 * 60 * 60_000;
 const PRIMARY_PORT = 9222;

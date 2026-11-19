@@ -1,7 +1,7 @@
 // What `pnpm test:changed` decides to run, from the files a diff touches: the whole suite when a
 // change can reach any test or nothing maps to one, otherwise only the projects it maps to.
 import { describe, expect, it } from "vitest";
-import { selectRuns } from "../scripts/test-changed.mjs";
+import { selectRuns } from "./test-changed.mjs";
 
 describe("selecting which tests a change reaches", () => {
 	it("runs the whole suite when dependency or build configuration changed, wherever it is", () => {

@@ -5,7 +5,7 @@ import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { Apps, type AppsOptions, Link, type Machine } from "../computer/pim-computer";
+import { Apps, type AppsOptions, Link, type Machine } from "../pim-computer";
 
 const ID = "0a1b2c3d-0000-4000-8000-000000000001";
 const OTHER = "0a1b2c3d-0000-4000-8000-000000000002";

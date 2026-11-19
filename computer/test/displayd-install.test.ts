@@ -4,8 +4,8 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { displaydSetupScript, displaydUnit, ensureDisplayd } from "../computer/pim-computer";
-import { displaydBundle, displaydFiles } from "../displayd/bundle.js";
+import { displaydSetupScript, displaydUnit, ensureDisplayd } from "../pim-computer";
+import { displaydBundle, displaydFiles } from "../../displayd/bundle.js";
 
 const setup = { url: "https://pim.test/", user: "cua", home: "/home/cua", node: "/usr/local/lib/nodejs/bin/node" };
 const dirs: string[] = [];
@@ -74,7 +74,7 @@ describe("the bundle the Pim serves at /displayd.tar.gz", () => {
 		const into = path.join(out, "app");
 		mkdirSync(into);
 		expect(spawnSync("tar", ["-xzf", archive, "-C", into]).status).toBe(0);
-		for (const file of displaydFiles()) expect(readFileSync(path.join(into, file))).toEqual(readFileSync(path.join(import.meta.dirname, "..", "displayd", file)));
+		for (const file of displaydFiles()) expect(readFileSync(path.join(into, file))).toEqual(readFileSync(path.join(import.meta.dirname, "..", "..", "displayd", file)));
 	});
 
 	it("is the same bytes every time, so a computer can tell by its checksum that it has the newest", () => {

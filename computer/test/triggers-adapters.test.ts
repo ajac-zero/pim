@@ -5,11 +5,11 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { observerAdapters } from "../computer/triggers-adapters/index";
-import { StreamAdapter, type StreamLauncher } from "../computer/triggers-adapters/stream";
-import { FileProcessProvider, LinuxProcessProbe, readManagedRecord, writeCompletionReceipt, writeLaunchIntent } from "../computer/triggers-adapters/managed";
-import { type ChildEvents, type ChildExit, NodeChildLauncher, type OwnedChild, POLL_LIMITS, PollAdapter, type PollAdapterOptions, readPollOutput } from "../computer/triggers-adapters/poll";
-import { type CompletionReceipt, type LaunchIntent, type Liveness, type ManagedProcessProvider, type ManagedRecord, PROCESS_WATCH, type ProcessIdentity, ProcessWatchAdapter } from "../computer/triggers-adapters/process";
+import { observerAdapters } from "../triggers-adapters/index";
+import { StreamAdapter, type StreamLauncher } from "../triggers-adapters/stream";
+import { FileProcessProvider, LinuxProcessProbe, readManagedRecord, writeCompletionReceipt, writeLaunchIntent } from "../triggers-adapters/managed";
+import { type ChildEvents, type ChildExit, NodeChildLauncher, type OwnedChild, POLL_LIMITS, PollAdapter, type PollAdapterOptions, readPollOutput } from "../triggers-adapters/poll";
+import { type CompletionReceipt, type LaunchIntent, type Liveness, type ManagedProcessProvider, type ManagedRecord, PROCESS_WATCH, type ProcessIdentity, ProcessWatchAdapter } from "../triggers-adapters/process";
 import {
 	type AdapterConfig,
 	type AdapterHealth,
@@ -23,7 +23,7 @@ import {
 	type RuntimeClock,
 	TriggersRuntime,
 	sourceConfigHash,
-} from "../computer/triggers-runtime";
+} from "../triggers-runtime";
 import { TRIGGER_DEFAULTS, TRIGGER_LIMITS } from "@pim/triggers/spec";
 
 const T0 = Date.UTC(2026, 10, 7);

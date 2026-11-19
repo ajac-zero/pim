@@ -5,7 +5,7 @@ import type { AddressInfo } from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { DisplayClient, handle, Link, type Machine, runCommand, type ScreenHost } from "../computer/pim-computer";
+import { DisplayClient, handle, Link, type Machine, runCommand, type ScreenHost } from "../pim-computer";
 
 type Req = { method: string; url: string; body: any; auth?: string };
 

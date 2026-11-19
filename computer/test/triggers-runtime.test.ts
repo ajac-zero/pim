@@ -26,7 +26,7 @@ import {
 	type StopReason,
 	TriggersRuntime,
 	sourceConfigHash,
-} from "../computer/triggers-runtime";
+} from "../triggers-runtime";
 
 const T0 = Date.UTC(2026, 10, 7);
 /** The longest id the protocol takes. */

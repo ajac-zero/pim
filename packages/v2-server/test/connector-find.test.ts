@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { type DirectoryApp, findApps } from "../src/extensions/app-directory";
+import { findApps } from "../src/connector-admin-tools.ts";
+import type { DirectoryApp } from "../src/connector-service.ts";
 
 const app = (ref: string, name: string, description = ""): DirectoryApp => ({ ref, name, description, url: `https://${ref.replace("/", ".")}.test/mcp`, custom: false, icon: null, category: null });
 

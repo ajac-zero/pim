@@ -5,7 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { FSWatcher } from "node:fs";
-import { Link, MAX_WATCHES, type Machine, WATCH_DEBOUNCE_MS } from "../computer/pim-computer";
+import { Link, MAX_WATCHES, type Machine, WATCH_DEBOUNCE_MS } from "../pim-computer";
 
 const fake = vi.hoisted(() => ({ failStat: false, mute: false, watchers: [] as unknown[], listeners: [] as ((event: string, name: string) => void)[] }));
 vi.mock("node:fs", async (original) => {

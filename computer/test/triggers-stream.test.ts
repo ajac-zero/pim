@@ -5,7 +5,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ChildExit } from "../computer/triggers-adapters/poll";
+import type { ChildExit } from "../triggers-adapters/poll";
 import {
 	NodeStreamLauncher,
 	STREAM_LIMITS,
@@ -14,7 +14,7 @@ import {
 	type StreamChild,
 	type StreamChildEvents,
 	checkStreamSource,
-} from "../computer/triggers-adapters/stream";
+} from "../triggers-adapters/stream";
 import {
 	type AdapterHealth,
 	type ComputerSource,
@@ -29,7 +29,7 @@ import {
 	type RuntimeClock,
 	TriggersRuntime,
 	sourceConfigHash,
-} from "../computer/triggers-runtime";
+} from "../triggers-runtime";
 import { TRIGGER_LIMITS } from "@pim/triggers/spec";
 
 const T0 = Date.UTC(2026, 10, 7);

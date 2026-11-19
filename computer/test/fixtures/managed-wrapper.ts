@@ -1,5 +1,5 @@
 // A test's stand-in for a managed launcher: supervises one tiny Node job under a handle, writing its intent and receipt in the given state folder.
-import { superviseManaged } from "../../computer/triggers-adapters/managed.ts";
+import { superviseManaged } from "../../triggers-adapters/managed.ts";
 
 const jobs: Record<string, string> = {
 	exit0: "process.exit(0)",

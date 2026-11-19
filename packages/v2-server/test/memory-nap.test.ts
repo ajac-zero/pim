@@ -10,7 +10,7 @@ import { napMemoryId } from "../src/memory-nap.ts";
 import { readTranscript, waitFor } from "../../v2-runtime/test/support/rig.ts";
 import { Client } from "./support/client.ts";
 import { type Deployment, base, start, startS3 } from "./support/processes.ts";
-import { createStack, describeWith, freePort, hasNats, startNats } from "./support/stack.ts";
+import { createStack, describeWith, freePort, hasNats, startNats, sentAndAnswered } from "./support/stack.ts";
 
 const real = describeWith(hasNats());
 
@@ -23,7 +23,8 @@ real("the memory nap", () => {
 	let ownerId: string;
 	let n = 0;
 	const faux = fauxProvider({ provider: "faux", models: [{ id: "m" }] });
-	const reply = (message: string) => fauxAssistantMessage([fauxToolCall("send_to_user", { message })], { stopReason: "toolUse" });
+	// A reply in a script does not end the turn; the send `say` adds does.
+	const reply = (message: string, ends = false) => fauxAssistantMessage([fauxToolCall("send_to_user", { message, ...(ends ? {} : { complete: false }) })], { stopReason: "toolUse" });
 
 	const transcript = async (chat: string) => {
 		const c = (await d.stack.admin.query("SELECT partition_id, conversation_id FROM pim_runtime.conversation_partitions WHERE public_chat_id = $1", [chat])).rows[0];
@@ -31,9 +32,9 @@ real("the memory nap", () => {
 	};
 	const say = async (chat: string, words: string, ...script: unknown[]) => {
 		const id = ++n;
-		faux.setResponses([...script, reply(`done ${id}`), fauxAssistantMessage(`ended ${id}`)] as never);
+		faux.setResponses([...script, reply(`done ${id}`, true), fauxAssistantMessage(`ended ${id}`)] as never);
 		expect((await web.call("POST", `/api/sessions/${chat}/messages`, { commandId: `m-${id}`, text: words })).status).toBe(202);
-		await waitFor(`the turn to end`, async () => ((await transcript(chat)).includes(`ended ${id}`) ? true : undefined), 60_000);
+		await waitFor(`the turn to end`, async () => (sentAndAnswered(await transcript(chat), `done ${id}`) ? true : undefined), 60_000);
 	};
 	const memory = async (chat: string) => (await d.stack.admin.query("SELECT scope, title, body, deleted_at FROM pim_app.memories WHERE id = $1", [napMemoryId(chat)])).rows[0];
 	const napped = async (chat: string) => (await d.stack.admin.query("SELECT napped_at, memory_id FROM pim_app.chat_naps WHERE public_chat_id = $1", [chat])).rows[0];

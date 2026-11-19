@@ -109,6 +109,9 @@ export const DUE = "coalesce((payload ->> 'notBefore')::bigint, 0) <= (extract(e
 
 export type OutboxTopic = "projection" | "wake" | "cost_ledger";
 
+/** `resume-<root>-<n>` and `retry-<root>-<n>` belong to the turn `root`; its wake is keyed by the root so a resumed turn ends once. */
+export const rootOperation = (op: string) => op.replace(/^(?:resume|retry)-(.*)-\d+$/, "$1");
+
 /** A thread slug for the pim/<slug>-<id> branch name. */
 export function branchFor(task: string, threadId: string, prefix = "pim/"): string {
 	const slug = task.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 32).replace(/-+$/, "") || "task";
@@ -220,6 +223,18 @@ export class ForgeStore {
 		if (!t.chatId) return false;
 		const wake = completionWake(t.threadId, operationId, outcome, summary);
 		return this.emit(q, "wake", wake.wakeId, t.threadId, { chatId: t.chatId, ...wake });
+	}
+
+	/**
+	 * Fails a thread before its turn could begin (no slot in time, over quota, no sandbox, a checkout that failed) and tells the chat that started it, as the end of any other turn does:
+	 * the wake is for the input the thread was about to run (`operationId`, else the oldest still waiting), or for its start. Told once per input.
+	 */
+	async failEarly(q: Queryable, threadId: string, reason: string, detail: string | null, operationId?: string): Promise<void> {
+		await this.setState(q, threadId, "failed", reason, detail);
+		const t = await this.get(threadId, q);
+		if (!t) return;
+		const waiting = operationId ?? ((await q.query<Row>("select operation_id from pim_forge.forge_inbox where thread_id = $1 and status = 'pending' and kind <> 'revive' order by seq limit 1", [threadId])).rows[0]?.operation_id as string | undefined);
+		await this.emitCompletionWake(q, t, rootOperation(waiting ?? t.startOperation), "failed", detail ? `${reason}: ${detail}` : reason);
 	}
 
 	async emit(q: Queryable, topic: OutboxTopic, dedupeKey: string, threadId: string | null, payload: object): Promise<boolean> {

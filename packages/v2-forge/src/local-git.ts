@@ -43,6 +43,19 @@ export class LocalGitHost implements GitHost {
 		return run("git", ["--git-dir", this.dir(repo), "rev-parse", "--verify", "--quiet", `refs/heads/${branch}`]).then(() => true, () => false);
 	}
 
+	async branches(repo: string): Promise<ReadonlyMap<string, string>> {
+		const out = new Map<string, string>();
+		for (const line of (await this.host(repo, "for-each-ref", "--format=%(refname:short) %(objectname)", "refs/heads")).split("\n")) {
+			const [name, sha] = line.split(" ");
+			if (name && sha) out.set(name, sha);
+		}
+		return out;
+	}
+
+	async resolveCommit(repo: string, ref: string): Promise<string | null> {
+		return this.host(repo, "rev-parse", "--verify", "--quiet", `${ref}^{commit}`).then((sha) => sha || null, () => null);
+	}
+
 	async push(h: ComputeHandle, repo: string, branch: string): Promise<PushOutcome> {
 		const head = (await this.ws(h, "rev-parse", "HEAD")).out;
 		if (!head) throw new ForgeError("nothing_to_push", "The workspace has no commits");

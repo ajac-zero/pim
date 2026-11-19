@@ -1,6 +1,7 @@
 // `/api/coding/git/:owner/:name.git/*`: git smart HTTP for the sandboxes, in front of the git host (GitHub App or Gitea).
 // A sandbox holds only a `pimgit_` token. Every request is checked against PostgreSQL (the thread's nonce and state, the owner not suspended), a push may only update the thread's own `pim/*` branch (never the default branch, never a delete), and a pushed branch is recorded on the thread.
 import { createHash, randomUUID } from "node:crypto";
+import { MAX_FETCH_RESPONSE_BYTES, MAX_UPLOAD_REQUEST_BYTES, askWithRetries } from "@pim/coding/git-broker/routes";
 import { type Row } from "../db";
 import { type ForgeStore } from "../store";
 import { ForgeError } from "../errors";
@@ -11,7 +12,7 @@ import { type Handler, errorResponse, json, match } from "./common";
 /** `repoUrl` is the repository as the thread names it (its provider instance is found from it). Where the host's smart HTTP endpoint is, and how to sign in to it for this repository. The broker never gives this to a sandbox. */
 export type GitUpstream = (repoUrl: string, access: "read" | "write") => Promise<{ url: string; authorization: string | null }>;
 
-export type GitBrokerDeps = { credentials: Credentials; store: ForgeStore; /** The store as one owner's requests see it (row-level security); the Gate's. */ scope?: (ownerId: string) => ForgeStore; git: GitHost; upstream: GitUpstream; fetch?: typeof fetch; maxPushBytes?: number };
+export type GitBrokerDeps = { credentials: Credentials; store: ForgeStore; /** The store as one owner's requests see it (row-level security); the Gate's. */ scope?: (ownerId: string) => ForgeStore; git: GitHost; upstream: GitUpstream; fetch?: typeof fetch; maxPushBytes?: number; /** The most a fetch's negotiation may weigh, and the most the broker passes on of the host's answer to one; the coding package's limits unless given. */ maxRequestBytes?: number; maxResponseBytes?: number; /** How the broker waits between its tries at a host that is rate limiting or briefly down; tests give their own. */ sleep?: (ms: number) => Promise<void>; random?: () => number };
 
 export const MAX_PUSH_BYTES = 64 * 1024 * 1024;
 const ZERO = "0".repeat(40);
@@ -45,7 +46,7 @@ export function pushCommands(body: Uint8Array): { old: string; next: string; ref
 }
 
 const FORWARD_REQ = ["content-type", "content-encoding", "accept", "accept-encoding", "git-protocol"];
-const FORWARD_RES = ["content-type", "cache-control", "content-encoding"];
+const FORWARD_RES = ["content-type", "cache-control", "content-encoding", "retry-after"];
 
 export function gitBroker(d: GitBrokerDeps): Handler {
 	const doFetch = d.fetch ?? fetch;
@@ -75,11 +76,15 @@ export function gitBroker(d: GitBrokerDeps): Handler {
 				op = "read";
 				who = await d.credentials.verifyGit(token, { repo, op: "fetch" });
 				target = rest;
+				// What git sends while negotiating a fetch is small; a request past the limit is refused unread.
+				if (Number(req.headers.get("content-length") ?? 0) > (d.maxRequestBytes ?? MAX_UPLOAD_REQUEST_BYTES)) return json(413, { error: "The request is too big", code: "push_refused" });
 			} else if (rest === "git-receive-pack" && req.method === "POST") {
 				op = "write";
 				return await receive(d, doFetch, req, repo, token);
 			} else return json(404, { error: "No such git route", code: "not_found" });
-			return await proxy(d, doFetch, req, (await storeOf(d, who.ownerId).get(who.threadId))!.repo, op, target, req.method === "POST" ? new Uint8Array(await req.arrayBuffer()) : undefined);
+			const sent = req.method === "POST" ? new Uint8Array(await req.arrayBuffer()) : undefined;
+			if (sent && sent.length > (d.maxRequestBytes ?? MAX_UPLOAD_REQUEST_BYTES)) return json(413, { error: "The request is too big", code: "push_refused" });
+			return await proxy(d, doFetch, req, (await storeOf(d, who.ownerId).get(who.threadId))!.repo, op, target, sent);
 		} catch (e) {
 			// A refusal from git's side reads best as a plain status: the sandbox's git prints it.
 			const r = errorResponse(e);
@@ -93,10 +98,25 @@ async function proxy(d: GitBrokerDeps, doFetch: typeof fetch, req: Request, repo
 	const headers = new Headers();
 	for (const h of FORWARD_REQ) if (req.headers.get(h)) headers.set(h, req.headers.get(h)!);
 	if (up.authorization) headers.set("authorization", up.authorization);
-	const res = await doFetch(`${up.url.replace(/\/$/, "")}/${target}`, { method: req.method, headers, body: body as BodyInit | undefined, redirect: "manual" });
+	const ask = () => doFetch(`${up.url.replace(/\/$/, "")}/${target}`, { method: req.method, headers, body: body as BodyInit | undefined, redirect: "manual" });
+	// A read is safe to repeat (its body is held here): a host that is rate limiting or briefly down is asked again after a pause, as long as it asks or by backoff. A push is not repeated.
+	const res = op === "read" ? (await askWithRetries(d, ask)).answer : await ask();
 	const out = new Headers();
 	for (const h of FORWARD_RES) if (res.headers.get(h)) out.set(h, res.headers.get(h)!);
-	return new Response(res.body, { status: res.status, headers: out });
+	if (op !== "read" || !res.body) return new Response(res.body, { status: res.status, headers: out });
+	// What the host answers is passed on up to a limit: a repository larger than that is cut off, which git reports.
+	const max = d.maxResponseBytes ?? MAX_FETCH_RESPONSE_BYTES;
+	let seen = 0;
+	const capped = res.body.pipeThrough(
+		new TransformStream<Uint8Array, Uint8Array>({
+			transform(chunk, controller) {
+				seen += chunk.byteLength;
+				if (seen > max) throw new ForgeError("push_refused", `The repository is larger than the ${max} bytes the broker passes on at once`);
+				controller.enqueue(chunk);
+			},
+		}),
+	);
+	return new Response(capped, { status: res.status, headers: out });
 }
 
 async function receive(d: GitBrokerDeps, doFetch: typeof fetch, req: Request, repo: string, token: string): Promise<Response> {

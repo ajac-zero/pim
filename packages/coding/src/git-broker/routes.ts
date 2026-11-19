@@ -91,7 +91,7 @@ function askedWaitMs(answer: Response, now: number): number | null {
  * briefly down. Only for requests that are safe to repeat: the broker's are,
  * since it only reads and its request body is held in memory.
  */
-async function askWithRetries(deps: GitBrokerDeps, ask: () => Promise<Response>): Promise<{ answer: Response; retryAfterSeconds: number; rateLimited: boolean }> {
+export async function askWithRetries(deps: Pick<GitBrokerDeps, "sleep" | "random" | "now">, ask: () => Promise<Response>): Promise<{ answer: Response; retryAfterSeconds: number; rateLimited: boolean }> {
 	const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
 	const random = deps.random ?? Math.random;
 	let waited = 0;

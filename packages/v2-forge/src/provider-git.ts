@@ -40,6 +40,16 @@ export class ProviderGitHost implements GitHost {
 		return (await provider.listBranches(repo)).has(branch);
 	}
 
+	async branches(repoUrl: string) {
+		const { provider, repo } = this.resolve(repoUrl);
+		return provider.listBranches(repo);
+	}
+
+	async resolveCommit(repoUrl: string, ref: string) {
+		const { provider, repo } = this.resolve(repoUrl);
+		return provider.resolveCommit(repo, ref);
+	}
+
 	async remoteDiff(repoUrl: string, branch: string, since?: string): Promise<string | null> {
 		const { provider, repo } = this.resolve(repoUrl);
 		// A commit of the host is as good as a branch to compare to.

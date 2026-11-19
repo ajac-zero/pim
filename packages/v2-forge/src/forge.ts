@@ -5,7 +5,7 @@ import { type OrbClient } from "@pim/coding/orb/types";
 import { pageTranscript, transcriptOutput } from "@pim/coding/transcript";
 import type { TranscriptMessage } from "@pim/shared/transcript";
 import { type Actor, Authz, assertCapability, assertPushBranch, repoName, type Permission } from "./authz";
-import { type ComputeProvider } from "./compute";
+import { type ComputeHandle, type ComputeProvider } from "./compute";
 import { type Db, type Row, scopedDb, tx } from "./db";
 import { ForbiddenError, ForgeError } from "./errors";
 import { HARNESSES, capabilitiesOf, type Harness } from "./harnesses";
@@ -35,6 +35,8 @@ export type ForgeConfig = {
 	promoteOnRelease?: boolean;
 	/** Where the checkout is in a sandbox; `/workspace/repo`, where `prepareCheckout` makes it, unless a provider lays it out otherwise. */
 	repoDir?: string;
+	/** How long a push or a merge waits for the worker to make a given-back sandbox again, in ms; three minutes unless given. */
+	reviveWaitMs?: number;
 };
 
 /** A thread as a person or an agent reads it: the row without what signs its credentials or says who steps it. */
@@ -456,21 +458,62 @@ export class Forge {
 		return null;
 	}
 
-	private workspaceOf(t: ThreadRow) {
+	/** Whether the thread's sandbox is there to run commands in. */
+	private hasWorkspace(t: ThreadRow): boolean {
+		return !!t.workspaceRef && !!this.c.compute && !t.computeTornDownAt;
+	}
+
+	/**
+	 * The thread's sandbox for a push or a merge. One given back (idle past the grace, or the thread failed or waited for a login) or lost is asked for again: the worker makes it and restores the checkout from the thread's last
+	 * autosave, without a turn, and the thread stays as it was. Waits for it, at most `reviveWaitMs`.
+	 */
+	private async workspaceOf(t: ThreadRow) {
 		if (!capabilitiesOf(t.harness).forgePush) throw new ForgeError("unsupported", "Pim can't push or merge an Amp thread: Amp pushes with its own credentials");
-		if (!t.workspaceRef || !this.c.compute || t.computeTornDownAt) throw new ForgeError("workspace_not_running", "This thread has no running workspace");
-		return t.workspaceRef;
+		if (!this.c.compute || t.state === "archived") throw new ForgeError("workspace_not_running", "This thread has no running workspace");
+		if (this.hasWorkspace(t) && (await this.c.compute.find(t.workspaceRef.tag ?? t.threadId).then((h) => h !== null, () => true))) return t.workspaceRef;
+		const operationId = `revive-${randomUUID()}`;
+		await this.c.store.locked(t.threadId, async (q, cur) => {
+			const restore = cur.state === "failed" || cur.state === "waiting_input" ? { state: cur.state, reason: cur.stateReason, detail: cur.stateDetail } : null;
+			await this.c.store.enqueueInbox(q, t.threadId, operationId, "revive", { restore });
+		});
+		const until = Date.now() + (this.c.reviveWaitMs ?? 3 * 60_000);
+		for (;;) {
+			const r = (await this.c.db.query<Row>("select t.workspace_ref, t.state, t.state_reason, i.status from pim_forge.forge_threads t join pim_forge.forge_inbox i on i.thread_id = t.thread_id and i.operation_id = $2 where t.thread_id = $1", [t.threadId, operationId])).rows[0];
+			if (r?.status === "done" && r.workspace_ref) return r.workspace_ref as ComputeHandle;
+			if (r?.state === "failed" && r.state_reason && ["provision_failed", "checkout_failed", "compute_quota", "queue_timeout", "no_backend"].includes(r.state_reason) && r.status !== "done") throw new ForgeError("workspace_not_running", `This thread's workspace couldn't be made again: ${r.state_reason}`);
+			if (Date.now() > until) throw new ForgeError("workspace_not_running", "This thread's workspace is being made again; try again in a moment");
+			await new Promise((resolve) => setTimeout(resolve, 200));
+		}
+	}
+
+	/** The commit the thread's work is at that isn't in a sandbox: its newest checkpoint, else what its autosave bundled. */
+	private async savedHead(t: ThreadRow): Promise<string | null> {
+		const a = (await this.c.db.query<Row>("select head_sha from pim_forge.forge_autosaves where thread_id = $1", [t.threadId])).rows[0];
+		return (await latestCheckpoint(this.c.db, t.threadId))?.sha ?? (a?.head_sha as string | undefined) ?? null;
+	}
+
+	/** Whether the branch the thread pushed already holds all its work, so a push or a merge needs no sandbox: the host has it. */
+	private async onHost(t: ThreadRow): Promise<boolean> {
+		if (!t.lastPushedSha || !t.branch) return false;
+		const saved = await this.savedHead(t);
+		return (saved === null || saved === t.lastPushedSha) && (await this.c.git.hasBranch(t.repo, t.branch));
 	}
 
 	/** Pushes the thread's work to its own branch, or to another of the branches Pim may push to (`branch`: under the prefix, never the default). */
 	async push(actor: Actor, ref: string, o: { branch?: string } = {}): Promise<Gated<{ outcome: "pushed" | "unchanged"; sha: string; branch: string }>> {
 		const t = await this.own(actor, ref);
-		const ws = this.workspaceOf(t);
+		if (!capabilitiesOf(t.harness).forgePush) throw new ForgeError("unsupported", "Pim can't push or merge an Amp thread: Amp pushes with its own credentials");
 		const pending = await this.gate(actor, "coding:push", "push", t);
 		if (pending) return { status: "approval_required", ...pending };
 		const branch = o.branch ?? t.branch!;
 		assertPushBranch(this.c.authz.policy, branch, await this.c.git.defaultBranch(t.repo));
-		await this.commitWork(t);
+		// The work is already on the host (the thread's branch was pushed at its last turn's end): nothing is brought back to push it again.
+		if (branch === t.branch && !this.hasWorkspace(t) && (await this.onHost(t))) {
+			await this.c.authz.consumeApproval(t.threadId, "push");
+			return { status: "done", outcome: "unchanged", sha: t.lastPushedSha!, branch };
+		}
+		const ws = await this.workspaceOf(t);
+		await this.commitWork((await this.c.store.get(t.threadId)) ?? t);
 		const r = await this.c.git.push(ws, t.repo, branch);
 		if (branch === t.branch) await this.c.store.locked(t.threadId, (q) => this.c.store.patch(q, t.threadId, { last_pushed_sha: r.sha }));
 		await this.c.authz.consumeApproval(t.threadId, "push");
@@ -501,17 +544,17 @@ export class Forge {
 		const t = await this.own(actor, ref);
 		const remote = capabilitiesOf(t.harness).family === "remote-orb";
 		const branch = remote ? ((t.orb?.branch as string | undefined) ?? null) : t.branch;
-		const ws = remote ? null : this.workspaceOf(t);
+		if (!remote && !capabilitiesOf(t.harness).forgePush) throw new ForgeError("unsupported", "Pim can't push or merge this thread");
 		const pending = await this.gate(actor, "coding:merge", "merge", t);
 		if (pending) return { status: "approval_required", ...pending };
 		const base = await this.c.git.defaultBranch(t.repo);
-		if (!branch || !(await this.c.git.hasBranch(t.repo, branch))) {
-			if (!ws) throw new ForgeError("not_pushed", "The Amp thread's branch isn't on the git host yet");
-		}
+		// A sandbox thread whose branch already holds all its work is merged from the host; otherwise its sandbox is brought back to push it first.
+		const ws = remote || (!this.hasWorkspace(t) && (await this.onHost(t))) ? null : await this.workspaceOf(t);
+		if (!ws && (!branch || !(await this.c.git.hasBranch(t.repo, branch)))) throw new ForgeError("not_pushed", remote ? "The Amp thread's branch isn't on the git host yet" : "The thread's branch isn't on the git host yet");
 		if (branch === base) throw new ForgeError("push_refused", `${base} is the default branch`);
 		assertPushBranch(this.c.authz.policy, branch!, base);
 		if (ws) {
-			await this.commitWork(t);
+			await this.commitWork((await this.c.store.get(t.threadId)) ?? t);
 			const pushed = await this.c.git.push(ws, t.repo, branch!);
 			await this.c.store.locked(t.threadId, (q) => this.c.store.patch(q, t.threadId, { last_pushed_sha: pushed.sha }));
 		}

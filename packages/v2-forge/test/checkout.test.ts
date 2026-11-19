@@ -47,4 +47,37 @@ describe("the sandbox's checkout through the broker", () => {
 		await prepareCheckout(deps, t, { id: "x", provider: "x", tag: "x" });
 		expect(cmds.slice(before).some((c) => c[1] === "clone")).toBe(false);
 	});
+
+	it("tries a clone again while the host is rate limiting or briefly down, pausing between tries, and fails at once on anything else", async () => {
+		const run = async (failures: string[], delays: number[]) => {
+			const cmds: string[][] = [];
+			let tries = 0;
+			let cloned = false;
+			const compute = {
+				id: "x",
+				workspace: async () => ({ writeFile: async () => {} }),
+				exec: async (_h: unknown, cmd: readonly string[]) => {
+					cmds.push([...cmd]);
+					if (cmd[0] === "test") return { code: cloned ? 0 : 1, stdout: "", stderr: "" };
+					if (cmd[1] === "clone") {
+						const said = failures[tries++];
+						if (said === undefined) cloned = true;
+						else return { code: 128, stdout: "", stderr: said };
+					}
+					return { code: 0, stdout: "", stderr: "" };
+				},
+			} as unknown as ComputeProvider;
+			const { threadId } = await s.forge.start(ada, startReq(`co-retry-${Math.random()}`, { harness: "claude-code" }));
+			const t = (await s.store.get(threadId))!;
+			const outcome = await prepareCheckout({ compute, credentials: s.credentials, publicUrl: "https://pim.example.test", retryDelaysMs: delays }, t, { id: "x", provider: "x", tag: "x" }).then(() => "cloned", (e: Error) => e.message);
+			return { outcome, clones: cmds.filter((c) => c[1] === "clone").length };
+		};
+		expect(await run(["fatal: unable to access: The requested URL returned error: 429", "error: RPC failed; HTTP 503 curl 22"], [0, 0, 0])).toEqual({ outcome: "cloned", clones: 3 });
+		// Three retries, then the last error, with what git said.
+		const gave = await run(Array(10).fill("error: RPC failed; HTTP 503 curl 22"), [0, 0, 0]);
+		expect(gave.clones).toBe(4);
+		expect(gave.outcome).toContain("RPC failed; HTTP 503");
+		// A repository that isn't there is not retried.
+		expect(await run(["fatal: repository 'x' not found"], [0, 0, 0])).toMatchObject({ clones: 1, outcome: expect.stringContaining("not found") });
+	});
 });

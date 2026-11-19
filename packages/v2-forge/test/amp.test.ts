@@ -196,6 +196,46 @@ describe("Amp: a remote orb Forge adopts and never restarts", () => {
 		expect((await s.forge.status(ada, id)).stateDetail).toBe(LEGACY_AMP_WORKSPACE_MESSAGE);
 	});
 
+	it("finds the branch its agent said it pushed, so its diff, pull request and merge work with nothing recorded by hand", async () => {
+		const orb = new FakeOrbClient();
+		const id = await amp();
+		const w = s.worker({ orbs: () => orb, git: s.git });
+		await w.step(id);
+		const h = orb.started[0]!.threadId;
+		// What the agent says of a branch the host doesn't have, or of the default branch it only looked at, is not its work.
+		orb.say(h, "assistant", "I looked at main and thought about feature/ghost, which I did not push.");
+		await w.step(id);
+		expect((await s.store.get(id))!.orb!.branch).toBeUndefined();
+		const clone = await s.sandboxes.create(`amp-found-${n}`);
+		await s.sandboxes.exec(clone, ["git", "clone", s.bare, "."]);
+		await s.sandboxes.exec(clone, ["sh", "-c", "echo found > found.txt"]);
+		await s.sh(clone, "checkout", "-b", `pim/found-${n}`);
+		await s.sh(clone, "add", ".");
+		await s.sh(clone, "commit", "-m", "found work");
+		await s.sh(clone, "push", s.bare, `pim/found-${n}`);
+		orb.say(h, "assistant", `All done: I pushed my work to pim/found-${n} for you.`);
+		orb.setState(h, "idle");
+		await w.step(id);
+		expect((await s.store.get(id))!.orb).toMatchObject({ branch: `pim/found-${n}` });
+		expect(await s.forge.diff(ada, id)).toMatchObject({ unpushedOrb: false, head: `pim/found-${n}`, diff: expect.stringContaining("+found") });
+		expect(await s.forge.openPullRequest(ada, id)).toMatchObject({ status: "done", head: `pim/found-${n}` });
+		expect(await s.forge.merge(ada, id)).toMatchObject({ status: "done", outcome: "merged" });
+		// A commit it names, which the host has, is followed when no branch is named.
+		const byCommit = new FakeOrbClient();
+		const id2 = await amp();
+		const w2 = s.worker({ orbs: () => byCommit, git: s.git });
+		await w2.step(id2);
+		await s.sandboxes.exec(clone, ["sh", "-c", "echo again > again.txt"]);
+		await s.sh(clone, "checkout", "-b", `elsewhere-${n}`);
+		await s.sh(clone, "add", ".");
+		await s.sh(clone, "commit", "-m", "work nobody named a branch for");
+		await s.sh(clone, "push", s.bare, `elsewhere-${n}`);
+		const sha = (await s.sandboxes.exec(clone, ["git", "rev-parse", "HEAD"])).stdout.trim();
+		byCommit.say(byCommit.started[0]!.threadId, "assistant", `Committed ${sha.slice(0, 10)} and pushed it to origin.`);
+		await w2.step(id2);
+		expect((await s.store.get(id2))!.orb!.branch).toBe(sha);
+	});
+
 	it("can't be pushed or merged by Forge, and its diff says honestly when the work isn't on the git host", async () => {
 		const id = await amp();
 		await s.worker().step(id);
@@ -217,7 +257,7 @@ describe("Amp: a remote orb Forge adopts and never restarts", () => {
 		expect(d.unpushedOrb).toBe(false);
 		expect(d.diff).toContain("+amp");
 		// A PR can be opened for the pushed orb branch.
-		expect(await s.forge.openPullRequest(ada, id)).toMatchObject({ status: "done", number: 1 });
+		expect(await s.forge.openPullRequest(ada, id)).toMatchObject({ status: "done", head: "amp/feature" });
 		// Only pim/* branches are merged by Pim, whoever pushed them.
 		await expect(s.forge.merge(ada, id)).rejects.toMatchObject({ code: "push_refused" });
 		await s.sh(clone, "push", s.bare, "amp/feature:refs/heads/pim/amp-work-1234");

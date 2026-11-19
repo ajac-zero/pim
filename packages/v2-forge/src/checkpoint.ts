@@ -85,10 +85,13 @@ export async function autosaveWorkspace(d: CheckpointDeps & { objects: { put(key
 	const handle = t.workspaceRef as ComputeHandle | null;
 	if (!handle) return;
 	const exec = (cmd: string[]) => d.compute.exec(handle, cmd, { cwd: d.repoDir ?? REPO_DIR, timeoutMs: 120_000 });
+	// Nothing past where the thread started, or what the last bundle already holds, is not bundled again.
+	const head = (await exec(["git", "rev-parse", "HEAD"])).stdout.trim();
+	if (!head || head === t.baseSha) return;
+	if ((await d.db.query<Row>("select 1 from pim_forge.forge_autosaves where thread_id = $1 and head_sha = $2", [t.threadId, head])).rows.length) return;
 	const r = await exec(["sh", "-c", "git bundle create ../autosave.bundle HEAD >&2 && base64 -w0 ../autosave.bundle"]);
 	if (r.code !== 0) return;
 	const bytes = Buffer.from(r.stdout, "base64");
-	const head = (await exec(["git", "rev-parse", "HEAD"])).stdout.trim();
 	const key = `forge/${t.threadId}/autosave/${head}.bundle`;
 	await d.objects.put(key, bytes, { contentType: "application/x-git-bundle" });
 	await d.db.query("insert into pim_forge.forge_autosaves (thread_id, head_sha, object_key, bytes) values ($1,$2,$3,$4) on conflict (thread_id) do update set head_sha = $2, object_key = $3, bytes = $4, at = now()", [t.threadId, head, key, bytes.length]);

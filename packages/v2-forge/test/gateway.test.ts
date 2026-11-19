@@ -106,6 +106,45 @@ describe("model gateway", () => {
 		expect(codes).toEqual([200, 200, 200, 200, 200, 429, 429]);
 	});
 
+	it("makes a streamed Chat Completions request report its usage, and leaves any other body as it was", async () => {
+		const t = await thread();
+		const tok = s.credentials.gatewayToken(t, { families: ["openai"] });
+		await (await call(tok, "openai/v1/chat/completions", { model: "gpt-x", stream: true, stream_options: { other: 1 }, messages: [] })).text();
+		expect(JSON.parse(seen.at(-1)!.body)).toEqual({ model: "gpt-x", stream: true, stream_options: { other: 1, include_usage: true }, messages: [] });
+		await (await call(tok, "openai/v1/chat/completions", { model: "gpt-x", messages: [] })).text();
+		expect(seen.at(-1)!.body).toBe(JSON.stringify({ model: "gpt-x", messages: [] }));
+	});
+
+	it("gives up on a provider that stops sending, ends the stream with the API's own error event, charges what it reported, and frees the request's place", async () => {
+		const quiet = createServer((req, res) => {
+			req.resume();
+			res.writeHead(200, { "content-type": "text/event-stream" });
+			res.write(`event: message_start\ndata: ${JSON.stringify({ type: "message_start", message: { model: "claude-x", usage: { input_tokens: 1200, output_tokens: 1 } } })}\n\n`);
+		});
+		await new Promise<void>((r) => quiet.listen(0, "127.0.0.1", r));
+		const base = `http://127.0.0.1:${(quiet.address() as AddressInfo).port}`;
+		const slow = await serve(modelGateway({ credentials: s.credentials, store: s.store, key: async () => ({ apiKey: "sk-ant-person", baseUrl: base }), price: (_f, _m, u) => (u.input + u.output) / 1000, limits: { idleTimeoutMs: 100, concurrent: 1 } }));
+		try {
+			const t = await thread();
+			const tok = s.credentials.gatewayToken(t, { families: ["anthropic"] });
+			const ask = () => fetch(`${slow.url}/api/coding/gateway/anthropic/v1/messages`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${tok}` }, body: JSON.stringify({ model: "claude-x", stream: true }) });
+			const r = await ask();
+			const text = await r.text();
+			expect(text).toContain("message_start");
+			expect(text).toMatch(/event: error\ndata: \{"type":"error","error":\{"type":"api_error","message":"The model provider stopped sending/);
+			const ev = (await s.store.events(t.threadId, { kind: "model_call" }))[0]!;
+			expect(ev).toMatchObject({ tokens_in: "1200" });
+			// The one place it had is free again.
+			const again = await ask();
+			expect(again.status).toBe(200);
+			await again.text();
+		} finally {
+			await slow.stop();
+			quiet.closeAllConnections();
+			quiet.close();
+		}
+	});
+
 	it("reads usage from a JSON body and from stream events, taking the largest of each counter", () => {
 		expect(usageOf(JSON.stringify({ model: "m", usage: { input_tokens: 5, output_tokens: 7, input_tokens_details: { cached_tokens: 2 } } }))).toEqual({ model: "m", usage: { input: 5, output: 7, cacheRead: 2, cacheWrite: 0 } });
 		expect(usageOf("data: {\"type\":\"response.completed\",\"response\":{\"model\":\"r\",\"usage\":{\"input_tokens\":9,\"output_tokens\":1}}}\n\n").usage).toMatchObject({ input: 9, output: 1 });

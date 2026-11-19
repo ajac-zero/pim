@@ -100,4 +100,8 @@ export interface GitHost {
 	deleteBranch(repo: string, branch: string): Promise<void>;
 	/** Whether the branch exists on the host. */
 	hasBranch(repo: string, branch: string): Promise<boolean>;
+	/** Every branch of the repository with the commit it is at: how what an Amp thread said it pushed is found. A host that can't list leaves this out. */
+	branches?(repo: string): Promise<ReadonlyMap<string, string>>;
+	/** The commit a branch, tag or abbreviated sha names on the host; null when it has none. */
+	resolveCommit?(repo: string, ref: string): Promise<string | null>;
 }

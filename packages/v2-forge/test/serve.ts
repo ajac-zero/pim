@@ -13,8 +13,13 @@ export async function serve(handler: Handler): Promise<{ url: string; stop(): Pr
 		const headers: Record<string, string> = {};
 		response.headers.forEach((v, k) => (headers[k] = v));
 		res.writeHead(response.status, headers);
-		if (response.body) for await (const chunk of response.body as unknown as AsyncIterable<Uint8Array>) res.write(chunk);
-		res.end();
+		// An answer whose stream fails part-way is cut off, as a real server's would be, rather than left open.
+		try {
+			if (response.body) for await (const chunk of response.body as unknown as AsyncIterable<Uint8Array>) res.write(chunk);
+			res.end();
+		} catch {
+			res.destroy();
+		}
 	});
 	await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
 	return {

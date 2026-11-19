@@ -160,6 +160,63 @@ describe("git broker over smart HTTP", () => {
 		expect((await fetch(`${url()}/info/refs?service=git-upload-pack`)).status).toBe(401);
 	});
 
+	it("asks the host again when it is rate limiting or briefly down, after the pause it asked for, and passes on what it still says after the last try", async () => {
+		const t = await thread();
+		const read = s.credentials.gitToken(t, { repo: "acme/app", scope: "read" });
+		const answers: Response[] = [];
+		const waits: number[] = [];
+		let asks = 0;
+		let outage = false;
+		const flaky = await serve(
+			gitBroker({
+				credentials: s.credentials,
+				store: s.store,
+				git: s.git,
+				upstream: async () => ({ url: `${host.url}/app.git`, authorization: UPSTREAM_AUTH }),
+				sleep: async (ms) => void waits.push(ms),
+				random: () => 0,
+				fetch: async (input, init) => {
+					if (String(input).includes("info/refs")) asks++;
+					if (answers.length) return answers.shift()!;
+					return outage ? new Response("down", { status: 503 }) : fetch(input, init);
+				},
+			}),
+		);
+		try {
+			const ls = (token: string) => git(sandbox(), token, "ls-remote", `${flaky.url}/api/coding/git/acme/app.git`);
+			// Rate limited with a Retry-After, then briefly unavailable, then well.
+			answers.push(new Response("slow down", { status: 429, headers: { "retry-after": "2" } }), new Response("bad gateway", { status: 502 }));
+			const ok = await ls(read);
+			expect(ok.status, ok.stderr).toBe(0);
+			expect(ok.stdout).toContain("refs/heads/main");
+			expect(asks).toBe(3);
+			expect(waits).toEqual([2000, 2000]);
+			// A host that stays down is asked a bounded number of times, and its answer is what the sandbox's git sees.
+			asks = 0;
+			outage = true;
+			const down = await ls(read);
+			expect(down.status).not.toBe(0);
+			expect(down.stderr).toMatch(/503/);
+			expect(asks).toBe(4);
+		} finally {
+			await flaky.stop();
+		}
+	});
+
+	it("refuses a fetch's negotiation past the limit unread, and cuts off an answer that is too large", async () => {
+		const t = await thread();
+		const read = s.credentials.gitToken(t, { repo: "acme/app", scope: "read" });
+		const small = await serve(gitBroker({ credentials: s.credentials, store: s.store, git: s.git, upstream: async () => ({ url: `${host.url}/app.git`, authorization: UPSTREAM_AUTH }), maxRequestBytes: 64, maxResponseBytes: 50 }));
+		try {
+			const big = await fetch(`${small.url}/api/coding/git/acme/app.git/git-upload-pack`, { method: "POST", headers: { authorization: `Bearer ${read}`, "content-type": "application/x-git-upload-pack-request" }, body: "x".repeat(65) });
+			expect(big.status).toBe(413);
+			// The answer is cut off part-way, which the sandbox's git reports as a failed fetch.
+			await expect((async () => (await fetch(`${small.url}/api/coding/git/acme/app.git/info/refs?service=git-upload-pack`, { headers: { authorization: `Bearer ${read}` } })).arrayBuffer())()).rejects.toThrow();
+		} finally {
+			await small.stop();
+		}
+	});
+
 	it("reads a push's commands from its pkt-lines", () => {
 		const line = (text: string) => new TextEncoder().encode((text.length + 4).toString(16).padStart(4, "0") + text);
 		const a = "a".repeat(40);

@@ -9,7 +9,13 @@ import { type Credentials } from "./tokens";
 /** Where the checkout is in a sandbox. */
 export const REPO_DIR = "/workspace/repo";
 
-export type CheckoutDeps = { compute: ComputeProvider; credentials: Credentials; /** Pim's public origin, such as https://pim.example.test: what the sandbox's `origin` points at. */ publicUrl: string; ttlMs?: number };
+export type CheckoutDeps = { compute: ComputeProvider; credentials: Credentials; /** Pim's public origin, such as https://pim.example.test: what the sandbox's `origin` points at. */ publicUrl: string; ttlMs?: number; /** The pauses before the retries of a clone or fetch the git host rate limited or briefly refused, one entry per retry; 5 s, 15 s and 45 s unless given. */ retryDelaysMs?: readonly number[] };
+
+/** The pauses before the retries of a clone or fetch the host rate limited or briefly refused, as v1 paced them. */
+export const GIT_RETRY_DELAYS_MS: readonly number[] = [5_000, 15_000, 45_000];
+
+/** Whether what git printed says the host rate limited the request or was briefly down: worth trying again. A missing repository or a refused login is not. */
+export const gitRateLimited = (message: string): boolean => /error: (429|502|503|504)\b|HTTP (429|502|503|504)\b|RPC failed|rate limit|Too Many Requests|\b(502|503|504)\b.*(Bad Gateway|Unavailable|Timeout)/i.test(message);
 
 /** Writes the credential helper and a push-scoped grant into the workspace. Idempotent; run again it brings the grant up to date (a thread that was aborted, or sat for longer than a grant lasts, holds a dead one). */
 export async function refreshGitCredentials(d: CheckoutDeps, thread: ThreadRow, handle: ComputeHandle): Promise<string> {
@@ -29,10 +35,17 @@ export async function refreshGitCredentials(d: CheckoutDeps, thread: ThreadRow, 
 export async function prepareCheckout(d: CheckoutDeps, thread: ThreadRow, handle: ComputeHandle, restore?: { bundle: Uint8Array; head: string } | null, o: { /** The sandbox was restored from an environment snapshot, which holds the repository as it was when the snapshot was made: it is brought to the thread's ref and branch. */ restored?: boolean } = {}): Promise<void> {
 	const url = await refreshGitCredentials(d, thread, handle);
 	const ws = await d.compute.workspace!(handle);
+	const delays = d.retryDelaysMs ?? GIT_RETRY_DELAYS_MS;
 	const run = async (cmd: string[]) => {
-		const r = await d.compute.exec(handle, cmd, { cwd: "/workspace", timeoutMs: 10 * 60_000 });
-		if (r.code !== 0) throw new ForgeError("conflict", `${cmd.slice(0, 2).join(" ")} failed: ${(r.stderr || r.stdout).replace(/pimgit_[\w.-]+/g, "[redacted]").slice(-300)}`);
-		return r;
+		// A clone or fetch is asked again, after a pause, while the host is rate limiting or briefly down.
+		const talks = cmd.includes("clone") || cmd.includes("fetch");
+		for (let attempt = 0; ; attempt++) {
+			const r = await d.compute.exec(handle, cmd, { cwd: "/workspace", timeoutMs: 10 * 60_000 });
+			if (r.code === 0) return r;
+			const said = (r.stderr || r.stdout).replace(/pimgit_[\w.-]+/g, "[redacted]");
+			if (!talks || attempt >= delays.length || !gitRateLimited(said)) throw new ForgeError("conflict", `${cmd.slice(0, 2).join(" ")} failed: ${said.slice(-300)}`);
+			await new Promise((resolve) => setTimeout(resolve, delays[attempt]));
+		}
 	};
 	const present = (await d.compute.exec(handle, ["test", "-d", `${REPO_DIR}/.git`], { cwd: "/workspace" })).code === 0;
 	if (present && !o.restored) return;

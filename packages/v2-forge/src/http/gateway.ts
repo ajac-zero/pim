@@ -23,8 +23,9 @@ export const defaultPrice: GatewayPrice = (family, _model, u) => {
 	return (u.input * p.input + u.output * p.output + u.cacheRead * p.cacheRead + u.cacheWrite * p.cacheWrite) / 1_000_000;
 };
 
-export type GatewayLimits = { requestsPerMinute: number; concurrent: number; maxBodyBytes: number };
-export const DEFAULT_GATEWAY_LIMITS: GatewayLimits = { requestsPerMinute: 120, concurrent: 4, maxBodyBytes: 8 * 1024 * 1024 };
+/** `idleTimeoutMs` is how long an answer may go without a byte before the gateway gives up on the provider. */
+export type GatewayLimits = { requestsPerMinute: number; concurrent: number; maxBodyBytes: number; idleTimeoutMs: number };
+export const DEFAULT_GATEWAY_LIMITS: GatewayLimits = { requestsPerMinute: 120, concurrent: 4, maxBodyBytes: 8 * 1024 * 1024, idleTimeoutMs: 5 * 60_000 };
 
 const BASES: Record<GatewayFamily, string> = { anthropic: "https://api.anthropic.com", openai: "https://api.openai.com" };
 const ROUTES: Record<string, { family: GatewayFamily; path: string; charged: boolean }> = {
@@ -71,6 +72,15 @@ export function usageOf(text: string): { model: string | null; usage: TokenUsage
 	return { model, usage: seen ? u : null };
 }
 
+/** A server-sent error event as the API's own streams send one when an answer fails part-way, which the CLI's SDK raises (an error would only reach it as the stream's end). */
+function streamError(path: string, message: string): string {
+	if (path.startsWith("/v1/messages")) return `event: error\ndata: ${JSON.stringify({ type: "error", error: { type: "api_error", message } })}\n\n`;
+	if (path === "/v1/responses") return `event: error\ndata: ${JSON.stringify({ type: "error", code: "upstream_timeout", message, param: null })}\n\n`;
+	return `data: ${JSON.stringify({ error: { message, type: "server_error", param: null, code: "upstream_timeout" } })}\n\n`;
+}
+
+class IdleTimeout extends Error {}
+
 const refuse = (status: number, type: string, message: string, headers: Record<string, string> = {}) => json(status, { error: { type, message } }, headers);
 
 export function modelGateway(d: GatewayDeps): Handler {
@@ -107,8 +117,18 @@ export function modelGateway(d: GatewayDeps): Handler {
 		if (gate.inFlight >= limits.concurrent) return refuse(429, "too_many_concurrent", "Too many requests at once", { "retry-after": "1" });
 		const cred = await d.key(thread, route.family);
 		if (!cred) return refuse(403, "no_credential", `This Pim has no ${route.family} key for you`);
-		const body = new Uint8Array(await req.arrayBuffer());
+		let body: Uint8Array = new Uint8Array(await req.arrayBuffer());
 		if (body.length > limits.maxBodyBytes) return refuse(413, "request_too_large", "The request is too big");
+		// A streamed Chat Completions answer reports its usage only when asked to, and the thread's budget needs it: any other body is sent on byte for byte.
+		if (route.path === "/v1/chat/completions") {
+			try {
+				const asked = JSON.parse(new TextDecoder().decode(body));
+				if (asked && typeof asked === "object" && !Array.isArray(asked) && asked.stream === true && asked.stream_options?.include_usage !== true) {
+					const options = asked.stream_options && typeof asked.stream_options === "object" ? asked.stream_options : {};
+					body = new TextEncoder().encode(JSON.stringify({ ...asked, stream_options: { ...options, include_usage: true } }));
+				}
+			} catch {}
+		}
 		gate.recent.push(now());
 		gate.inFlight++;
 		let released = false;
@@ -147,15 +167,39 @@ export function modelGateway(d: GatewayDeps): Handler {
 				const costUsd = await price(route.family, model, usage);
 				await store.locked(thread.threadId, (q) => store.appendEvent(q, thread.threadId, { kind: "model_call", costUsd, tokensIn: usage.input, tokensOut: usage.output, data: { via: "gateway", api: route.path, family: route.family, model, estimated: read.usage === null } })).catch(() => {});
 			};
-			const tee = new TransformStream<Uint8Array, Uint8Array>({
-				transform(chunk, c) {
-					if (copy.length < 8 * 1024 * 1024) copy += decoder.decode(chunk, { stream: true });
-					c.enqueue(chunk);
+			const reader = upstream.body.getReader();
+			const streamed = (upstream.headers.get("content-type") ?? "").toLowerCase().startsWith("text/event-stream");
+			// An answer that stops sending is given up on, after what the provider sent: a stream ends with the API's own error event, and what it reported is charged.
+			const answer = new ReadableStream<Uint8Array>({
+				async pull(controller) {
+					let timer: ReturnType<typeof setTimeout> | undefined;
+					try {
+						const next = await Promise.race([reader.read(), new Promise<never>((_, reject) => (timer = setTimeout(() => reject(new IdleTimeout()), limits.idleTimeoutMs)))]);
+						if (next.done) {
+							await charge();
+							controller.close();
+							return;
+						}
+						if (copy.length < 8 * 1024 * 1024) copy += decoder.decode(next.value, { stream: true });
+						controller.enqueue(next.value);
+					} catch (error) {
+						reader.cancel().catch(() => {});
+						await charge();
+						const message = "The model provider stopped sending: the Pim model gateway gave up on the answer";
+						if (error instanceof IdleTimeout && streamed) {
+							controller.enqueue(new TextEncoder().encode(streamError(route.path, message)));
+							controller.close();
+						} else controller.error(error instanceof IdleTimeout ? new Error(message) : error);
+					} finally {
+						clearTimeout(timer);
+					}
 				},
-				flush: charge,
+				cancel(reason) {
+					void charge();
+					return reader.cancel(reason).catch(() => {});
+				},
 			});
-			void upstream.body.pipeTo(tee.writable).catch(() => void charge());
-			return new Response(tee.readable, { status: upstream.status, headers: out });
+			return new Response(answer, { status: upstream.status, headers: out });
 		} catch (e) {
 			release();
 			throw e;

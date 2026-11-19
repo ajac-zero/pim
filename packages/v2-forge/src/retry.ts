@@ -14,7 +14,7 @@ export const RATE_LIMIT_ERROR = /rate.?limit|\b429\b|too many requests|per min/i
 /** Errors a retry can't help: the credentials, the request, the budget or the person. */
 const PERMANENT_ERROR = /unauthori[sz]ed|forbidden|authenticat|invalid[ _-]?(api[ _-]?key|request|token|param)|api key|permission|budget|usage limit|quota|credit|billing|context (length|window)|too (long|large)|not found|\b(40[0-9]|41[0-9]|42[0-8]|4[3-9][0-9])\b/i;
 /** Errors that come and go: provider trouble, rate limits and a connection that dropped. */
-const TRANSIENT_ERROR = /\b(429|5\d\d)\b|rate.?limit|too many requests|overload|server error|bad gateway|unavailable|temporar|timed? ?out|timeout|network|connection|websocket|socket|ECONN\w*|ETIMEDOUT|EAI_AGAIN|fetch failed|capacity|internal error|try again|manager|workspace|container|sandbox/i;
+const TRANSIENT_ERROR = /\b(429|5\d\d)\b|rate.?limit|too many requests|overload|server error|bad gateway|unavailable|temporar|timed? ?out|timeout|no progress|network|connection|websocket|socket|ECONN\w*|ETIMEDOUT|EAI_AGAIN|fetch failed|capacity|internal error|try again|manager|workspace|container|sandbox/i;
 
 /** Whether a failed turn's error is worth a retry: it reads as transient and not as permanent (a 429 is both, and counts as transient). */
 export function isTransient(detail: string | null | undefined): boolean {

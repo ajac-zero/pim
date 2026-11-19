@@ -406,6 +406,7 @@ async function promoteDomain(pool: Pool, owner: string, options: PromoteOptions,
 	const skillVersions = await rows("pim_skill_versions");
 	const skillFiles = await rows("pim_skill_files");
 	const memories = await rows("optmem_log");
+	const memoryScopes = await rows("optmem_scopes");
 	const goals = await rows("pim_goals");
 	const connections = await rows("pim_app_connections");
 	const toolPermissions = await rows("pim_tool_permissions");
@@ -538,7 +539,7 @@ async function promoteDomain(pool: Pool, owner: string, options: PromoteOptions,
 			const named = typeof model === "string" ? (model.includes("/") ? { provider: model.split("/")[0], id: model.split("/").slice(1).join("/") } : null) : model;
 			// The same as a chat's `pi.agent` above: a model of a provider this deployment lacks names the default instead, since a Runner chooses each turn's model from the agent's.
 			const ref = named?.provider && !usable.has(named.provider) && !(named.provider.startsWith("own:") && usable.has(named.provider.slice(4))) && options.defaultAgent ? { provider: options.defaultAgent.provider, id: options.defaultAgent.modelId } : named?.provider?.startsWith("own:") && usable.has(named.provider.slice(4)) ? { ...named, provider: named.provider.slice(4) } : named;
-			const config = { ...(ref ? { model: ref } : {}), fallbacks: parseJson(a.fallbacks, []), skills: parseJson(a.skills, []), apps: parseJson(a.apps, []), contacts: parseJson(a.contacts, []), delegates: [], legacy: { role: a.role ?? null, description: a.description ?? "", isDefault: a.is_default === 1 } };
+			const config = { ...(ref ? { model: ref } : {}), fallbacks: parseJson(a.fallbacks, []), skills: parseJson(a.skills, []), apps: parseJson(a.apps, []), contacts: parseJson(a.contacts, []), delegates: [], ...(a.memory_scope ? { memoryScope: String(a.memory_scope) } : {}), memoryScopes: parseJson(a.memory_scopes, []), legacy: { role: a.role ?? null, description: a.description ?? "", isDefault: a.is_default === 1 } };
 			const r = await c.query("INSERT INTO pim_app.agents (id, owner_id, name, instructions, config, emoji, color, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT DO NOTHING", [a.id, owner, a.name, a.instructions ?? "", JSON.stringify(config), a.symbol ?? null, a.color ?? null, ms(a.created_at)]);
 			bump(d, "agents", r.rowCount ?? 0);
 		}
@@ -566,6 +567,11 @@ async function promoteDomain(pool: Pool, owner: string, options: PromoteOptions,
 			if (!inserted.rowCount) continue;
 			bump(d, "skills");
 			for (const v of versions) await c.query("INSERT INTO pim_app.skill_versions (owner_id, skill_id, version, body, files, created_at) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING", [owner, id, Number(v.version), v.instructions ?? "", JSON.stringify(filesOf(v)), ms(v.created_at)]);
+		}
+		// The scopes the person named, which agents read through `memoryScopes` in their config. An agent's own scope is `memoryScope` (the majordomo's is `private`).
+		for (const sc of memoryScopes) {
+			const r = await c.query("INSERT INTO pim_app.memory_scopes (owner_id, key, name, created_at) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING", [owner, sc.key, sc.name, ms(sc.created_at)]);
+			bump(d, "memory scopes", r.rowCount ?? 0);
 		}
 		for (const m of memories) {
 			const text = String(m.text ?? "");
@@ -661,7 +667,7 @@ async function promoteDomain(pool: Pool, owner: string, options: PromoteOptions,
 			const mine = members.filter((m) => m.circle_id === ci.id).map((m) => owners.get(String(m.owner_id)) ?? String(m.owner_id));
 			const known = new Set((await c.query("SELECT owner_id FROM pim_app.accounts WHERE owner_id = ANY($1)", [mine])).rows.map((r) => r.owner_id));
 			for (const m of mine) if (!known.has(m)) d.skipped.push(`circle ${ci.id}: member ${m} has no account here`);
-			const r = await c.query("INSERT INTO pim_app.circles (id, owner_id, name, members) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING", [ci.id, owner, ci.name, mine.filter((m) => known.has(m))]);
+			const r = await c.query("INSERT INTO pim_app.circles (id, owner_id, name, members, memory_scopes) VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING", [ci.id, owner, ci.name, mine.filter((m) => known.has(m)), parseJson(ci.memory_scopes, [])]);
 			bump(d, "circles", r.rowCount ?? 0);
 		}
 		for (const l of links) {

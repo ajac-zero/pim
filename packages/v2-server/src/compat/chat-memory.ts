@@ -3,15 +3,13 @@
  * V2 keeps a title and a body, so a line is read back as "title: body" and written as a title with the same line as its body.
  *
  * A scope is a key: `private` (what only the person and their majordomo read), `everyone`, `agent-<id>` (one agent's own), or one the person named
- * (`scope-…`, kept in `pim_app.memory_scopes`). Agents read `everyone` and their own; a named scope is the person's own grouping.
+ * (`scope-…`, kept in `pim_app.memory_scopes`). An agent reads `everyone`, its own and the named scopes it was given (its `memoryScopes`).
  */
-import { newId } from "@pim/v2-app/ids";
-import { BadRequestError, ConflictError, NotFoundError } from "@pim/v2-app/errors";
+import { BadRequestError, NotFoundError } from "@pim/v2-app/errors";
 import { ok, type Route, route } from "@pim/v2-app/http";
 import type { App } from "@pim/v2-app/app";
 import type { Principal } from "@pim/v2-contracts/identity";
 
-const MAX_NAMED_SCOPES = 20;
 const MAX_LINE = 2000;
 
 type ScopeInfo = { key: string; kind: "private" | "everyone" | "agent" | "named" | "former"; name: string | null; agents: string[]; readers: string[]; count: number };
@@ -22,13 +20,15 @@ const entryOf = (r: any) => ({ id: r.id as string, date: (r.updated_at as Date).
 async function scopes(app: App, p: Principal): Promise<ScopeInfo[]> {
 	return app.db.owner(p.ownerId, async (tx) => {
 		const counts = new Map((await tx.query("SELECT scope, count(*)::int AS n FROM pim_app.memories WHERE deleted_at IS NULL GROUP BY scope")).rows.map((r) => [r.scope as string, r.n as number]));
-		const agents = (await tx.query("SELECT id FROM pim_app.agents WHERE deleted_at IS NULL ORDER BY created_at")).rows.map((r) => r.id as string);
+		const agents = (await tx.query("SELECT id, name, config FROM pim_app.agents WHERE deleted_at IS NULL ORDER BY created_at")).rows.map((r) => ({ id: r.id as string, name: r.name as string, own: (r.config.memoryScope ?? `agent-${r.id}`) as string, named: (r.config.memoryScopes ?? []) as string[] }));
 		const named = (await tx.query("SELECT key, name FROM pim_app.memory_scopes ORDER BY created_at")).rows;
+		// An agent's own scope is shared by the agents that keep it (copies of one agent do); `private` is the majordomo's.
+		const owners = Map.groupBy(agents, (a) => a.own);
 		const out: ScopeInfo[] = [
-			{ key: "private", kind: "private", name: null, agents: [], readers: [], count: counts.get("private") ?? 0 },
-			{ key: "everyone", kind: "everyone", name: null, agents: [], readers: agents, count: counts.get("everyone") ?? 0 },
-			...agents.map((id): ScopeInfo => ({ key: `agent-${id}`, kind: "agent", name: null, agents: [id], readers: [id], count: counts.get(`agent-${id}`) ?? 0 })),
-			...named.map((r): ScopeInfo => ({ key: r.key, kind: "named", name: r.name, agents: [], readers: [], count: counts.get(r.key) ?? 0 })),
+			{ key: "private", kind: "private", name: null, agents: (owners.get("private") ?? []).map((a) => a.id), readers: (owners.get("private") ?? []).map((a) => a.id), count: counts.get("private") ?? 0 },
+			{ key: "everyone", kind: "everyone", name: null, agents: [], readers: agents.map((a) => a.id), count: counts.get("everyone") ?? 0 },
+			...[...owners].filter(([key]) => key !== "private").map(([key, copies]): ScopeInfo => ({ key, kind: "agent", name: copies.map((a) => a.name).join(", "), agents: copies.map((a) => a.id), readers: copies.map((a) => a.id), count: counts.get(key) ?? 0 })),
+			...named.map((r): ScopeInfo => ({ key: r.key, kind: "named", name: r.name, agents: [], readers: agents.filter((a) => a.named.includes(r.key)).map((a) => a.id), count: counts.get(r.key) ?? 0 })),
 		];
 		const known = new Set(out.map((s) => s.key));
 		for (const [key, count] of counts) if (!known.has(key)) out.push({ key, kind: "former", name: null, agents: [], readers: [], count });
@@ -108,11 +108,7 @@ export function memoryRoutes(): Route[] {
 			const p = await principal();
 			await app.identity.authz.enforce(p, "api:write");
 			const name = scopeName((await json()).name);
-			const key = `scope-${newId("s").slice(2)}`;
-			await app.db.owner(p.ownerId, async (tx) => {
-				if (((await tx.query("SELECT count(*)::int AS n FROM pim_app.memory_scopes")).rows[0].n as number) >= MAX_NAMED_SCOPES) throw new ConflictError(`You can have up to ${MAX_NAMED_SCOPES} named memory scopes.`, "too_many_scopes");
-				await tx.query("INSERT INTO pim_app.memory_scopes (owner_id, key, name) VALUES ($1, $2, $3)", [p.ownerId, key, name]);
-			});
+			const key = await app.memories.createScope(p, name);
 			return ok((await scopes(app, p)).find((s) => s.key === key), 201);
 		}),
 		route("PUT", "/api/memory/scopes/:key", async ({ app, principal, json, params }) => {
@@ -126,8 +122,13 @@ export function memoryRoutes(): Route[] {
 		route("DELETE", "/api/memory/scopes/:key", async ({ app, principal, params }) => {
 			const p = await principal();
 			await app.identity.authz.enforce(p, "api:write");
-			// Its memories stay, and only the person and their majordomo read them, until they are moved or forgotten.
-			const n = await app.db.owner(p.ownerId, async (tx) => (await tx.query("DELETE FROM pim_app.memory_scopes WHERE key = $1", [params[0]!])).rowCount);
+			// Its memories stay, and only the person reads them, until they are moved or forgotten.
+			const n = await app.db.owner(p.ownerId, async (tx) => {
+				const deleted = (await tx.query("DELETE FROM pim_app.memory_scopes WHERE key = $1", [params[0]!])).rowCount;
+				// No agent keeps reading a scope that no longer has a name.
+				if (deleted) await tx.query("UPDATE pim_app.agents SET config = jsonb_set(config, '{memoryScopes}', (SELECT coalesce(jsonb_agg(v), '[]'::jsonb) FROM jsonb_array_elements(config->'memoryScopes') v WHERE v <> to_jsonb($1::text))) WHERE config->'memoryScopes' ? $1", [params[0]!]);
+				return deleted;
+			});
 			if (!n) throw new BadRequestError("Only a scope you named can be deleted");
 			return ok({ deleted: true });
 		}),

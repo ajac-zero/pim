@@ -36,7 +36,7 @@ export const WIDGETS: Record<string, { title: Text; empty: Text; description: st
 		empty: { en: "Nothing remembered yet.", es: "Aún no hay recuerdos." },
 		description: "The newest memories this agent can read.",
 		async load(app, p, agentId) {
-			const found = await app.memories.list(p, agentId ? [`agent-${agentId}`, "everyone"] : undefined);
+			const found = await app.memories.list(p, agentId ? (await app.agents.memoryOf(p, agentId)).reads : undefined);
 			return { kind: "list", items: found.slice(0, 5).map((m) => ({ title: m.title, detail: m.body.length > 100 ? `${m.body.slice(0, 99)}…` : m.body, time: m.updatedAt.toISOString() })) };
 		},
 	},

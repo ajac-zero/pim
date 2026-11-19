@@ -92,8 +92,9 @@ export async function napPass(options: NapOptions, failed = new Map<string, numb
 			const [first = "", ...rest] = (answer ?? "").split(/\r?\n/);
 			const keep = !/^NOTHING\b/i.test((answer ?? "").trim()) && first.trim() !== "";
 			const id = napMemoryId(chat.public_chat_id);
-			const scope = chat.agent_id ? `agent-${chat.agent_id}` : "everyone";
 			await app.db.owner(chat.owner_id, async (tx) => {
+				// A chat's own agent keeps what it learned in the agent's own scope; a migrated majordomo's is `private`.
+				const scope = chat.agent_id ? ((await tx.query("SELECT config->>'memoryScope' AS scope FROM pim_app.agents WHERE id = $1", [chat.agent_id])).rows[0]?.scope as string | null | undefined) ?? `agent-${chat.agent_id}` : "everyone";
 				if (keep) {
 					await tx.query(
 						"INSERT INTO pim_app.memories (id, owner_id, scope, title, body) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (owner_id, id) DO UPDATE SET scope = $3, title = $4, body = $5, updated_at = now(), deleted_at = NULL",

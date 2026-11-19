@@ -424,7 +424,7 @@ export function createAgentHost(options: AgentHostOptions) {
 			}),
 			section("memory", async (input) => {
 				const c = await ctx(input.conversationId);
-				const scopes = c.agent ? `agent-${c.agent.id} and everyone` : "everyone";
+				const scopes = c.agent ? [...new Set([c.agent.config.memoryScope ?? `agent-${c.agent.id}`, ...(c.agent.config.memoryScopes ?? []), "everyone"])].join(", ") : "everyone";
 				return `Your memory (scopes ${scopes}). Save with note, find with recall, read in full with zoom.${c.memories.length ? `\n${c.memories.map((m) => `- [${m.id}] (${m.scope}) ${m.title}`).join("\n")}` : "\nNothing is remembered yet."}`;
 			}),
 			section("room", async (input) => {

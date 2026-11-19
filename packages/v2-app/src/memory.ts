@@ -1,12 +1,25 @@
 import type { Db } from "./db.ts";
 import { Authorizer } from "./authz.ts";
-import { BadRequestError, NotFoundError } from "./errors.ts";
+import { BadRequestError, ConflictError, NotFoundError } from "./errors.ts";
 import { newId } from "./ids.ts";
 import type { Principal } from "@pim/v2-contracts/identity";
+
+const MAX_NAMED_SCOPES = 20;
 
 /** Memories (scopes: agent-<id>, everyone, or a custom shared scope), skills and goals. */
 export class Memories {
 	constructor(private readonly db: Db, private readonly authz = new Authorizer(db)) {}
+
+	/** Names a new shared scope, such as Work, which agents read once it is shared with them (`Agents.update`'s `memoryScopes`). */
+	async createScope(p: Principal, name: string): Promise<string> {
+		await this.authz.enforce(p, "api:write");
+		const key = `scope-${newId("s").slice(2)}`;
+		await this.db.owner(p.ownerId, async (tx) => {
+			if (((await tx.query("SELECT count(*)::int AS n FROM pim_app.memory_scopes")).rows[0].n as number) >= MAX_NAMED_SCOPES) throw new ConflictError(`You can have up to ${MAX_NAMED_SCOPES} named memory scopes.`, "too_many_scopes");
+			await tx.query("INSERT INTO pim_app.memory_scopes (owner_id, key, name) VALUES ($1, $2, $3)", [p.ownerId, key, name]);
+		});
+		return key;
+	}
 
 	async remember(p: Principal, scope: string, title: string, body: string): Promise<string> {
 		await this.authz.enforce(p, "api:write");

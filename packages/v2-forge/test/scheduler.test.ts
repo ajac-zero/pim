@@ -17,8 +17,14 @@ describe("ForgeScheduler on PostgreSQL", () => {
 		expect((await s.scheduler.admit(b, "p1", "ada")).kind).toBe("slot");
 		expect(await s.scheduler.admit(c, "p1", "ada")).toMatchObject({ kind: "queued", position: 1 });
 		expect(await s.scheduler.admit(d, "p1", "ada")).toMatchObject({ kind: "queued", position: 2 });
+		// The page reads the same place from the thread, and nothing for one that isn't waiting.
+		const ada = { ownerId: "ada", role: "member" as const };
+		expect((await s.forge.progress(ada, c)).queuePosition).toBe(1);
+		expect((await s.forge.progress(ada, d)).queuePosition).toBe(2);
+		expect((await s.forge.progress(ada, a)).queuePosition).toBeNull();
 		expect(await s.scheduler.release(a)).toEqual([c]);
 		expect(await s.scheduler.slots("p1")).toEqual([b, c]);
+		expect((await s.forge.progress(ada, d)).queuePosition).toBe(1);
 		expect(await s.scheduler.queue("p1")).toEqual([d]);
 		expect((await s.store.get(c))!.state).toBe("provisioning");
 		// A newcomer cannot jump the queue even though... the pool is full, and FIFO also holds when a slot frees and a waiter exists.

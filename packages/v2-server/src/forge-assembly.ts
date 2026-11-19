@@ -9,7 +9,7 @@
  * `startForgeLoops` runs what keeps threads moving. `forgeHttp` is Forge's HTTP surface for the Gate.
  */
 import { compatibleProvider } from "./agent-host.ts";
-import { webCodingShapes } from "./compat/coding.ts";
+import { type PageApproval, webCodingShapes } from "./compat/coding.ts";
 import { createModels } from "@earendil-works/pi-ai";
 import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
@@ -181,7 +181,7 @@ export function assembleForge(db: ForgeDb, objects: ObjectStore, env: Env, crypt
 }
 
 /** Forge's HTTP surface for the Gate, whose database role is subject to row-level security: each request runs under its owner's scope. The git broker and the Gitea connection are mounted when there is a git host for them. */
-export function forgeHttp(parts: ForgeParts, o: { authenticate: Authenticate; crypto: EnvelopeCrypto }): Handler {
+export function forgeHttp(parts: ForgeParts, o: { authenticate: Authenticate; crypto: EnvelopeCrypto; pageApproval: PageApproval }): Handler {
 	const { db } = parts;
 	const scope = (owner: string) => new ForgeStore(scopedDb(db, owner));
 	const gatewayKeys: Record<string, string | undefined> = { anthropic: parts.env.PIM_CODING_ANTHROPIC_API_KEY, openai: parts.env.PIM_CODING_OPENAI_API_KEY };
@@ -198,7 +198,7 @@ export function forgeHttp(parts: ForgeParts, o: { authenticate: Authenticate; cr
 		gatewayKeys.anthropic || gatewayKeys.openai ? modelGateway({ credentials: parts.credentials, store: parts.store, scope, key: async (_thread, family) => (gatewayKeys[family] ? { apiKey: gatewayKeys[family]! } : null) }) : null,
 	);
 	// The web app reads threads in v1's shapes.
-	return webCodingShapes({ forge: parts.forge, authenticate: o.authenticate, inner });
+	return webCodingShapes({ forge: parts.forge, authenticate: o.authenticate, inner, pageApproval: o.pageApproval });
 }
 
 export type ForgeLoopOptions = { databaseUrl: string; pollMs?: number; stallMs?: number; onError?: (what: string, error: unknown) => void };

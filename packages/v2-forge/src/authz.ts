@@ -151,13 +151,14 @@ export class Authz {
 	}
 
 	/** Only the thread's owner approves, as a person: an agent of the space cannot approve for them. */
-	async decide(approvalId: string, by: Actor, approve: boolean): Promise<void> {
+	async decide(approvalId: string, by: Actor, approve: boolean): Promise<{ threadId: string; action: string }> {
 		if (by.agent) throw new ForbiddenError("approve", "an agent can't approve its own request");
-		await tx(this.db, async (q) => {
+		return tx(this.db, async (q) => {
 			const row = (await q.query<Row>("select a.*, t.owner_id from pim_forge.forge_approvals a join pim_forge.forge_threads t using (thread_id) where approval_id = $1 for update of a", [approvalId])).rows[0];
 			if (!row) throw new ForgeError("not_found", `No approval ${approvalId}`);
 			if (row.owner_id !== by.ownerId) throw new ForbiddenError("approve", "only the thread's owner decides this approval");
 			await q.query("update pim_forge.forge_approvals set status = $2, decided_by = $3 where approval_id = $1", [approvalId, approve ? "approved" : "denied", by.ownerId]);
+			return { threadId: row.thread_id as string, action: row.action as string };
 		});
 	}
 

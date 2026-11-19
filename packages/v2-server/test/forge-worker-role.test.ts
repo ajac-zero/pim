@@ -37,6 +37,7 @@ import { createStack, describeWith, freePort, hasNats, startNats } from "./suppo
 const real = describeWith(hasNats());
 const REPO = "https://github.com/acme/app";
 const KEK = randomBytes(32).toString("base64");
+const COMMIT = "c".repeat(40);
 
 real("Forge's worker role with the Gate and Maintenance", () => {
 	let d: Deployment;
@@ -56,6 +57,15 @@ real("Forge's worker role with the Gate and Maintenance", () => {
 	const codeModel = fauxProvider({ provider: "codefaux", models: [{ id: "m", contextWindow: 200_000 }] });
 	const chatModel = fauxProvider({ provider: "faux", models: [{ id: "m" }] });
 	const manager = fakeManager(8);
+	let twoUnpushed = false;
+	/** The git host, which notes the pushes Forge itself makes (the sandbox's own go through the broker). */
+	const pushes = new (class extends LocalGitHost {
+		made: { repo: string; branch: string }[] = [];
+		override async push(_handle: Parameters<LocalGitHost["push"]>[0], repo: string, branch: string) {
+			this.made.push({ repo, branch });
+			return { outcome: "pushed" as const, sha: COMMIT };
+		}
+	})(new LocalSandboxProvider(join(dir, "sbx")), { get "acme/app"() { return bare; } });
 	const claudeArgv: string[][] = [];
 	const UPSTREAM = `Basic ${btoa("host:secret")}`;
 	const hostGit = (...a: string[]) => execFileSync("git", ["--git-dir", bare, ...a], { encoding: "utf8" }).trim();
@@ -118,6 +128,9 @@ real("Forge's worker role with the Gate and Maintenance", () => {
 		// The fake sandbox: `git` makes the checkout, `claude` prints a recorded turn, `sh` runs the pi agent's tools.
 		manager.backing.register("git", async ({ argv, workspace }) => {
 			if (argv.includes("clone")) await workspace.writeFile("/workspace/repo/.git/HEAD", new TextEncoder().encode("ref: refs/heads/main\n"));
+			// Two commits on no remote branch, the newest named `fix greeting`.
+			if (twoUnpushed && argv.includes("rev-list")) return { stdout: "2\n", code: 0 };
+			if (twoUnpushed && argv.includes("log")) return { stdout: `${COMMIT}\x1ffix greeting\x1f1700000000\n`, code: 0 };
 			return { code: 0 };
 		});
 		manager.backing.register("test", async ({ workspace }) => ((await workspace.stat("/workspace/repo/.git").then(() => true, () => false)) ? { code: 0 } : { code: 1 }));
@@ -125,7 +138,7 @@ real("Forge's worker role with the Gate and Maintenance", () => {
 		manager.backing.register("sh", async () => ({ stdout: "built ok\n", code: 0 }));
 		managerServer = await serveManager();
 		uninstall = useForgeOverrides({
-			git: new LocalGitHost(new LocalSandboxProvider(join(dir, "sbx")), { "acme/app": bare }),
+			git: pushes,
 			gitUpstream: async () => ({ url: `${gitHost.url}/app.git`, authorization: UPSTREAM }),
 			models: async () => {
 				const models = createModels();
@@ -210,7 +223,7 @@ real("Forge's worker role with the Gate and Maintenance", () => {
 		expect(page).toMatchObject({ id, state: "idle", harness: "pi", repo: { url: REPO }, slot: "held", pool: "default", createdBy: { type: "person" }, spentUsd: expect.any(Number), createdAt: expect.any(Number) });
 		expect(page).not.toHaveProperty("gatewayNonce");
 		expect((await web.call("GET", `/api/coding/threads/${id}/transcript`)).json.messages.at(-1).parts).toEqual([{ type: "text", text: "Built it." }]);
-		expect((await web.call("GET", "/api/coding/threads")).json.threads).toEqual([expect.objectContaining({ id, repo: REPO, state: "idle", lastSeenAt: null })]);
+		expect((await web.call("GET", "/api/coding/threads")).json.threads).toEqual([expect.objectContaining({ id, repo: REPO, state: "idle", lastSeenAt: null, lastTurnEndedAt: expect.any(Number) })]);
 		expect((await web.call("POST", `/api/coding/threads/${id}/seen`)).json).toEqual({ seen: true });
 		// The same start again is the same thread, over HTTP.
 		expect((await web.call("POST", "/api/coding/threads", { operationId: "role-pi", task: "Build the project", repo: REPO, harness: "pi", chat: chatId })).json).toMatchObject({ threadId: id, created: false });
@@ -219,6 +232,32 @@ real("Forge's worker role with the Gate and Maintenance", () => {
 		expect(wakes.map((w) => w.dedupe_key)).toEqual([`coding:${id}:role-pi`]);
 		expect(wakes[0].delivered_at).toBeTruthy();
 	}, 120_000);
+
+	it("the page's Push button asks for the push, shows the person's approval, and pushes once they say yes", async () => {
+		const id = (await d.stack.admin.query("select thread_id from pim_forge.forge_threads where start_operation = 'role-pi'")).rows[0].thread_id as string;
+		// What there is to push is the commits on no remote branch: the button reads it from `checkpoint`. Nothing, until the workspace has some.
+		expect((await web.call("GET", `/api/coding/threads/${id}`)).json.checkpoint).toBeNull();
+		twoUnpushed = true;
+		expect((await web.call("GET", `/api/coding/threads/${id}`)).json.checkpoint).toEqual({ seq: 2, sha: COMMIT, message: "fix greeting", operationId: null, createdAt: 1_700_000_000_000 });
+		const asked = await web.call("POST", `/api/coding/threads/${id}/push`, {});
+		expect(asked.status).toBe(202);
+		const branch = (await state(id)).branch;
+		expect(asked.json).toMatchObject({ status: "pending", branch, head: COMMIT, summary: "Push acme/app" });
+		// The same push asked again is the same approval, and nothing is pushed before the person answers.
+		expect((await web.call("POST", `/api/coding/threads/${id}/push`, {})).json.approval).toBe(asked.json.approval);
+		expect(pushes.made).toEqual([]);
+		const listed = (await web.call("GET", "/api/approvals?status=pending")).json.approvals as { id: string; action: string }[];
+		expect(listed.find((a) => a.id === asked.json.approval)).toMatchObject({ action: "coding:push" });
+		expect((await web.call("POST", `/api/approvals/${asked.json.approval}/approve`, {})).status).toBe(200);
+		expect(pushes.made).toEqual([{ repo: REPO, branch }]);
+		// The push used up the approval, so pushing again asks again.
+		const again = await web.call("POST", `/api/coding/threads/${id}/push`, {});
+		expect(again.status).toBe(202);
+		expect(again.json.approval).not.toBe(asked.json.approval);
+		expect((await web.call("POST", `/api/approvals/${again.json.approval}/deny`, {})).status).toBe(200);
+		expect(pushes.made).toHaveLength(1);
+		twoUnpushed = false;
+	}, 60_000);
 
 	it("the sandbox clones and pushes through /api/coding/git on the Gate: fast-forwards pass; force pushes, main and other branches are refused", async () => {
 		const id = (await d.stack.admin.query("select thread_id from pim_forge.forge_threads where start_operation = 'role-pi'")).rows[0].thread_id as string;

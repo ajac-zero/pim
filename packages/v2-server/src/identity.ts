@@ -8,7 +8,7 @@ import { type AuthzRequest, type Authorizer, ForbiddenError } from "@pim/v2-cont
 import { OwnerId, type Principal } from "@pim/v2-contracts/identity";
 import type { App } from "@pim/v2-app/app";
 import { newId } from "@pim/v2-app/ids";
-import type { ApprovalFiled } from "@pim/v2-forge/authz";
+import { type ApprovalFiled, repoName } from "@pim/v2-forge/authz";
 import type { Forge } from "@pim/v2-forge/forge";
 import { bearerOf } from "@pim/v2-app/http";
 import type { LiveIdentity } from "@pim/v2-live/server/identity";
@@ -117,20 +117,36 @@ export function surfaceForgeApprovals(app: App): (filed: ApprovalFiled) => Promi
 			// Two asks at once (an agent's tool calls run side by side) take turns, so the second finds the first's.
 			await tx.query("SELECT pg_advisory_xact_lock(hashtext($1))", [approvalId]);
 			if ((await tx.query("SELECT 1 FROM pim_app.approvals WHERE state = 'waiting' AND args->>'forgeApproval' = $1", [approvalId])).rowCount) return;
-			const args = { forgeApproval: approvalId, explicit: true, resource: { repository: repo }, summary: `${FORGE_ACTIONS[action] ?? action} ${repo}` };
+			const args = { forgeApproval: approvalId, explicit: true, resource: { repository: repo }, summary: `${FORGE_ACTIONS[action] ?? action} ${repoName(repo) ?? repo}` };
 			await tx.query("INSERT INTO pim_app.approvals (id, owner_id, public_chat_id, tool, args, timeout_policy, expires_at) VALUES ($1,$2,$3,$4,$5,'deny', now() + interval '24 hours')", [newId("ap"), ownerId, chatId && CHAT_ID.test(chatId) ? chatId : null, `coding:${action}`, JSON.stringify(args)]);
 		});
 	};
 }
 
-/** A person's answer to an approval that stands for one of Forge's reaches Forge, which only the thread's owner may give. */
+/**
+ * A person's answer to an approval that stands for one of Forge's reaches Forge, which only the thread's owner may give. A push the person asked for from the page (`pageApproval`)
+ * is made once they say yes, as v1 did; one an agent asked for is left to the agent's next try.
+ */
 export function deliverForgeDecisions(app: App, forge: Forge): void {
 	const decide = app.approvals.decide.bind(app.approvals);
 	app.approvals.decide = async (p, approvalId, approve) => {
 		await decide(p, approvalId, approve);
-		const forgeApproval = (await app.db.owner(p.ownerId, async (tx) => (await tx.query("SELECT args->>'forgeApproval' AS id FROM pim_app.approvals WHERE id = $1", [approvalId])).rows[0]))?.id;
-		if (typeof forgeApproval === "string") await forge.scopedTo(p.ownerId).decideApproval({ ownerId: p.ownerId, role: "member" }, forgeApproval, approve);
+		const row = (await app.db.owner(p.ownerId, async (tx) => (await tx.query("SELECT args->>'forgeApproval' AS forge, args->>'pushOnApproval' AS push FROM pim_app.approvals WHERE id = $1", [approvalId])).rows[0])) as { forge: string | null; push: string | null } | undefined;
+		if (typeof row?.forge !== "string") return;
+		const actor = { ownerId: p.ownerId, role: "member" } as const;
+		const scoped = forge.scopedTo(p.ownerId);
+		const decided = await scoped.decideApproval(actor, row.forge, approve);
+		if (approve && row.push === "true" && decided.action === "push") await scoped.push(actor, decided.threadId).catch((error) => console.warn("the approved push failed", error instanceof Error ? error.message : error));
 	};
+}
+
+/** The approvals-list entry that stands for one of Forge's, marked as one the person asked for by pushing from the page, so that their yes also pushes. */
+export function pageApproval(app: App): (ownerId: string, forgeApproval: string) => Promise<{ id: string; summary: string } | null> {
+	return (ownerId, forgeApproval) =>
+		app.db.owner(ownerId, async (tx) => {
+			const row = (await tx.query("UPDATE pim_app.approvals SET args = args || '{\"pushOnApproval\": true}' WHERE state = 'waiting' AND args->>'forgeApproval' = $1 RETURNING id, args->>'summary' AS summary", [forgeApproval])).rows[0];
+			return row ? { id: row.id as string, summary: row.summary as string } : null;
+		});
 }
 
 /** `host/owner/name` as Forge names a repository: `owner/name`; a wildcard keeps its star. */

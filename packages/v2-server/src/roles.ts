@@ -36,7 +36,7 @@ import { mcpFetchTools } from "./connector-tools.ts";
 import { publicUrl } from "./agent-tools.ts";
 import { renewDue } from "./watches.ts";
 import type { Host } from "./host.ts";
-import { AppLiveIdentity, deliverApprovalDecisions, deliverForgeDecisions, LiveAuthorizer, mirrorCodingGrants, publishRevocations, surfaceForgeApprovals } from "./identity.ts";
+import { AppLiveIdentity, deliverApprovalDecisions, deliverForgeDecisions, LiveAuthorizer, mirrorCodingGrants, pageApproval, publishRevocations, surfaceForgeApprovals } from "./identity.ts";
 import { runtimeOutboxSource } from "./runtime-source.ts";
 import { natsRelayBus } from "./relay-bus.ts";
 import { notifyPass } from "./notifier.ts";
@@ -117,7 +117,7 @@ export async function startGate(config: ProcessConfig, env: Env, host: Host, nat
 	deliverForgeDecisions(app, forge.forge);
 	const authenticate = forgeAuthenticator(app, secure);
 	// Forge's whole HTTP surface (the coding API, harness logins, the git broker, Gitea, the model gateway), each request under its owner's row-level security scope.
-	const coding = forgeHttp(forge, { authenticate, crypto: app.crypto });
+	const coding = forgeHttp(forge, { authenticate, crypto: app.crypto, pageApproval: pageApproval(app) });
 	const options = { publicUrl: config.publicUrl, ...(env.PIM_APPS_ORIGIN ? { appsOrigin: env.PIM_APPS_ORIGIN } : {}), routes: [...snapshotRoutes(db.pool), ...codingAdminRoutes(forge), ...poolRoutes(coding), ...forgeRoutes(coding)],
 		// The web app's v1 API over v2's services (packages/v2-server/src/compat/), tried before the built-in routes so its shapes win.
 		first: [...webCompatRoutes], before: gateBefore(app, env) };

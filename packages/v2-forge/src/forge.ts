@@ -44,8 +44,40 @@ export class Forge {
 
 
 	/** A person's answer to an approval Forge filed (a push, pull request or merge): the thread's next try goes ahead or is refused. */
-	decideApproval(actor: Actor, approvalId: string, approve: boolean): Promise<void> {
+	decideApproval(actor: Actor, approvalId: string, approve: boolean): Promise<{ threadId: string; action: string }> {
 		return this.c.authz.decide(approvalId, actor, approve);
+	}
+
+	/** When the thread's latest turn ended (null before its first), and its place in its pool's line while it waits for a workspace (1 is next; null when it isn't waiting). */
+	async progress(actor: Actor, ref: string): Promise<{ lastTurnEndedAt: number | null; queuePosition: number | null }> {
+		const t = await this.own(actor, ref);
+		const r = (await this.c.db.query<Row>(
+			`select (select extract(epoch from max(e.at)) * 1000 from pim_forge.forge_events e where e.thread_id = $1 and e.kind = 'thread.turn_ended') as ended,
+			        (select count(*) from pim_forge.forge_queue q2 where q2.pool_id = q.pool_id and q2.seq <= q.seq) as place
+			   from (select 1) x left join pim_forge.forge_queue q on q.thread_id = $1`,
+			[t.threadId],
+		)).rows[0]!;
+		return { lastTurnEndedAt: r.ended === null ? null : Math.round(Number(r.ended)), queuePosition: r.place === null || Number(r.place) === 0 ? null : Number(r.place) };
+	}
+
+	/**
+	 * What a thread's workspace holds that the git host doesn't: how many commits are on no remote branch, and the newest one. Null when there is no running workspace to ask,
+	 * the harness doesn't push from one, the thread is between states (provisioning, or a turn is running, when the workspace is being changed), or everything is pushed. Only what is
+	 * committed counts; uncommitted edits are not on a push's way.
+	 */
+	async unpushed(actor: Actor, ref: string): Promise<{ commits: number; sha: string; message: string; at: number } | null> {
+		const t = await this.own(actor, ref);
+		if ((t.state !== "idle" && t.state !== "waiting_input") || !capabilitiesOf(t.harness).forgePush || !t.workspaceRef || !this.c.compute || t.computeTornDownAt) return null;
+		const git = (...args: string[]) => this.c.compute!.exec(t.workspaceRef!, ["git", ...args], { cwd: "/workspace/repo", timeoutMs: 10_000 });
+		try {
+			const ahead = await git("rev-list", "--count", "HEAD", "--not", "--remotes");
+			const commits = Number(ahead.stdout.trim());
+			if (ahead.code !== 0 || !(commits > 0)) return null;
+			const [sha, message, seconds] = (await git("log", "-1", "--format=%H%x1f%s%x1f%ct")).stdout.trim().split("\x1f");
+			return sha ? { commits, sha, message: message ?? "", at: Number(seconds) * 1000 } : null;
+		} catch {
+			return null;
+		}
 	}
 
 	private async own(actor: Actor, ref: string): Promise<ThreadRow> {

@@ -11,10 +11,16 @@ import type { ThreadRow } from "@pim/v2-forge/store";
 const NO_ENVIRONMENT = { state: "none", key: null, source: null, builtAt: null, restoredFromKey: null, provisionMs: null, restoreMs: null, setupMs: null, snapshotMs: null, snapshotBytes: null, snapshotKept: null, readyFrom: null, preparedAt: null, rebuildRequested: false, toolchains: [], dependencies: [], testCommands: [], notes: [], services: [], cachePaths: [] };
 const NO_REBUILD = { error: "This deployment keeps no environment snapshots to rebuild", code: "conflict" };
 
+/** What Forge says of how a thread is getting on (`Forge.progress`), for the page's unread dot and its place in the queue. */
+type Progress = { lastTurnEndedAt: number | null; queuePosition: number | null };
+
+/** Forge's reasons as the page names them: waiting for a pool slot is the queue's own line, and an expired wait says what it waited for. */
+const reasonOf = (reason: string | null) => (reason === "pool_full" ? null : reason === "queue_timeout" ? "queue_expired:slots_full" : reason);
+
 const creator = (t: ThreadRow) => (t.createdBy === t.ownerId || !t.chatId ? { type: "person" } : { type: "agent", agent: t.createdBy, chat: t.chatId });
 
 /** A thread as the page's list reads it. */
-function summary(t: ThreadRow) {
+function summary(t: ThreadRow, progress: Progress) {
 	return {
 		id: t.threadId,
 		url: `/coding/${t.threadId}`,
@@ -23,8 +29,8 @@ function summary(t: ThreadRow) {
 		branch: t.branch ?? "",
 		task: t.task,
 		state: t.state,
-		stateReason: t.stateReason,
-		queue: null,
+		stateReason: reasonOf(t.stateReason),
+		queue: t.state === "queued" && progress.queuePosition !== null ? { position: progress.queuePosition, reason: "slots_full" } : null,
 		createdBy: creator(t),
 		parent: null,
 		chat: t.chatId,
@@ -37,20 +43,20 @@ function summary(t: ThreadRow) {
 		threadId: t.threadId,
 		status: t.state,
 		unread: t.lastSeenAt === null || t.updatedAt > t.lastSeenAt,
-		lastTurnEndedAt: null,
+		lastTurnEndedAt: progress.lastTurnEndedAt,
 		lastSeenAt: t.lastSeenAt,
 	};
 }
 
 /** A thread as its page reads it. */
-function view(t: ThreadRow) {
+function view(t: ThreadRow, progress: Progress, unpushed: { commits: number; sha: string; message: string; at: number } | null) {
 	// Forge's own fields stay (a caller of the API reads `workspaceRef` and `lastPushedSha`), but the nonce that signs the thread's grants is never sent.
 	const { gatewayNonce: _nonce, leaseHolder: _holder, ...raw } = t;
 	const pool = t.placement?.pool ?? "";
 	const provider = t.workspaceRef?.provider ?? t.placement?.provider ?? "";
 	return {
 		...raw,
-		...summary(t),
+		...summary(t, progress),
 		threadId: t.threadId,
 		status: t.state,
 		stateDetail: t.stateDetail,
@@ -68,13 +74,16 @@ function view(t: ThreadRow) {
 		slot: t.workspaceRef && !t.computeTornDownAt ? "held" : t.state === "queued" ? "queued" : "none",
 		currentOperation: t.state === "running" ? t.startOperation : null,
 		inbox: 0,
-		checkpoint: null,
+		// What the page's Push button is for: the newest commit the git host doesn't have. Forge keeps no checkpoints of its own, so `seq` counts the commits waiting.
+		checkpoint: unpushed && { seq: unpushed.commits, sha: unpushed.sha, message: unpushed.message, operationId: null, createdAt: unpushed.at },
 		parentThread: null,
 		environment: NO_ENVIRONMENT,
 	};
 }
 
-export function webCodingShapes(d: { forge: Forge; authenticate: Authenticate; inner: Handler }): Handler {
+export type PageApproval = (ownerId: string, forgeApproval: string) => Promise<{ id: string; summary: string } | null>;
+
+export function webCodingShapes(d: { forge: Forge; authenticate: Authenticate; inner: Handler; pageApproval: PageApproval }): Handler {
 	return async (req) => {
 		const url = new URL(req.url);
 		const path = url.pathname;
@@ -84,12 +93,12 @@ export function webCodingShapes(d: { forge: Forge; authenticate: Authenticate; i
 		if (!caller || caller.actor.role === "guest") return d.inner(req);
 		const { actor } = caller;
 		const forge = d.forge.scopedTo(actor.ownerId);
-		const thread = async (id: string) => view(await forge.status(actor, id));
+		const thread = async (id: string) => view(await forge.status(actor, id), await forge.progress(actor, id), await forge.unpushed(actor, id));
 		let m: RegExpExecArray | null;
 
 		if (path === "/api/coding/threads" && req.method === "GET") {
 			const listed = await forge.list(actor, { archived: url.searchParams.get("archived") === "1" });
-			return json(200, { threads: await Promise.all(listed.map(async (t) => summary(await forge.status(actor, t.threadId)))) });
+			return json(200, { threads: await Promise.all(listed.map(async (t) => summary(await forge.status(actor, t.threadId), await forge.progress(actor, t.threadId)))) });
 		}
 		if (path === "/api/coding/threads" && req.method === "POST") {
 			const made = await d.inner(req);
@@ -118,6 +127,19 @@ export function webCodingShapes(d: { forge: Forge; authenticate: Authenticate; i
 				}
 				case "GET events":
 					return json(404, { error: "The live stream isn't served by this deployment", code: "not_found" });
+				case "POST push": {
+					// The page reads v1's answer: the approval the person decides (the one in their list), and the branch and commit it is for. A push nothing stands in the way of is done already.
+					const r = await d.inner(req);
+					if (!r || (r.status >= 300 && r.status !== 202)) return r;
+					const pushed = (await r.json()) as { status: string; approvalId?: string; outcome?: string; sha?: string; branch?: string };
+					if (pushed.status === "done") {
+						if (pushed.outcome === "unchanged") return json(409, { error: "There is nothing new to push", code: "nothing_to_push" });
+						return json(200, { approval: "", status: "approved", branch: pushed.branch ?? "", head: pushed.sha ?? "", bytes: 0, summary: `Pushed ${pushed.branch ?? ""}` });
+					}
+					const asked = pushed.approvalId ? await d.pageApproval(actor.ownerId, pushed.approvalId) : null;
+					if (!asked) return json(409, { error: "The push's approval could not be shown", code: "conflict" });
+					return json(202, { approval: asked.id, status: "pending", branch: (await forge.status(actor, id)).branch ?? "", head: (await forge.unpushed(actor, id))?.sha ?? "", bytes: 0, summary: asked.summary });
+				}
 				case "POST seen": {
 					const r = await d.inner(req);
 					return r && r.status < 300 ? json(200, { seen: true }) : r;

@@ -15,7 +15,7 @@ import type { Process } from "../src/main.ts";
 import { readTranscript, waitFor } from "../../v2-runtime/test/support/rig.ts";
 import { Client } from "./support/client.ts";
 import { type Deployment, base, start, startS3 } from "./support/processes.ts";
-import { createStack, describeWith, freePort, hasNats, startNats } from "./support/stack.ts";
+import { createStack, describeWith, freePort, hasNats, startNats, sentAndAnswered } from "./support/stack.ts";
 
 const real = describeWith(hasNats());
 const HOSTOPSD = fileURLToPath(new URL("../../../sandbox-manager/hostopsd/hostopsd.js", import.meta.url));
@@ -48,7 +48,7 @@ real("host operations through the admin's majordomo", () => {
 		faux.setResponses([...script, toolUse(fauxToolCall("send_to_user", { message: `done ${++n}` })), fauxAssistantMessage(`ended ${n}`)] as never);
 		expect((await client.call("POST", `/api/sessions/${chat}/messages`, { commandId: `m-${n}`, text: words })).status).toBe(202);
 		const mine = n;
-		return () => waitFor(`the turn "${words}" to end`, async () => ((await transcriptOf(chat, owner)).includes(`ended ${mine}`) ? true : undefined), 60_000);
+		return () => waitFor(`the turn "${words}" to end`, async () => (sentAndAnswered(await transcriptOf(chat, owner), `done ${mine}`) ? true : undefined), 60_000);
 	};
 	const waiting = () => waitFor("the approval to be filed", async () => (await d.stack.admin.query("SELECT id, tool, args FROM pim_app.approvals WHERE state = 'waiting' ORDER BY created_at LIMIT 1")).rows[0], 60_000);
 	const audit = async () => (await web.call("GET", "/api/hostops/audit?limit=200")).json.audit as { action: string; outcome: string; actorKind: string; args: any }[];
@@ -89,7 +89,7 @@ real("host operations through the admin's majordomo", () => {
 	}, 60_000);
 
 	it("runs a command on the host only after the person approves exactly it, and keeps it in the audit log", async () => {
-		const end = await ask(web, chatId, ownerId, "check the disk", toolUse(fauxToolCall("hostops_exec", { command: "echo from-the-host; id -un" })), toolUse(fauxToolCall("send_to_user", { message: "Done." })));
+		const end = await ask(web, chatId, ownerId, "check the disk", toolUse(fauxToolCall("hostops_exec", { command: "echo from-the-host; id -un" })));
 		const approval = await waiting();
 		expect(approval.tool).toBe("hostops_exec");
 		expect(approval.args).toMatchObject({ op: "exec", args: { command: "echo from-the-host; id -un", timeoutSeconds: 60 }, summary: expect.stringContaining("echo from-the-host") });
@@ -113,7 +113,7 @@ real("host operations through the admin's majordomo", () => {
 	it("queues nothing when the person declines, and refuses an agent that is not the majordomo", async () => {
 		const queued = async () => (await d.stack.admin.query("SELECT count(*)::int AS n FROM pim_app.hostops_ops")).rows[0].n as number;
 		const before = await queued();
-		const end = await ask(web, chatId, ownerId, "restart the gate", toolUse(fauxToolCall("hostops_restart", { service: "gate" })), toolUse(fauxToolCall("send_to_user", { message: "Ok." })));
+		const end = await ask(web, chatId, ownerId, "restart the gate", toolUse(fauxToolCall("hostops_restart", { service: "gate" })));
 		const approval = await waiting();
 		expect(approval.args.summary).toBe("Restart gate on this machine");
 		expect((await web.call("POST", `/api/approvals/${approval.id}/decision`, { approve: false })).status).toBe(200);
@@ -124,7 +124,7 @@ real("host operations through the admin's majordomo", () => {
 		// Another agent of the admin's has the tools in its partition, but the service refuses it, before anyone is asked, and keeps the refusal.
 		const agent = (await web.call("POST", "/api/agents", { name: "Helper", instructions: "" })).json;
 		const other = (await web.call("POST", "/api/sessions", { title: "Other", agentId: agent.id })).json.id;
-		const end2 = await ask(web, other, ownerId, "look at the host", toolUse(fauxToolCall("hostops_stats", {})), toolUse(fauxToolCall("send_to_user", { message: "Ok." })));
+		const end2 = await ask(web, other, ownerId, "look at the host", toolUse(fauxToolCall("hostops_stats", {})));
 		await end2();
 		expect((await resultsOf(other, ownerId, "hostops_stats"))[0]).toMatch(/Only the admin's majordomo/);
 		expect((await d.stack.admin.query("SELECT count(*)::int AS n FROM pim_app.approvals WHERE state = 'waiting'")).rows[0].n).toBe(0);

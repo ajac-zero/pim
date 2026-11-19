@@ -14,7 +14,7 @@ import { codexContext } from "../src/codex-images.ts";
 import { readTranscript, waitFor } from "../../v2-runtime/test/support/rig.ts";
 import { Client } from "./support/client.ts";
 import { type Deployment, base, start, startS3 } from "./support/processes.ts";
-import { createStack, describeWith, freePort, hasNats, startNats } from "./support/stack.ts";
+import { createStack, describeWith, freePort, hasNats, startNats, sentAndAnswered } from "./support/stack.ts";
 
 const real = describeWith(hasNats());
 const b64u = (v: string | Buffer) => Buffer.from(v).toString("base64url");
@@ -83,7 +83,7 @@ real("generate_image", () => {
 		const id = ++n;
 		faux.setResponses([toolUse(fauxToolCall("generate_image", { prompt, ...extra })), toolUse(fauxToolCall("send_to_user", { message: `done ${id}` })), fauxAssistantMessage(`ended ${id}`)] as never);
 		expect((await web.call("POST", `/api/sessions/${chatId}/messages`, { commandId: `m-${id}`, text: prompt })).status).toBe(202);
-		await waitFor(`turn ${id} to end`, async () => ((await transcript()).includes(`ended ${id}`) ? true : undefined), 60_000);
+		await waitFor(`turn ${id} to end`, async () => (sentAndAnswered(await transcript(), `done ${id}`) ? true : undefined), 60_000);
 		const results = (JSON.parse(await transcript()) as { model?: { role: string; toolName?: string; content: { text?: string }[] }[] }[]).flatMap((e) => (e.model ?? []).filter((m) => m.role === "toolResult" && m.toolName === "generate_image").map((m) => m.content.map((c) => c.text ?? "").join("")));
 		return results[results.length - 1]!;
 	};

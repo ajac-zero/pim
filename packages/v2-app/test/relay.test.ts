@@ -1,4 +1,5 @@
 import { createHmac } from "node:crypto";
+import { computerAppId } from "../src/hosted-run.ts";
 import { type Server, request as httpRequest } from "node:http";
 import * as decoding from "lib0/decoding";
 import * as encoding from "lib0/encoding";
@@ -24,7 +25,7 @@ let sockets: { close(): void };
 beforeAll(async () => {
 	const urls = await freshDatabase();
 	app = new App(connect(urls.appUrl, 10), new MemoryObjectStore(), { appKey: "test-app-key" });
-	admin = await bootstrap(app, "root");
+	admin = await bootstrap(app, "rootly");
 	await app.identity.setRegistrationOpen(admin.principal, true);
 	const options = { appsOrigin: "http://apps.test", publicUrl: "http://pim.test" };
 	server = createGate(app, options);
@@ -452,15 +453,19 @@ describe("apps with a backend, through the computer", () => {
 		const u = await mk("rl-deploy");
 		const ref = await app.apps.create(u.principal, backend());
 		const manifest = { backend: { command: "node server.js" }, access: "owner" };
-		const deploy = (p: Principal) => app.relay.deployApp(p, { id: ref.id, version: 1, files: { "server.js": "x" }, manifest });
+		const deploy = (p: Principal) => app.relay.deployApp(p, { id: ref.id, version: 1, files: { "server.js": "x" }, manifest, port: 18_000 });
 		const agent: Principal = { kind: "agent", ownerId: OwnerId.parse(u.account.ownerId), agentId: "builder" };
 		await expect(deploy(u.principal)).rejects.toMatchObject({ name: "CapabilityUnavailableError", capability: "app_deploy" }); // a person approved by asking, but nothing is connected
 		const { c } = await pairAndConnect(u);
 		c.handlers.set("app_start", () => ({ running: true }));
+		// The release is copied first: a folder that is not there yet, its files, and the rename that makes it whole.
+		c.handlers.set("stat", () => { throw new Error("ENOENT"); });
+		for (const op of ["mkdir", "write", "rename"]) c.handlers.set(op, () => null);
 		await expect(deploy(agent)).rejects.toMatchObject({ name: "ApprovalRequiredError", action: "app:deploy" });
 		expect(await deploy(u.principal)).toEqual({ running: true });
 		const start = c.calls.find((x) => x.op === "app_start")!.args;
-		expect(start).toMatchObject({ id: ref.id, version: 1, backend: { command: "node server.js" }, env: { PIM_APP_ID: ref.id, PIM_APP_SECRET: app.relay.appSecret(u.account.ownerId, ref.id) } });
+		expect(start).toMatchObject({ id: computerAppId(ref.id), dir: `/workspace/.pim/apps/${computerAppId(ref.id)}/v1`, command: "node server.js", port: 18_000, data: `/workspace/.pim/apps/${computerAppId(ref.id)}/data`, env: { PIM_APP_ID: ref.id, PIM_APP_SECRET: app.relay.appSecret(u.account.ownerId, ref.id) } });
+		expect(c.calls.filter((x) => x.op === "write").map((x) => x.args.path)).toEqual([`/workspace/.pim/apps/${computerAppId(ref.id)}/v1.${(c.calls.find((x) => x.op === "rename")!.args.from as string).split(".").pop()}/server.js`]);
 		await app.identity.authz.grantStanding(admin.principal, { ownerId: u.account.ownerId, action: "app:deploy", scope: { app: ref.id, access: "owner" } });
 		expect(await deploy(agent)).toEqual({ running: true }); // the standing approval stands in for the person
 		// Another app's secret is another secret.
@@ -478,8 +483,9 @@ describe("apps with a backend, through the computer", () => {
 		const r = await call("127.0.0.1", `${path}api/items?x=1`, { cookie: "pim_session=SECRET; other=1", authorization: "Bearer SECRET", "user-agent": "t", "x-pim-user": "forged", accept: "application/json" }, "POST", "payload");
 		expect(r.status).toBe(200);
 		const seen = JSON.parse(r.body);
-		expect(seen).toMatchObject({ id: ref.id, method: "POST", path: "/api/items?x=1", body: Buffer.from("payload").toString("base64") });
-		expect(seen.headers).toEqual({ "user-agent": "t", accept: "application/json", "x-forwarded-prefix": path.replace(/\/$/, "") }); // never Pim's cookies, authorization, or forged x-pim-*
+		const sent = Object.fromEntries(seen.headers as [string, string][]);
+		expect(seen).toMatchObject({ id: computerAppId(ref.id), method: "POST", path: "/api/items?x=1", body: Buffer.from("payload").toString("base64") });
+		expect(sent).toEqual({ "user-agent": "t", accept: "application/json", "x-forwarded-prefix": path.replace(/\/$/, "") }); // never Pim's cookies, authorization, or forged x-pim-*
 		expect(r.headers["set-cookie"]).toBeUndefined();
 		expect(r.headers["strict-transport-security"]).toBeUndefined();
 		expect(r.headers["content-security-policy"]).toContain("default-src 'self'");
@@ -499,7 +505,7 @@ describe("apps with a backend, through the computer", () => {
 		const friend = await mk("rl-friend");
 		const stranger = await mk("rl-stranger");
 		const { c } = await pairAndConnect(owner);
-		c.handlers.set("app_http", (a) => ({ status: 200, headers: { "set-cookie": ["a=1; Domain=apps.test; Path=/", "pim_app=hijack"] }, body: Buffer.from(JSON.stringify(a.headers)).toString("base64") }));
+		c.handlers.set("app_http", (a) => ({ status: 200, headers: { "set-cookie": ["a=1; Domain=apps.test; Path=/", "pim_app=hijack"] }, body: Buffer.from(JSON.stringify(Object.fromEntries(a.headers as [string, string][]))).toString("base64") }));
 		const pub = await app.apps.create(owner.principal, backend({}, "public"));
 		const label = (await app.apps.byLabel((await (async () => (await import("../src/apps.ts")).appLabel(owner.account.ownerId, pub.id))())))!;
 		expect(label).toMatchObject({ id: pub.id, access: "private" }); // the manifest's access is a statement of intent: sharing is set explicitly
@@ -574,7 +580,7 @@ describe("apps with a backend, through the computer", () => {
 		await expect(wsOpen(`${path.replace(/\/[^/]+\/$/, "/bogus/")}socket`)).rejects.toMatchObject({ status: 404 });
 		const ws = await wsOpen(`${path}socket?room=1`);
 		await until(() => c.calls.some((x) => x.op === "app_ws_open"));
-		expect(c.calls.find((x) => x.op === "app_ws_open")!.args).toMatchObject({ id: ref.id, path: "/socket?room=1", headers: { "x-forwarded-prefix": path.replace(/\/$/, "") } });
+		expect(c.calls.find((x) => x.op === "app_ws_open")!.args).toMatchObject({ id: computerAppId(ref.id), path: "/socket?room=1", headers: { "x-forwarded-prefix": path.replace(/\/$/, "") } });
 		const got: (string | Buffer)[] = [];
 		ws.on("message", (d, bin) => got.push(bin ? (d as Buffer) : d.toString()));
 		ws.send("hello");

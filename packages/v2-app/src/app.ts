@@ -1,6 +1,7 @@
 import { ChatGPT, type ChatGPTOptions } from "./chatgpt.ts";
 import { Agents } from "./agents.ts";
 import { Apps } from "./apps.ts";
+import { Bundles } from "./bundles.ts";
 import { Canvas } from "./canvas.ts";
 import { Conversations } from "./conversations.ts";
 import { type Connectors as ConnectorsType, Connectors, type CodeExchanger, type ToolFetcher } from "./connectors.ts";
@@ -66,7 +67,7 @@ export class App {
 	readonly notices = new Notices();
 
 	constructor(readonly db: Db, store: ObjectStore, opts: { hideSuspended?: boolean; providers?: Partial<Record<ProviderId, ProviderSettings>>; crypto?: EnvelopeCrypto; appKey?: string; fetchTools?: ToolFetcher; exchange?: CodeExchanger; transcripts?: TranscriptSource; chatgpt?: ChatGPTOptions; env?: Record<string, string | undefined>; mcpReplyWaitMs?: number; allowHttpConnectors?: boolean } = {}) {
-		this.identity = new Identity(db);
+		this.identity = new Identity(db, opts.env ? () => opts.env! : undefined);
 		this.conversations = new Conversations(db);
 		this.memories = new Memories(db);
 		this.schedules = new Schedules(db, this.conversations);
@@ -90,6 +91,8 @@ export class App {
 		this.apps = new Apps(db, this.signin, { hideSuspended: opts.hideSuspended ?? false });
 		this.sharing = new Sharing(db, this.conversations, this.agents, opts.transcripts);
 		this.guests = new Guests(db, this.agents);
+		const bundles = new Bundles(db, this.objects);
+		this.agents.bundles = this.sharing.bundles = this.guests.bundles = bundles;
 		this.limits = new RateLimits(db);
 	}
 }

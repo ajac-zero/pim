@@ -3,6 +3,7 @@ import { Authorizer } from "./authz.ts";
 import type { Db, Tx } from "./db.ts";
 import { BadRequestError, ConflictError, NotFoundError } from "./errors.ts";
 import { newId } from "./ids.ts";
+import type { Bundle, Bundles } from "./bundles.ts";
 
 export type Agent = {
 	id: string;
@@ -188,17 +189,21 @@ export class Agents {
 		});
 	}
 
-	/** The default-for-everyone agent, adopted into the person's space once: a copy that remembers where it came from. */
+	/** Copies what a template carries into a space: set by the application, which has the objects the icons are copied through. */
+	bundles?: Bundles;
+
+	/**
+	 * The default-for-everyone agent, adopted into the person's space once: a copy that remembers where it came from, with the role, description, look, icon,
+	 * connectors and the agents that come with it. Registration calls it for an account that cannot act yet, so it checks no permission: it only ever gives.
+	 */
 	async adoptDefault(p: Principal): Promise<Agent | null> {
-		await this.authz.enforce(p, "api:write");
 		const template = await this.db.anonymous(async (tx) => (await tx.query("SELECT id, title, bundle FROM pim_app.templates WHERE default_for_everyone LIMIT 1")).rows[0]);
-		if (!template) return null;
+		if (!template || !this.bundles) return null;
 		const existing = await this.db.owner(p.ownerId, async (tx) => (await tx.query("SELECT * FROM pim_app.agents WHERE adopted_from = $1 AND deleted_at IS NULL", [template.id])).rows[0]);
 		if (existing) return rowToAgent(existing);
-		const b = template.bundle as { agent?: { name?: string; instructions?: string; emoji?: string; color?: string } };
-		const agent = await this.create(p, { name: b.agent?.name ?? template.title, instructions: b.agent?.instructions ?? "", ...(b.agent?.emoji ? { emoji: b.agent.emoji } : {}), ...(b.agent?.color ? { color: b.agent.color } : {}) });
-		await this.db.owner(p.ownerId, (tx) => tx.query("UPDATE pim_app.agents SET adopted_from = $2 WHERE id = $1", [agent.id, template.id]));
-		return { ...agent, adoptedFrom: template.id };
+		const b = template.bundle as Bundle;
+		const id = await this.bundles.adopt(p.ownerId, { ...b, agent: { ...b.agent, name: b.agent?.name ?? template.title, instructions: b.agent?.instructions ?? "" } }, { adoptedFrom: template.id });
+		return this.db.owner(p.ownerId, async (tx) => rowToAgent((await tx.query("SELECT * FROM pim_app.agents WHERE id = $1", [id])).rows[0]));
 	}
 
 	// ---- skills ----
@@ -233,11 +238,12 @@ export class Agents {
 	}
 
 	/** A new version of a skill: its body and supporting files, with every earlier version kept. */
-	async updateSkill(p: Principal, name: string, input: { description?: string; body?: string; files?: Record<string, string> }) {
+	async updateSkill(p: Principal, name: string, input: { description?: string; body?: string; files?: Record<string, string>; /** The version the writer read: a skill that moved on since is refused. */ baseVersion?: number }) {
 		await this.authz.enforce(p, "api:write");
 		const files = input.files === undefined ? undefined : checkFiles(input.files);
 		return this.db.owner(p.ownerId, async (tx) => {
 			const cur = await this.#skill(tx, name);
+			if (input.baseVersion !== undefined && input.baseVersion !== cur.version) throw new ConflictError(`${name} is at version ${cur.version} now, not ${input.baseVersion}: read it again before rewriting it`, "stale_version");
 			const next = cur.version + 1;
 			const body = input.body ?? cur.body;
 			const f = files ?? cur.files;

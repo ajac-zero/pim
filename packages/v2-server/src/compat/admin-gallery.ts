@@ -7,6 +7,8 @@ import type { App } from "@pim/v2-app/app";
 import { BadRequestError, NotFoundError } from "@pim/v2-app/errors";
 import { route, type Route } from "@pim/v2-app/http";
 import type { Principal } from "@pim/v2-contracts/identity";
+import type { Bundle } from "@pim/v2-app/bundles";
+import { offeredModels } from "../deployment.ts";
 import { bytesReply, deleted, isUploadedIcon, ms, ok } from "./admin-util.ts";
 
 type Env = Readonly<Record<string, string | undefined>>;
@@ -16,16 +18,18 @@ export type CustomApp = { id: string; name: string; description: string; url: st
 export const CUSTOM_APPS_KEY = "custom_apps";
 export const customApps = async (app: App): Promise<CustomApp[]> => ((await app.db.anonymous(async (tx) => (await tx.query("SELECT value FROM pim_app.instance_settings WHERE key = $1", [CUSTOM_APPS_KEY])).rows[0]))?.value ?? []) as CustomApp[];
 
-/** The models the deployment's AI gateway offers, as the environment names them. */
-export const gatewayModels = (env: Env) => (env.PIM_AI_GATEWAY_MODELS ?? "").split(",").map((m) => m.trim()).filter(Boolean);
+/** The models the deployment's AI gateway offers, narrowed by `PIM_MODELS` when it sets an allow-list. */
+export const gatewayModels = offeredModels;
 
-type TemplateRow = { id: string; owner_id: string; agent_id: string; title: string; bundle: { agent?: { name?: string; instructions?: string; emoji?: string; color?: string }; description?: string; apps?: string[]; icon?: string }; published_at: Date; uses: number; username: string; display_name: string | null };
+type TemplateRow = { id: string; owner_id: string; agent_id: string; title: string; bundle: Bundle; published_at: Date; uses: number; username: string; display_name: string | null };
 
 const TEMPLATE_SQL = "SELECT t.id, t.owner_id, t.agent_id, t.title, t.bundle, t.published_at, t.uses, a.username, pr.display_name FROM pim_app.templates t JOIN pim_app.accounts a ON a.owner_id = t.owner_id LEFT JOIN pim_app.profiles pr ON pr.owner_id = t.owner_id AND pr.published WHERE a.status NOT IN ('deleting', 'deleted')";
 
+/** A template as the gallery shows it: the agent, its contacts by role, and the agents that come with it, each with when its icon was published. */
 const templateOf = (r: TemplateRow) => ({
-	id: r.id, author: r.username, authorName: r.display_name, name: r.title, description: r.bundle.description ?? "", instructions: r.bundle.agent?.instructions ?? "",
-	apps: r.bundle.apps ?? [], contacts: [] as string[], bundle: [] as unknown[], symbol: r.bundle.agent?.emoji ?? null, color: r.bundle.agent?.color ?? null,
+	id: r.id, author: r.username, authorName: r.display_name, name: r.title, role: r.bundle.agent?.role ?? r.title, description: r.bundle.description ?? r.bundle.agent?.description ?? "", instructions: r.bundle.agent?.instructions ?? "",
+	apps: r.bundle.apps ?? r.bundle.agent?.apps ?? [], contacts: r.bundle.agent?.contacts ?? [], symbol: r.bundle.agent?.emoji ?? null, color: r.bundle.agent?.color ?? null,
+	bundle: (r.bundle.bundle ?? []).map((a) => ({ name: a.name, role: a.role, description: a.description, instructions: a.instructions, apps: a.apps, symbol: a.emoji, color: a.color, contacts: a.contacts, icon: a.icon ? ms(r.published_at) : null })),
 	icon: r.bundle.icon ? ms(r.published_at) : null, publishedAt: ms(r.published_at), uses: r.uses,
 });
 
@@ -85,8 +89,11 @@ export function galleryRoutes(env: Env): Route[] {
 			const r = (await templates(app, await principal(), " AND t.id = $1", [params[0]!]))[0];
 			return serveKey(app, r?.bundle.icon ?? null);
 		}),
-		// A template brings no other agents with it yet, so no bundled agent has an icon.
-		route("GET", "/api/templates/:id/agents/:position/icon", async ({ app, principal }) => (await app.identity.authz.enforce(await principal(), "api:read"), serveKey(app, null))),
+		// The icon of one of the agents that come with a template, by its place in the bundle.
+		route("GET", "/api/templates/:id/agents/:position/icon", async ({ app, principal, params }) => {
+			const r = (await templates(app, await principal(), " AND t.id = $1", [params[0]!]))[0];
+			return serveKey(app, r?.bundle.bundle?.[Number(params[1])]?.icon ?? null);
+		}),
 		// Making a template your own, counted for its author.
 		route("POST", "/api/templates/:id/use", async ({ app, principal, params }) => {
 			const agent = await app.sharing.useTemplate(await principal(), params[0]!);
@@ -161,6 +168,8 @@ export function galleryRoutes(env: Env): Route[] {
 			const settings = { dailyMessages: limit(b.dailyMessages), dailyToolCalls: limit(b.dailyToolCalls), model: b.model ?? null, tools: Array.isArray(b.tools) ? b.tools.map(String) : [], ask: Array.isArray(b.ask) ? b.ask.map(String) : [] };
 			if (Number.isNaN(settings.dailyMessages) || Number.isNaN(settings.dailyToolCalls)) throw new BadRequestError("Limits are whole numbers or null");
 			if (settings.model && (typeof settings.model.provider !== "string" || typeof settings.model.id !== "string")) throw new BadRequestError("model is { provider, id } or null");
+			// Guests can't use the admin's own ChatGPT plan or providers: choose a model this Pim offers everyone.
+			if (settings.model && (settings.model.provider === "chatgpt" || settings.model.provider.startsWith("own:"))) throw new BadRequestError("Guests can't use your ChatGPT plan or your own providers: choose a model this Pim offers everyone.");
 			await app.agents.get(p, params[0]!);
 			if (!(await sharingOf(app, p, origin, params[0]!))) await app.sharing.createBot(p, params[0]!);
 			await app.db.owner(p.ownerId, (tx) => tx.query("UPDATE pim_app.bots SET settings = $3 WHERE owner_id = $1 AND agent_id = $2", [p.ownerId, params[0]!, JSON.stringify(settings)]));

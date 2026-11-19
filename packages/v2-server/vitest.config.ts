@@ -7,7 +7,8 @@ export default defineConfig({
 		testTimeout: 60_000,
 		hookTimeout: 120_000,
 		// A deployment's default is that the person's majordomo answers approvals; these tests answer them by hand, and the ones about the majordomo's review choose that policy themselves.
-		env: { PIM_APPROVAL_POLICY: "explicit" },
+		// Every test client is 127.0.0.1, and a deployment lets one address register three accounts a day: the tests that make more set their own.
+		env: { PIM_APPROVAL_POLICY: "explicit", PIM_REGISTRATIONS_PER_ADDRESS: "1000" },
 		globalSetup: ["../v2-runtime/test/support/global-setup.ts", "test/support/template-setup.ts"],
 		// Files run side by side, each in its own database copied from a template. Two workers on a 2-CPU orb, four on a 4-vCPU CI runner.
 		maxWorkers: Number(process.env.PIM_V2_TEST_WORKERS ?? 2),

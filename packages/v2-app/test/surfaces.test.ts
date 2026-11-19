@@ -97,6 +97,39 @@ describe("agents and skills", () => {
 	});
 });
 
+describe("what an adopted agent keeps", () => {
+	it("copies the role, description, look, connectors and the agents that come with it, for the default agent and a used template", async () => {
+		const scout = await app.agents.create(admin.principal, { name: "Scout", role: "Researcher", description: "Finds things out", instructions: "search", emoji: "🔎", color: "#336699", apps: ["gmail"] });
+		const boss = await app.agents.create(admin.principal, { name: "Boss", role: "Lead", description: "Runs the team", instructions: "lead", emoji: "👑", color: "#aa3300", apps: ["calendar"], contacts: [scout.id] });
+		const { id } = await app.sharing.publishTemplate(admin.principal, boss.id);
+		await app.agents.setDefaultTemplate(admin.principal, id);
+		const u = await mk("heir");
+		const copy = await app.agents.adoptDefault(u.principal);
+		expect(copy).toMatchObject({ name: "Boss", role: "Lead", description: "Runs the team", emoji: "👑", color: "#aa3300", apps: ["calendar"], adoptedFrom: id });
+		const mine = await app.agents.list(u.principal);
+		const helper = mine.find((a) => a.name === "Scout")!;
+		expect(helper).toMatchObject({ role: "Researcher", description: "Finds things out", emoji: "🔎", apps: ["gmail"] });
+		expect(copy!.contacts).toEqual([helper.id]); // its own copy of the contact, not the admin's agent
+		expect(helper.id).not.toBe(scout.id);
+		// Using the template brings the same.
+		const other = await mk("user2x");
+		const used = await app.sharing.useTemplate(other.principal, id);
+		expect((await app.agents.list(other.principal)).filter((a) => a.name === "Scout")).toHaveLength(1);
+		expect(used).toMatchObject({ role: "Lead", description: "Runs the team", color: "#aa3300" });
+	});
+
+	it("holds a person to 20 published agents and 20 bots", async () => {
+		const u = await mk("publisher");
+		const made = [];
+		for (let i = 0; i < 21; i++) made.push(await app.agents.create(u.principal, { name: `Agent ${i}` }));
+		for (const a of made.slice(0, 20)) await app.sharing.publishTemplate(u.principal, a.id);
+		await expect(app.sharing.publishTemplate(u.principal, made[20]!.id)).rejects.toMatchObject({ status: 409, code: "limit" });
+		await app.sharing.publishTemplate(u.principal, made[0]!.id); // publishing again replaces, so it is not over the limit
+		for (const a of made.slice(0, 20)) await app.sharing.createBot(u.principal, a.id);
+		await expect(app.sharing.createBot(u.principal, made[20]!.id)).rejects.toMatchObject({ code: "limit" });
+	});
+});
+
 describe("the session list", () => {
 	it("lists the most recently active first with unread, archived, continuedFrom and startedBy", async () => {
 		const u = await mk("lister");
@@ -313,7 +346,10 @@ describe("triggers", () => {
 		const u = await mk("trigc");
 		const agent = await app.agents.create(u.principal, { name: "Watcher" });
 		const file = { version: 1, owningAgentId: agent.id, originChatId: "api", label: "Watch", instruction: "look", source: { kind: "file", path: "/home/me/notes.md", events: ["modified"], recursive: false }, condition: null, destination: { type: "new_chat" }, delivery: {}, authorizationRef: null };
-		const t = await app.triggers.create(u.principal, { spec: file });
+		// Nothing observes files yet: it is a draft until something does, however it is granted.
+		await expect(app.triggers.setLifecycle(u.principal, (await app.triggers.create(u.principal, { spec: file })).id, "enabled")).rejects.toMatchObject({ code: "source_not_wired" });
+		const watch = { ...file, source: { kind: "stream", command: "tail -f /home/me/notes.md" } };
+		const t = await app.triggers.create(u.principal, { spec: watch });
 		await expect(app.triggers.setLifecycle(u.principal, t.id, "enabled")).rejects.toMatchObject({ name: "CapabilityUnavailableError" }); // no grant
 		await expect(app.triggers.grantComputer(u.principal, t.id, "pc_none")).rejects.toMatchObject({ name: "CapabilityUnavailableError" }); // nothing paired
 		const pair = await app.relay.pair(u.principal, "laptop", 2);

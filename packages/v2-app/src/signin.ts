@@ -5,13 +5,14 @@ import type { Db } from "./db.ts";
 import { BadRequestError, NotFoundError, RefusedError, UnauthorizedError } from "./errors.ts";
 import { digest, newId, secret } from "./ids.ts";
 import type { Identity } from "./identity.ts";
+import { usernameProblem } from "./registration.ts";
 import { ALGORITHMS, type Assertion, type PublicKey, type Registration, verifyAssertion, verifyRegistration } from "./webauthn.ts";
 
 /** What a ceremony is bound to: the hostname passkeys belong to and the page's origin. */
 export type Site = { rpId: string; origin: string };
 
 export const CHALLENGE_MS = 5 * 60_000;
-export const SETUP_CODE_MS = 60 * 60_000;
+export const SETUP_CODE_MS = 24 * 3600_000;
 export const DEVICE_LINK_MS = 10 * 60_000;
 export const RECOVERY_CODES = 10;
 
@@ -169,7 +170,7 @@ export class SignIn {
 			await tx.query("INSERT INTO pim_app.passkeys (credential_id, owner_id, user_handle, rp_id, spki, algorithm, name, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)", [
 				registration.id, owner, userHandle(owner), site.rpId, key.spki, key.algorithm, registration.name.trim().slice(0, 64) || "Passkey", now,
 			]);
-			if (account.status === "pending") await tx.query("UPDATE pim_app.accounts SET status = 'active', activated_at = $2 WHERE owner_id = $1", [owner, now]);
+			if (account.status === "pending") await tx.query("UPDATE pim_app.accounts SET status = 'active', activated_at = $2, pending_until = NULL WHERE owner_id = $1 AND pending_until > $2", [owner, now]);
 		});
 		const rows = await this.passkeys(owner);
 		const passkey = rows.find((p) => p.id === registration.id)!;
@@ -256,7 +257,8 @@ export class SignIn {
 
 	/** Whether a username is free: never claimed, now or in the past. */
 	async usernameAvailable(name: string): Promise<{ available: boolean; reason?: string }> {
-		if (!/^[a-z][a-z0-9-]{1,31}$/.test(name)) return { available: false, reason: "Usernames are 2 to 32 lowercase letters, digits or dashes, starting with a letter." };
+		const problem = usernameProblem(name);
+		if (problem) return { available: false, reason: problem };
 		const taken = await this.db.anonymous(async (tx) => !!(await tx.query("SELECT 1 FROM pim_app.usernames WHERE username = $1", [name])).rowCount);
 		return taken ? { available: false, reason: "That username is taken." } : { available: true };
 	}

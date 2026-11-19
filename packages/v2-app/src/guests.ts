@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { Principal } from "@pim/v2-contracts/identity";
 import { OwnerId } from "@pim/v2-contracts/identity";
 import type { Agents } from "./agents.ts";
+import type { Bundles } from "./bundles.ts";
 import type { Db } from "./db.ts";
 import { NotFoundError, RefusedError } from "./errors.ts";
 
@@ -46,6 +47,9 @@ export type GuestPermission = { app: string; tool: string; permission: "off" | "
 export class Guests {
 	constructor(private readonly db: Db, private readonly agents: Agents, private readonly now: () => Date = () => new Date()) {}
 
+	/** Copies the bot's agents into a guest's space: set by the application. */
+	bundles?: Bundles;
+
 	// ---- bots: joining ----
 
 	/** A bot whose link is live: its author is an active admin and the bot is still shared. Anything else is a 404, as v1's was. */
@@ -58,9 +62,10 @@ export class Guests {
 	/** After a guest's account is made: their copy of the bot's agent, which is what they chat with. */
 	async enroll(guest: string, botId: string): Promise<void> {
 		const bot = await this.liveBot(botId);
-		const source = bot.agentId ? await this.db.owner(bot.host, async (tx) => (await tx.query("SELECT name, instructions, emoji, color FROM pim_app.agents WHERE id = $1 AND deleted_at IS NULL", [bot.agentId])).rows[0]) : null;
-		const p: Principal = { kind: "user", ownerId: OwnerId.parse(guest), role: "guest", sessionId: "guest-join" };
-		const copy = await this.agents.create(p, { name: source?.name ?? bot.name, instructions: source?.instructions ?? "", ...(source?.emoji ? { emoji: source.emoji } : {}), ...(source?.color ? { color: source.color } : {}) } as never);
+		// Their copy of the bot's agent and the agents that come with it, on the model the bot was given; it connects none of the host's connectors (the bot's tools are the host's to share).
+		const bundle = bot.agentId ? await this.db.owner(bot.host, (tx) => this.bundles!.of(tx, bot.host, bot.agentId!)) : null;
+		const model = bot.settings.model && typeof bot.settings.model.provider === "string" && typeof bot.settings.model.id === "string" ? { provider: bot.settings.model.provider, id: bot.settings.model.id } : null;
+		const copy = { id: await this.bundles!.adopt(guest, bundle ?? { agent: { name: bot.name, instructions: "" } }, { adoptedFrom: bot.id, apps: [], model }) };
 		await this.db.owner(guest, (tx) => tx.query("INSERT INTO pim_app.guest_bots (owner_id, bot_id, host_owner, agent_id, shared_at) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (owner_id) DO NOTHING", [guest, bot.id, bot.host, copy.id, bot.sharedAt]));
 	}
 

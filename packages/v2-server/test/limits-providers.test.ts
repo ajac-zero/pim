@@ -155,12 +155,12 @@ describe("limits and shared providers", () => {
 		expect(answers.filter((a) => a === "answered")).toHaveLength(2);
 		expect(answers.find((a) => a !== "answered")).toBe("Space usage quota exceeded: 2 model requests a day. It resets at midnight UTC.");
 		// Tokens are known once a request ends: the day's 100 are used, so the next request is refused. A plan's tokens are not the deployment's.
-		const cy = await app.identity.register({ username: "cy" });
-		people.cy = { ownerId: cy.ownerId, token: "" };
-		await app.usage.record(cy.ownerId, { id: "plan", runKind: "chat", provider: "chatgpt", model: "gpt", inputTokens: 5000, outputTokens: 0, costMicroUsd: 0 });
-		expect(await request("cy")).toBe("answered");
-		await app.usage.record(cy.ownerId, { id: "paid", runKind: "chat", provider: "faux", model: "m", inputTokens: 60, outputTokens: 30, cacheReadTokens: 20, costMicroUsd: 0 });
-		expect(await request("cy")).toBe("Space usage quota exceeded: 100 tokens a day. It resets at midnight UTC.");
+		const cyd = await app.identity.register({ username: "cyd" });
+		people.cyd = { ownerId: cyd.ownerId, token: "" };
+		await app.usage.record(cyd.ownerId, { id: "plan", runKind: "chat", provider: "chatgpt", model: "gpt", inputTokens: 5000, outputTokens: 0, costMicroUsd: 0 });
+		expect(await request("cyd")).toBe("answered");
+		await app.usage.record(cyd.ownerId, { id: "paid", runKind: "chat", provider: "faux", model: "m", inputTokens: 60, outputTokens: 30, cacheReadTokens: 20, costMicroUsd: 0 });
+		expect(await request("cyd")).toBe("Space usage quota exceeded: 100 tokens a day. It resets at midnight UTC.");
 		// An admin has no limits.
 		expect(await Promise.all([request("ada"), request("ada"), request("ada")])).toEqual(["answered", "answered", "answered"]);
 	});

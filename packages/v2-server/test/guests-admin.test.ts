@@ -12,7 +12,7 @@ import type { Process } from "../src/main.ts";
 import { readTranscript, waitFor } from "../../v2-runtime/test/support/rig.ts";
 import { Client } from "./support/client.ts";
 import { type Deployment, base, start, startS3 } from "./support/processes.ts";
-import { createStack, describeWith, freePort, hasNats, startNats } from "./support/stack.ts";
+import { createStack, describeWith, freePort, hasNats, startNats, sentAndAnswered } from "./support/stack.ts";
 
 const real = describeWith(hasNats());
 const TOKEN = "host-mcp-token";
@@ -72,7 +72,7 @@ real("guests, circles and the admin's majordomo", () => {
 	};
 	const results = async (who: Person, tool: string) =>
 		(JSON.parse(await transcript(who)) as { model?: { role: string; toolName?: string; content: { text?: string }[] }[] }[]).flatMap((e) => (e.model ?? []).filter((m) => m.role === "toolResult" && m.toolName === tool).map((m) => m.content.map((c) => c.text ?? "").join("")));
-	const finish = (who: Person) => waitFor("the turn to end", async () => ((await transcript(who)).includes(`ended ${n}`) ? true : undefined), 60_000);
+	const finish = (who: Person) => waitFor("the turn to end", async () => (sentAndAnswered(await transcript(who), `done ${n}`) ? true : undefined), 60_000);
 	const send = async (who: Person, words: string, park: boolean, ...script: unknown[]) => {
 		faux.setResponses([...script, toolUse(fauxToolCall("send_to_user", { message: `done ${++n}` })), fauxAssistantMessage(`ended ${n}`)] as never);
 		expect((await who.web.call("POST", `/api/sessions/${who.chat}/messages`, { commandId: `m-${n}`, text: words })).status).toBe(202);
@@ -114,7 +114,9 @@ real("guests, circles and the admin's majordomo", () => {
 
 	it("shares a bot, and a guest joins through its link under closed registration with a copy of the agent", async () => {
 		// Only an admin shares a bot.
-		const shared = await host.web.call("PUT", `/api/agents/${agentId}/bot`, { dailyMessages: 5, dailyToolCalls: 4, tools: ["search", "create_ticket", "delete_all"], ask: ["create_ticket"] });
+		// Guests can't use the host's own plan or providers, but a model the deployment offers everyone.
+		expect((await host.web.call("PUT", `/api/agents/${agentId}/bot`, { model: { provider: "chatgpt", id: "gpt-5" }, tools: [] })).status).toBe(400);
+		const shared = await host.web.call("PUT", `/api/agents/${agentId}/bot`, { model: { provider: "faux", id: "m" }, dailyMessages: 5, dailyToolCalls: 4, tools: ["search", "create_ticket", "delete_all"], ask: ["create_ticket"] });
 		expect(shared.status).toBe(200);
 		botId = shared.json.id;
 		expect((await host.web.call("GET", `/api/bots/${botId}`)).json).toMatchObject({ id: botId, author: "anibal" });
@@ -131,6 +133,8 @@ real("guests, circles and the admin's majordomo", () => {
 		// Their own copy of the agent (the majordomo is the app's own entry), not the host's.
 		expect(agents.find((a) => a.id === mine.agent)).toMatchObject({ name: "Helper", instructions: "Help with tickets." });
 		expect(mine.agent).not.toBe(agentId);
+		// On the model the bot was given.
+		expect(agents.find((a) => a.id === mine.agent)).toMatchObject({ model: { provider: "faux", id: "m" } });
 		guest.chat = (await guest.web.call("POST", "/api/sessions", { title: "Hi", agentId: mine.agent })).json.id;
 	});
 
@@ -244,6 +248,24 @@ real("guests, circles and the admin's majordomo", () => {
 		const own = (await host.web.call("GET", "/api/permissions")).json.tools as { tool: string; permission: string }[];
 		expect(own.find((t) => t.tool === "search")!.permission).toBe("on");
 		expect(own.find((t) => t.tool === "create_ticket")!.permission).toBe("ask");
+
+		// The host's time zone and the memory its circle may read are the visit's, and no other: the circle reads nothing until it is given a scope.
+		const hostP = { kind: "user", ownerId: host.ownerId, role: "admin", sessionId: "s" } as never;
+		await app.memories.remember(hostP, "everyone", "Anibal's locker code", "The locker code is 4512");
+		await app.memories.remember(hostP, "diary", "Anibal's secret", "Never share this diary entry");
+		await app.memories.remember({ ...(hostP as object), ownerId: bob.ownerId, role: "member" } as never, "everyone", "Bob's own note", "Bob keeps bees");
+		await host.web.call("PUT", "/api/settings", { timeZone: "Pacific/Auckland" });
+		const brief = async () => (await d.stack.admin.query("SELECT pim_app.runner_visit_brief($1, $2, 96) AS b", [bob.ownerId, visitor.chat])).rows[0].b;
+		expect(await brief()).toMatchObject({ host: "anibal", circle: "Friends", available: true, timeZone: "Pacific/Auckland", memory: null });
+		await send(visitor, "what do you know of him?", false, toolUse(fauxToolCall("recall", { pattern: "locker" })));
+		expect((await results(visitor, "recall")).at(-1)).toBe("No match.");
+		await host.web.call("PUT", `/api/circles/${circleId}`, { memoryScopes: ["everyone"] });
+		expect((await brief()).memory).toEqual([expect.objectContaining({ title: "Anibal's locker code", scope: "everyone" })]);
+		await send(visitor, "his locker?", false, toolUse(fauxToolCall("recall", { pattern: "locker" })), toolUse(fauxToolCall("recall", { pattern: "diary|bees" })));
+		const recalled = await results(visitor, "recall");
+		expect(recalled.at(-2)).toContain("Anibal's locker code");
+		expect(recalled.at(-1)).toBe("No match."); // neither the host's diary scope nor the visitor's own memory
+		await host.web.call("PUT", `/api/circles/${circleId}`, { memoryScopes: [] });
 
 		// A paused circle, and a member taken out, stop the next call; a person is in one circle at most.
 		expect((await host.web.call("PUT", `/api/circles/${circleId}`, { enabled: false })).json).toMatchObject({ enabled: false });

@@ -4,6 +4,7 @@ import type { Db } from "./db.ts";
 import { BadRequestError, ConflictError, GoneError, NotFoundError, PimError, RefusedError } from "./errors.ts";
 import { newId, secret } from "./ids.ts";
 import type { Agents } from "./agents.ts";
+import type { Bundle, Bundles } from "./bundles.ts";
 import type { Conversations } from "./conversations.ts";
 
 /** Where a chat's messages are read from: the runtime's projection. Absent, a shared chat shows its metadata alone. */
@@ -25,6 +26,9 @@ export type SharedChat = { title: string | null; agent: { name: string; symbol: 
 
 /** A chat's link as its owner sees it: `messages` counts what the copy holds, as of `sharedAt`. The address is the route's to add. */
 export type ChatLink = { id: string; sharedAt: number; messages: number };
+
+/** What a person may publish of each: templates, published apps and bots. */
+export const MAX_PUBLISHED = 20;
 
 /** At most this much JSON in one copy. */
 export const MAX_SHARED_BYTES = 1_000_000;
@@ -205,7 +209,10 @@ export class Sharing {
 		await this.authz.enforce(p, "api:write");
 		const agent = await this.agents.get(p, agentId);
 		const id = `bot_${secret(9)}`;
-		await this.db.owner(p.ownerId, (tx) => tx.query("INSERT INTO pim_app.bots (id, owner_id, name, agent_id) VALUES ($1,$2,$3,$4)", [id, p.ownerId, name?.trim() || agent.name, agentId]));
+		await this.db.owner(p.ownerId, async (tx) => {
+			if ((await tx.query("SELECT count(*)::int AS n FROM pim_app.bots WHERE owner_id = $1", [p.ownerId])).rows[0].n >= MAX_PUBLISHED) throw new PimError(409, "limit", `You can share ${MAX_PUBLISHED} agents as bots. Stop sharing one first.`);
+			await tx.query("INSERT INTO pim_app.bots (id, owner_id, name, agent_id) VALUES ($1,$2,$3,$4)", [id, p.ownerId, name?.trim() || agent.name, agentId]);
+		});
 		return { id };
 	}
 
@@ -250,14 +257,21 @@ export class Sharing {
 
 	// ---- templates and the gallery ----
 
-	/** Publishes an agent as a template: its name, instructions and look, nothing of its memory or connectors. */
+	/** Copies what a template carries into a space: set by the application, which has the objects the icons are copied through. */
+	bundles?: Bundles;
+
+	/**
+	 * Publishes an agent as a template: its name, role, description, look and connectors, and the agents that come with it (its contacts, and theirs), nothing of
+	 * their memory. At most `MAX_PUBLISHED` a person; publishing an agent again replaces its template.
+	 */
 	async publishTemplate(p: Principal, agentId: string, title?: string) {
 		await this.authz.enforce(p, "api:write");
 		const agent = await this.agents.get(p, agentId);
 		const id = `tpl_${secret(9)}`;
-		const bundle = { agent: { name: agent.name, instructions: agent.instructions, emoji: agent.emoji, color: agent.color } };
 		await this.db.owner(p.ownerId, async (tx) => {
+			const bundle = (await this.bundles?.of(tx, p.ownerId, agentId)) ?? { agent: { name: agent.name, instructions: agent.instructions, emoji: agent.emoji, color: agent.color } };
 			await tx.query("DELETE FROM pim_app.templates WHERE owner_id = $1 AND agent_id = $2", [p.ownerId, agentId]);
+			if ((await tx.query("SELECT count(*)::int AS n FROM pim_app.templates WHERE owner_id = $1", [p.ownerId])).rows[0].n >= MAX_PUBLISHED) throw new PimError(409, "limit", `You can publish ${MAX_PUBLISHED} agents. Unpublish one first.`);
 			await tx.query("INSERT INTO pim_app.templates (id, owner_id, agent_id, title, bundle) VALUES ($1,$2,$3,$4,$5)", [id, p.ownerId, agentId, title?.trim() || agent.name, JSON.stringify(bundle)]);
 		});
 		return { id };
@@ -286,15 +300,15 @@ export class Sharing {
 		await this.authz.enforce(p, "api:read");
 		const r = await this.db.owner(p.ownerId, async (tx) => (await tx.query("SELECT t.id, t.title, t.bundle, a.username FROM pim_app.templates t JOIN pim_app.accounts a ON a.owner_id = t.owner_id WHERE t.id = $1 AND a.status NOT IN ('deleting', 'deleted')", [id])).rows[0]);
 		if (!r) throw new NotFoundError("No such template");
-		return { id: r.id as string, title: r.title as string, author: r.username as string, bundle: r.bundle as { agent: { name: string; instructions: string } } };
+		return { id: r.id as string, title: r.title as string, author: r.username as string, bundle: r.bundle as Bundle };
 	}
 
-	/** Uses a template: a copy of the agent in your space, remembering where it came from. */
+	/** Uses a template: copies of its agent and of the agents that come with it in your space, each remembering where it came from. */
 	async useTemplate(p: Principal, id: string) {
+		await this.authz.enforce(p, "api:write");
 		const t = await this.template(p, id);
-		const agent = await this.agents.create(p, { name: t.bundle.agent.name, instructions: t.bundle.agent.instructions });
-		await this.db.owner(p.ownerId, (tx) => tx.query("UPDATE pim_app.agents SET adopted_from = $2 WHERE id = $1", [agent.id, id]));
-		return agent;
+		const agentId = await this.bundles!.adopt(p.ownerId, t.bundle, { adoptedFrom: id });
+		return this.agents.get(p, agentId);
 	}
 
 	// ---- export ----

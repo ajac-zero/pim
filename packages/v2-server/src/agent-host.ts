@@ -37,10 +37,13 @@ import { currentOpenaiProvider } from "./openai-catalog.ts";
 import { chatgptCredentialStore, chatgptProvider, type ChatGPTRunnerOptions } from "./chatgpt-auth.ts";
 import type { ForgeParts } from "./forge-assembly.ts";
 import { mentionedAgents } from "./rooms.ts";
+import { describeGoal } from "./goal-tools.ts";
 import { agentsSection, ASSISTANT_INSTRUCTIONS, delegatesSection, identity, majordomoRole, MAX_TASK_DEPTH, startedBySection, type Roster } from "./agent-prompts.ts";
 import { createFailover, failureMessage } from "./provider-failover.ts";
 import { priceOf } from "./model-prices.ts";
 import { fallbackMaxTokens } from "@pim/v2-app/web-providers";
+import { memoryLinesOf, offeredModels } from "./deployment.ts";
+import { type VisitBrief, visitMemory, visitPreamble } from "./visit-brief.ts";
 
 type Env = Record<string, string | undefined>;
 type ModelRef = { provider: string; id: string };
@@ -358,7 +361,7 @@ export function createAgentHost(options: AgentHostOptions) {
 		models.setProvider((plan ? chatgptProvider(chatgptOptions) : currentOpenaiProvider()) as never);
 		models.setProvider(googleProvider() as never);
 		if (env.PIM_AI_GATEWAY_URL) {
-			const listed = (env.PIM_AI_GATEWAY_MODELS ?? "").split(",").map((m) => m.trim()).filter(Boolean);
+			const listed = offeredModels(env);
 			if (listed.length > 0) models.setProvider(compatibleProvider("gateway", "AI gateway", env.PIM_AI_GATEWAY_URL, listed.map((id) => ({ id })), () => env.PIM_AI_GATEWAY_KEY) as never);
 		}
 		for (const row of rows) {
@@ -463,6 +466,12 @@ export function createAgentHost(options: AgentHostOptions) {
 				return (model: any, ...rest: any[]) => {
 					const out = createAssistantMessageEventStream();
 					void (async () => {
+						// A suspended or deleted account's agents stop at their next model request, whatever turn they were in.
+						const gone = await db.read<{ r: string | null }>(ownerId, "SELECT pim_app.runner_account_refusal($1) AS r", [ownerId]).then((r) => r.rows[0]?.r ?? null, () => null);
+						if (gone !== null) {
+							out.push({ type: "error", reason: "error", error: failureMessage(model, gone, "error", now()) } as never);
+							return;
+						}
 						const refusal = await db.read<{ r: string | null }>(ownerId, "SELECT pim_app.runner_reserve_model_request($1, $2, $3, $4) AS r", [ownerId, String(model.provider), limits.dailyTokens, limits.dailyModelRequests]).then((r) => r.rows[0]?.r ?? null, () => null);
 						if (refusal !== null) {
 							console.warn(JSON.stringify({ event: "pim.limit", limit: "model", provider: model.provider, reason: refusal }));
@@ -486,10 +495,18 @@ export function createAgentHost(options: AgentHostOptions) {
 		const registry = createRegistry();
 		const deps: ToolDeps = { ownerId, partitionId: partition.partitionId, runtime: db, app: options.app, forge: options.forge, relay: options.relay, fetch: options.fetch ?? fetch, now, toolTimeoutMs: options.stallMs?.tool, crypto: options.crypto, allowPrivateConnectors: env.PIM_CONNECTOR_ALLOW_PRIVATE === "1", images: imageSources(ownerId), chatOf: (conversationId) => publicChatId(ownerId, conversationId) };
 		const ctx = (conversationId: number | string) => publicChatId(ownerId, conversationId).then((chat) => readContext(ownerId, chat));
+		/** The brief of a visit to someone's space, null in every other chat. */
+		const visitOf = async (conversationId: number | string): Promise<VisitBrief | null> => {
+			const chat = await publicChatId(ownerId, conversationId).catch(() => null);
+			return chat ? ((await db.read<{ b: VisitBrief | null }>(ownerId, "SELECT pim_app.runner_visit_brief($1, $2, $3) AS b", [ownerId, chat, memoryLinesOf(env)]).catch(() => ({ rows: [] as { b: VisitBrief | null }[] }))).rows[0]?.b ?? null) : null;
+		};
 		registry.install(pimExtension(deps, [
-			section("user_time_zone", () => timeZoneOf(db, ownerId)),
+			section("user_time_zone", async (input) => ((await visitOf(input.conversationId)) ? undefined : timeZoneOf(db, ownerId))),
+			section("host_time_zone", async (input) => (await visitOf(input.conversationId))?.timeZone ?? undefined),
 			section("agent", async (input) => {
 				const c = await ctx(input.conversationId);
+				const visit = await visitOf(input.conversationId);
+				if (visit) return [AGENT_PREAMBLE, visitPreamble(visit, c.username ?? "the visitor")].join("\n\n");
 				const chat = await publicChatId(ownerId, input.conversationId);
 				const roster = await readRoster(ownerId, chat).catch(() => undefined);
 				const me = roster?.agents.find((a) => a.id === c.agent?.id);
@@ -498,10 +515,12 @@ export function createAgentHost(options: AgentHostOptions) {
 				return [AGENT_PREAMBLE, who, me ? identity(me) : undefined, c.agent?.majordomo ? majordomoRole(c.agent.name) : undefined, ASSISTANT_INSTRUCTIONS, own].filter(Boolean).join("\n\n");
 			}),
 			section("your_agents", async (input) => {
+				if (await visitOf(input.conversationId)) return undefined;
 				const roster = await readRoster(ownerId, await publicChatId(ownerId, input.conversationId)).catch(() => undefined);
 				return roster && roster.agents.length > 0 ? agentsSection(roster.self, roster) : undefined;
 			}),
 			section("started_by", async (input) => {
+				if (await visitOf(input.conversationId)) return undefined;
 				const roster = await readRoster(ownerId, await publicChatId(ownerId, input.conversationId)).catch(() => undefined);
 				return roster?.startedBy ? startedBySection(roster.startedBy) : undefined;
 			}),
@@ -512,13 +531,19 @@ export function createAgentHost(options: AgentHostOptions) {
 				return `Skills you can load with read_skill:\n${skills.map((s) => `- ${s.name}: ${s.description}`).join("\n")}`;
 			}),
 			section("active_goals", async (input) => {
+				if (await visitOf(input.conversationId)) return undefined;
 				const c = await ctx(input.conversationId);
-				return c.goals.length === 0 ? undefined : c.goals.map((g) => `- [${g.id}] ${g.title}${g.steps.length ? `\n${g.steps.map((s) => `  - [${s.done ? "x" : " "}] ${s.title}`).join("\n")}` : ""}`).join("\n");
+				if (c.goals.length === 0) return undefined;
+				// Each goal with its steps numbered from 1, which is what update_goal's complete_steps takes, and its latest progress note.
+				const notes = (await db.read<{ n: Record<string, string> }>(ownerId, "SELECT pim_app.runner_goal_notes($1) AS n", [ownerId]).catch(() => ({ rows: [] as { n: Record<string, string> }[] }))).rows[0]?.n ?? {};
+				return c.goals.map((g) => describeGoal(g, notes[g.id])).join("\n");
 			}),
 			section("memory", async (input) => {
+				const visit = await visitOf(input.conversationId);
+				if (visit) return visitMemory(visit);
 				const c = await ctx(input.conversationId);
 				const scopes = c.agent?.majordomo ? "every scope" : c.agent ? [...new Set([c.agent.config.memoryScope ?? `agent-${c.agent.id}`, ...(c.agent.config.memoryScopes ?? []), "everyone"])].join(", ") : "everyone";
-				return `Your memory (scopes ${scopes}). Save with note, find with recall, read in full with zoom.${c.memories.length ? `\n${c.memories.map((m) => `- [${m.id}] (${m.scope}) ${m.title}`).join("\n")}` : "\nNothing is remembered yet."}`;
+				return `Your memory (scopes ${scopes}). Save with note, find with recall, read in full with zoom.${c.memories.length ? `\n${c.memories.slice(0, memoryLinesOf(env)).map((m) => `- [${m.id}] (${m.scope}) ${m.title}`).join("\n")}` : "\nNothing is remembered yet."}`;
 			}),
 			section("room", async (input) => {
 				const chat = await publicChatId(ownerId, input.conversationId);
@@ -529,6 +554,7 @@ export function createAgentHost(options: AgentHostOptions) {
 				return `This is a group chat${room.role === "seat" ? " and you are one of its agents, not its host" : " and you are its host"}. ${room.role === "host" ? "Also in it" : "Others in it"}: ${names.join(", ") || "no one else yet"}. ${turns} What another agent says reaches you as a message that starts "[From Name]"; what you send with send_to_user is shown in the chat as yours, under your name. Mention an agent by @Name to bring its attention; do not repeat what others have said. ${room.role === "host" ? "When an agent you or the person brought in has done what it was here for, take it out of the chat with `remove_from_chat`: it hears nothing more, and can be brought in again later." : "You joined knowing nothing of what was said here before; when what you are asked refers to it, read it with `chat_history`."}`;
 			}),
 			section("delegates", async (input) => {
+				if (await visitOf(input.conversationId)) return undefined;
 				const roster = await readRoster(ownerId, await publicChatId(ownerId, input.conversationId)).catch(() => undefined);
 				return roster && roster.delegates.length > 0 ? delegatesSection(roster) : undefined;
 			}),

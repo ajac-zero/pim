@@ -32,7 +32,7 @@ describe("the computer host", () => {
 		app = new App(connectApp(stack.url("gate"), 6), new MemoryObjectStore());
 		const ada = await app.identity.register({ username: "ada", bootstrap: await app.identity.issueClaim("bootstrap", null, 3_600_000) });
 		await app.identity.setRegistrationOpen({ kind: "user", ownerId: ada.ownerId, role: "admin", sessionId: "s" }, true);
-		for (const [name, a] of [["ada", ada], ["bob", await app.identity.register({ username: "bob" })], ["cy", await app.identity.register({ username: "cy" })], ["dee", await app.identity.register({ username: "dee" })]] as const) people[name] = { ownerId: a.ownerId, token: await app.identity.createSession(a.ownerId) };
+		for (const [name, a] of [["ada", ada], ["bob", await app.identity.register({ username: "bob" })], ["cyd", await app.identity.register({ username: "cyd" })], ["dee", await app.identity.register({ username: "dee" })]] as const) people[name] = { ownerId: a.ownerId, token: await app.identity.createSession(a.ownerId) };
 		server = createGate(app, { first: [...hostRoutes(), ...managedComputerRoutes(computerRoutes())] });
 		await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
 		base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
@@ -68,9 +68,9 @@ describe("the computer host", () => {
 	it("refuses a token that is not the host's, and a check takes no work", async () => {
 		expect((await sync("pimh_nope")).status).toBe(401);
 		expect((await sync(people.bob!.token)).status).toBe(401);
-		const own = (await as("cy", "POST", "/api/computer", {})).json.token; // cy pairs their own, before being asked about
+		const own = (await as("cyd", "POST", "/api/computer", {})).json.token; // cy pairs their own, before being asked about
 		expect((await sync(own)).status).toBe(401);
-		await as("cy", "DELETE", "/api/computer");
+		await as("cyd", "DELETE", "/api/computer");
 		expect((await call("", "POST", "/api/computer-host/sync", {})).status).toBe(401);
 		expect((await sync(hostToken, { check: true })).json).toEqual({ requests: [] });
 		expect((await as("ada", "GET", "/api/admin/computer-host")).json.seenAt).toBeNull();
@@ -108,16 +108,16 @@ describe("the computer host", () => {
 	});
 
 	it("gives a request again after twenty minutes with a new token that replaces the old", async () => {
-		await as("cy", "GET", "/api/computer");
+		await as("cyd", "GET", "/api/computer");
 		const [r1] = (await sync(hostToken)).json.requests;
-		expect(r1.name).toBe(`pim-${people.cy!.ownerId.replace("_", "-")}`);
+		expect(r1.name).toBe(`pim-${people.cyd!.ownerId.replace("_", "-")}`);
 		expect((await sync(hostToken)).json.requests).toEqual([]); // taken: not given again at once
-		await stack.admin.query("UPDATE pim_app.computer_requests SET taken_at = now() - interval '21 minutes' WHERE owner_id = $1", [people.cy!.ownerId]);
+		await stack.admin.query("UPDATE pim_app.computer_requests SET taken_at = now() - interval '21 minutes' WHERE owner_id = $1", [people.cyd!.ownerId]);
 		const [r2] = (await sync(hostToken)).json.requests;
 		expect(r2.id).toBe(r1.id);
 		expect(r2.token).not.toBe(r1.token);
 		await expect(connectsWith(r1.token)).rejects.toThrow();
-		expect((await connectsWith(r2.token)).ownerId).toBe(people.cy!.ownerId);
+		expect((await connectsWith(r2.token)).ownerId).toBe(people.cyd!.ownerId);
 	});
 
 	it("tells a person why their computer could not be made, and makes it again when they ask", async () => {
@@ -152,7 +152,7 @@ describe("the computer host", () => {
 		expect((await sync(hostToken)).status).toBe(401);
 		expect((await stack.admin.query("SELECT revoked_at FROM pim_app.token_consumers WHERE kind = 'host'")).rows[0]!.revoked_at).not.toBeNull();
 		// Cy's computer was made by it and is still theirs; with no host, theirs is a computer like any other.
-		expect((await as("cy", "GET", "/api/computer")).json.managed).toBe(true);
+		expect((await as("cyd", "GET", "/api/computer")).json.managed).toBe(true);
 		expect((await call(hostToken, "GET", "/pim-host.ts")).status).toBe(200);
 	});
 });

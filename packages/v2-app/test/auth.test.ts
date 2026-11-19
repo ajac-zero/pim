@@ -60,7 +60,7 @@ beforeAll(async () => {
 	await new Promise<void>((r) => idp.listen(0, "127.0.0.1", r));
 	idpBase = `http://127.0.0.1:${(idp.address() as { port: number }).port}`;
 	app = new App(connect(urls.appUrl, 6), new MemoryObjectStore(), { providers: { oidc: { clientId: "client-1", clientSecret: "secret", issuer: idpBase, name: "Acme SSO" } } });
-	const root = await bootstrap(app, "root");
+	const root = await bootstrap(app, "rootly");
 	await app.identity.setRegistrationOpen(root.principal, true);
 	server = createGate(app);
 	await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
@@ -146,7 +146,7 @@ describe("passkeys", () => {
 		expect(removed.status).toBe(200);
 		expect((await other.call("GET", "/auth/session")).json.signedIn).toBe(false); // opens nothing once its credential is gone
 		expect((await c.call("GET", "/auth/session")).json.signedIn).toBe(true);
-		const admin = (await app.db.anonymous(async (tx) => (await tx.query("SELECT owner_id FROM pim_app.accounts WHERE username = 'root'")).rows[0].owner_id)) as string;
+		const admin = (await app.db.anonymous(async (tx) => (await tx.query("SELECT owner_id FROM pim_app.accounts WHERE username = 'rootly'")).rows[0].owner_id)) as string;
 		await app.identity.setStatus({ kind: "user", ownerId: admin as never, role: "admin", sessionId: "x" }, ownerId, "suspended");
 		const refused = await signInWith(new Client(base), k1, ownerId);
 		expect(refused.status).toBe(403);
@@ -415,7 +415,7 @@ describe("MCP OAuth 2.1 server", () => {
 	});
 
 	it("checks the account and scopes on every call: suspended 403, deleted 410, guests refused, an unscoped API token kept out", async () => {
-		const admin = (await app.db.anonymous(async (tx) => (await tx.query("SELECT owner_id FROM pim_app.accounts WHERE username = 'root'")).rows[0].owner_id)) as string;
+		const admin = (await app.db.anonymous(async (tx) => (await tx.query("SELECT owner_id FROM pim_app.accounts WHERE username = 'rootly'")).rows[0].owner_id)) as string;
 		const adminP = { kind: "user", ownerId: admin as never, role: "admin", sessionId: "x" } as const;
 		const { c, ownerId } = await join("mcp-checks");
 		const anon = new Client(base);

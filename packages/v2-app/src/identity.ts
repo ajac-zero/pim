@@ -1,71 +1,132 @@
 import { randomUUID } from "node:crypto";
 import { OwnerId, type Principal } from "@pim/v2-contracts/identity";
 import { type Account, Authorizer, readAccount } from "./authz.ts";
-import type { Db } from "./db.ts";
-import { BadRequestError, ConflictError, NotFoundError, RefusedError, UnauthorizedError } from "./errors.ts";
+import type { Db, Tx } from "./db.ts";
+import { BadRequestError, ConflictError, NotFoundError, PimError, RefusedError, UnauthorizedError } from "./errors.ts";
 import { digest, newId, newOwnerId, secret } from "./ids.ts";
+import { PENDING_MS, registrationPolicy, usernameProblem } from "./registration.ts";
 
-const USERNAME = /^[a-z][a-z0-9-]{1,31}$/;
+/** API tokens one person may have. */
+export const MAX_TOKENS = 20;
 export const SESSION_MS = 30 * 24 * 3600_000;
 
 /** `guestOf` makes a guest account of a live bot's link (`Guests.liveBot` has checked it): allowed whatever the registration mode, with no invite. */
-export type Registration = { username: string; invite?: string; address?: string; bootstrap?: string; now?: Date; guestOf?: { botId: string; host: string } };
+export type Registration = { username: string; invite?: string; address?: string; bootstrap?: string; now?: Date; guestOf?: { botId: string; host: string }; /** The account is `pending` until its first passkey (`activate`), and lapses after a day without one. */ pending?: boolean };
 export type ConsumerKind = "computer" | "host" | "mcp_client" | "mcp_grant" | "mcp_refresh";
 const CONSUMER_PREFIX: Record<ConsumerKind, string> = { computer: "pimc_", host: "pimh_", mcp_client: "pimmc_", mcp_grant: "pimmg_", mcp_refresh: "pimmr_" };
 
 /** Accounts, credentials, browser sessions, API tokens and the token consumers. Each secret is returned once and kept as a digest. */
 export class Identity {
 	readonly authz: Authorizer;
-	constructor(private readonly db: Db) {
+	/** `env` is the deployment's variables, read each time, for its registration policy (`PIM_REGISTRATION`, `PIM_MAX_ACCOUNTS`, `PIM_REGISTRATIONS_PER_ADDRESS`). */
+	constructor(private readonly db: Db, private readonly env: () => Readonly<Record<string, string | undefined>> = () => process.env) {
 		this.authz = new Authorizer(db);
 	}
 
 	// ---- accounts ----
 
-	/** Creates an account. The very first is the admin and needs a bootstrap claim code; later ones need open registration or an invite. */
+	/**
+	 * Creates an account. The very first is the admin and needs a bootstrap claim code; later ones join as the deployment's policy says: with an
+	 * invite, freely, or not at all (`closed`), while a cap on accounts and a limit of registrations a day per address hold in every mode.
+	 */
 	async register(input: Registration): Promise<Account> {
-		const username = input.username.toLowerCase();
-		if (!USERNAME.test(username)) throw new BadRequestError("Usernames are 2 to 32 lowercase letters, digits or dashes, starting with a letter");
+		const username = input.username.trim().toLowerCase();
+		const problem = usernameProblem(username);
+		if (problem) throw new BadRequestError(problem);
 		const ownerId = newOwnerId();
 		const now = input.now ?? new Date();
 		const guest = input.guestOf;
+		// Lapsed registrations hold no username, place or invite.
+		await this.releaseLapsed(now);
 		const first = !guest && (await this.db.anonymous(async (tx) => (await tx.query("SELECT NOT EXISTS (SELECT 1 FROM pim_app.accounts) AS first")).rows[0].first as boolean));
-		const open = await this.db.anonymous(async (tx) => (await tx.query("SELECT value FROM pim_app.instance_settings WHERE key = 'registration_open'")).rows[0]?.value === true);
+		const stored = await this.db.anonymous(async (tx) => (await tx.query("SELECT value FROM pim_app.instance_settings WHERE key = 'registration_open'")).rows[0]?.value === true);
+		const policy = registrationPolicy(this.env(), stored);
+		const spendsInvite = !first && !guest && policy.mode === "invite";
 		if (guest) {
-			// A bot's link is open to anyone while it is live, whatever the registration mode; only the per-address limit applies.
+			// A bot's link is open to anyone while it is live, whatever the registration mode; the cap and the per-address limit still hold.
 		} else if (first) {
 			if (!input.bootstrap) throw new RefusedError("This Pim needs its bootstrap claim code to create the first account", "bootstrap_required");
 			await this.#redeemClaim(input.bootstrap, "bootstrap", now);
-		} else if (!open && !input.invite) throw new RefusedError("Registration is closed", "registration_closed");
-		if (input.address) await this.#limit(input.address, now);
+		} else if (policy.mode === "closed") throw new RefusedError("Registration is closed.", "registration_closed");
+		else if (spendsInvite && !input.invite) throw new RefusedError("Registration is closed. Joining needs an invite.", "registration_closed");
+		const role = first ? "admin" : guest ? "guest" : "member";
+		const pending = input.pending === true;
 		await this.db.owner(ownerId, async (tx) => {
+			// Counting and taking a place is one step, whoever else registers at the same moment.
+			await tx.query("SELECT pg_advisory_xact_lock(hashtext('pim_app.registration'))");
+			if (input.address) {
+				const recent = (await tx.query("SELECT count(*)::int AS n FROM pim_app.registration_attempts WHERE address = $1 AND at > $2", [input.address, new Date(now.getTime() - 24 * 3600_000)])).rows[0].n as number;
+				if (recent >= policy.perAddressPerDay) throw new PimError(429, "rate_limited", "Too many registrations from this network today. Try again tomorrow.");
+			}
+			if (!first && policy.maxAccounts !== null && (await tx.query("SELECT count(*)::int AS n FROM pim_app.accounts WHERE status <> 'deleted'")).rows[0].n >= policy.maxAccounts) throw new PimError(503, "full", "This Pim is full for now. Ask the person who runs it.");
 			try {
 				await tx.query("INSERT INTO pim_app.usernames (username, owner_id) VALUES ($1, $2)", [username, ownerId]);
 			} catch (error) {
 				if ((error as { code?: string }).code === "23505") throw new ConflictError("That username is taken, now or in the past", "username_taken");
 				throw error;
 			}
-			await tx.query("INSERT INTO pim_app.accounts (owner_id, username, role, status, activated_at, bot) VALUES ($1, $2, $3, 'active', $4, $5)", [ownerId, username, first ? "admin" : guest ? "guest" : "member", now, !!guest]);
+			await tx.query("INSERT INTO pim_app.accounts (owner_id, username, role, status, activated_at, pending_until, bot) VALUES ($1, $2, $3, $4, $5, $6, $7)", [ownerId, username, role, pending ? "pending" : "active", pending ? null : now, pending ? new Date(now.getTime() + PENDING_MS) : null, !!guest]);
 			await tx.query("INSERT INTO pim_app.partitions (partition_id, owner_id, home, next_conversation_id) VALUES ($1, $2, true, 2)", [randomUUID(), ownerId]);
+			if (input.address) await tx.query("INSERT INTO pim_app.registration_attempts (address, at) VALUES ($1, $2)", [input.address, now]);
 			// The invite is spent in the same transaction as the account, so a failed registration never burns it.
-			if (!first && !open && !guest) {
-				const spent = await tx.query("UPDATE pim_app.invites SET used_by = $1, used_at = $2 WHERE code_hash = $3 AND used_at IS NULL", [ownerId, now, digest(input.invite ?? "")]);
-				if (!spent.rowCount) throw new RefusedError("That invite is not valid", "invite_invalid");
+			if (spendsInvite) {
+				const spent = await tx.query("UPDATE pim_app.invites SET used_by = $1, used_at = $2 WHERE code_hash = $3 AND (used_at IS NULL OR NOT EXISTS (SELECT 1 FROM pim_app.accounts WHERE owner_id = invites.used_by))", [ownerId, now, digest(input.invite?.trim() ?? "")]);
+				if (!spent.rowCount) throw new RefusedError("Joining needs an invite, and that one isn't valid.", "invite_invalid");
 			}
-		}, digest(input.invite ?? ""));
-		return { ownerId: OwnerId.parse(ownerId), username, role: first ? "admin" : guest ? "guest" : "member", status: "active", bot: !!guest };
+		}, digest(input.invite?.trim() ?? ""));
+		return { ownerId: OwnerId.parse(ownerId), username, role, status: pending ? "pending" : "active", bot: !!guest };
 	}
 
-	async #limit(address: string, now: Date, max = 5, windowMs = 3600_000): Promise<void> {
-		await this.db.anonymous(async (tx) => {
-			const { rows } = await tx.query("SELECT count(*)::int AS n FROM pim_app.registration_attempts WHERE address = $1 AND at > $2", [address, new Date(now.getTime() - windowMs)]);
-			if (rows[0].n >= max) throw new RefusedError("Too many registrations from this address", "rate_limited");
-			await tx.query("INSERT INTO pim_app.registration_attempts (address, at) VALUES ($1, $2)", [address, now]);
+	/** The account's first passkey was made, or a client that has none starts with a session: it is the owner's now. A lapsed registration cannot be. */
+	async activate(ownerId: string, now = new Date()): Promise<void> {
+		await this.db.owner(ownerId, (tx) => tx.query("UPDATE pim_app.accounts SET status = 'active', activated_at = $2, pending_until = NULL WHERE owner_id = $1 AND status = 'pending' AND pending_until > $2", [ownerId, now]));
+	}
+
+	/** Gives back every registration whose day ran out without a passkey: its username, its invite and its place, and erases what it made. */
+	async releaseLapsed(now = new Date()): Promise<number> {
+		const lapsed = (await this.db.anonymous((tx) => tx.query("SELECT owner_id FROM pim_app.accounts WHERE status = 'pending' AND pending_until <= $1", [now]))).rows.map((r) => r.owner_id as string);
+		for (const ownerId of lapsed) await this.releaseRegistration(ownerId);
+		return lapsed.length;
+	}
+
+	/** Gives a registration that was not finished back at once, whatever time it has left: one that could not be set up. Only a pending account goes. */
+	async releaseRegistration(ownerId: string): Promise<void> {
+		await this.db.owner(ownerId, async (tx) => {
+			if ((await tx.query("SELECT status FROM pim_app.accounts WHERE owner_id = $1 FOR UPDATE", [ownerId])).rows[0]?.status !== "pending") return;
+			await this.#erase(tx, ownerId);
+			await tx.query("DELETE FROM pim_app.usernames WHERE owner_id = $1", [ownerId]);
+			await tx.query("DELETE FROM pim_app.accounts WHERE owner_id = $1 AND status = 'pending'", [ownerId]);
 		});
+	}
+
+	/** Empties every table that holds an owner's rows but the identity facts, in passes until the foreign keys let go of the rest. */
+	async #erase(tx: Tx, ownerId: string): Promise<number> {
+		const keep = new Set(["accounts", "usernames", "audit_log"]);
+		const tables = (await tx.query("SELECT table_name FROM information_schema.columns WHERE table_schema = 'pim_app' AND column_name = 'owner_id'")).rows.map((r) => r.table_name as string).filter((t) => !keep.has(t));
+		let pending = [...tables];
+		let deleted = 0;
+		for (let pass = 0; pass < 6 && pending.length; pass++) {
+			const next: string[] = [];
+			for (const table of pending) {
+				await tx.query("SAVEPOINT purge");
+				try {
+					deleted += (await tx.query(`DELETE FROM pim_app.${table} WHERE owner_id = $1`, [ownerId])).rowCount ?? 0;
+					await tx.query("RELEASE SAVEPOINT purge");
+				} catch (error) {
+					if ((error as { code?: string }).code !== "23503") throw error;
+					await tx.query("ROLLBACK TO SAVEPOINT purge");
+					next.push(table);
+				}
+			}
+			pending = next;
+		}
+		if (pending.length) throw new Error(`Could not purge ${pending.join(", ")}`);
+		return deleted;
 	}
 
 	async setRegistrationOpen(admin: Principal, open: boolean): Promise<void> {
 		await this.authz.enforce(admin, "admin:settings");
+		if (registrationPolicy(this.env()).fixed) throw new RefusedError("This deployment sets registration with PIM_REGISTRATION; change it there.", "registration_fixed");
 		await this.db.anonymous((tx) => tx.query("INSERT INTO pim_app.instance_settings (key, value) VALUES ('registration_open', $1) ON CONFLICT (key) DO UPDATE SET value = $1", [JSON.stringify(open)]));
 	}
 
@@ -137,26 +198,7 @@ export class Identity {
 		return this.db.owner(ownerId, async (tx) => {
 			const status = (await tx.query("SELECT status FROM pim_app.accounts WHERE owner_id = $1", [ownerId])).rows[0]?.status;
 			if (status !== "deleting" && status !== "deleted") throw new RefusedError("Only a deleting account is purged.", "not_deleting");
-			const keep = new Set(["accounts", "usernames", "audit_log"]);
-			const tables = (await tx.query("SELECT table_name FROM information_schema.columns WHERE table_schema = 'pim_app' AND column_name = 'owner_id'")).rows.map((r) => r.table_name as string).filter((t) => !keep.has(t));
-			let pending = [...tables];
-			let deleted = 0;
-			for (let pass = 0; pass < 6 && pending.length; pass++) {
-				const next: string[] = [];
-				for (const table of pending) {
-					await tx.query("SAVEPOINT purge");
-					try {
-						deleted += (await tx.query(`DELETE FROM pim_app.${table} WHERE owner_id = $1`, [ownerId])).rowCount ?? 0;
-						await tx.query("RELEASE SAVEPOINT purge");
-					} catch (error) {
-						if ((error as { code?: string }).code !== "23503") throw error;
-						await tx.query("ROLLBACK TO SAVEPOINT purge");
-						next.push(table);
-					}
-				}
-				pending = next;
-			}
-			if (pending.length) throw new Error(`Could not purge ${pending.join(", ")}`);
+			const deleted = await this.#erase(tx, ownerId);
 			await tx.query("UPDATE pim_app.accounts SET status = 'deleted', status_changed_at = now() WHERE owner_id = $1", [ownerId]);
 			return { deleted };
 		});
@@ -198,9 +240,11 @@ export class Identity {
 		await this.authz.enforce(session, "token:create");
 		const token = `pim_${session.ownerId}_${secret()}`;
 		const id = newId("t");
-		await this.db.owner(session.ownerId, (tx) =>
-			tx.query("INSERT INTO pim_app.api_tokens (id, owner_id, name, token_hash, scopes, expires_at) VALUES ($1, $2, $3, $4, $5, $6)", [id, session.ownerId, input.name, digest(token), input.scopes, input.expiresAt ?? null]),
-		);
+		await this.db.owner(session.ownerId, async (tx) => {
+			await tx.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`tokens:${session.ownerId}`]);
+			if ((await tx.query("SELECT count(*)::int AS n FROM pim_app.api_tokens WHERE revoked_at IS NULL")).rows[0].n >= MAX_TOKENS) throw new PimError(429, "limit", `You can have up to ${MAX_TOKENS} tokens. Revoke one first.`);
+			await tx.query("INSERT INTO pim_app.api_tokens (id, owner_id, name, token_hash, scopes, expires_at) VALUES ($1, $2, $3, $4, $5, $6)", [id, session.ownerId, input.name, digest(token), input.scopes, input.expiresAt ?? null]);
+		});
 		return { id, token };
 	}
 

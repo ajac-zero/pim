@@ -12,6 +12,7 @@ import { ok, type Route, route } from "@pim/v2-app/http";
 import { toWebProvider } from "@pim/v2-app/web-providers";
 import { CodexImagesSignIn } from "../codex-images.ts";
 import { currentOpenaiProvider } from "../openai-catalog.ts";
+import { offeredModels } from "../deployment.ts";
 
 type Env = Record<string, string | undefined>;
 type ModelRef = { provider: string; id: string };
@@ -57,7 +58,7 @@ export function modelRoutes(env: Env): Route[] {
 			if (row.hasKey && row.config.builtin && kind !== "openai") for (const m of CATALOGS[kind]?.models() ?? []) if (!row.config.chosen || row.config.chosen.includes(m.id)) add(describe(m));
 			if (row.kind === "openai_compatible" && Array.isArray(row.config.models)) for (const m of row.config.models) add({ provider: `${SHARED}${row.id}`, id: m.id, name: m.name ?? m.id, images: m.images === true } as never);
 		}
-		if (env.PIM_AI_GATEWAY_URL) for (const id of (env.PIM_AI_GATEWAY_MODELS ?? "").split(",").map((s) => s.trim()).filter(Boolean)) add({ provider: "gateway", id, name: id, images: false } as never);
+		if (env.PIM_AI_GATEWAY_URL) for (const id of offeredModels(env)) add({ provider: "gateway", id, name: id, images: false } as never);
 		const info = (r: ModelRef | null) => (r ? (choices.find((c) => same(c, r)) ?? null) : null);
 		const chosen = await setting(app, p.ownerId, "model");
 		const utilitySaved = await setting(app, p.ownerId, "model_utility");

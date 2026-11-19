@@ -6,13 +6,14 @@
 import type { App } from "@pim/v2-app/app";
 import { BadRequestError, NotFoundError, RefusedError } from "@pim/v2-app/errors";
 import { route, type Reply, type Route } from "@pim/v2-app/http";
-import { deploymentLimits } from "@pim/v2-app/quota";
+import type { Bundle } from "@pim/v2-app/bundles";
 import { toServiceInput } from "@pim/v2-app/web-providers";
 import { configuredProviders, PROVIDER_IDS, providerName, providerSecrets } from "@pim/v2-app/oauth";
 import type { Principal } from "@pim/v2-contracts/identity";
 import type { IncomingMessage } from "node:http";
 import { randomBytes } from "node:crypto";
-import { CUSTOM_APPS_KEY, type CustomApp, customApps, gatewayModels } from "./admin-gallery.ts";
+import { CUSTOM_APPS_KEY, type CustomApp, customApps } from "./admin-gallery.ts";
+import { readDeployment } from "../deployment.ts";
 import { deleted, ms, ok } from "./admin-util.ts";
 
 type Env = Readonly<Record<string, string | undefined>>;
@@ -33,12 +34,15 @@ async function setSetting(app: App, key: string, value: unknown) {
 }
 
 const defaultAgentOf = async (app: App) => {
-	const t = await app.db.anonymous(async (tx) => (await tx.query("SELECT t.agent_id, t.title, t.published_at, a.username FROM pim_app.templates t JOIN pim_app.accounts a ON a.owner_id = t.owner_id WHERE t.default_for_everyone LIMIT 1")).rows[0]);
-	return t ? { author: t.username as string, agentId: t.agent_id as string, name: t.title as string, updatedAt: ms(t.published_at) } : null;
+	const t = await app.db.anonymous(async (tx) => (await tx.query("SELECT t.agent_id, t.title, t.bundle, t.published_at, a.username FROM pim_app.templates t JOIN pim_app.accounts a ON a.owner_id = t.owner_id WHERE t.default_for_everyone LIMIT 1")).rows[0]);
+	if (!t) return null;
+	const b = t.bundle as Bundle;
+	return {
+		author: t.username as string, agentId: t.agent_id as string, name: t.title as string, role: b.agent?.role ?? (t.title as string), description: b.description ?? "", instructions: b.agent?.instructions ?? "", apps: b.apps ?? [],
+		symbol: b.agent?.emoji ?? null, color: b.agent?.color ?? null, icon: !!b.icon, updatedAt: ms(t.published_at), contacts: b.agent?.contacts ?? [],
+		bundle: (b.bundle ?? []).map((a) => ({ name: a.name, role: a.role, description: a.description, instructions: a.instructions, apps: a.apps, symbol: a.emoji, color: a.color, contacts: a.contacts, icon: a.icon ? ms(t.published_at) : null })),
+	};
 };
-
-/** Variables the admin may see the value of; the rest are shown as set or not, never as what they are. */
-const PLAIN_VARIABLES = ["PIM_PUBLIC_URL", "PIM_APPS_ORIGIN", "PIM_CONTENT_ORIGIN", "PIM_DEFAULT_MODEL", "PIM_AI_GATEWAY_URL", "PIM_AI_GATEWAY_MODELS"];
 
 const slug = (text: string) => text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40);
 
@@ -96,12 +100,10 @@ export function screenRoutes(env: Env): Route[] {
 		// ---- how this deployment runs ----
 		route("GET", "/api/admin/deployment", async ({ app, principal, origin, appsOrigin }) => {
 			await admin(app, await principal(), "admin:settings");
-			const open = (await app.db.anonymous(async (tx) => (await tx.query("SELECT value FROM pim_app.instance_settings WHERE key = 'registration_open'")).rows[0]))?.value === true;
-			const limits = deploymentLimits(env);
-			const settings = { registration: open ? "open" : "invite", maxAccounts: null, registrationsPerAddress: 5, approvalPolicy: env.PIM_APPROVAL_POLICY === "auto" || env.PIM_APPROVAL_POLICY === "explicit" ? env.PIM_APPROVAL_POLICY : "majordomo", timeZone: env.PIM_TIME_ZONE ?? env.TZ ?? "UTC", model: env.PIM_DEFAULT_MODEL ?? "", models: gatewayModels(env), utilityModel: null, memoryModel: null, memoryLines: 0, imageModel: null, limits, publicUrl: env.PIM_PUBLIC_URL ?? origin, contentOrigin: appsOrigin ?? env.PIM_CONTENT_ORIGIN ?? null, emailFrom: null };
+			const adminOpen = (await app.db.anonymous(async (tx) => (await tx.query("SELECT value FROM pim_app.instance_settings WHERE key = 'registration_open'")).rows[0]))?.value === true;
+			const { settings, variables } = readDeployment(env, origin, appsOrigin, adminOpen);
 			const secrets = PROVIDER_IDS.flatMap((id) => providerSecrets(id));
-			const variables = [...PLAIN_VARIABLES.map((name) => ({ name, value: env[name]?.trim() || null, problem: null })), ...secrets.map((name) => ({ name, value: env[name]?.trim() ? "(set)" : null, problem: null }))];
-			return ok({ settings, variables });
+			return ok({ settings, variables: [...variables, ...secrets.map((name) => ({ name, value: env[name]?.trim() ? "(set)" : null, problem: null }))] });
 		}),
 		route("GET", "/api/admin/sign-in", async ({ app, principal, origin }) => {
 			await admin(app, await principal(), "admin:settings");

@@ -128,6 +128,20 @@ export class Objects {
 	}
 
 	/**
+	 * Copies a public object, such as the icon a gallery agent has, into another owner's space. Registration and adoption do it before the account can act,
+	 * so it checks no one's permission: the caller has decided to give the copy. The source must be public; null when it is gone.
+	 */
+	async copyPublic(toOwner: string, key: string): Promise<string | null> {
+		const meta = await this.db.lookup(key, async (tx) => (await tx.query("SELECT content_type FROM pim_app.objects WHERE key = $1 AND acl = 'public' AND deleted_at IS NULL", [key])).rows[0]);
+		const got = meta ? await this.store.get(key) : null;
+		if (!got) return null;
+		const copy = `${toOwner}/${randomBytes(12).toString("hex")}`;
+		await this.store.put(copy, got.body, { contentType: meta.content_type });
+		await this.db.owner(toOwner, (tx) => tx.query("INSERT INTO pim_app.objects (key, owner_id, purpose, content_type, size, sha256, acl) VALUES ($1,$2,'image',$3,$4,$5,'public')", [copy, toOwner, meta.content_type, got.body.length, createHash("sha256").update(got.body).digest("hex")]));
+		return copy;
+	}
+
+	/**
 	 * Serves an object. A public object is served to anyone while its owner's account is not deleted; a private one only to its owner (live).
 	 * `Range` gives 206 with Content-Range, so video and audio seek; a range past the end gives 416.
 	 */

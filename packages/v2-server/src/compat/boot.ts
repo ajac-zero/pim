@@ -9,7 +9,7 @@
 import type { Principal } from "@pim/v2-contracts/identity";
 import type { App } from "@pim/v2-app/app";
 import type { Agent as V2Agent } from "@pim/v2-app/agents";
-import { BadRequestError, ForbiddenError, NotFoundError } from "@pim/v2-app/errors";
+import { BadRequestError, ForbiddenError, NotFoundError, PimError } from "@pim/v2-app/errors";
 import { usageReport, computeReport } from "./usage.ts";
 import { fromAnotherSite, ok, route, sessionCookieName, setCookie, type Route } from "@pim/v2-app/http";
 import { newId } from "@pim/v2-app/ids";
@@ -190,11 +190,25 @@ export const bootRoutes: Route[] = [
 		const b = await json();
 		// Through a bot's link anyone may join as its guest (the bot must still be live); the address is the proxy's header when the deployment trusts one.
 		const bot = typeof b.bot === "string" && b.bot ? await app.guests.liveBot(b.bot) : null;
-		const account = await app.identity.register({ username: String(b.username ?? ""), invite: b.invite, bootstrap: b.bootstrap ?? b.claim, address: clientAddress(req, process.env), ...(bot ? { guestOf: { botId: bot.id, host: bot.host } } : {}) });
-		if (bot) await app.guests.enroll(account.ownerId, bot.id);
+		// Without a browser (`session: true`) there is no passkey to make, so the account starts active; otherwise it is pending until its first
+		// passkey, and lapses after a day without one.
+		const account = await app.identity.register({ username: String(b.username ?? ""), invite: b.invite, bootstrap: b.bootstrap ?? b.claim, address: clientAddress(req, process.env), pending: b.session !== true, ...(bot ? { guestOf: { botId: bot.id, host: bot.host } } : {}) });
+		let recoveryCodes: string[];
+		let setup: { code: string; expiresAt: Date };
+		try {
+			if (bot) await app.guests.enroll(account.ownerId, bot.id);
+			// Everyone else gets a copy of the agent the admin chose, if they chose one, besides the majordomo they name next.
+			else await app.agents.adoptDefault({ kind: "user", ownerId: account.ownerId, role: account.role, sessionId: "registration" });
+			recoveryCodes = await app.signin.newRecoveryCodes(account.ownerId);
+			setup = await app.signin.issueSetupCode(account.ownerId);
+			if (b.session === true) await app.identity.activate(account.ownerId);
+		} catch (error) {
+			// Half a registration helps nobody: give the username and invite back now, not in a day.
+			await app.identity.releaseRegistration(account.ownerId).catch(() => undefined);
+			console.error(JSON.stringify({ event: "pim.registration_failed", owner: account.ownerId, username: account.username, error: String(error) }));
+			throw new PimError(500, "registration_failed", "Your account couldn't be set up. Try again in a moment.");
+		}
 		const session = () => app.identity.createSession(account.ownerId, { userAgent: req.headers["user-agent"] });
-		const recoveryCodes = await app.signin.newRecoveryCodes(account.ownerId);
-		const setup = await app.signin.issueSetupCode(account.ownerId);
 		const name = typeof b.name === "string" && b.name.trim() && !/[\r\n]/.test(b.name) ? b.name.trim().slice(0, 80) : null;
 		if (name) await putSetting(app, account.ownerId, "your_name", name);
 		if (typeof b.timeZone === "string" && SETTINGS.timeZone!(b.timeZone)) await putSetting(app, account.ownerId, "settings.timeZone", b.timeZone);

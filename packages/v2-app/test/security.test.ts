@@ -262,4 +262,68 @@ describe("registration", () => {
 		const rows = await f.db.anonymous(async (tx) => (await tx.query("SELECT count(*)::int AS n FROM pim_app.usernames WHERE username = 'zoe'")).rows[0].n);
 		expect(rows).toBe(0);
 	});
+
+	it("refuses names v1 refused: under 3 characters, odd hyphens, and the reserved ones that look official", async () => {
+		await f.app.identity.setRegistrationOpen(f.admin.principal, true);
+		for (const [name, reason] of [["ab", /3 to 32/], ["a--b", /single hyphens/], ["-ab", /single hyphens/], ["ab-", /single hyphens/], ["admin", /reserved/], ["support", /reserved/], ["x".repeat(33), /3 to 32/]] as const) {
+			await expect(f.app.identity.register({ username: name })).rejects.toThrow(reason);
+			expect(await f.app.signin.usernameAvailable(name)).toMatchObject({ available: false });
+		}
+		// Digits may lead, as in v1.
+		expect((await f.app.identity.register({ username: "7seas" })).username).toBe("7seas");
+	});
+
+	it("follows PIM_REGISTRATION, PIM_MAX_ACCOUNTS and PIM_REGISTRATIONS_PER_ADDRESS, whatever the admin's switch says", async () => {
+		const withEnv = (env: Record<string, string>) => new (f.app.constructor as typeof import("../src/app.ts").App)(f.db, f.store, { env });
+		const invite = await f.app.identity.createInvite(f.admin.principal);
+		const closed = withEnv({ PIM_REGISTRATION: "closed" });
+		await expect(closed.identity.register({ username: "carla", invite })).rejects.toMatchObject({ code: "registration_closed" });
+		await expect(closed.identity.setRegistrationOpen(f.admin.principal, true)).rejects.toMatchObject({ code: "registration_fixed" });
+		// Open ignores invites, and the cap counts every account that is not deleted.
+		const total = await f.db.anonymous(async (tx) => (await tx.query("SELECT count(*)::int AS n FROM pim_app.accounts WHERE status <> 'deleted'")).rows[0].n as number);
+		const capped = withEnv({ PIM_REGISTRATION: "open", PIM_MAX_ACCOUNTS: String(total + 1) });
+		expect((await capped.identity.register({ username: "carla" })).role).toBe("member");
+		await expect(capped.identity.register({ username: "dora" })).rejects.toMatchObject({ status: 503, code: "full" });
+		// A cap that cannot be read counts as none left, so a typo never lifts it.
+		await expect(withEnv({ PIM_REGISTRATION: "open", PIM_MAX_ACCOUNTS: "lots" }).identity.register({ username: "dora" })).rejects.toMatchObject({ code: "full" });
+		// Per address, a day; only registrations that were made count.
+		const few = withEnv({ PIM_REGISTRATION: "open", PIM_REGISTRATIONS_PER_ADDRESS: "2" });
+		await expect(few.identity.register({ username: "ed", address: "10.9.9.9" })).rejects.toThrow(/3 to 32/);
+		await few.identity.register({ username: "eddie", address: "10.9.9.9" });
+		await few.identity.register({ username: "edith", address: "10.9.9.9" });
+		await expect(few.identity.register({ username: "edna", address: "10.9.9.9" })).rejects.toMatchObject({ status: 429 });
+		await few.identity.register({ username: "edna", address: "10.9.9.10" });
+	});
+
+	it("lets a registration nobody made a passkey for lapse after a day, giving back its username, invite and place", async () => {
+		await f.app.identity.setRegistrationOpen(f.admin.principal, false);
+		const invite = await f.app.identity.createInvite(f.admin.principal);
+		const longAgo = new Date(Date.now() - 25 * 3600_000);
+		const lapsed = await f.app.identity.register({ username: "gone", invite, pending: true, now: longAgo });
+		expect(lapsed.status).toBe("pending");
+		// A pending account cannot act, and its day is up.
+		await expect(f.app.identity.authz.requireLive(lapsed.ownerId)).rejects.toBeInstanceOf(ForbiddenError);
+		await f.app.identity.activate(lapsed.ownerId);
+		expect((await f.app.identity.authz.account(lapsed.ownerId))?.status).toBe("pending");
+		// The next registration frees it: the same name and the same invite work for someone else.
+		const again = await f.app.identity.register({ username: "gone", invite });
+		expect(again.ownerId).not.toBe(lapsed.ownerId);
+		expect(await f.app.identity.authz.account(lapsed.ownerId)).toBeNull();
+		// A registration inside its day is held, and is the owner's once activated.
+		const invite2 = await f.app.identity.createInvite(f.admin.principal);
+		const held = await f.app.identity.register({ username: "holding", invite: invite2, pending: true });
+		await expect(f.app.identity.register({ username: "holding", invite: invite2 })).rejects.toMatchObject({ code: "username_taken" });
+		await f.app.identity.activate(held.ownerId);
+		expect((await f.app.identity.authz.account(held.ownerId))?.status).toBe("active");
+		await f.app.identity.setRegistrationOpen(f.admin.principal, true);
+	});
+
+	it("lists API tokens that were imported, lets them be revoked, and holds a person to 20", async () => {
+		const u = await member(f.app, f.admin.principal, "tokenly");
+		await f.app.identity.importLegacyToken(u.account.ownerId, "old phone", "legacy-hash");
+		const names = async () => (await f.db.owner(u.account.ownerId, async (tx) => (await tx.query("SELECT name FROM pim_app.api_tokens WHERE revoked_at IS NULL")).rows)).map((r) => r.name);
+		expect(await names()).toEqual(["old phone"]);
+		for (let i = 1; i < 20; i++) await f.app.identity.createToken(u.principal, { name: `t${i}`, scopes: ["*"] });
+		await expect(f.app.identity.createToken(u.principal, { name: "one too many", scopes: ["*"] })).rejects.toMatchObject({ status: 429 });
+	});
 });

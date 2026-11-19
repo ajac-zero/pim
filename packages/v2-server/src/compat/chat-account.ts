@@ -3,7 +3,7 @@
  * its admin yet), passkeys and linked identities with their times as epoch milliseconds, API tokens, the device link, and the email and push
  * email setting, which this Pim does not have and answers as such (push is `notifications.ts`).
  */
-import { CapabilityUnavailableError } from "@pim/v2-app/errors";
+import { BadRequestError, CapabilityUnavailableError } from "@pim/v2-app/errors";
 import { ok, type Reply, type Route, route } from "@pim/v2-app/http";
 
 const ms = (value: Date | string | null | undefined): number | null => (value ? new Date(value).getTime() : null);
@@ -16,13 +16,14 @@ export function accountRoutes(): Route[] {
 	const tokenList: Route["run"] = async ({ app, principal }) => {
 		const p = await principal();
 		await app.identity.authz.enforce(p, "api:read");
-		const rows = await app.db.owner(p.ownerId, async (tx) => (await tx.query("SELECT id, name, created_at, last_used_at FROM pim_app.api_tokens WHERE revoked_at IS NULL AND NOT legacy ORDER BY created_at")).rows);
+		const rows = await app.db.owner(p.ownerId, async (tx) => (await tx.query("SELECT id, name, created_at, last_used_at FROM pim_app.api_tokens WHERE revoked_at IS NULL ORDER BY created_at")).rows);
 		return ok({ tokens: rows.map((r) => ({ id: r.id as string, name: r.name as string, createdAt: ms(r.created_at), lastUsedAt: ms(r.last_used_at) })) });
 	};
-	// The app's tokens are for other clients of the person's own space, so they carry everything a token may do.
+	// Tokens imported from v1 are listed and revoked like any other. The app's tokens are for other clients of the person's own space, so they carry everything a token may do.
 	const tokenCreate: Route["run"] = async ({ app, principal, json }): Promise<Reply> => {
 		const p = await principal();
-		const name = String((await json()).name ?? "").trim().slice(0, 80) || "token";
+		const name = String((await json()).name ?? "").trim().slice(0, 64);
+		if (!name) throw new BadRequestError("Give the token a name, such as the app that will use it.");
 		const created = await app.identity.createToken(p, { name, scopes: ["*"] });
 		return ok({ id: created.id, name, createdAt: Date.now(), lastUsedAt: null, token: created.token }, 201);
 	};

@@ -343,21 +343,21 @@ describe("triggers", () => {
 		await expect(app.triggers.runs(u.principal, t.id)).rejects.toMatchObject({ status: 404 });
 	});
 
-	it("holds at most maxPendingEvents firings waiting for a Runner, skips the rest, and makes a trigger once for one Idempotency key", async () => {
+	it("runs a trigger one turn at a time, holds at most maxPendingEvents firings behind it, drops the rest, and makes a trigger once for one Idempotency key", async () => {
 		const u = await mk("trigq");
 		const agent = await app.agents.create(u.principal, { name: "Queue" });
-		const spec = { version: 1, owningAgentId: agent.id, originChatId: "api", label: "Events", instruction: "look", source: { kind: "connector_event", connectorId: "c1", event: "ticket", arguments: {} }, condition: null, destination: { type: "new_chat" }, delivery: { maxPendingEvents: 2 }, authorizationRef: null };
+		const spec = { version: 1, owningAgentId: agent.id, originChatId: "api", label: "Events", instruction: "look", source: { kind: "connector_event", connectorId: "c1", event: "ticket", arguments: {} }, condition: null, destination: { type: "new_chat" }, delivery: { maxPendingEvents: 1 }, authorizationRef: null };
 		const t = await app.triggers.create(u.principal, { spec, key: "k1" });
 		expect((await app.triggers.create(u.principal, { spec, key: "k1" })).id).toBe(t.id); // the same key and request: the trigger made the first time
 		await expect(app.triggers.create(u.principal, { spec: { ...spec, label: "Other" }, key: "k1" })).rejects.toMatchObject({ code: "idempotency_conflict" });
 		await app.triggers.setLifecycle(u.principal, t.id, "enabled");
-		// No Runner takes the firings off the inbox here: the third finds it full and is recorded as skipped, with no chat made for it.
+		// A trigger runs one turn at a time: the first firing starts one, the second waits behind it (what may wait is `maxPendingEvents`), and the third finds no room and is recorded as skipped, with no chat made for it.
 		const fired = [];
 		for (const n of [1, 2, 3, 3]) fired.push(await app.triggers.fireOccurrence(u.account.ownerId, t.id, `e${n}`, { event: "ticket" }));
-		expect(fired).toEqual([true, true, true, true]);
+		expect(fired).toEqual(["fired", "queued", "full", "full"]);
 		const runs = await app.triggers.runs(u.principal, t.id);
-		expect(runs.map((r) => [r.id.split(":").at(-1), r.phase, r.detail.reason ?? null]).sort()).toEqual([["e1", "fired", null], ["e2", "fired", null], ["e3", "skipped", "pending_full"]]);
-		expect((await app.db.owner(u.account.ownerId, (tx) => tx.query("SELECT count(*)::int AS n FROM pim_app.conversations WHERE kind = 'trigger'"))).rows[0]!.n).toBe(2);
+		expect(runs.map((r) => [r.id.split(":").at(-1), r.phase, r.detail.reason ?? null]).sort()).toEqual([["e1", "fired", null], ["e2", "pending", null]]);
+		expect((await app.db.owner(u.account.ownerId, (tx) => tx.query("SELECT count(*)::int AS n FROM pim_app.conversations WHERE kind = 'trigger'"))).rows[0]!.n).toBe(1);
 	});
 
 	it("needs a computer grant for a computer trigger, and a paired computer for the grant", async () => {

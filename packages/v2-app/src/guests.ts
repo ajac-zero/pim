@@ -5,6 +5,7 @@ import type { Agents } from "./agents.ts";
 import type { Bundles } from "./bundles.ts";
 import type { Db } from "./db.ts";
 import { NotFoundError, RefusedError } from "./errors.ts";
+import { choiceChanged } from "./tool-permissions.ts";
 
 /** What a guest of a bot may do in a day when the bot says nothing (v1's defaults), and what a circle's member may. */
 export const BOT_DAILY_MESSAGES = 50;
@@ -42,7 +43,7 @@ export type Boundary = {
 };
 
 export type GuestConnector = { id: string; kind: string; name: string; url: string; status: string; credential: string | null; enabledTools: string[]; approval: "writes" | "all" | "none" };
-export type GuestPermission = { app: string; tool: string; permission: "off" | "ask" | "on" };
+export type GuestPermission = { app: string; tool: string; permission: "off" | "ask" | "on"; definition?: string | null };
 
 export class Guests {
 	constructor(private readonly db: Db, private readonly agents: Agents, private readonly now: () => Date = () => new Date()) {}
@@ -111,19 +112,23 @@ export class Guests {
 			connectors: (await tx.query("SELECT id, kind, name, url, status, credential, enabled_tools, approval FROM pim_app.connectors WHERE url IS NOT NULL ORDER BY created_at")).rows
 				.filter((r) => r.status === "connected" || r.credential === null)
 				.map((r): GuestConnector => ({ id: r.id, kind: r.kind, name: r.name, url: r.url, status: r.status, credential: r.credential, enabledTools: r.enabled_tools, approval: r.approval })),
-			permissions: (await tx.query("SELECT app, tool, permission FROM pim_app.tool_permissions WHERE audience = $1", [b.audience])).rows as GuestPermission[],
+			permissions: (await tx.query("SELECT app, tool, permission, definition FROM pim_app.tool_permissions WHERE audience = $1", [b.audience])).rows as GuestPermission[],
 		}));
 	}
 
 	/**
 	 * Whether the guest may call a tool: off (not offered), ask (the host decides each call), or on. A bot shares the tool names it lists, the ones in `ask` asking first;
-	 * a circle's tools are the host's choices for that circle, off until set. A tool the connector marks destructive never runs without asking, and a host's choice never
+	 * a circle's tools are the host's choices for that circle, off until set. A tool the connector marks destructive never runs without asking, a tool it changed since the host chose is off until they choose again, and a host's choice never
 	 * reaches beyond the connector's own enabled tools for a bot.
 	 */
-	permissionOf(b: Boundary, c: GuestConnector, tool: { name: string; destructive?: boolean }, permissions: readonly GuestPermission[]): "off" | "ask" | "on" {
+	permissionOf(b: Boundary, c: GuestConnector, tool: { name: string; destructive?: boolean; definition?: string }, permissions: readonly GuestPermission[]): "off" | "ask" | "on" {
 		let permission: "off" | "ask" | "on";
 		if (b.kind === "bot") permission = !b.tools.includes(tool.name) || !c.enabledTools.includes(tool.name) ? "off" : b.ask.includes(tool.name) ? "ask" : "on";
-		else permission = permissions.find((p) => p.app === c.id && p.tool === tool.name)?.permission ?? "off";
+		else {
+			const row = permissions.find((p) => p.app === c.id && p.tool === tool.name);
+			// A tool the connector changed since the host chose it is the host's to choose again.
+			permission = row && !(tool.definition !== undefined && choiceChanged(row, tool.definition, false)) ? row.permission : "off";
+		}
 		return tool.destructive === true && permission === "on" ? "ask" : permission;
 	}
 
@@ -191,11 +196,12 @@ export class Guests {
 			const connector = a?.args?.resource?.connector;
 			const tool = a?.args?.resource?.tool;
 			if (!r || typeof connector !== "string" || typeof tool !== "string") return { settled: [] };
-			const discovered = ((await tx.query("SELECT discovered_tools FROM pim_app.connectors WHERE id = $1", [connector])).rows[0]?.discovered_tools ?? []) as { name: string; annotations?: { destructiveHint?: boolean } }[];
-			if (discovered.find((t) => t.name === tool)?.annotations?.destructiveHint === true) return { settled: [] };
+			const discovered = ((await tx.query("SELECT discovered_tools FROM pim_app.connectors WHERE id = $1", [connector])).rows[0]?.discovered_tools ?? []) as { name: string; definition?: string; annotations?: { destructiveHint?: boolean } }[];
+			const found = discovered.find((t) => t.name === tool);
+			if (found?.annotations?.destructiveHint === true) return { settled: [] };
 			const audience = r.bot ? `bot:${r.bot}` : `circle:${r.circle}`;
 			if (audience.startsWith("circle:")) {
-				await tx.query("INSERT INTO pim_app.tool_permissions (owner_id, audience, app, tool, permission) VALUES ($1,$2,$3,$4,'on') ON CONFLICT (owner_id, audience, app, tool) DO UPDATE SET permission = 'on', updated_at = now()", [host, audience, connector, tool]);
+				await tx.query("INSERT INTO pim_app.tool_permissions (owner_id, audience, app, tool, permission, definition) VALUES ($1,$2,$3,$4,'on',$5) ON CONFLICT (owner_id, audience, app, tool) DO UPDATE SET permission = 'on', definition = excluded.definition, updated_at = now()", [host, audience, connector, tool, found?.definition ?? null]);
 			} else {
 				const b = (await tx.query("SELECT settings FROM pim_app.bots WHERE id = $1 AND owner_id = $2", [r.bot, host])).rows[0];
 				if (b) await tx.query("UPDATE pim_app.bots SET settings = $3 WHERE id = $1 AND owner_id = $2", [r.bot, host, JSON.stringify({ ...b.settings, ask: ((b.settings.ask ?? []) as string[]).filter((t) => t !== tool) })]);

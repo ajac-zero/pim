@@ -10,6 +10,7 @@ import { defineTool, type ToolRegistration } from "@earendil-works/pi-durable";
 import type { App } from "@pim/v2-app/app";
 import type { Boundary, GuestConnector } from "@pim/v2-app/guests";
 import { openString, sealString } from "@pim/v2-app/crypto";
+import { toolDefinition } from "@pim/v2-app/tool-permissions";
 import { PartitionId } from "@pim/v2-contracts/identity";
 import type { EnvelopeCrypto } from "@pim/v2-contracts/platform";
 import type { ExternalOperations } from "@pim/v2-runtime/external";
@@ -90,7 +91,7 @@ export function guestToolset(deps: GuestToolsDeps): ToolRegistration[] {
 				const out: unknown[] = [];
 				for (const c of connectors) {
 					for (const t of await toolsOf(b, c).catch(() => [] as McpTool[])) {
-						const permission = app.guests.permissionOf(b, c, { name: t.name, destructive: t.annotations?.destructiveHint === true }, permissions);
+						const permission = app.guests.permissionOf(b, c, { name: t.name, destructive: t.annotations?.destructiveHint === true, definition: toolDefinition(t) }, permissions);
 						if (permission !== "off") out.push({ connector: c.id, service: c.name, tool: t.name, description: t.description ?? null, inputSchema: t.inputSchema, asksFirst: permission === "ask" });
 					}
 				}
@@ -120,7 +121,7 @@ export function guestToolset(deps: GuestToolsDeps): ToolRegistration[] {
 				// A tool the host did not grant is answered as one that does not exist: nothing says what else the host has connected.
 				if (!c || !tool) return await refused(app, b, args.tool, `${b.hostName} doesn't share a tool ${args.tool} with you.`);
 				const readOnly = tool.annotations?.readOnlyHint === true;
-				const permission = app.guests.permissionOf(b, c, { name: tool.name, destructive: tool.annotations?.destructiveHint === true }, permissions);
+				const permission = app.guests.permissionOf(b, c, { name: tool.name, destructive: tool.annotations?.destructiveHint === true, definition: toolDefinition(tool) }, permissions);
 				if (permission === "off") return await refused(app, b, tool.name, `${b.hostName} doesn't share a tool ${args.tool} with you.`);
 				const taskId = String(api.taskId);
 				if (permission === "ask") {

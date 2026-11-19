@@ -18,6 +18,11 @@ async function noteOf(app: App, ownerId: string, approvalId: string): Promise<st
 	return note ? ` Their note: ${note}` : "";
 }
 
+/** What a gated call came to, on its approval card, as v1 showed it: the call's own outcome, cut short. Best effort: a card that is not there (the tool ran without asking) has none to write on. */
+export async function recordResult(app: App, ownerId: string, action: string, taskId: string, result: string): Promise<void> {
+	await app.db.owner(ownerId, (tx) => tx.query("UPDATE pim_app.approvals SET args = args || $3::jsonb WHERE tool = $1 AND args->>'taskId' = $2 AND state IN ('approved', 'timed_out_approved')", [action, taskId, JSON.stringify({ result: result.slice(0, 4000) })])).catch(() => undefined);
+}
+
 /**
  * Asks a person before the call goes on. It returns `undefined` when the call may go on (approved, or covered by a standing approval), and otherwise what the call must answer:
  * the parked result while the approval waits, or the refusal when it was denied.
@@ -25,14 +30,14 @@ async function noteOf(app: App, ownerId: string, approvalId: string): Promise<st
 export async function askFirst(
 	deps: { app: App; runtime: RuntimeDb; ownerId: string },
 	call: { chat: string | null; p: Principal; api: { taskId: unknown; callId: unknown } },
-	ask: { action: string; resource?: Record<string, string>; summary: string; args?: Record<string, unknown>; explicit?: boolean; denied: string },
+	ask: { action: string; tool?: string; resource?: Record<string, string>; summary: string; args?: Record<string, unknown>; explicit?: boolean; denied: string },
 ): Promise<Result | undefined> {
 	const { app, runtime, ownerId } = deps;
 	const taskId = String(call.api.taskId);
 	const callId = String(call.api.callId);
 	const filed = (await app.db.owner(ownerId, async (tx) => (await tx.query("SELECT id FROM pim_app.approvals WHERE tool = $1 AND args->>'taskId' = $2 AND args->>'callId' = $3 ORDER BY id DESC LIMIT 1", [ask.action, taskId, callId])).rows[0])) as { id: string } | undefined;
 	if (!filed) {
-		const gate = await app.approvals.gate(call.p, { action: ask.action, resource: ask.resource ?? {}, ...(call.chat ? { chatId: call.chat } : {}), args: { ...ask.args, taskId, callId, summary: ask.summary }, timeoutMs: 24 * 3600_000, onTimeout: "deny", ...(ask.explicit ? { explicit: true } : {}) });
+		const gate = await app.approvals.gate(call.p, { action: ask.action, ...(ask.tool ? { tool: ask.tool } : {}), resource: ask.resource ?? {}, ...(call.chat ? { chatId: call.chat } : {}), args: { ...ask.args, taskId, callId, summary: ask.summary }, timeoutMs: 24 * 3600_000, onTimeout: "deny", ...(ask.explicit ? { explicit: true } : {}) });
 		return gate.outcome === "waiting" ? WAITING : undefined;
 	}
 	const signal = (await runtime.read<{ payload: { approved?: boolean; approvalId?: string } }>(ownerId, "SELECT payload FROM pim_runtime.durable_signals WHERE owner_id = $1 AND task_id = $2 AND kind = 'approval' AND payload->>'approvalId' = $3 ORDER BY signal_id DESC LIMIT 1", [ownerId, taskId, filed.id])).rows[0];

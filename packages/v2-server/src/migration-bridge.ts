@@ -29,6 +29,7 @@ import type { Bundle, BundleAgent } from "@pim/v2-app/bundles";
 import { chatgptContext } from "@pim/v2-app/chatgpt";
 import { KeyringCrypto, sealString } from "@pim/v2-app/crypto";
 import { mergeNoteUpdates, noteUpdateFromText } from "@pim/v2-app/note-import";
+import { OWN_TOOLS } from "@pim/v2-app/tool-permissions";
 import { userHandle } from "@pim/v2-app/signin";
 import type { EnvelopeCrypto as OpsCrypto } from "@pim/v2-ops/crypto/envelope";
 import { applyImmutable, decoder } from "@earendil-works/chord/delta";
@@ -677,15 +678,22 @@ async function promoteDomain(pool: Pool, owner: string, options: PromoteOptions,
 			else d.skipped.push(`MCP server ${m.id}: its tools are not switched on until its owner enables them (the old Pim did not keep the list)`);
 		}
 		// What the person chose for each connector tool (Off, Ask, On), and each connector's approval policy, for themselves, for each agent, and for each circle (the audience `circle:<id>`).
-		// A choice for Pim's own tools has no switch here: an agent's own tools are not turned on or off by person.
-		for (const m of mcpServers) {
+				for (const m of mcpServers) {
 			if (["writes", "all", "none"].includes(String(m.approval))) await c.query("UPDATE pim_app.connectors SET approval = $2 WHERE id = $1", [m.id, m.approval]);
 		}
 		for (const t of toolPermissions) {
 			const circle = circles.find((ci) => ci.id === t.audience);
 			const audience = t.audience === "" ? "owner" : String(t.audience).startsWith("agent:") ? String(t.audience) : circle ? `circle:${circle.id}` : null;
+			// What the person chose for one of Pim's own tools, or an agent's switch for skills, carries over as it was; a tool that always needs their own decision was never On.
+			const own = !t.app && ["off", "ask", "on"].includes(String(t.permission)) ? (audience === "owner" ? OWN_TOOLS.find((o) => o.tool === t.tool) : audience?.startsWith("agent:") && t.tool === "write_skill" ? { tool: "write_skill" } : undefined) : undefined;
+			if (own) {
+				const choice = "explicit" in own && own.explicit && t.permission === "on" ? "ask" : audience === "owner" ? t.permission : t.permission === "off" ? "off" : "on";
+				const r = await c.query("INSERT INTO pim_app.tool_permissions (owner_id, audience, app, tool, permission) VALUES ($1,$2,'',$3,$4) ON CONFLICT DO NOTHING", [owner, audience, own.tool, choice]);
+				bump(d, "tool permissions", r.rowCount ?? 0);
+				continue;
+			}
 			if (!audience || !t.app || !["off", "ask", "on"].includes(String(t.permission))) {
-				d.skipped.push(`tool permission ${t.audience || "owner"}/${t.app || "pim"}/${t.tool}: ${audience && t.app ? "unknown choice" : t.app ? "its audience is neither the owner, an agent nor a circle" : "Pim's own tools have no per-person switch here"}`);
+				d.skipped.push(`tool permission ${t.audience || "owner"}/${t.app || "pim"}/${t.tool}: ${audience && t.app ? "unknown choice" : t.app ? "its audience is neither the owner, an agent nor a circle" : "that tool of Pim's has no switch here"}`);
 				continue;
 			}
 			// An agent's switch is on or off; asking meant off there.

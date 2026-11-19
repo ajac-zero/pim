@@ -15,7 +15,7 @@ import { type CustomApp, CUSTOM_APPS_KEY, customApps } from "./compat/admin-gall
 import type { Transport } from "./connector-tools.ts";
 import { ConnectorService, type DirectoryApp } from "./connector-service.ts";
 import type { Env } from "./native/native.ts";
-import { askFirst } from "./tool-approval.ts";
+import { askFirst, recordResult } from "./tool-approval.ts";
 
 type Result = { output: { type: "text"; text: string }[]; isError?: boolean };
 type Call = { chat: string | null; p: Principal; api: any; agentId: string | null; context: any };
@@ -128,12 +128,14 @@ export function connectorAdminTools(deps: { ownerId: string; runtime: RuntimeDb;
 			const name = (ref: string) => directory.find((d) => d.ref === ref)?.name ?? ref;
 			const changes = [...((a.add ?? []) as string[]).filter((r) => !agent.apps.includes(r)).map((r: string) => `adds ${name(r)} and connects it`), ...((a.remove ?? []) as string[]).filter((r) => agent.apps.includes(r)).map((r: string) => `removes ${name(r)}`)];
 			if (changes.length === 0) return text(`${agent.name}'s connectors are as asked already.`);
-			const waiting = await askFirst({ app, runtime, ownerId }, call, { action: "connector:manage", resource: { agent: id }, summary: `${agent.name} ${changes.join(" and ")}`, args: { agent: id, add: a.add, remove: a.remove }, explicit: true, denied: "The person did not approve that change, so the connectors are as they were." });
+			const waiting = await askFirst({ app, runtime, ownerId }, call, { action: "connector:manage", tool: "manage_connectors", resource: { agent: id }, summary: `${agent.name} ${changes.join(" and ")}`, args: { agent: id, add: a.add, remove: a.remove }, explicit: true, denied: "The person did not approve that change, so the connectors are as they were." });
 			if (waiting) return waiting;
 			if ((a.add?.length ?? 0) > 0 && !origin()) return noAddress;
 			await app.agents.update(call.p, id, { apps: next });
 			const added = directory.filter((d) => a.add?.includes(d.ref));
-			return text([`${agent.name}'s connectors are updated. Shared connections and their tool permissions are unchanged.`, ...(await connectAll(app, added, directory))].join("\n"));
+			const done = [`${agent.name}'s connectors are updated. Shared connections and their tool permissions are unchanged.`, ...(await connectAll(app, added, directory))].join("\n");
+			await recordResult(app, ownerId, "connector:manage", String(call.api.taskId), done);
+			return text(done);
 		}),
 		read("add_custom_connector", "The person runs this Pim: add a remote MCP server they give you to its connectors, for everyone on it, then add it to your connectors and connect it. Only for a connector find_connector doesn't find. Give the server's https URL as the person gave it, never with credentials in it; if it needs a sign-in, you get the link to give them. The person approves it first.", Type.Object({
 			name: S({ minLength: 1, maxLength: 60, description: "The connector's name, as people will see it." }),
@@ -152,7 +154,7 @@ export function connectorAdminTools(deps: { ownerId: string; runtime: RuntimeDb;
 			// As the admin's own screen has it: https, or a local address while this deployment may reach private ones.
 			if (url.protocol !== "https:" && !(deps.env.PIM_CONNECTOR_ALLOW_PRIVATE === "1" || /^(localhost|127\.0\.0\.1)$/.test(url.hostname))) return text("A connector's address is https.", true);
 			if (!origin()) return noAddress;
-			const waiting = await askFirst({ app, runtime, ownerId }, call, { action: "connector:add", resource: { url: url.origin }, summary: `Add ${a.name} (${a.url}) to this Pim's connectors for everyone, and connect it`, args: { name: a.name, url: a.url }, explicit: true, denied: "The person did not approve adding that connector, so nothing was added." });
+			const waiting = await askFirst({ app, runtime, ownerId }, call, { action: "connector:add", tool: "add_custom_connector", resource: { url: url.origin }, summary: `Add ${a.name} (${a.url}) to this Pim's connectors for everyone, and connect it`, args: { name: a.name, url: a.url }, explicit: true, denied: "The person did not approve adding that connector, so nothing was added." });
 			if (waiting) return waiting;
 			// One that is there at that address already is the one used, as in v1.
 			const known = (await customApps(app)).find((c) => c.url === a.url);
@@ -171,7 +173,9 @@ export function connectorAdminTools(deps: { ownerId: string; runtime: RuntimeDb;
 				const agent = await app.agents.get(call.p, id);
 				await app.agents.update(call.p, id, { apps: [...new Set([...agent.apps, added.ref])].slice(0, MAX_APPS) });
 			}
-			return text([`${added.name} is one of this Pim's connectors [id: ${added.ref}], and one of yours.`, ...(await connectAll(app, [added], directory))].join("\n"));
+			const done = [`${added.name} is one of this Pim's connectors [id: ${added.ref}], and one of yours.`, ...(await connectAll(app, [added], directory))].join("\n");
+			await recordResult(app, ownerId, "connector:add", String(call.api.taskId), done);
+			return text(done);
 		}),
 	];
 }

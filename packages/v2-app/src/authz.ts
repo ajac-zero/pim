@@ -130,6 +130,11 @@ export class Authorizer implements AuthorizerContract {
 		);
 	}
 
+	/** The standing approval that covers `action` within `resource`, if one does: the approval an admin recorded stands in for a person's. */
+	standing(ownerId: string, action: string, resource: Readonly<Record<string, string>> = {}): Promise<string | null> {
+		return this.#standing(ownerId, action, resource);
+	}
+
 	async #standing(ownerId: string, action: string, resource: Readonly<Record<string, string>>): Promise<string | null> {
 		const now = this.now();
 		const approvals = await this.db.owner(ownerId, async (tx): Promise<StandingApproval[]> =>

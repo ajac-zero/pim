@@ -9,7 +9,7 @@ import type { App } from "@pim/v2-app/app";
 import type { Principal } from "@pim/v2-contracts/identity";
 import type { Db as RuntimeDb } from "@pim/v2-runtime/db";
 import { rosterOf } from "./agent-team-tools.ts";
-import { askFirst } from "./tool-approval.ts";
+import { askFirst, recordResult } from "./tool-approval.ts";
 
 type Result = { output: { type: "text"; text: string }[]; isError?: boolean };
 type Call = { chat: string | null; p: Principal; api: any; agentId: string | null; context: any };
@@ -35,6 +35,9 @@ export function skillTools(deps: { ownerId: string; runtime: RuntimeDb; read: De
 			const roster = await rosterOf(runtime, ownerId, call.chat);
 			const by = roster.agents.find((x) => x.id === roster.self);
 			const forId = a.agent ?? roster.self;
+			// An agent's switch for skills, in Tool permissions: off, its chats write none, and the majordomo writes none for it.
+			const switchedOff = await app.db.owner(ownerId, async (tx) => (await tx.query("SELECT 1 FROM pim_app.tool_permissions WHERE audience = ANY($1) AND app = '' AND tool = 'write_skill' AND permission = 'off'", [[roster.self, forId].filter(Boolean).map((id) => `agent:${id}`)])).rowCount);
+			if (switchedOff) return text("The person turned skills off for this agent, so no skill is written.", true);
 			const agents = await app.agents.list(call.p);
 			// A space with no agent of its own to give the skill to keeps it among the person's skills, unlisted.
 			const target = forId ? agents.find((x) => x.id === forId) : undefined;
@@ -56,14 +59,16 @@ export function skillTools(deps: { ownerId: string; runtime: RuntimeDb; read: De
 			if (!existing && !a.body) return text("Give the skill's instructions as body.", true);
 			const forWhom = target?.name ?? "the person";
 			const summary = existing ? `${by && target && by.id !== target.id ? `${by.name} rewrites ${forWhom}'s skill` : `${forWhom} rewrites the skill`} ${a.name}` : `${by && target && by.id !== target.id ? `${by.name} saves a new skill for ${forWhom}` : `${by?.name ?? "An agent"} saves a new skill`}: ${a.name}`;
-			const waiting = await askFirst({ app, runtime, ownerId }, call, { action: "skill:write", resource: { skill: a.name, ...(target ? { agent: target.id } : {}) }, summary, args: { name: a.name, ...(target ? { agent: target.id } : {}), description: a.description, instructions: a.body, files: a.files, ...(a.base_version === undefined ? {} : { base_version: a.base_version }) }, denied: "The person did not approve this skill, so it was not saved." });
+			const waiting = await askFirst({ app, runtime, ownerId }, call, { action: "skill:write", tool: "write_skill", resource: { skill: a.name, ...(target ? { agent: target.id } : {}) }, summary, args: { name: a.name, ...(target ? { agent: target.id } : {}), description: a.description, instructions: a.body, files: a.files, ...(a.base_version === undefined ? {} : { base_version: a.base_version }) }, denied: "The person did not approve this skill, so it was not saved." });
 			if (waiting) return waiting;
 			// Written to the skill as it is when the person has approved, which must still be the version they were shown.
 			const saved = existing
 				? await app.agents.updateSkill(call.p, a.name, { description: a.description, body: a.body, files: a.files, baseVersion: a.base_version })
 				: await app.agents.createSkill(call.p, { name: a.name, description: a.description, body: a.body, files: a.files });
 			if (target && !target.skills.includes(a.name)) await app.agents.update(call.p, target.id, { skills: [...target.skills, a.name] });
-			return text(`Saved the skill ${a.name}, version ${saved.version}${target ? `, one of ${target.name}'s skills. It applies from its next step` : ""}.`);
+			const done = `Saved the skill ${a.name}, version ${saved.version}${target ? `, one of ${target.name}'s skills. It applies from its next step` : ""}.`;
+			await recordResult(app, ownerId, "skill:write", String(call.api.taskId), done);
+			return text(done);
 		}),
 	];
 }

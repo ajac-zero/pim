@@ -13,7 +13,7 @@ import type { Principal } from "@pim/v2-contracts/identity";
 import type { Db as RuntimeDb } from "@pim/v2-runtime/db";
 import { rosterOf } from "./agent-team-tools.ts";
 import { contextOf, instants, load, sourcesOf, viewOf } from "./compat/chat-triggers.ts";
-import { askFirst } from "./tool-approval.ts";
+import { askFirst, recordResult } from "./tool-approval.ts";
 import { recordComputerGrant, sourceConfigHash } from "./computer-triggers.ts";
 
 type Result = { output: { type: "text"; text: string }[]; isError?: boolean };
@@ -331,13 +331,15 @@ export function triggerTools(deps: { ownerId: string; runtime: RuntimeDb; read: 
 					if (row.lifecycle === "ended") return text(`The trigger "${spec.label}" has ended.`, true);
 					if (!(await app.db.owner(call.p.ownerId, async (tx) => (await tx.query("SELECT 1 FROM pim_app.computers WHERE revoked_at IS NULL LIMIT 1")).rowCount))) return text("No computer is paired, so there is nothing to grant this on. The person can pair one in Settings → Computer.", true);
 					const hash = sourceConfigHash(spec.source);
-					const refused = await askFirst({ app, runtime, ownerId }, call, { action: "trigger:computer_grant", resource: { trigger: row.id, source: hash }, summary: grantSummary(spec.label, spec.source), args: { trigger: row.id, configHash: hash }, explicit: true, denied: "The person did not approve running it on their computer, so nothing was granted." });
+					const refused = await askFirst({ app, runtime, ownerId }, call, { action: "trigger:computer_grant", tool: "trigger_computer_grant", resource: { trigger: row.id, source: hash }, summary: grantSummary(spec.label, spec.source), args: { trigger: row.id, configHash: hash }, explicit: true, denied: "The person did not approve running it on their computer, so nothing was granted." });
 					if (refused) return refused;
 					// The person approved exactly this source: the grant is that approval, recorded. A source changed since is not what they read.
 					const now = (await load(app, call.p, row.id)).row;
 					if (sourceConfigHash(now.spec.source) !== hash) return text("The person approved, but the trigger has changed since, so the grant covers nothing it runs now. Ask again for what it is now.", true);
 					await recordComputerGrant(app, call.p.ownerId, row.id, "approval");
-					return text(`Granted: the trigger "${spec.label}" may run its source on the person's computer${row.lifecycle === "enabled" ? "" : " once it is enabled (resume_trigger)"}. The person can revoke this at any time.`);
+					const done = `Granted: the trigger "${spec.label}" may run its source on the person's computer${row.lifecycle === "enabled" ? "" : " once it is enabled (resume_trigger)"}. The person can revoke this at any time.`;
+					await recordResult(app, ownerId, "trigger:computer_grant", String(call.api.taskId), done);
+					return text(done);
 				}),
 		),
 	];

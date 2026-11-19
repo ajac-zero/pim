@@ -66,6 +66,8 @@ export function hostopsTools(deps: HostOpsToolDeps): ToolRegistration[] {
 		const { who, chat } = await caller(api);
 		// The majordomo's, or a refusal that is kept, before anybody is asked for anything.
 		await hostops.assertCaller(who, "request", { op, args });
+		// The admin's switch in Tool permissions: off, the operation is not asked for at all (every one is asked about one at a time otherwise).
+		if (await app.db.owner(ownerId, async (tx) => (await tx.query("SELECT 1 FROM pim_app.tool_permissions WHERE audience = 'owner' AND app = '' AND tool = $1 AND permission = 'off'", [`hostops_${op}`])).rowCount)) return text(`hostops_${op} is switched off in Settings → Tool permissions, so it was not asked for.`, true);
 		const checked = checkHostOp(op, args, { approval: false });
 		const taskId = String(api.taskId);
 		const callId = String(api.callId);

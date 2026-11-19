@@ -119,7 +119,7 @@ real("connector tools", () => {
 
 	it("keeps the credential sealed and shows each tool's default permission", async () => {
 		expect((await d.stack.admin.query("SELECT credential FROM pim_app.connectors")).rows[0].credential).not.toContain(TOKEN);
-		const tools = (await web.call("GET", "/api/permissions")).json.tools as { tool: string; permission: string; default: string; readOnly: boolean; destructive: boolean }[];
+		const tools = ((await web.call("GET", "/api/permissions")).json.tools as { app: string | null; tool: string; permission: string; default: string; readOnly: boolean; destructive: boolean }[]).filter((t) => t.app !== null);
 		expect(Object.fromEntries(tools.map((t) => [t.tool, t.permission]))).toEqual({ search: "on", create_ticket: "ask", delete_all: "off" });
 		expect(tools.find((t) => t.tool === "search")).toMatchObject({ readOnly: true });
 		expect(tools.find((t) => t.tool === "delete_all")).toMatchObject({ destructive: true });
@@ -229,6 +229,103 @@ real("connector tools", () => {
 		expect(mcp.calls.length).toBe(count + 1);
 		expect(await approvals()).toBe(filed + 1);
 	}, 240_000);
+
+	it("holds Pim's own tools to Off / Ask / On, lists them as v1 did, and lets Always approve set one On with what it did on the card", async () => {
+		const own = async () => ((await web.call("GET", "/api/permissions")).json.tools as { app: string | null; tool: string; permission: string; default: string; chosen: string | null; choices: string[] }[]).filter((t) => t.app === null);
+		const put = (tool: string, permission: string | null) => web.call("PUT", "/api/permissions", { app: null, tool, permission });
+		const approvals = async () => (await d.stack.admin.query("SELECT count(*)::int AS n FROM pim_app.approvals WHERE tool = 'skill:write'")).rows[0].n as number;
+		// What an agent does on the computer and its HTTP requests run without asking, everything else asks first; a tool that always needs a person's own decision is only Off or Ask.
+		const listed = await own();
+		expect(Object.fromEntries(listed.map((t) => [t.tool, t.permission]))).toMatchObject({ shell: "on", file_delete: "on", desktop_act: "on", browser_click: "on", browser_type: "on", browser_upload: "on", http_request: "on", write_skill: "ask", install_skill: "ask", app_deploy: "ask", share_memory_scope: "ask", manage_connectors: "ask" });
+		expect(listed.find((t) => t.tool === "install_skill")!.choices).toEqual(["off", "ask"]);
+		expect(listed.find((t) => t.tool === "shell")!.choices).toEqual(["off", "ask", "on"]);
+		expect((await put("install_skill", "on")).status).toBe(400);
+		expect((await put("no_such_tool", "on")).status).toBe(404);
+		expect((await web.call("PUT", "/api/permissions", { circle: "none", app: null, tool: "shell", permission: "on" })).status).toBe(404);
+
+		// Ask: the write waits for a person; Always approve on its card sets the tool On, and the card says what came of it.
+		const written = await approvals();
+		await send("write a skill", true, toolUse(fauxToolCall("write_skill", { name: "brief-notes", description: "How to write brief notes", body: "Keep them short." })));
+		const first = await waiting();
+		expect(first.tool).toBe("skill:write");
+		expect((await web.call("POST", `/api/approvals/${first.id}/approve`, { always: true })).status).toBe(200);
+		await finish();
+		expect((await results("write_skill")).at(-1)).toContain("Saved the skill brief-notes");
+		expect((await web.call("GET", `/api/approvals/${first.id}`)).json).toMatchObject({ status: "approved", result: expect.stringContaining("Saved the skill brief-notes") });
+		expect(await approvals()).toBe(written + 1);
+		expect((await own()).find((t) => t.tool === "write_skill")).toMatchObject({ permission: "on", chosen: "on", default: "ask" });
+
+		// On: the next write runs at once, rechecked on every call.
+		await send("write another", false, toolUse(fauxToolCall("write_skill", { name: "brief-notes-two", description: "More brief notes", body: "Keep them shorter." })));
+		expect((await results("write_skill")).at(-1)).toContain("Saved the skill brief-notes-two");
+		expect(await approvals()).toBe(written + 1);
+
+		// Off: it is refused before anyone is asked. Taken back to its default, it asks again.
+		expect((await put("write_skill", "off")).json).toMatchObject({ permission: "off", chosen: "off" });
+		await send("write a third", false, toolUse(fauxToolCall("write_skill", { name: "brief-notes-three", description: "Even more", body: "Shortest." })));
+		expect((await results("write_skill")).at(-1)).toMatch(/switched off|turned skills off/);
+		expect((await put("write_skill", null)).json).toMatchObject({ permission: "ask", chosen: null });
+		// An agent's own switch for skills turns them off for that agent only; the listing gives it as `skills`.
+		const made = await web.call("POST", "/api/agents", { name: "Scribe" });
+		expect(made.status).toBe(201);
+		const agentId = made.json.id as string;
+		await d.stack.admin.query("UPDATE pim_app.conversations SET agent_id = $1 WHERE public_chat_id = $2", [agentId, chatId]);
+		expect((await web.call("GET", `/api/permissions?agent=${agentId}`)).json.skills).toMatchObject({ tool: "write_skill", permission: "on", choices: ["off", "on"] });
+		expect((await web.call("PUT", "/api/permissions", { agent: agentId, app: "", tool: "write_skill", permission: "off" })).json).toMatchObject({ permission: "off" });
+		await send("write a fourth", false, toolUse(fauxToolCall("write_skill", { name: "brief-notes-four", description: "Again", body: "Shortest." })));
+		expect((await results("write_skill")).at(-1)).toContain("turned skills off for this agent");
+		await web.call("PUT", "/api/permissions", { agent: agentId, app: "", tool: "write_skill", permission: null });
+	}, 240_000);
+
+	it("reads a tool's permission again at every gated call: on runs, ask files an approval, off refuses, and a tool that always needs a person ignores on", async () => {
+		const agent = { kind: "agent", ownerId, agentId: "dev" } as never;
+		const admin = { kind: "user", ownerId, role: "admin", sessionId: "s1" } as never;
+		const set = (tool: string, permission: string | null) => web.call("PUT", "/api/permissions", { app: null, tool, permission });
+		const shell = () => app.approvals.gate(agent, { action: "computer:shell", tool: "shell", args: { summary: "ls" } });
+		expect(await shell()).toEqual({ outcome: "allowed" });
+		expect((await set("shell", "ask")).status).toBe(200);
+		expect((await shell()).outcome).toBe("waiting");
+		// A standing approval an admin recorded still stands in for a person where the tool asks.
+		const standing = await app.identity.authz.grantStanding(admin, { ownerId, action: "computer:shell", scope: {} });
+		expect(await shell()).toEqual({ outcome: "allowed", viaStandingApproval: standing });
+		await app.identity.authz.revokeStanding(admin, ownerId, standing);
+		expect((await set("shell", "off")).status).toBe(200);
+		await expect(shell()).rejects.toMatchObject({ code: "tool_off" });
+		expect((await set("shell", null)).status).toBe(200);
+		expect(await shell()).toEqual({ outcome: "allowed" });
+		// The browser's three tools are three permissions of one action.
+		const browse = (tool: string) => app.approvals.gate(agent, { action: "computer:browser_submit", tool, resource: { tool } });
+		await set("browser_click", "ask");
+		expect([(await browse("browser_click")).outcome, (await browse("browser_type")).outcome]).toEqual(["waiting", "allowed"]);
+		await set("browser_click", null);
+		// An action a person must always answer for asks whatever the permission says (the row is forced past the screen, which refuses On), and still stops when off.
+		const install = () => app.approvals.gate(agent, { action: "skill:install", tool: "install_skill", explicit: true });
+		await d.stack.admin.query("INSERT INTO pim_app.tool_permissions (owner_id, audience, app, tool, permission) VALUES ($1,'owner','','install_skill','on')", [ownerId]);
+		expect((await install()).outcome).toBe("waiting");
+		await set("install_skill", "off");
+		await expect(install()).rejects.toMatchObject({ code: "tool_off" });
+		await set("install_skill", null);
+		await d.stack.admin.query("UPDATE pim_app.approvals SET state = 'denied' WHERE state = 'waiting'");
+	}, 60_000);
+
+	it("asks again about a tool its connector changed since the person let it run, and says so", async () => {
+		const put = (tool: string, permission: string | null) => web.call("PUT", "/api/permissions", { app: connector, tool, permission });
+		const info = async () => ((await web.call("GET", "/api/permissions")).json.tools as { app: string | null; tool: string; permission: string; changed: boolean }[]).find((t) => t.app === connector && t.tool === "create_ticket")!;
+		expect((await put("create_ticket", "on")).json).toMatchObject({ permission: "on", changed: false });
+		const tool = mcp.tools.find((t) => t.name === "create_ticket")!;
+		const was = tool.description;
+		try {
+			tool.description = "Open a ticket, and email everyone";
+			expect((await web.call("POST", `/api/connectors/${connector}/discover`)).status).toBe(200);
+			expect(await info()).toMatchObject({ permission: "ask", changed: true });
+			// Choosing again trusts the new version.
+			expect((await put("create_ticket", "on")).json).toMatchObject({ permission: "on", changed: false });
+		} finally {
+			tool.description = was;
+			await web.call("POST", `/api/connectors/${connector}/discover`);
+			await put("create_ticket", null);
+		}
+	}, 60_000);
 
 	it("serves the web app's connected-servers and connections lists, connects a server by its address and removes it", async () => {
 		const listed = (await web.call("GET", "/api/mcp")).json.servers as { id: string; state: string; tools: { name: string }[] }[];

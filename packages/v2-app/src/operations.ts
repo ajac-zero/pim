@@ -1,7 +1,8 @@
 import type { Principal } from "@pim/v2-contracts/identity";
 import { type ExternalOperationRecord, type ExternalOperationState, operationSettled } from "@pim/v2-contracts/runtime-seam";
-import { ConflictError, NotFoundError } from "./errors.ts";
+import { ConflictError, NotFoundError, RefusedError } from "./errors.ts";
 import { Authorizer } from "./authz.ts";
+import { ownToolOf, type Permission } from "./tool-permissions.ts";
 import type { Db, Tx } from "./db.ts";
 import { newId } from "./ids.ts";
 
@@ -91,10 +92,33 @@ export class Operations {
 export class Approvals {
 	constructor(private readonly db: Db, private readonly authz = new Authorizer(db)) {}
 
-	/** Authorizes `action`. Returns "allowed" (with the standing approval that covered it, if any), or the id of a waiting approval a person must decide. */
-	async gate(p: Principal, input: { action: string; resource?: Record<string, string>; chatId?: string; args?: object; timeoutMs?: number; onTimeout?: "deny" | "approve"; explicit?: boolean; now?: Date }): Promise<{ outcome: "allowed"; viaStandingApproval?: string } | { outcome: "waiting"; approvalId: string }> {
+	/** The person's permission for one of Pim's own tools: their choice, or the tool's default. Null for an action that has none. */
+	async permission(ownerId: string, action: string, tool?: string): Promise<{ tool: string; permission: Permission; explicit: boolean } | null> {
+		const own = ownToolOf(action, tool);
+		if (!own) return null;
+		const chosen = await this.db.owner(ownerId, async (tx) => (await tx.query("SELECT permission FROM pim_app.tool_permissions WHERE audience = 'owner' AND app = '' AND tool = $1", [own.tool])).rows[0]?.permission as Permission | undefined);
+		return { tool: own.tool, permission: chosen ?? own.default, explicit: own.explicit === true };
+	}
+
+	/**
+	 * Authorizes `action`, then holds it to the person's permission for the tool, read again at every call: Off refuses it, On lets it run, Ask files an approval (a tool whose every
+	 * call needs their own decision ignores On). Returns "allowed" (with the standing approval that covered it, if any), or the id of a waiting approval a person must decide.
+	 * `tool` names the tool when one action has several, such as the browser's.
+	 */
+	async gate(p: Principal, input: { action: string; tool?: string; resource?: Record<string, string>; chatId?: string; args?: object; timeoutMs?: number; onTimeout?: "deny" | "approve"; explicit?: boolean; now?: Date }): Promise<{ outcome: "allowed"; viaStandingApproval?: string } | { outcome: "waiting"; approvalId: string }> {
 		const decision = await this.authz.authorize({ principal: p, ownerId: p.ownerId, action: input.action, ...(input.resource ? { resource: input.resource } : {}) });
-		if (decision.outcome === "allow") return { outcome: "allowed", ...(decision.viaStandingApproval ? { viaStandingApproval: decision.viaStandingApproval } : {}) };
+		const own = await this.permission(p.ownerId, input.action, input.tool);
+		if (own?.permission === "off") throw new RefusedError(`${own.tool} is switched off in Settings → Tool permissions, so it was not run.`, "tool_off");
+		let allowed = decision.outcome === "allow";
+		let standing = decision.outcome === "allow" ? decision.viaStandingApproval : undefined;
+		if (own && !own.explicit) {
+			if (own.permission === "on") allowed = true;
+			else if (decision.outcome === "allow" && !standing) {
+				standing = (await this.authz.standing(p.ownerId, input.action, input.resource)) ?? undefined;
+				allowed = standing !== undefined;
+			}
+		}
+		if (allowed) return { outcome: "allowed", ...(standing ? { viaStandingApproval: standing } : {}) };
 		const id = newId("ap");
 		const now = input.now ?? new Date();
 		// The person's approval policy. `auto` approves what is not answered within the timeout (30 seconds unless they set another); `majordomo` has the majordomo review it

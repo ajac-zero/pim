@@ -11,7 +11,7 @@ import type { Triggers } from "./triggers.ts";
 import type { SignIn } from "./signin.ts";
 
 export type ConnectorKind = "builtin" | "native" | "custom_mcp";
-export type Tool = { name: string; description?: string; annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean } };
+export type Tool = { name: string; description?: string; annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean }; /** A digest of the tool as the server describes it, whole (`toolDefinition`): what a permission given to it is tied to. */ definition?: string };
 export type Connector = { id: string; kind: ConnectorKind; name: string; url: string | null; status: string; hasCredential: boolean; discoveredTools: Tool[]; enabledTools: string[]; eventsPath: string };
 
 /** Fetches a connector's tools (`tools/list`). Injected so the Gate never reaches a third party without a bound. */

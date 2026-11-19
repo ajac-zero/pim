@@ -21,6 +21,7 @@ import { OwnerId, PartitionId, type Principal } from "@pim/v2-contracts/identity
 import type { ExternalOperations } from "@pim/v2-runtime/external";
 import type { Db as RuntimeDb } from "@pim/v2-runtime/db";
 import { hostedTools } from "./hosted-tools.ts";
+import { recordResult } from "./tool-approval.ts";
 import { type BrowserTransport, type Computer as BrowserComputer, describePage, PimBrowser } from "./computer-browser.ts";
 
 type Part = { type: "text"; text: string } | { type: "image"; data: string; mimeType: string };
@@ -182,7 +183,7 @@ export function computerTools(deps: ComputerToolDeps, kit: ComputerToolKit): Too
 				if ("result" in prepared) return prepared.result;
 				summary = prepared.summary;
 			} else summary = String(g.args.summary ?? g.tool);
-			const gate = await app.approvals.gate(p, { action: g.action, resource: g.resource ?? {}, ...(chat ? { chatId: chat } : {}), args: { taskId, callId: api.callId, tool: g.tool, ...g.args, summary }, timeoutMs: 24 * 3600_000, onTimeout: "deny" });
+			const gate = await app.approvals.gate(p, { action: g.action, tool: g.tool, resource: g.resource ?? {}, ...(chat ? { chatId: chat } : {}), args: { taskId, callId: api.callId, tool: g.tool, ...g.args, summary }, timeoutMs: 24 * 3600_000, onTimeout: "deny" });
 			if (gate.outcome === "waiting") return waiting;
 		}
 		// The effect itself, once: a replay or a new owner finds its outcome on the operation, and one that was in flight is reconciled, not run again.
@@ -202,12 +203,14 @@ export function computerTools(deps: ComputerToolDeps, kit: ComputerToolKit): Too
 		try {
 			const done = await g.run(computer);
 			await ops.transition(ownerId, operationId, "completed", { summary: done.text, isError: done.isError === true });
+			await recordResult(app, ownerId, g.action, taskId, done.text);
 			return done.content ? { output: done.content, ...(done.isError ? { isError: true } : {}) } : text(done.text, done.isError === true);
 		} catch (error) {
 			const message = reason(error);
 			// A call the computer answered with an error did not take effect as asked; one that may have run, or whose answer was lost, is left for a person.
 			const unsent = error instanceof CapabilityUnavailableError || (error as { status?: number }).status === 502;
 			await ops.transition(ownerId, operationId, unsent ? "failed" : "needs_reconciliation", { error: message });
+			await recordResult(app, ownerId, g.action, taskId, message);
 			return text(unsent ? `It failed: ${message}` : `It may or may not have run on the computer (${message}). It was not run again; look at the computer before asking again.`, true);
 		}
 	};

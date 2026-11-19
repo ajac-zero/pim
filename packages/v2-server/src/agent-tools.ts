@@ -31,6 +31,7 @@ import { builtinSkill } from "./builtin-skills.ts";
 import { readSkillFolder } from "./skill-sources.ts";
 import { adminTools } from "./admin-tools.ts";
 import { rosterOf, teamTools } from "./agent-team-tools.ts";
+import { recordResult } from "./tool-approval.ts";
 import { roomTools } from "./room-tools.ts";
 import { triggerTools } from "./trigger-tools.ts";
 import { copiedFiles } from "./app-from-files.ts";
@@ -39,7 +40,8 @@ import { goalTools } from "./goal-tools.ts";
 import { memoryTools } from "./memory-tools.ts";
 import { skillTools } from "./skill-tools.ts";
 import { clipText, webTools } from "./web-tools.ts";
-import { blockImages, fetchImage, imageCopyId, MAX_REPLY_IMAGES, MAX_UI_STATE_CHARS, REPLY_BLOCKS_GUIDANCE, replyBlocks, uiBlockLabel, uiProgramsOf } from "./reply-blocks.ts";
+import { plainReply, widgetMarkdown } from "./shared-chat.ts";
+import { blockImages, blocksAsMarkdown, fetchImage, imageCopyId, MAX_REPLY_IMAGES, MAX_UI_STATE_CHARS, REPLY_BLOCKS_GUIDANCE, replyBlocks, uiBlockLabel, uiProgramsOf } from "./reply-blocks.ts";
 import { disabledBuiltins } from "./compat/admin-directory.ts";
 import { textDigest } from "./compat/admin-util.ts";
 import { guestToolset } from "./guest-tools.ts";
@@ -68,6 +70,12 @@ export type ToolDeps = {
 type Result = { output: { type: "text"; text: string }[]; isError?: boolean };
 const text = (s: string, isError = false): Result => ({ output: [{ type: "text", text: s }], ...(isError ? { isError } : {}) });
 const json = (v: unknown): Result => text(JSON.stringify(v, null, 1));
+
+/** An email's subject when the model gives none: the message's first line. */
+function headline(message: string): string {
+	const line = message.trim().split(/\r?\n/)[0]!.replace(/^[#>*\-\s]+/, "").trim();
+	return line.length > 120 ? `${line.slice(0, 119)}…` : line || "Pim";
+}
 
 const MAX_BODY = 100_000;
 const MAX_REQUEST_MS = 20_000;
@@ -261,6 +269,13 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 				message: S({ minLength: 1, maxLength: 20_000 }),
 				complete: O(Type.Boolean({ description: "Finish this turn (default true). Set false only for a progress update; send the final answer in a separate call with no other tools." })),
 				widgets: O(Type.Array(Type.String(), { maxItems: MAX_WIDGETS })),
+				// Email is a channel only where the deployment can send it.
+				...(deps.app?.mail.available
+					? {
+							title: O(S({ maxLength: 120, description: "The email's subject; else the message's first line." })),
+							channel: O(Type.Union([Type.Literal("chat"), Type.Literal("email")], { description: 'Where it goes: "chat" (the default), this conversation; "email", their inbox, when they ask for email or for something they will want to keep, such as a report. The conversation shows that it was emailed.' })),
+						}
+					: {}),
 			}),
 			async (args, api) => {
 				const app = deps.app;
@@ -280,6 +295,26 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 					const seen = (await runtime.read<{ record: string }>(ownerId, "SELECT record FROM pim_runtime.entries WHERE owner_id = $1 AND conversation_id = $2 AND record LIKE '%\"role\":\"toolResult\"%' AND record NOT LIKE '%\"toolName\":\"send_to_user\"%' AND record NOT LIKE '%\"toolName\":\"ui_state\"%'", [ownerId, api.conversationId])).rows.map((r) => r.record).join("\n");
 					const unseen = pictured.filter((url) => !seen.includes(url));
 					if (unseen.length > 0) return text(`Not sent: no tool's result in this chat gave ${unseen.join(", ")}. Use only images a tool found, or leave the image out.`, true);
+				}
+				// An email goes to the person's own inbox, and only there: not from a chat with someone else's agent.
+				if (args.channel === "email") {
+					if (!app?.mail.available || !chat) return text("Not sent: this Pim can't send email.", true);
+					try {
+						const p = await principalOf(app, chat);
+						const kind = (await app.db.owner(ownerId, async (tx) => (await tx.query("SELECT kind FROM pim_app.conversations WHERE public_chat_id = $1", [chat])).rows[0]?.kind)) as string | undefined;
+						if (kind === "visit") return text("Not sent: there is no email to send from a chat with someone else's agent.", true);
+						// An inbox can't draw widgets: they go as text.
+						const shownWidgets = wanted.length > 0 ? await loadWidgets(app, p, p.kind === "agent" && p.agentId !== "pim" ? p.agentId : null, wanted) : [];
+						const origin = process.env.PIM_PUBLIC_URL;
+						const link = origin ? `\n\n—\nFrom your Pim: ${new URL(`/chat/${chat}`, origin)}` : "";
+						const body = [plainReply(blocksAsMarkdown(message)), ...shownWidgets.map((widget) => widgetMarkdown(widget))].join("\n\n");
+						const emailed = await app.mail.send(ownerId, { id: `${api.taskId}:${api.callId}`, chat, subject: String(args.title ?? "").trim() || headline(message), text: `${body}${link}` });
+						if ("error" in emailed) return text(`Not sent: ${emailed.error}`, true);
+						await app.conversations.markResponse(ownerId, chat);
+						return { ...text(`Emailed it to ${emailed.to}.`), ...(args.complete === false ? {} : { control: { terminate: true as const } }) } as Result;
+					} catch (error) {
+						return text(`Not sent: ${error instanceof Error ? error.message : String(error)}`, true);
+					}
 				}
 				let shown: ShownWidget[] = [];
 				const images: Record<string, string> = {};
@@ -388,13 +423,16 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 					const chat = await deps.chatOf(api.conversationId);
 					const p = await principalOf(app, chat);
 					const name = args.name ?? folder.name;
+					// An agent's switch for skills, in Tool permissions: off, it installs none.
+					const self = (await rosterOf(runtime, ownerId, chat)).self;
+					if (self && (await app.db.owner(ownerId, async (tx) => (await tx.query("SELECT 1 FROM pim_app.tool_permissions WHERE audience = $1 AND app = '' AND tool = 'write_skill' AND permission = 'off'", [`agent:${self}`])).rowCount))) return text("The person turned skills off for this agent, so no skill is installed.", true);
 					const signal = (await runtime.read<{ payload: { approved?: boolean } }>(ownerId, "SELECT payload FROM pim_runtime.durable_signals WHERE owner_id = $1 AND task_id = $2 AND kind = 'approval' ORDER BY signal_id DESC LIMIT 1", [ownerId, taskId])).rows[0];
 					if (signal && signal.payload.approved !== true) return text(`A person did not approve this skill, so it was not installed.${await noteOn(app, ownerId, signal.payload)}`, true);
 					const filed = (await app.db.owner(ownerId, async (tx) => (await tx.query("SELECT id, args FROM pim_app.approvals WHERE tool = 'skill:install' AND args->>'taskId' = $1 LIMIT 1", [taskId])).rows[0])) as { id: string; args: { commit?: string; hashes?: Record<string, string> } } | undefined;
 					if (!signal && !filed) {
 						const names = Object.keys(folder.hashes);
 						const summary = `Install the skill ${name} from ${folder.source}: ${names.length} file${names.length === 1 ? "" : "s"} (${names.slice(0, 12).join(", ")}${names.length > 12 ? ", …" : ""})`;
-						const gate = await app.approvals.gate(p, { action: "skill:install", resource: { source: folder.source.replace(/\/tree\/.*$/, "") }, ...(chat ? { chatId: chat } : {}), args: { taskId, callId: api.callId, source: folder.source, commit: folder.commit, name, hashes: folder.hashes, summary }, timeoutMs: 24 * 3600_000, onTimeout: "deny", explicit: true });
+						const gate = await app.approvals.gate(p, { action: "skill:install", tool: "install_skill", resource: { source: folder.source.replace(/\/tree\/.*$/, "") }, ...(chat ? { chatId: chat } : {}), args: { taskId, callId: api.callId, source: folder.source, commit: folder.commit, name, hashes: folder.hashes, summary }, timeoutMs: 24 * 3600_000, onTimeout: "deny", explicit: true });
 						if (gate.outcome === "waiting") return { output: [{ type: "text", text: "Waiting for a person's approval." }], control: { suspend: true } } as never;
 					} else if (!signal) {
 						return { output: [{ type: "text", text: "Waiting for a person's approval." }], control: { suspend: true } } as never;
@@ -404,7 +442,9 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 					const files = { ...folder.files, ".source": JSON.stringify({ source: folder.source, commit: folder.commit }) };
 					const exists = await app.agents.getSkill(p, name).then(() => true, () => false);
 					await (exists ? app.agents.updateSkill(p, name, { description: folder.description, body: folder.body, files }) : app.agents.createSkill(p, { name, description: folder.description, body: folder.body, files }));
-					return text(`${exists ? "Saved a new version of" : "Installed"} the skill ${name} from ${folder.source}.`);
+					const done = `${exists ? "Saved a new version of" : "Installed"} the skill ${name} from ${folder.source}.`;
+					await recordResult(app, ownerId, "skill:install", taskId, done);
+					return text(done);
 				} catch (error) {
 					return text(error instanceof Error ? error.message : String(error), true);
 				}
@@ -470,7 +510,7 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 					if (!signal) {
 						const filed = await app.db.owner(ownerId, async (tx) => (await tx.query("SELECT id FROM pim_app.approvals WHERE tool = 'http:request' AND args->>'taskId' = $1 LIMIT 1", [taskId])).rows[0]?.id as string | undefined);
 						if (filed) return { output: [{ type: "text", text: "Waiting for a person's approval." }], control: { suspend: true } } as never;
-						const gate = await app.approvals.gate(p, { action: "http:request", resource: { host: url.host, method: args.method }, ...(chat ? { chatId: chat } : {}), args: { taskId, callId: api.callId, method: args.method, url: url.href, headers: redactHeaders(args.headers), body: typeof args.body === "string" ? args.body.slice(0, 2000) : undefined }, timeoutMs: 24 * 3600_000, onTimeout: "deny" });
+						const gate = await app.approvals.gate(p, { action: "http:request", tool: "http_request", resource: { host: url.host, method: args.method }, ...(chat ? { chatId: chat } : {}), args: { taskId, callId: api.callId, method: args.method, url: url.href, headers: redactHeaders(args.headers), body: typeof args.body === "string" ? args.body.slice(0, 2000) : undefined }, timeoutMs: 24 * 3600_000, onTimeout: "deny" });
 						if (gate.outcome === "waiting") return { output: [{ type: "text", text: "Waiting for a person's approval." }], control: { suspend: true } } as never;
 					}
 					// The request itself, once: its outcome is on the operation, so a replay or a new owner finds it there, and one that was in flight is reconciled, not sent again.

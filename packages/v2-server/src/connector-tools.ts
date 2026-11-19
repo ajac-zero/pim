@@ -11,18 +11,20 @@ import { defineTool, type PromptSection, type ToolRegistration } from "@earendil
 import type { App } from "@pim/v2-app/app";
 import type { Tool as DiscoveredTool, ToolFetcher } from "@pim/v2-app/connectors";
 import { openString, sealString } from "@pim/v2-app/crypto";
+import { choiceChanged, toolDefinition } from "@pim/v2-app/tool-permissions";
 import { PartitionId, type Principal } from "@pim/v2-contracts/identity";
 import type { EnvelopeCrypto } from "@pim/v2-contracts/platform";
 import type { ExternalOperations } from "@pim/v2-runtime/external";
 import { AuthRefused } from "./native/http.ts";
+import { recordResult } from "./tool-approval.ts";
 import { endpointsOf, type Env, nativeApp } from "./native/native.ts";
 import type { Db as RuntimeDb } from "@pim/v2-runtime/db";
 
-export type McpTool = { name: string; description?: string; inputSchema?: Record<string, unknown>; annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean; title?: string } };
+export type McpTool = { name: string; description?: string; inputSchema?: Record<string, unknown>; annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean; title?: string }; /** A digest of the tool as the server describes it (`toolDefinition`), kept when the Gate discovers it. */ definition?: string };
 export type Approval = "writes" | "all" | "none";
 export type ConnectorRow = { id: string; kind: string; name: string; url: string | null; status: string; credential: string | null; enabledTools: string[]; approval: Approval; /** The directory entry it connects, for a native connector (`google/gmail`). */ appRef?: string | null };
 export type Permission = "off" | "ask" | "on";
-export type PermissionRow = { audience: string; app: string; tool: string; permission: Permission };
+export type PermissionRow = { audience: string; app: string; tool: string; permission: Permission; /** The tool's definition when the choice was made. */ definition?: string | null };
 
 export const agentAudience = (agentId: string) => `agent:${agentId}`;
 
@@ -36,17 +38,22 @@ export function needsApproval(tool: Pick<McpTool, "annotations">, approval: Appr
 
 /**
  * A tool's permission for an owner: their choice, or else off until the tool is enabled, then the connector's policy (a read-only tool runs, any other asks). A tool
- * the connector marks destructive never runs without asking. One agent's switch can only turn it off.
+ * the connector marks destructive never runs without asking. One agent's switch can only turn it off. A choice is tied to the tool's definition when it was made: a connector
+ * that changed a tool the person let run gets it asked about again (`changed`), and an agent's switch for it is off, until they choose anew.
  */
-export function resolvePermission(connector: Pick<ConnectorRow, "id" | "enabledTools" | "approval">, tool: McpTool, permissions: readonly PermissionRow[], agentId?: string) {
-	const find = (audience: string) => permissions.find((p) => p.audience === audience && p.app === connector.id && p.tool === tool.name)?.permission ?? null;
+export function resolvePermission(connector: Pick<ConnectorRow, "id" | "enabledTools" | "approval">, tool: McpTool, permissions: readonly PermissionRow[], agentId?: string, definition: string | null = toolDefinition(tool)) {
+	const row = (audience: string) => permissions.find((p) => p.audience === audience && p.app === connector.id && p.tool === tool.name) ?? null;
 	const fallback: Permission = connector.enabledTools.includes(tool.name) ? (needsApproval(tool, connector.approval) ? "ask" : "on") : "off";
-	const chosen = find("owner");
-	const base = chosen ?? fallback;
-	const agentChosen = agentId ? find(agentAudience(agentId)) : null;
-	let permission: Permission = agentChosen === "off" ? "off" : base;
+	const owner = row("owner");
+	const agent = agentId ? row(agentAudience(agentId)) : null;
+	const ownerChanged = choiceChanged(owner, definition, true);
+	const agentChanged = choiceChanged(agent, definition, false);
+	const chosen = owner?.permission ?? null;
+	const agentChosen = agent?.permission ?? null;
+	const base: Permission = ownerChanged ? "ask" : (chosen ?? fallback);
+	let permission: Permission = agentChosen === "off" || agentChanged ? "off" : base;
 	if (tool.annotations?.destructiveHint === true && permission === "on") permission = "ask";
-	return { permission, default: fallback, chosen, agentChosen };
+	return { permission, default: fallback, chosen, agentChosen, changed: ownerChanged || agentChanged };
 }
 
 // ---- credentials ----
@@ -177,6 +184,7 @@ export function mcpFetchTools(transport: Transport): ToolFetcher {
 	return async (url, credential) =>
 		(await listTools(transport, url, credential ? parseCredential(credential).bearer : null)).map((t): DiscoveredTool => ({
 			name: t.name,
+			definition: toolDefinition(t),
 			...(t.description ? { description: t.description.slice(0, 500) } : {}),
 			...(t.annotations ? { annotations: { ...(t.annotations.readOnlyHint !== undefined ? { readOnlyHint: t.annotations.readOnlyHint } : {}), ...(t.annotations.destructiveHint !== undefined ? { destructiveHint: t.annotations.destructiveHint } : {}) } } : {}),
 		}));
@@ -412,6 +420,7 @@ export function connectorToolset(deps: ConnectorToolsDeps): { tools: ToolRegistr
 					const content = resultContent(result);
 					// What the model was shown is kept on the operation, pictures included, so a replay shows the same.
 					await deps.ops.transition(ownerId, operationId, result?.isError === true ? "failed" : "completed", result?.isError === true ? { error: summary } : { summary, ...(content.some((part) => part.type === "image") ? { content } : {}) });
+					if (deps.app) await recordResult(deps.app, ownerId, "connector:call", taskId, summary);
 					return { output: content, ...(result?.isError === true ? { isError: true } : {}) };
 				} catch (error) {
 					const message = error instanceof Error ? error.message : String(error);

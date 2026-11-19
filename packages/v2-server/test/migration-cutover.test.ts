@@ -90,6 +90,10 @@ async function legacyDomain(admin: Pool, objects: FsObjectStore, conversation: s
 		// What a circle's guests did, what the circle may use of a connector, a room with a seat, the models' cost, and an unused invitation.
 		["pim_guest_activity", "1", { id: 1, at, username: "grace", circle_id: "c_friends", tool: "send_email", outcome: "asked", summary: "Grace asked to send mail" }],
 		["pim_tool_permissions", "c_friends:conn_gmail:send_email", { audience: "c_friends", app: "conn_gmail", tool: "send_email", permission: "on" }],
+		// The person's choices for Pim's own tools, and an agent's switch for skills: a tool that always needs their decision was never On.
+		["pim_tool_permissions", ":shell", { audience: "", app: "", tool: "shell", permission: "ask" }],
+		["pim_tool_permissions", ":install_skill", { audience: "", app: "", tool: "install_skill", permission: "on" }],
+		["pim_tool_permissions", "agent:ag_1:write_skill", { audience: "agent:ag_1", app: "", tool: "write_skill", permission: "off" }],
 		["pim_rooms", session, { session, mode: "open", created_at: at }],
 		["pim_room_seats", "seat1", { conversation: "seat-conv", room: session, agent: "ag_poet", depth: 0, joined_at: at }],
 		["pim_model_calls", "1", { id: 1, ts: at, chat_id: session, run_kind: "chat", provider: "faux", model: "m", input: 100, output: 20, cache_read: 5, cache_write_5m: 0, cache_write_1h: 0, cost_usd: 0.0125 }],
@@ -205,7 +209,7 @@ real("a cutover rehearsal", () => {
 		expect(await as("SELECT key, name FROM pim_app.memory_scopes WHERE owner_id = $1", [ADA])).toEqual([{ key: "s_career", name: "Career" }]);
 		expect((await as("SELECT memory_scopes FROM pim_app.circles WHERE owner_id = $1", [ADA]))[0]).toEqual({ memory_scopes: ["everyone"] });
 		// What the person chose for a connector's tool is carried: their own choice as it was, an agent's as on or off (asking meant off), a circle's as it was; the connector keeps its approval policy.
-		expect(await as("SELECT audience, app, tool, permission FROM pim_app.tool_permissions WHERE owner_id = $1 ORDER BY audience", [ADA])).toEqual([{ audience: "agent:ag_1", app: "conn_gmail", tool: "send_email", permission: "off" }, { audience: "circle:c_friends", app: "conn_gmail", tool: "send_email", permission: "on" }, { audience: "owner", app: "conn_gmail", tool: "send_email", permission: "ask" }]);
+		expect(await as("SELECT audience, app, tool, permission FROM pim_app.tool_permissions WHERE owner_id = $1 ORDER BY audience, app, tool", [ADA])).toEqual([{ audience: "agent:ag_1", app: "", tool: "write_skill", permission: "off" }, { audience: "agent:ag_1", app: "conn_gmail", tool: "send_email", permission: "off" }, { audience: "circle:c_friends", app: "conn_gmail", tool: "send_email", permission: "on" }, { audience: "owner", app: "", tool: "install_skill", permission: "ask" }, { audience: "owner", app: "", tool: "shell", permission: "ask" }, { audience: "owner", app: "conn_gmail", tool: "send_email", permission: "ask" }]);
 		expect(await as("SELECT approval FROM pim_app.connectors WHERE owner_id = $1 AND id = 'conn_gmail'", [ADA])).toEqual([{ approval: "all" }]);
 		expect(await count(`SELECT count(*) n FROM pim_app.conversations WHERE owner_id = '${ADA}' AND agent_id = 'ag_poet'`)).toBeGreaterThan(0);
 		expect((await as("SELECT body, files, version FROM pim_app.skills WHERE owner_id = $1 AND name = 'Haiku'", [ADA]))[0]).toMatchObject({ body: "Five, seven, five.", files: { "ref.md": "# reference\n" }, version: 1 });

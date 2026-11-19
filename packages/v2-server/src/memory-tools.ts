@@ -9,7 +9,7 @@ import type { App } from "@pim/v2-app/app";
 import type { Principal } from "@pim/v2-contracts/identity";
 import type { Db as RuntimeDb } from "@pim/v2-runtime/db";
 import { rosterOf } from "./agent-team-tools.ts";
-import { askFirst } from "./tool-approval.ts";
+import { askFirst, recordResult } from "./tool-approval.ts";
 
 type Result = { output: { type: "text"; text: string }[]; isError?: boolean };
 type Call = { chat: string | null; p: Principal; api: any; agentId: string | null; context: any };
@@ -96,11 +96,13 @@ export function memoryTools(deps: { ownerId: string; runtime: RuntimeDb; read: D
 			if (!target) return text("That agent no longer exists.", true);
 			if (target.id === (await rosterOf(runtime, ownerId, call.chat)).self) return text("You read every scope already.", true);
 			const who = JSON.stringify(target.name);
-			const waiting = await askFirst({ app, runtime, ownerId }, call, { action: "memory:share", resource: { scope: scope.key, agent: target.id }, summary: a.stop ? `Stop ${who} reading the memory scope ${JSON.stringify(scope.name)}` : `Let ${who} read the memory scope ${JSON.stringify(scope.name)}`, args: { scope: scope.key, agent: target.id, ...(a.stop ? { stop: true } : {}) }, denied: "The person did not approve that, so nothing changed." });
+			const waiting = await askFirst({ app, runtime, ownerId }, call, { action: "memory:share", tool: "share_memory_scope", resource: { scope: scope.key, agent: target.id }, summary: a.stop ? `Stop ${who} reading the memory scope ${JSON.stringify(scope.name)}` : `Let ${who} read the memory scope ${JSON.stringify(scope.name)}`, args: { scope: scope.key, agent: target.id, ...(a.stop ? { stop: true } : {}) }, denied: "The person did not approve that, so nothing changed." });
 			if (waiting) return waiting;
 			const kept = target.memoryScopes.filter((k) => k !== scope.key);
 			await app.agents.update(call.p, target.id, { memoryScopes: a.stop ? kept : [...kept, scope.key] });
-			return text(a.stop ? `${target.name} no longer reads "${scope.name}".` : `${target.name} reads "${scope.name}" from its next step.`);
+			const done = a.stop ? `${target.name} no longer reads "${scope.name}".` : `${target.name} reads "${scope.name}" from its next step.`;
+			await recordResult(app, ownerId, "memory:share", String(call.api.taskId), done);
+			return text(done);
 		}),
 	];
 }

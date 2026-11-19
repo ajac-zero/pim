@@ -261,18 +261,19 @@ real("connector tools", () => {
 		);
 		// A call the tool would refuse is refused here, with what the tool takes, and nothing is called or asked.
 		const answers = await results("connector_call");
-		expect(answers.at(-2)).toMatch(/Validation failed[\s\S]*title[\s\S]*The tool takes: \{.*"required":\["title"\]/);
+		expect(answers.slice(-2).find((r) => r.includes("Validation failed"))).toMatch(/Validation failed[\s\S]*title[\s\S]*The tool takes: \{.*"required":\["title"\]/);
 		expect(mcp.calls.slice(before).map((c) => c.name)).toEqual(["shot"]);
 		expect((await d.stack.admin.query("SELECT count(*)::int AS n FROM pim_app.approvals")).rows[0].n).toBe(filed);
 		// A tool's picture reaches the model as an image, not as "[image image/png]".
 		const model = (JSON.parse(await transcript()) as { model?: { role: string; toolName?: string; content: { type: string; data?: string; text?: string }[] }[] }[]).flatMap((e) => e.model ?? []);
-		const shot = model.filter((m) => m.role === "toolResult" && m.toolName === "connector_call").at(-1)!;
+		const shot = model.filter((m) => m.role === "toolResult" && m.toolName === "connector_call" && m.content.some((part) => part.type === "image")).at(-1)!;
 		expect(shot.content).toEqual([{ type: "text", text: "here it is" }, { type: "image", data: PNG, mimeType: "image/png" }]);
 		// The tools past the first page are listed on request, and a search that finds nothing says how many there are.
-		const page = JSON.parse((await results("connector_tools")).at(-2)!);
+		const pages = (await results("connector_tools")).slice(-2);
+		const page = JSON.parse(pages.find((r) => r.startsWith("{"))!);
 		expect(page).toMatchObject({ total: 70, from: 10, next: "offset 15 of 70" });
 		expect(page.tools.map((t: { tool: string }) => t.tool)).toEqual(bulk.slice(10, 15));
-		expect((await results("connector_tools")).at(-1)).toMatch(/^None of the 73 tools matches/);
+		expect(pages.find((r) => r.startsWith("None of"))).toMatch(/^None of the 73 tools matches/);
 		// The prompt lists the first sixty and says how many more there are.
 		await send("and now?", false);
 		expect(await transcript()).toMatch(/and 13 more tools: find them with connector_tools/);

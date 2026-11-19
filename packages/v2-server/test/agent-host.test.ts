@@ -569,6 +569,23 @@ const agentId = (await d.stack.admin.query("SELECT id FROM pim_app.agents WHERE 
 		expect(await updatesIn(chat)).toEqual([]);
 	}, 180_000);
 
+	it("fails a task whose agent's run ends without an answer, and tells the agent that asked, instead of holding the run for a person", async () => {
+		const answer = (ctx: { messages: { role: string; toolName?: string }[] }) => {
+			const asked = JSON.stringify(ctx.messages);
+			const last = ctx.messages.at(-1);
+			if (asked.includes("[From Pim]")) return fauxAssistantMessage([], { stopReason: "error", errorMessage: "400 invalid request body" });
+			if (last?.toolName === "delegate") return toolUse(fauxToolCall("send_to_user", { message: "On it" }));
+			if (JSON.stringify(last).includes("[Task update]")) return toolUse(fauxToolCall("send_to_user", { message: "It failed" }));
+			return toolUse(fauxToolCall("delegate", { tasks: [{ to: "Researcher", task: "Find D" }] }));
+		};
+		faux.setResponses(Array(8).fill(answer) as never);
+		const chat = (await web.call("POST", "/api/sessions", { title: "Failing" })).json.id as string;
+		expect((await message(chat, "please hand it off")).status).toBe(202);
+		await waitFor("the requester to hear of the failure", async () => ((await said(chat)).includes("It failed") ? true : undefined), 90_000);
+		expect((await d.stack.admin.query("SELECT status, result FROM pim_app.tasks WHERE started_by = $1", [chat])).rows).toEqual([{ status: "failed", result: expect.stringMatching(/^It didn't finish: /) }]);
+		expect(await updatesIn(chat)).toEqual([expect.stringContaining("didn't finish task")]);
+	}, 180_000);
+
 	it("refuses a task for no one it may hand tasks to, and gives a worker no one the majordomo has not made its contact", async () => {
 		const worker = (await d.stack.admin.query("SELECT id FROM pim_app.agents WHERE name = 'Researcher'")).rows[0].id as string;
 		faux.setResponses([toolUse(fauxToolCall("delegate", { tasks: [{ to: "Nobody", task: "x" }] })), toolUse(fauxToolCall("send_to_user", { message: "ok" }))] as never);
@@ -783,7 +800,7 @@ const agentId = (await d.stack.admin.query("SELECT id FROM pim_app.agents WHERE 
 		// A rewrite names the version it read; one that does not, or read an old one, is refused before anyone is asked.
 		await turnWith(chat, [fauxToolCall("write_skill", { name: "sonnet", body: "No version." }), fauxToolCall("write_skill", { name: "sonnet", body: "Old.", base_version: 9 }), fauxToolCall("write_skill", { name: "limerick", body: "x", base_version: 1 }), fauxToolCall("read_skill", { name: "sonnet" })]);
 		const answers = await resultsIn(chat, "write_skill");
-		expect(answers.slice(-3)).toEqual(["A skill named sonnet exists already: read it, then give its version as base_version to rewrite it", "sonnet is at version 1 now, not 9: read it again before rewriting it", "No skill named limerick"]);
+		expect(answers.slice(-3).sort()).toEqual((["A skill named sonnet exists already: read it, then give its version as base_version to rewrite it", "sonnet is at version 1 now, not 9: read it again before rewriting it", "No skill named limerick"]).sort());
 		expect((await resultsIn(chat, "read_skill")).at(-1)).toMatch(/^Skill sonnet, version 1:\nFive, seven, five\./);
 		expect(await skill()).toMatchObject({ version: 1 });
 		// A refusal leaves the skill as it was; a yes makes the next version.
@@ -805,9 +822,9 @@ const agentId = (await d.stack.admin.query("SELECT id FROM pim_app.agents WHERE 
 			fauxToolCall("note", { title: "x".repeat(281), body: "too long a title" }),
 			fauxToolCall("note", { title: "two\nlines", body: "b" }),
 			fauxToolCall("note", { title: "Fine", body: "b", scope: `agent-${other}` }),
-			fauxToolCall("note", { title: "Tea one", body: "t" }),
-			fauxToolCall("note", { title: "Tea two", body: "t" }),
-			fauxToolCall("note", { title: "Tea three", body: "t" }),
+			fauxToolCall("note", { title: "Oolong one", body: "t" }),
+			fauxToolCall("note", { title: "Oolong two", body: "t" }),
+			fauxToolCall("note", { title: "Oolong three", body: "t" }),
 		]);
 		const noted = await resultsIn(chat, "note");
 		expect(noted).toContain("Too long: the title is 281 bytes, the limit is 280. Compress it, and put the rest in the text.");
@@ -815,19 +832,19 @@ const agentId = (await d.stack.admin.query("SELECT id FROM pim_app.agents WHERE 
 		expect(noted.filter((r) => r.startsWith("You can't keep memories in agent-"))).toHaveLength(1);
 		expect(noted.filter((r) => /^Saved as m_\w+ in agent-/.test(r))).toHaveLength(3);
 		await turnWith(chat, [
-			fauxToolCall("recall", { pattern: "Tea", limit: 2 }),
+			fauxToolCall("recall", { pattern: "Oolong", limit: 2 }),
 			fauxToolCall("recall", { pattern: "(" }),
 			fauxToolCall("recall", { pattern: ".", scope: `agent-${other}` }),
-			fauxToolCall("recall", { pattern: "Tea" }),
+			fauxToolCall("recall", { pattern: "Oolong" }),
 			fauxToolCall("forget", { id: secret }),
 			fauxToolCall("zoom", { id: secret }),
 			fauxToolCall("move_memory", { id: secret, scope: "everyone" }),
 		]);
 		const recalls = await resultsIn(chat, "recall");
-		expect(recalls.find((r) => r.includes("Newest 2 of 3"))).toMatch(/^(\[m_\w+\] \(agent-\w+\) Tea \w+\n){2}Newest 2 of 3 matches\. Narrow the pattern\.$/);
+		expect(recalls.find((r) => r.includes("Newest 2 of 3"))).toMatch(/^(\[m_\w+\] \(agent-\w+\) Oolong \w+\n){2}Newest 2 of 3 matches\. Narrow the pattern\.$/);
 		expect(recalls.find((r) => r.startsWith("Invalid pattern: "))).toBeDefined();
 		expect(recalls).toContain(`You don't read the scope agent-${other}.`);
-		expect(recalls.find((r) => r.endsWith("\n3 matches."))).toMatch(/Tea one[\s\S]*Tea two|Tea two[\s\S]*Tea one/);
+		expect(recalls.find((r) => r.endsWith("\n3 matches."))).toMatch(/Oolong one[\s\S]*Oolong two|Oolong two[\s\S]*Oolong one/);
 		// Another agent's private memory is neither read, forgotten nor moved.
 		for (const tool of ["forget", "zoom", "move_memory"]) expect((await resultsIn(chat, tool))[0]).toBe(`There is no memory ${secret}.`);
 		expect((await d.stack.admin.query("SELECT scope, deleted_at FROM pim_app.memories WHERE id = $1", [secret])).rows[0]).toEqual({ scope: `agent-${other}`, deleted_at: null });
@@ -835,7 +852,8 @@ const agentId = (await d.stack.admin.query("SELECT id FROM pim_app.agents WHERE 
 		// The majordomo names a scope once, and shares it with an agent only once the person approves; any other agent has neither tool.
 		await turnWith(chat, [fauxToolCall("create_memory_scope", { name: "Health" })]);
 		expect((await resultsIn(chat, "create_memory_scope"))[0]).toBe("Only the person's majordomo does that.");
-		await turnWith(chatId, [fauxToolCall("create_memory_scope", { name: "Health" }), fauxToolCall("create_memory_scope", { name: "health" })]);
+		await turnWith(chatId, [fauxToolCall("create_memory_scope", { name: "Health" })]);
+		await turnWith(chatId, [fauxToolCall("create_memory_scope", { name: "health" })]);
 		const [made, again] = (await resultsIn(chatId, "create_memory_scope")).slice(-2);
 		const key = /as (scope-\w+)\./.exec(made!)![1]!;
 		expect(again).toBe(`The scope "Health" is there already, as ${key}.`);
@@ -848,8 +866,8 @@ const agentId = (await d.stack.admin.query("SELECT id FROM pim_app.agents WHERE 
 
 	it("reads, edits and lists notes as v1 did: versions and offsets, all-or-nothing edits, append, rename, and a whole rewrite only from the latest version", async () => {
 		const chat = (await web.call("POST", "/api/sessions", { title: "Notes" })).json.id as string;
-		await turnWith(chat, [fauxToolCall("note_create", { title: "Plan", text: "alpha beta gamma" })]);
-		const id = (await d.stack.admin.query("SELECT note_id FROM pim_app.notes WHERE title = 'Plan'")).rows[0].note_id as string;
+		await turnWith(chat, [fauxToolCall("note_create", { title: "Reading plan", text: "alpha beta gamma" })]);
+		const id = (await d.stack.admin.query("SELECT note_id FROM pim_app.notes WHERE title = 'Reading plan'")).rows[0].note_id as string;
 		await turnWith(chat, [fauxToolCall("note_read", { id })]);
 		// The calls that change the note run one turn at a time: the note has one writer at once.
 		await turnWith(chat, [fauxToolCall("note_edit", { id, edits: [{ find: "alpha", replace: "ALPHA" }, { find: "gamma", replace: "GAMMA" }], title: "Renamed plan" })]);
@@ -866,7 +884,7 @@ const agentId = (await d.stack.admin.query("SELECT id FROM pim_app.agents WHERE 
 		expect((await app.canvas.read(ownerId, id)).text).toBe("ALPHA beta GAMMA\n- delta");
 		const reads = await resultsIn(chat, "note_read");
 		const read = (re: RegExp) => reads.find((r) => re.test(r));
-		expect(reads[0]).toBe(`Note ${id} "Plan", version 1 of 1, 16 characters:\nalpha beta gamma`);
+		expect(reads[0]).toBe(`Note ${id} "Reading plan", version 1 of 1, 16 characters:\nalpha beta gamma`);
 		expect(read(/version 1 of 3/)).toBe(`Note ${id} "Renamed plan", version 1 of 3, 16 characters:\nalpha beta gamma`);
 		expect(read(/from 6/)).toBe(`Note ${id} "Renamed plan", version 3 of 3, 24 characters, from 6:\nbeta GAMMA\n- delta`);
 		expect(read(/^No version 99/)).toBe(`No version 99 of note ${id}.`);
@@ -923,12 +941,14 @@ const agentId = (await d.stack.admin.query("SELECT id FROM pim_app.agents WHERE 
 		const [ann, bob] = [await newAgent("Ann", "Works"), await newAgent("Bob", "Also works")];
 		const [annChat, bobChat] = [(await web.call("POST", "/api/sessions", { title: "Ann", agentId: ann })).json.id as string, (await web.call("POST", "/api/sessions", { title: "Bob", agentId: bob })).json.id as string];
 		let turns = 0;
-		const turn = async (chat: string, ...calls: ReturnType<typeof fauxToolCall>[]) => {
+		/** Starts a turn that calls `calls` and then answers; what it returns waits for the answer, which a tool that waits for the person delays. */
+		const begin = async (chat: string, ...calls: ReturnType<typeof fauxToolCall>[]) => {
 			const mine = ++turns;
 			faux.setResponses([toolUse(...calls), toolUse(fauxToolCall("send_to_user", { message: `reply ${mine}` }))] as never);
 			expect((await message(chat, `turn ${mine}`)).status).toBe(202);
-			await waitFor(`turn ${mine}`, async () => (sentAndAnswered(await transcriptOf(chat), `reply ${mine}`) ? true : undefined), 90_000);
+			return () => waitFor(`turn ${mine}`, async () => (sentAndAnswered(await transcriptOf(chat), `reply ${mine}`) ? true : undefined), 90_000);
 		};
+		const turn = async (chat: string, ...calls: ReturnType<typeof fauxToolCall>[]) => (await begin(chat, ...calls))();
 		const last = async (chat: string, tool: string) => (await resultsIn(chat, tool)).at(-1)!;
 		const cron = { kind: "time", schedule: "cron", expression: "0 9 * * *", timeZone: "UTC" };
 
@@ -959,14 +979,15 @@ const agentId = (await d.stack.admin.query("SELECT id FROM pim_app.agents WHERE 
 		expect(await last(annChat, "create_trigger")).toContain("source_not_wired");
 		const logId = (await d.stack.admin.query("SELECT id FROM pim_app.triggers WHERE title = 'Log'")).rows[0].id as string;
 		expect((await web.call("POST", "/api/computer", {})).status).toBe(201);
-		await turn(annChat, fauxToolCall("list_trigger_sources", {}), fauxToolCall("trigger_computer_grant", { triggerId: logId }));
-		expect(JSON.parse((await resultsIn(annChat, "list_trigger_sources")).at(-1)!).sources.find((x: { kind: string }) => x.kind === "stream")).toMatchObject({ status: "available", delivers: true });
+		const granted = await begin(annChat, fauxToolCall("list_trigger_sources", {}), fauxToolCall("trigger_computer_grant", { triggerId: logId }));
 		const approval = await waitFor("the grant to wait for the person", async () => (await d.stack.admin.query("SELECT id, args FROM pim_app.approvals WHERE tool = 'trigger:computer_grant' AND state = 'waiting'")).rows[0], 60_000);
 		expect(approval.args.summary).toContain("tail -f /var/log/syslog");
 		expect(approval.args.explicit).toBe(true);
 		expect((await d.stack.admin.query("SELECT count(*)::int AS n FROM pim_app.trigger_computer_grants WHERE trigger_id = $1", [logId])).rows[0].n).toBe(0);
 		expect((await web.call("POST", `/api/approvals/${approval.id}/decision`, { approve: true })).status).toBe(200);
-		await waitFor("the grant", async () => ((await d.stack.admin.query("SELECT 1 FROM pim_app.trigger_computer_grants WHERE trigger_id = $1 AND revoked_at IS NULL", [logId])).rowCount ? true : undefined), 60_000);
+		await granted();
+		expect(JSON.parse((await resultsIn(annChat, "list_trigger_sources")).at(-1)!).sources.find((x: { kind: string }) => x.kind === "stream")).toMatchObject({ status: "available", delivers: true });
+		expect(await last(annChat, "trigger_computer_grant")).toContain("Granted");
 		const view = (await web.call("GET", `/api/triggers/${logId}`)).json;
 		expect(view.grant.state).toBe("current");
 		await turn(annChat, fauxToolCall("resume_trigger", { id: logId, expectedRevision: view.revision }));

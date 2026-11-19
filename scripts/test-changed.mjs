@@ -3,7 +3,7 @@
 // suite every time: `pnpm test:changed`. It diffs against origin/main (HEAD~1 when there is no
 // origin/main, or the ref given as an argument) and picks what to run: the whole suite when
 // configuration changed or nothing maps to a test, otherwise vitest's own --changed over the
-// root project's Node tests (not the Worker's own, v1's, which nothing runs unasked), plus the web app's tests when web/ or a package it imports changed, the
+// root's Node tests (computer/test and scripts/*.test.ts), plus the web app's tests when web/ or a package it imports changed, the
 // tests of each package under packages/ a change is in, and the daemons' tests when one of them changed. The whole
 // suite itself runs in GitHub CI on the pushed branch, never locally (AGENTS.md).
 import { spawnSync } from "node:child_process";
@@ -19,7 +19,6 @@ function reconfigured(file) {
 		name(file) === "package.json" ||
 		name(file) === "pnpm-lock.yaml" ||
 		/^vitest.*\.config\./.test(name(file)) ||
-		/^wrangler/.test(name(file)) ||
 		/^tsconfig/.test(name(file))
 	);
 }
@@ -35,14 +34,14 @@ const SHARED_WITH_WEB = ["packages/shared/", "packages/ui-lang/", "displayd/bund
 /** The name of the package a file is in (`@pim/shared` for packages/shared/...), or null. */
 const packageOf = (file) => /^packages\/([^/]+)\//.exec(file)?.[1] ?? null;
 
-/** A package's own tests: only that package's `pnpm --filter @pim/<name> test` reads them, not the root project's, unless they are `test/support/` modules the Worker's tests import. */
+/** A package's own tests: only that package's `pnpm --filter @pim/<name> test` reads them, not the root's, unless they are `test/support/` modules other tests import. */
 const packageTest = (file) => /^packages\/[^/]+\/test\//.test(file) && !file.includes("/test/support/");
 
 /** The standalone daemons, each with its own `node --test` tests (`pnpm test:daemons`). */
 const DAEMONS = ["displayd/", "sandbox-manager/", "workspace-agentd/"];
 
-/** Whether a Worker test reads a file of a daemon: only displayd's bundle, which the Worker serves to computers. */
-const readByWorkerTests = (file) => file.startsWith("displayd/bundle.");
+/** Whether a root test reads a file of a daemon: only displayd's bundle, which the computer's install test checks. */
+const readByRootTests = (file) => file.startsWith("displayd/bundle.");
 
 /** What `pnpm test:changed` runs for a diff's files: the whole suite and why, or the projects it maps the change to. */
 export function selectRuns(changed) {
@@ -52,7 +51,7 @@ export function selectRuns(changed) {
 	if (configuring) return { full: true, reason: `${configuring} changed` };
 	const web = files.some((file) => file.startsWith("web/") || (!packageTest(file) && SHARED_WITH_WEB.some((shared) => file.startsWith(shared))));
 	const daemons = files.some((file) => DAEMONS.some((daemon) => file.startsWith(daemon)));
-	const root = files.some((file) => !file.startsWith("web/") && !prose(file) && !packageTest(file) && (!DAEMONS.some((daemon) => file.startsWith(daemon)) || readByWorkerTests(file)));
+	const root = files.some((file) => !file.startsWith("web/") && !prose(file) && !packageTest(file) && (!DAEMONS.some((daemon) => file.startsWith(daemon)) || readByRootTests(file)));
 	// Each package a change is in runs its own tests, in seconds; @pim/shared is every other package's dependency, so a change to it runs them all.
 	const changedPackages = [...new Set(files.map(packageOf).filter((name) => name !== null))].sort();
 	const packages = changedPackages.includes("shared") ? readdirSync("packages").sort() : changedPackages;
@@ -89,8 +88,8 @@ function main() {
 		process.exit(run("pnpm", ["test"]) ? 0 : 1);
 	}
 	if (plan.root) {
-		console.log(`Running the root project's Node tests changed since ${base}.`);
-		if (!run("pnpm", ["exec", "vitest", "run", "--project", "node", "--changed", base])) process.exit(1);
+		console.log(`Running the root's Node tests changed since ${base}.`);
+		if (!run("pnpm", ["exec", "vitest", "run", "--changed", base, "--passWithNoTests"])) process.exit(1);
 	}
 	for (const name of plan.packages) {
 		console.log(`Running @pim/${name}'s tests.`);

@@ -4,7 +4,7 @@
 		"lib": ["es2024"],
 		"module": "es2022",
 		"moduleResolution": "bundler",
-		"types": ["node", "../../worker-configuration.d.ts"],
+		"types": ["node", "../../workerd-runtime.d.ts"],
 		"strict": true,
 		"noUncheckedIndexedAccess": true,
 		"isolatedModules": true,

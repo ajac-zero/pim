@@ -10,7 +10,7 @@ import { loadProcessConfig, rolesOf } from "../src/platform.ts";
 const owner = OwnerId.parse("o_ada");
 const partition = "6f1d2c3e-0000-4000-8000-000000000001" as ProjectionCursor["partitionId"];
 
-/** The legacy Worker's algorithm (`src/auth/store.ts` digestHex, `src/coding/threads.ts` codingThreadId) with WebCrypto, as it runs there. The package may not import `src/`. */
+/** The legacy Worker's algorithm (its `digestHex` and `codingThreadId`, at the git tag `v1-final`) with WebCrypto, as it ran there. */
 async function legacyCodingThreadId(space: string, operationId: string): Promise<string> {
 	const bytes = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`pim coding thread\n${space}\n${operationId}`)));
 	const hex = [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
@@ -18,9 +18,10 @@ async function legacyCodingThreadId(space: string, operationId: string): Promise
 }
 
 describe("codingThreadId", () => {
-	it("still uses the same recipe as the legacy source", () => {
-		const source = readFileSync(new URL("../../../src/coding/threads.ts", import.meta.url), "utf8");
-		expect(source).toContain("digestHex(`pim coding thread\\n${space}\\n${operationId}`)");
+	it("keeps the legacy recipe: the SHA-256 of \"pim coding thread\", the space and the operation on separate lines, cut into a UUID's groups", () => {
+		// Thread ids already stored by the legacy Worker must come out the same, so these are fixed values, not recomputed ones.
+		expect(codingThreadId("o_ada", "op-1")).toBe("d7adeb2f-26eb-224c-57cb-fb011bb3c94f");
+		expect(codingThreadId("o_bob", "op-2")).toBe("56b06f6f-4a07-c1dc-f168-ca4e6c8ed88b");
 	});
 	it("matches the legacy Worker's id for the same space and operation", async () => {
 		for (const [space, operation] of [["o_ada", "op-1"], ["o_ada", "op-2"], ["o_bob", "op-1"], ["o_ünï", "op\n1"]] as const) {

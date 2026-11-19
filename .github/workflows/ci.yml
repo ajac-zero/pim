@@ -10,9 +10,7 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 # Every job runs on every change, side by side, and each is sized to finish in about a minute and a half with its setup, so CI as a whole
-# answers in under two. The Worker's own tests (vitest's `worker` and `browser` projects) are v1's: v1 is no longer deployed and is kept only
-# until v2 reaches feature parity, so CI doesn't run them (`pnpm exec vitest run --project worker` does). The Compose smoke test runs after a
-# push to main, in compose.yml.
+# answers in under two. The Compose smoke test runs after a push to main, in compose.yml.
 jobs:
   # Biome over web/, and the check that the repository names no deployment's internal hosts or identifiers.
   lint:
@@ -65,7 +63,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm test:daemons
 
-  # The root's Node project, which starts real processes (computer/, the supervisor of apps), four files at a time on this runner.
+  # The root's Node project: the computer's tests, which start real processes (computer/test, the supervisor of apps), and the repository's own scripts (scripts/*.test.ts), four files at a time on this runner.
   node:
     runs-on: ubuntu-latest
     steps:
@@ -76,7 +74,7 @@ jobs:
           node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm exec vitest run --project node --maxWorkers=4
+      - run: pnpm exec vitest run --maxWorkers=4
 
   # Every package's own tests but @pim/v2-server's, all packages at once rather than in dependency order (their tests don't depend on each other's).
   packages:

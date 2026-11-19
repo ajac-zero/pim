@@ -1,61 +1,31 @@
 {
   "name": "pim",
   "version": "0.1.0",
-  "description": "An open-source personal agent, with its web app, deployable to Cloudflare Durable Objects.",
+  "description": "An open-source personal agent, with its web app, served by one self-hostable server.",
   "license": "FSL-1.1-ALv2",
   "private": true,
   "packageManager": "pnpm@12.0.0",
   "type": "module",
   "scripts": {
-    "dev": "wrangler dev --var PIM_PUBLIC_URL:http://localhost:8787",
     "dev:web": "pnpm --filter pim-web dev",
     "build": "pnpm --filter pim-web build",
-    "deploy": "wrangler deploy",
-    "preview": "wrangler dev --local --config wrangler.preview.jsonc --persist-to .wrangler/state-preview",
-    "types": "wrangler types",
     "typecheck": "tsc --noEmit && pnpm --filter \"./packages/*\" typecheck && pnpm --filter pim-web typecheck",
     "lint": "pnpm --filter pim-web lint",
     "check": "pnpm typecheck && pnpm lint && pnpm test",
     "test": "node scripts/test-all.mjs",
-    "test:serial": "node scripts/check-internal-identifiers.mjs && vitest run --project node && pnpm test:packages && pnpm --filter pim-web test && pnpm test:daemons",
+    "test:serial": "node scripts/check-internal-identifiers.mjs && vitest run && pnpm test:packages && pnpm --filter pim-web test && pnpm test:daemons",
     "test:packages": "pnpm --filter \"./packages/*\" --no-sort test",
     "test:packages:v2-server": "pnpm --filter @pim/v2-server test",
     "test:packages:rest": "pnpm --filter \"./packages/*\" --filter \"!@pim/v2-server\" --no-sort test",
     "test:daemons": "node --test \"displayd/test/*.test.js\" \"sandbox-manager/test/*.test.js\" \"sandbox-manager/hostopsd/test/*.test.js\" \"workspace-agentd/test/*.test.mjs\"",
-    "test:changed": "node scripts/test-changed.mjs",
-    "test:live": "PIM_LIVE=1 vitest run"
+    "test:changed": "node scripts/test-changed.mjs"
   },
   "dependencies": {
-    "@cloudflare/computer": "0.5.1",
-    "@cloudflare/puppeteer": "1.4.0",
-    "@cloudflare/workers-oauth-provider": "^1.2.3",
-    "@earendil-works/chord": "1.5.2",
-    "@earendil-works/pi-ai": "1.5.2",
-    "@earendil-works/pi-durable": "1.5.2",
-    "typebox": "1.3.27",
-    "@modelcontextprotocol/client": "2.0.0",
-    "@modelcontextprotocol/server": "2.0.0",
-    "@opentelemetry/api": "1.9.1",
-    "@opentelemetry/core": "2.12.0",
-    "@opentelemetry/otlp-transformer": "0.223.0",
-    "@opentelemetry/resources": "2.12.0",
-    "@opentelemetry/sdk-trace": "2.12.0",
-    "@pim/coding": "workspace:*",
-    "@pim/shared": "workspace:*",
-    "@pim/triggers": "workspace:*",
-    "@pim/ui-lang": "workspace:*",
-    "agents": "0.27.0",
-    "lib0": "^0.2.119",
-    "node-diff3": "^4.0.0",
-    "sucrase": "^3.35.1",
-    "y-protocols": "^1.0.7",
-    "yjs": "^13.6.33",
-    "zod": "^4.4.3"
+    "@pim/triggers": "workspace:*"
   },
   "devDependencies": {
-    "@cloudflare/vitest-plugin": "^1.3.7",
+    "@types/node": "^24.19.1",
     "typescript": "^7.0.2",
-    "vitest": "^4.1.11",
-    "wrangler": "^4.148.0"
+    "vitest": "^4.1.11"
   }
 }

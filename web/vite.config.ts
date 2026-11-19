@@ -7,8 +7,8 @@ import { defineConfig, loadEnv } from "vite";
 import { displaydBundle } from "../displayd/bundle.js";
 
 /**
- * In development, `/api` goes to Pim under `wrangler dev` (run `pnpm dev` at
- * the repository's root) with an API token you made in Settings, so you're
+ * In development, `/api` goes to a running Pim (the preview, `node scripts/v2-dev/preview.mjs`)
+ * with an API token you made in Settings, so you're
  * signed in as yourself without a passkey:
  *
  *   PIM_API_TOKEN=... pnpm dev:web

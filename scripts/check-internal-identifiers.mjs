@@ -1,5 +1,5 @@
 // Fails when the repository names a deployment's internal hosts or identifiers.
-// Those are set as Worker variables, never committed; docs and tests use example domains.
+// Those are set as deployment variables, never committed; docs and tests use example domains.
 // The banned words are kept only as SHA-256 hashes, so this file names none of them.
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";

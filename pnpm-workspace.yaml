@@ -2,8 +2,14 @@ packages:
   - web
   - packages/*
 allowBuilds:
+  '@embedded-postgres/darwin-arm64': set this to true or false
+  '@embedded-postgres/darwin-x64': set this to true or false
+  '@embedded-postgres/linux-arm': set this to true or false
   '@embedded-postgres/linux-arm64': true
+  '@embedded-postgres/linux-ia32': set this to true or false
+  '@embedded-postgres/linux-ppc64': set this to true or false
   '@embedded-postgres/linux-x64': true
+  '@embedded-postgres/windows-x64': set this to true or false
   '@google/genai': false
   '@mongodb-js/zstd': false
   core-js-pure: false
@@ -23,5 +29,4 @@ minimumReleaseAgeExclude:
 patchedDependencies:
   '@earendil-works/pi-ai@1.5.2': patches/@earendil-works__pi-ai@1.5.2.patch
   '@earendil-works/pi-durable@1.5.2': patches/@earendil-works__pi-durable@1.5.2.patch
-  '@modelcontextprotocol/client@2.0.0': patches/@modelcontextprotocol__client@2.0.0.patch
   agents@0.27.0: patches/agents@0.27.0.patch

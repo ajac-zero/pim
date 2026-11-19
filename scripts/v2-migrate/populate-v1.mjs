@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Fills a running v1 preview (`amp orb services ensure`, http://localhost:8787) with a realistic space through the real API paths, so the cutover can be rehearsed on data
+// Fills a running v1 preview (v1 is the git tag `v1-final`, no longer in this branch: `rehearse-local.mjs` starts it from PIM_V1_CHECKOUT, or run its `pnpm preview` yourself) with a realistic space through the real API paths, so the cutover can be rehearsed on data
 // a real Worker wrote instead of a synthetic fixture. Two accounts (ada the admin, bob), chats with a fork and a chat cut off mid-tool, agents, skills with files and
 // versions, memories, goals, scheduled tasks, notes, apps with versions, an uploaded image, a custom model provider with an API key, settings and a profile.
 // Also what the admin shares and what credentials a space holds: a template, a bot, the agent everyone starts with, a provider shared with everyone, and (through the preview's

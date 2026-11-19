@@ -3,5 +3,5 @@ export type TestRun =
 	| { readonly full: true; readonly reason: string }
 	| { readonly full: false; readonly root: boolean; readonly web: boolean; readonly daemons: boolean };
 
-/** What the files a diff touches should run: the whole suite when a change can reach any test or nothing maps to one, otherwise the root project for anything outside web/ and the daemons, the web app for web/ and the files of src/ it imports, and the daemons' tests for a daemon. */
+/** What the files a diff touches should run: the whole suite when a change can reach any test or nothing maps to one, otherwise the root's Node tests for anything outside web/ and the daemons, the web app for web/ and the files of src/ it imports, and the daemons' tests for a daemon. */
 export function selectRuns(changed: readonly string[]): TestRun;

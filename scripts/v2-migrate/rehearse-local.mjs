@@ -1,5 +1,11 @@
 #!/usr/bin/env node
-// Rehearses the whole v1 -> v2 cutover, end to end, on this machine, against a real v1 Worker (the preview, `wrangler dev`) instead of a synthetic snapshot:
+// Rehearses the whole v1 -> v2 cutover, end to end, on this machine, against a real v1 Worker (the preview, `wrangler dev`) instead of a synthetic snapshot.
+//
+// v1 is no longer in this branch: it needs a checkout of the git tag `v1-final` (the last commit with the Worker), named by the environment variable PIM_V1_CHECKOUT, with its
+// dependencies installed (`pnpm install`) and its web app built (`pnpm build`):
+//   git worktree add ../pim-v1 v1-final && (cd ../pim-v1 && pnpm install --frozen-lockfile && pnpm build)
+//   PIM_V1_CHECKOUT=../pim-v1 node scripts/v2-migrate/rehearse-local.mjs all --database-url ...
+// The Worker's `wrangler.jsonc`, `wrangler.preview.jsonc`, `preview/worker.ts` and `web/dist` are read from there; the fence Worker is this branch's (packages/v2-ops/src/fence-worker).
 //
 //   v1        start the v1 preview on a fresh state, fill it through its real API (populate-v1.mjs), and take a digest of what it serves
 //   fence     stop it, then run the inert fence Worker (packages/v2-ops/src/fence-worker) on the SAME Durable Object, R2 and KV state
@@ -17,7 +23,7 @@
 //   --provider-host  the host the stand-in providers and MCP server are addressed by in v1's data (default 127.0.0.1; the Docker gateway, 172.18.0.1, for a Compose destination)
 //   --probe-seconds  a schedule that falls due while the fence is up (default 100); the rollback shows whether v1 fires it after being unfenced
 //   --keep           leave the processes running at the end
-// Needs: PIM_NATS_BIN (or nats-server on the PATH), and the node_modules of this checkout (wrangler, tsx, s3rver). Nothing here touches Cloudflare, a live host or any cloud.
+// Needs: PIM_V1_CHECKOUT (above), PIM_NATS_BIN (or nats-server on the PATH), and the node_modules of this checkout (wrangler in @pim/v2-ops, tsx, s3rver). Nothing here touches Cloudflare, a live host or any cloud.
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, createWriteStream } from "node:fs";
@@ -28,6 +34,14 @@ import { parseArgs } from "node:util";
 import pg from "../../packages/v2-server/node_modules/pg/lib/index.js";
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+/** The checkout of the git tag `v1-final`, where the Worker's configuration and preview live: this branch has no Worker of its own. */
+const V1_CHECKOUT = process.env.PIM_V1_CHECKOUT ? resolve(process.env.PIM_V1_CHECKOUT) : null;
+function v1File(path) {
+	if (!V1_CHECKOUT) throw new Error("The rehearsal needs a checkout of the git tag v1-final: set PIM_V1_CHECKOUT=<path> (git worktree add <path> v1-final; pnpm install; pnpm build there).");
+	const file = join(V1_CHECKOUT, path);
+	if (!existsSync(file)) throw new Error(`PIM_V1_CHECKOUT=${V1_CHECKOUT} has no ${path}: it must be a checkout of the git tag v1-final.`);
+	return file;
+}
 const { positionals, values } = parseArgs({
 	allowPositionals: true,
 	options: {
@@ -45,6 +59,12 @@ const { positionals, values } = parseArgs({
 });
 const ALL = ["v1", "fence", "export", "import", "serve", "verify", "rollback"];
 const phases = positionals.length === 0 || positionals.includes("all") ? ALL : positionals;
+try {
+	if (phases.some((phase) => ["v1", "fence", "rollback"].includes(phase))) for (const file of ["wrangler.jsonc", "wrangler.preview.jsonc", "preview/worker.ts", "web/dist"]) v1File(file);
+} catch (error) {
+	console.error(error.message);
+	process.exit(2);
+}
 const WORK = resolve(values.work);
 const dir = (name) => (mkdirSync(join(WORK, name), { recursive: true }), join(WORK, name));
 mkdirSync(WORK, { recursive: true });
@@ -112,10 +132,10 @@ const jsonc = (file) => JSON.parse(readFileSync(file, "utf8").replace(/^\s*\/\/.
 // ---- the legacy Worker and the fence Worker, on one state directory ----
 const stateDir = () => join(WORK, "v1-state");
 function v1Config() {
-	const preview = jsonc(join(REPO, "wrangler.preview.jsonc"));
+	const preview = jsonc(v1File("wrangler.preview.jsonc"));
 	delete preview.build; // the web app is already built; the rehearsal must not rebuild it
-	preview.main = join(REPO, "preview/worker.ts");
-	preview.assets = { ...preview.assets, directory: join(REPO, "web/dist") };
+	preview.main = v1File("preview/worker.ts");
+	preview.assets = { ...preview.assets, directory: v1File("web/dist") };
 	preview.dev = { ip: "127.0.0.1", port: Number(values["v1-port"]) };
 	const origin = V1;
 	preview.vars = { ...preview.vars, PIM_PUBLIC_URL: origin, PIM_CONTENT_ORIGIN: `http://127.0.0.1:${values["v1-port"]}`, PIM_APPS_ORIGIN: `http://apps.localhost:${values["v1-port"]}` };
@@ -125,8 +145,8 @@ function v1Config() {
 }
 function fenceConfig() {
 	// The production config's classes, bindings and migrations (so nothing is deleted), under the preview's name, buckets and namespace so it opens the same state.
-	const prod = jsonc(join(REPO, "wrangler.jsonc"));
-	const preview = jsonc(join(REPO, "wrangler.preview.jsonc"));
+	const prod = jsonc(v1File("wrangler.jsonc"));
+	const preview = jsonc(v1File("wrangler.preview.jsonc"));
 	const config = {};
 	for (const [k, v] of Object.entries(prod)) if (!["assets", "ai", "build", "ratelimits", "previews", "send_email", "$schema", "triggers", "routes", "route", "containers"].includes(k)) config[k] = structuredClone(v);
 	Object.assign(config, { name: preview.name, main: join(REPO, "packages/v2-ops/src/fence-worker/index.ts"), workers_dev: false, vars: {}, r2_buckets: preview.r2_buckets, kv_namespaces: preview.kv_namespaces.filter((k) => k.binding === "OAUTH_KV"), version_metadata: preview.version_metadata });
@@ -135,7 +155,11 @@ function fenceConfig() {
 	writeFileSync(join(d, ".dev.vars"), `FENCE_EXPORT_TOKEN=${FENCE_TOKEN}\n`, { mode: 0o600 });
 	return join(d, "wrangler.json");
 }
-const wrangler = (name, config, port) => start(name, "pnpm", ["exec", "wrangler", "dev", "--local", "-c", config, "--persist-to", stateDir(), "--ip", "127.0.0.1", "--port", String(port)]);
+/** Runs `wrangler dev` on one config: the legacy Worker from the v1-final checkout (`v1`), or the fence Worker from this branch's @pim/v2-ops. */
+const wrangler = (name, config, port) => {
+	const dev = ["wrangler", "dev", "--local", "-c", config, "--persist-to", stateDir(), "--ip", "127.0.0.1", "--port", String(port)];
+	return name === "v1" ? start(name, "pnpm", ["exec", ...dev], { cwd: V1_CHECKOUT }) : start(name, "pnpm", ["--filter", "@pim/v2-ops", "exec", ...dev]);
+};
 
 /** What a person sees through the legacy API, as one hash per area, leaving out what the fence probe adds. */
 async function digestV1() {

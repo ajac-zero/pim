@@ -1,9 +1,8 @@
 #!/usr/bin/env node
-// The whole suite's independent stages at once — the internal-identifier check, the root project's
-// Node tests, the packages' tests (packages/*), the web app's tests and the daemons' tests — each with its output prefixed with its name, so one stage
+// The whole suite's independent stages at once — the internal-identifier check, the root's
+// Node tests (computer/test and scripts/*.test.ts), the packages' tests (packages/*), the web app's tests and the daemons' tests — each with its output prefixed with its name, so one stage
 // doesn't wait for the ones before it. The full suite is CI's to run, in shards
-// (`.github/workflows/ci.yml`). Neither runs the Worker's own tests (v1's, kept until v1 is removed):
-// `pnpm exec vitest run --project worker` does. `pnpm test:serial` runs the same stages one at a time, for a
+// (`.github/workflows/ci.yml`). `pnpm test:serial` runs the same stages one at a time, for a
 // machine too small to hold them side by side (AGENTS.md).
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
@@ -11,7 +10,7 @@ import { createInterface } from "node:readline";
 /** The suite's stages: the name each line of its output is prefixed with, and the command that runs it. */
 const stages = [
 	{ name: "identifiers", run: [process.execPath, "scripts/check-internal-identifiers.mjs"] },
-	{ name: "node", run: ["pnpm", "exec", "vitest", "run", "--project", "node"] },
+	{ name: "node", run: ["pnpm", "exec", "vitest", "run"] },
 	{ name: "packages", run: ["pnpm", "test:packages"] },
 	{ name: "web", run: ["pnpm", "--filter", "pim-web", "test"] },
 	{ name: "daemons", run: ["pnpm", "test:daemons"] },

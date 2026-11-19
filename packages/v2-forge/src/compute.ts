@@ -5,7 +5,9 @@ import { ForgeError } from "./errors";
 export type ComputeHandle = { readonly id: string; readonly provider: string; readonly tag: string };
 
 /** What a new sandbox is made from: the thread's repository, and what it may reach. A provider fills in what is absent. */
-export type ComputeSpec = { /** Whose dependency cache and environment snapshots the sandbox belongs to (a host that keeps snapshots), and the snapshot it starts from. */ environment?: { userId: string; repo: string; restoreFrom?: string }; image?: string; repo?: { url: string; ref: string; branch: string }; egressAllow?: string[]; limits?: { cpu: number; memMiB: number; diskMiB: number; pids: number; wallClockMin: number | null } };
+export type ComputeSpec = { /** Whose dependency cache and environment snapshots the sandbox belongs to (a host that keeps snapshots), and the snapshot it starts from. */ environment?: { userId: string; repo: string; restoreFrom?: string }; image?: string; repo?: { url: string; ref: string; branch: string }; egressAllow?: string[]; limits?: { cpu: number; memMiB: number; diskMiB: number; pids: number; wallClockMin: number | null };
+	/** How long the sandbox may run from its creation, in minutes, which the host enforces: the person's session limit, or the minutes the month has left. It replaces the limits' own. */
+	wallClockMin?: number | null };
 export type ExecResult = { code: number | null; stdout: string; stderr: string; timedOut?: boolean };
 export type ExecOptions = { cwd?: string; env?: Record<string, string>; timeoutMs?: number; stdin?: string };
 

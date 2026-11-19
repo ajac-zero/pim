@@ -44,7 +44,7 @@ import { HarnessLogins } from "@pim/v2-forge/login-flows";
 import { PiTurnPort, type PiPortDeps } from "@pim/v2-forge/pi-port";
 import type { GitHost, TurnPort } from "@pim/v2-forge/ports";
 import { ProviderGitHost, providerUpstream } from "@pim/v2-forge/provider-git";
-import { ForgeScheduler } from "@pim/v2-forge/scheduler";
+import { ForgeScheduler, loginKey } from "@pim/v2-forge/scheduler";
 import { StallSupervisor } from "@pim/v2-forge/stall";
 import { ForgeStore } from "@pim/v2-forge/store";
 import { Credentials } from "@pim/v2-forge/tokens";
@@ -88,6 +88,8 @@ export type ForgeParts = {
 	worker: ForgeWorker;
 	stalls: StallSupervisor;
 	compute: ComputeProvider | null;
+	/** The pi models a person's coding threads may run on: their own catalog. */
+	models: PiPortDeps["models"];
 	/** The sandbox manager's workspaces, where a harness sign-in runs; null without a manager. */
 	workspaces: WorkspaceProvider | null;
 	git: GitHost;
@@ -149,9 +151,10 @@ export function assembleForge(db: ForgeDb, objects: ObjectStore, env: Env, crypt
 
 	// Turns: pi on pi-durable and PostgreSQL, and the three vendor CLIs, in the sandbox the manager makes. Amp needs no sandbox, only the person's key.
 	const turns: Partial<Record<Harness, TurnPort>> = {};
+	const models = overrides.models ?? ownerModels(db, crypto, env);
 	if (compute) {
 		const [provider, ...rest] = (env.PIM_CODING_DEFAULT_MODEL ?? "anthropic/claude-sonnet-5").split("/");
-		turns.pi = new PiTurnPort({ store, compute, models: overrides.models ?? ownerModels(db, crypto, env), defaultModel: { provider: provider!, modelId: rest.join("/") } });
+		turns.pi = new PiTurnPort({ store, compute, models, defaultModel: { provider: provider!, modelId: rest.join("/") } });
 		if (vault) for (const cli of [claudeCode, codex, mistralVibe]) turns[cli.id as Harness] = new CliTurnPort({ cli, compute, store, scheduler, vault });
 	}
 	const wiring = vault ? { db, vault, baseUrl: env.PIM_AMP_BASE_URL ?? "https://ampcode.com", ...(overrides.fetch ? { fetch: overrides.fetch } : {}) } : null;
@@ -161,6 +164,7 @@ export function assembleForge(db: ForgeDb, objects: ObjectStore, env: Env, crypt
 		turns,
 		compute,
 		orbs: wiring ? ampOrbClients(wiring) : () => null,
+		git,
 		objects: objects as never,
 		...(wiring ? { attachments: ampAttachmentFetcher(wiring), ampBaseUrl: wiring.baseUrl } : {}),
 		defaultPool: env.PIM_CODING_DEFAULT_POOL ?? "default",
@@ -182,7 +186,7 @@ export function assembleForge(db: ForgeDb, objects: ObjectStore, env: Env, crypt
 	});
 	const ampConfigured = opts.ampConfigured ?? vault !== null;
 	const forge = new Forge({ db, store, authz, scheduler, credentials, git, objects: objects as never, orbs: wiring ? ampOrbClients(wiring) : () => null, compute, ampConfigured, promoteOnRelease: !opts.scoped });
-	return { forge, store, authz, scheduler, credentials, db, worker, stalls: new StallSupervisor(db, store, clock), compute, workspaces, git, gitUpstream, gitea, vault, ampConfigured, env };
+	return { forge, store, authz, scheduler, credentials, db, worker, stalls: new StallSupervisor(db, store, clock), compute, models, workspaces, git, gitUpstream, gitea, vault, ampConfigured, env };
 }
 
 /** Forge's HTTP surface for the Gate, whose database role is subject to row-level security: each request runs under its owner's scope. The git broker and the Gitea connection are mounted when there is a git host for them. */
@@ -194,7 +198,14 @@ export function forgeHttp(parts: ForgeParts, o: { authenticate: Authenticate; cr
 	// A sign-in or a key makes the person's threads that waited for it go on, under their own scope.
 	const resume = async (owner: string, harness: string) => void (await parts.forge.scopedTo(owner).resumeAfterLogin(owner, harness));
 	// Harness sign-ins run in a short-lived sandbox of the manager, so they are offered where there is one.
-	const login = new HarnessLogins({ provider: parts.workspaces, image: parts.env.PIM_CODING_IMAGE ?? "pim-workspace:local", vault, onConnected: resume });
+	const login = new HarnessLogins({
+		provider: parts.workspaces,
+		image: parts.env.PIM_CODING_IMAGE ?? "pim-workspace:local",
+		vault,
+		onConnected: resume,
+		// The sign-in's sandbox counts against the person's compute quota like a thread's workspace.
+		compute: { begin: async (owner, harness, provider) => (await parts.scheduler.beginSandbox(owner, loginKey(owner, harness), provider, { maxMinutes: 20 })).wallClockMin, end: (owner, harness) => parts.scheduler.endSandbox(loginKey(owner, harness)) },
+	});
 	const inner = compose(
 		codingRest({ forge: parts.forge, scheduler: parts.scheduler, store: parts.store, db, authenticate: o.authenticate, scoped: true }),
 		codingVault({ vault, authenticate: o.authenticate, login, connected: resume }),

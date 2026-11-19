@@ -53,6 +53,8 @@ export type LoginDeps = {
 	/** How long the CLI has to print the URL, and the whole sign-in to finish. */
 	readonly urlTimeoutMs?: number;
 	readonly timeoutMs?: number;
+	/** The minutes the person's compute quota leaves the workspace, when fewer than the sign-in's own twenty. */
+	readonly wallClockMin?: number;
 };
 
 /** The file the code is handed to the CLI through. */
@@ -110,7 +112,7 @@ export class HarnessLoginFlow {
 				image,
 				// No repository: the sign-in needs none.
 				repo: { url: "", ref: "", branch: "" },
-				limits: { cpu: 1, memMiB: 1024, diskMiB: 1024, pids: 256, wallClockMin: 20 },
+				limits: { cpu: 1, memMiB: 1024, diskMiB: 1024, pids: 256, wallClockMin: Math.min(20, this.#deps.wallClockMin ?? 20) },
 				egress: { allow: [...harness.egress] },
 				gitAuth: { mode: "none" },
 			};

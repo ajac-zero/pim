@@ -16,6 +16,11 @@ export type HarnessLoginsOptions = {
 	vault: (ownerId: string) => ForgeVault;
 	/** After a login is kept: threads that waited for it go on. */
 	onConnected?: (ownerId: string, harness: string) => Promise<void>;
+	/**
+	 * The sign-in's workspace costs the deployment compute as a thread's does: the person's quota is checked before it is made (a refusal is the sign-in's failure, in the quota's words)
+	 * and its minutes are counted until the sign-in ends. `begin` answers how many minutes the quota leaves it, or null for no limit.
+	 */
+	compute?: { begin(ownerId: string, harness: string, provider: string): Promise<number | null>; end(ownerId: string, harness: string): Promise<void> };
 };
 
 const none = (harness: string): LoginStatus => ({ harness: harness as never, state: "none", url: null, userCode: null, error: null });
@@ -36,14 +41,30 @@ export class HarnessLogins implements LoginFlows {
 		if (!this.o.provider) throw new CapabilityUnavailableError("coding:login", "this deployment has no sandbox manager to run the sign-in in");
 		await this.cancel(ownerId, harness);
 		const key = `${ownerId}\n${harness}`;
-		const flow = new HarnessLoginFlow({ harness: cli, userId: ownerId, provider: this.o.provider, image: this.o.image, vault: this.o.vault(ownerId), ...(this.o.onConnected ? { onConnected: () => this.o.onConnected!(ownerId, harness) } : {}) });
+		let wallClockMin: number | null = null;
+		if (this.o.compute) {
+			try {
+				wallClockMin = await this.o.compute.begin(ownerId, harness, this.o.provider.id);
+			} catch (error) {
+				if (!(error instanceof ForgeError && error.code === "quota")) throw error;
+				return { harness: harness as never, state: "failed", url: null, userCode: null, error: error.message.replace(/^\w+: /, "") };
+			}
+		}
+		const flow = new HarnessLoginFlow({ harness: cli, userId: ownerId, provider: this.o.provider, image: this.o.image, vault: this.o.vault(ownerId), ...(wallClockMin === null ? {} : { wallClockMin }), ...(this.o.onConnected ? { onConnected: () => this.o.onConnected!(ownerId, harness) } : {}) });
 		this.flows.set(key, flow);
-		return flow.start();
+		return this.settled(ownerId, harness, await flow.start());
+	}
+
+	/** A sign-in that is over, connected or failed or gone, no longer counts against the person's compute. */
+	private async settled(ownerId: string, harness: string, status: LoginStatus): Promise<LoginStatus> {
+		if (this.o.compute && (status.state === "connected" || status.state === "failed" || status.state === "none")) await this.o.compute.end(ownerId, harness).catch((error) => console.warn(JSON.stringify({ event: "pim.coding.compute_end_failed", harness, error: String(error).slice(0, 300) })));
+		return status;
 	}
 
 	async status(ownerId: string, harness: string): Promise<LoginStatus> {
 		this.cli(harness);
-		return this.flows.get(`${ownerId}\n${harness}`)?.status() ?? none(harness);
+		const flow = this.flows.get(`${ownerId}\n${harness}`);
+		return flow ? this.settled(ownerId, harness, flow.status()) : none(harness);
 	}
 
 	async cancel(ownerId: string, harness: string): Promise<LoginStatus> {
@@ -54,7 +75,7 @@ export class HarnessLogins implements LoginFlows {
 			await flow.cancel();
 			this.flows.delete(key);
 		}
-		return none(harness);
+		return this.settled(ownerId, harness, none(harness));
 	}
 
 	/** The code the person pasted, for the harness whose sign-in they have under way (a paste-code sign-in takes it, a device-code one never does). */
@@ -62,6 +83,6 @@ export class HarnessLogins implements LoginFlows {
 		const cli = this.cli(harness);
 		if (cli.login?.mode !== "paste_code") throw new ForgeError("invalid", "This sign-in takes no code here: enter it on the sign-in page");
 		const flow = this.flows.get(`${ownerId}\n${harness}`);
-		return flow ? flow.submit(code) : none(harness);
+		return this.settled(ownerId, harness, flow ? await flow.submit(code) : none(harness));
 	}
 }

@@ -22,17 +22,23 @@ export async function usageReport(app: App, ownerId: string, days = 30) {
 type ComputeQuota = { maxConcurrentWorkspaces: number | null; monthlySandboxMinutes: number | null; maxSessionMinutes: number | null };
 const NO_COMPUTE_QUOTA: ComputeQuota = { maxConcurrentWorkspaces: null, monthlySandboxMinutes: null, maxSessionMinutes: null };
 const num = (v: unknown) => (v === null || v === undefined ? null : Number(v));
-/** Forge keeps a quota as `max_concurrent` and `compute_minutes` (and `usd`, which the app has no field for); the longest session has no counterpart, so it is never set. */
-const quotaOf = (row: Record<string, unknown> | undefined): Partial<ComputeQuota> | null => (row ? { maxConcurrentWorkspaces: num(row.max_concurrent), monthlySandboxMinutes: num(row.compute_minutes) } : null);
+/** Forge keeps a quota as `max_concurrent`, `compute_minutes` and `max_session_minutes` (and `usd`, which the app has no field for). */
+const quotaOf = (row: Record<string, unknown> | undefined): Partial<ComputeQuota> | null => (row ? { maxConcurrentWorkspaces: num(row.max_concurrent), monthlySandboxMinutes: num(row.compute_minutes), maxSessionMinutes: num(row.max_session_minutes) } : null);
 
 /** What a person may use of the deployment's compute for coding sandboxes, and what they used: Forge's quota rows (the person's own over the deployment's) and its compute ledger. */
 export async function computeReport(app: App, ownerId: string) {
 	return app.db.owner(ownerId, async (tx) => {
-		const rows = (await tx.query("SELECT subject_type, max_concurrent, compute_minutes FROM pim_forge.forge_quotas WHERE (subject_type, subject_id) IN (('user', $1), ('deployment', '*'))", [ownerId])).rows;
+		const rows = (await tx.query("SELECT subject_type, max_concurrent, compute_minutes, max_session_minutes FROM pim_forge.forge_quotas WHERE (subject_type, subject_id) IN (('user', $1), ('deployment', '*'))", [ownerId])).rows;
 		const own = quotaOf(rows.find((r) => r.subject_type === "user"));
 		const deployment = quotaOf(rows.find((r) => r.subject_type === "deployment"));
-		const minutes = `coalesce(sum(extract(epoch FROM (coalesce(ended_at, now()) - began_at))) / 60, 0)`;
-		const months = (await tx.query(`SELECT to_char(began_at AT TIME ZONE 'UTC', 'YYYY-MM') AS month, provider, ${minutes} AS minutes, count(*) FILTER (WHERE ended_at IS NULL)::int AS running FROM pim_forge.forge_compute_usage WHERE began_at >= date_trunc('month', now()) - interval '11 months' GROUP BY 1, 2`)).rows;
+		// Each stretch counts toward every month it ran in, by when it ran: one that crosses midnight on the 1st is split between the two.
+		const months = (await tx.query(
+			`WITH m AS (SELECT generate_series(date_trunc('month', now() AT TIME ZONE 'UTC') - interval '11 months', date_trunc('month', now() AT TIME ZONE 'UTC'), interval '1 month') AS start)
+			 SELECT to_char(m.start, 'YYYY-MM') AS month, u.provider,
+			        coalesce(sum(extract(epoch FROM (least(coalesce(u.ended_at, now()), (m.start + interval '1 month') AT TIME ZONE 'UTC') - greatest(u.began_at, m.start AT TIME ZONE 'UTC')))) / 60, 0) AS minutes,
+			        count(*) FILTER (WHERE u.ended_at IS NULL)::int AS running
+			 FROM m JOIN pim_forge.forge_compute_usage u ON u.owner_id = $1 AND u.began_at < (m.start + interval '1 month') AT TIME ZONE 'UTC' AND coalesce(u.ended_at, now()) > m.start AT TIME ZONE 'UTC'
+			 GROUP BY 1, 2`, [ownerId])).rows;
 		const month = new Date().toISOString().slice(0, 7);
 		const total = (list: typeof months) => Math.round(list.reduce((n, r) => n + Number(r.minutes), 0));
 		const thisMonth = months.filter((r) => r.month === month);
@@ -48,8 +54,8 @@ export async function computeReport(app: App, ownerId: string) {
 	});
 }
 
-/** The compute quota as the admin sets it, over `forge_quotas`: whole numbers or null, and no longest session, which Forge does not limit. */
-function parseComputeQuota(value: unknown): { max_concurrent: number | null; compute_minutes: number | null } {
+/** The compute quota as the admin sets it, over `forge_quotas`: whole numbers or null. */
+function parseComputeQuota(value: unknown): { max_concurrent: number | null; compute_minutes: number | null; max_session_minutes: number | null } {
 	if (value === null || typeof value !== "object" || Array.isArray(value)) throw new BadRequestError("quota must be an object");
 	const q = value as Record<string, unknown>;
 	for (const name of Object.keys(q)) if (!["maxConcurrentWorkspaces", "monthlySandboxMinutes", "maxSessionMinutes"].includes(name)) throw new BadRequestError(`Unknown quota ${name}`);
@@ -59,14 +65,13 @@ function parseComputeQuota(value: unknown): { max_concurrent: number | null; com
 		if (!(Number.isSafeInteger(v) && (v as number) >= 0)) throw new BadRequestError(`${name} must be a non-negative integer or null`);
 		return v as number;
 	};
-	if (whole("maxSessionMinutes") !== null) throw new BadRequestError("maxSessionMinutes is not limited on this deployment");
-	return { max_concurrent: whole("maxConcurrentWorkspaces"), compute_minutes: whole("monthlySandboxMinutes") };
+	return { max_concurrent: whole("maxConcurrentWorkspaces"), compute_minutes: whole("monthlySandboxMinutes"), max_session_minutes: whole("maxSessionMinutes") };
 }
 
 async function setComputeQuota(app: App, subject: ["user" | "deployment", string], quota: ReturnType<typeof parseComputeQuota> | null): Promise<void> {
 	await app.db.anonymous(async (tx) => {
-		if (quota === null || (quota.max_concurrent === null && quota.compute_minutes === null)) await tx.query("UPDATE pim_forge.forge_quotas SET max_concurrent = NULL, compute_minutes = NULL WHERE subject_type = $1 AND subject_id = $2", subject);
-		else await tx.query("INSERT INTO pim_forge.forge_quotas (subject_type, subject_id, max_concurrent, compute_minutes) VALUES ($1,$2,$3,$4) ON CONFLICT (subject_type, subject_id) DO UPDATE SET max_concurrent = $3, compute_minutes = $4", [...subject, quota.max_concurrent, quota.compute_minutes]);
+		if (quota === null || (quota.max_concurrent === null && quota.compute_minutes === null && quota.max_session_minutes === null)) await tx.query("UPDATE pim_forge.forge_quotas SET max_concurrent = NULL, compute_minutes = NULL, max_session_minutes = NULL WHERE subject_type = $1 AND subject_id = $2", subject);
+		else await tx.query("INSERT INTO pim_forge.forge_quotas (subject_type, subject_id, max_concurrent, compute_minutes, max_session_minutes) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (subject_type, subject_id) DO UPDATE SET max_concurrent = $3, compute_minutes = $4, max_session_minutes = $5", [...subject, quota.max_concurrent, quota.compute_minutes, quota.max_session_minutes]);
 	});
 }
 

@@ -1,5 +1,6 @@
 // The real ComputeProvider: a `@pim/coding` WorkspaceProvider (the sandbox-manager client, `ComposeWorkspaceProvider`, whose sandboxes run workspace-agentd) behind Forge's tag-based contract.
 // The tag is the workspace's session id, and the manager creates idempotently per session, so `find` by tag is how an ambiguous create is settled.
+import { ComposeManagerError } from "@pim/coding/workspace/compose";
 import { WorkspaceCapacityError, type Workspace, type WorkspaceProvider, type WorkspaceRef, type WorkspaceSpec } from "@pim/coding/workspace/types";
 import { AmbiguousCreateError, type ComputeHandle, type ComputeProvider, type ComputeSpec, type Environments, type ExecOptions, type ExecResult } from "./compute";
 import { ForgeError } from "./errors";
@@ -43,7 +44,7 @@ export class WorkspaceAgentComputeProvider implements ComputeProvider {
 			sessionId: tag,
 			image: spec.image ?? this.options.image ?? "pim-workspace:local",
 			repo: spec.repo ?? { url: "", ref: "HEAD", branch: "" },
-			limits: spec.limits ?? DEFAULT_LIMITS,
+			limits: spec.wallClockMin === undefined ? (spec.limits ?? DEFAULT_LIMITS) : { ...(spec.limits ?? DEFAULT_LIMITS), wallClockMin: spec.wallClockMin },
 			egress: { allow: [...(this.options.egressAllow ?? []), ...(spec.egressAllow ?? [])] },
 			gitAuth: { mode: spec.repo ? "broker" : "none" },
 			...(spec.environment && this.provider.capabilities.environmentSnapshots ? { environment: spec.environment } : {}),
@@ -61,6 +62,8 @@ export class WorkspaceAgentComputeProvider implements ComputeProvider {
 			return { id: ref.id, provider: this.id, tag };
 		} catch (error) {
 			if (error instanceof WorkspaceCapacityError) throw new ForgeError("conflict", "The sandbox host is at capacity");
+			// A manager whose disk is low refuses new workspaces: the thread waits for room, as it does for capacity, instead of failing.
+			if (error instanceof ComposeManagerError && error.code === "low_disk") throw new ForgeError("conflict", `low_disk: ${error.message}`);
 			// A manager that went quiet after receiving the request may have made the sandbox: the caller reconciles by tag.
 			if (error instanceof Error && /fetch failed|timed out|timeout|ETIMEDOUT|ECONNRESET|socket hang up|502|503|504/i.test(error.message)) throw new AmbiguousCreateError(error.message);
 			throw error;

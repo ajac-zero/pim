@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { FakeWorkspaceProvider } from "@pim/coding/workspace/fake";
 import { tx } from "../src/db";
 import { HarnessLogins } from "../src/login-flows";
+import { loginKey } from "../src/scheduler";
 import { ForgeVault, LocalEnvelopeCrypto } from "../src/vault";
 import { ada, startReq, stack } from "./stack";
 
@@ -52,5 +53,28 @@ describe("harness sign-in", () => {
 		await expect.poll(async () => (await logins.status("ada", "codex")).state).toBe("failed");
 		expect((await vault.status("ada")).find((h) => h.harness === "codex")!.connected).toBe(false);
 		await expect(logins.start("ada", "pi")).rejects.toThrow(/No sign-in/);
+	});
+
+	it("counts the sign-in's workspace against the person's compute quota until it ends, and refuses one the quota does not allow", async () => {
+		const counted = new HarnessLogins({
+			provider, image: "pim-workspace:local", vault: () => vault,
+			compute: { begin: async (owner, harness, name) => (await s.scheduler.beginSandbox(owner, loginKey(owner, harness), name, { maxMinutes: 20 })).wallClockMin, end: (owner, harness) => s.scheduler.endSandbox(loginKey(owner, harness)) },
+		});
+		await s.pool.query("insert into pim_forge.forge_quotas (subject_type, subject_id, max_session_minutes) values ('user', 'lex', 0)");
+		// A person whose quota allows no workspace is told so, in the quota's words, and no workspace is made.
+		expect(await counted.start("lex", "codex")).toMatchObject({ state: "failed", error: expect.stringContaining("session length limit is 0 minutes") });
+		expect(await provider.list({})).toEqual([]);
+		// Another person's sign-in is counted while it runs and stops counting once it is over, whichever way it ends.
+		saves = true;
+		await vault.delete("ada", "codex");
+		const open = async () => Number((await s.pool.query("select count(*) c from pim_forge.forge_compute_usage where thread_id = $1 and ended_at is null", [loginKey("ada", "codex")])).rows[0].c);
+		await counted.start("ada", "codex");
+		await expect.poll(async () => (await counted.status("ada", "codex")).state).toBe("connected");
+		expect(await open()).toBe(0);
+		expect((await s.pool.query("select count(*) c from pim_forge.forge_compute_usage where thread_id = $1", [loginKey("ada", "codex")])).rows[0].c).toBe("1");
+		saves = false;
+		await counted.start("ada", "codex");
+		await counted.cancel("ada", "codex");
+		expect(await open()).toBe(0);
 	});
 });

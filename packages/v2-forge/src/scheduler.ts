@@ -8,9 +8,18 @@ import { type ForgeStore } from "./store";
 export const QUEUE_DEADLINE_MS = 30 * 60_000;
 /** A held workspace with nothing to do keeps its slot this long. */
 export const IDLE_SLOT_GRACE_MS = 2 * 60_000;
+/** A thread waiting for the person (a login) keeps its slot this long, as v1 held it. */
+export const WAITING_SLOT_GRACE_MS = 5 * 60_000;
 export { POOL_COOLDOWN_MS };
 
-export type Admission = { kind: "slot"; poolId: string; probe: boolean } | { kind: "queued"; poolId: string; position: number } | { kind: "unhealthy"; poolId: string };
+/** How long past its limit a workspace may run before Forge itself stops it, which leaves the sandbox host's own wall clock the first chance. */
+export const SESSION_CAP_GRACE_MS = 60_000;
+const MINUTE_MS = 60_000;
+
+/** Where a sandbox that belongs to no thread (a harness sign-in's) is counted: a name no thread has. */
+export const loginKey = (ownerId: string, harness: string) => `login:${ownerId}:${harness}`;
+
+export type Admission = { kind: "slot"; poolId: string; probe: boolean; /** The longest this workspace may run from its start, in minutes; null for no limit. */ wallClockMin: number | null } | { kind: "queued"; poolId: string; position: number } | { kind: "unhealthy"; poolId: string };
 
 const lockPool = (q: Queryable, poolId: string) => q.query("select pg_advisory_xact_lock(hashtext($1))", [`forge_pool:${poolId}`]);
 
@@ -41,8 +50,17 @@ export class ForgeScheduler {
 		await q.query("update pim_forge.forge_pool_breakers set failures = $2, retry_at = $3, probe = $4 where pool_id = $1", [poolId, b.failures, b.retryAt === null ? null : this.at(b.retryAt), b.probe]);
 	}
 
-	/** Quotas: the most specific of user, tenant, deployment that sets a number applies to that number. Thrown as `quota` so a second thread fails with compute_quota. */
-	async checkQuota(q: Queryable, ownerId: string, tenantId: string | null, opts: { startingWorkspaceThread: boolean }): Promise<void> {
+	/** The minutes of a person's stretches that fall inside [from, until): each is clipped to the window and, while it runs, to now, so one that crosses midnight on the 1st counts toward each month by when it ran. */
+	private async minutesIn(q: Queryable, ownerId: string, from: Date, until: Date): Promise<number> {
+		const row = (await q.query<Row>(`select coalesce(sum(greatest(0, extract(epoch from (least(coalesce(ended_at, $4), $3) - greatest(began_at, $2))))), 0) / 60 as m from pim_forge.forge_compute_usage where owner_id = $1 and began_at < $3 and coalesce(ended_at, $4) > $2`, [ownerId, from, until, this.at(this.clock())])).rows[0]!;
+		return Number(row.m);
+	}
+
+	/**
+	 * Quotas: the most specific of user, tenant, deployment that sets a number applies to that number. Thrown as `quota` so a second thread fails with compute_quota.
+	 * Answers how long the workspace may then run (v1's `capAt`): the session limit, or the month's minutes that are left, whichever is less, and null for no limit.
+	 */
+	async checkQuota(q: Queryable, ownerId: string, tenantId: string | null, opts: { startingWorkspaceThread: boolean }): Promise<{ wallClockMin: number | null }> {
 		const rows = (
 			await q.query<Row>("select * from pim_forge.forge_quotas where (subject_type, subject_id) in (('user', $1), ('tenant', $2), ('deployment', '*'))", [ownerId, tenantId ?? ""])
 		).rows;
@@ -55,19 +73,26 @@ export class ForgeScheduler {
 		};
 		const maxConcurrent = pick("max_concurrent");
 		if (opts.startingWorkspaceThread && maxConcurrent !== null) {
-			const held = Number((await q.query<Row>("select count(*) c from pim_forge.forge_slots where owner_id = $1", [ownerId])).rows[0]!.c);
+			// What counts is the stretches running, which a sign-in's workspace has as a thread's slot does.
+			const held = Number((await q.query<Row>("select count(*) c from pim_forge.forge_compute_usage where owner_id = $1 and ended_at is null", [ownerId])).rows[0]!.c);
 			if (held >= maxConcurrent) throw new ForgeError("quota", `compute_quota: ${maxConcurrent} concurrent coding workspaces are allowed`);
 		}
+		const session = pick("max_session_minutes");
+		if (session !== null && session <= 0) throw new ForgeError("quota", "compute_quota: your session length limit is 0 minutes, so no sandbox workspaces run");
+		let remaining: number | null = null;
 		const minutes = pick("compute_minutes");
 		if (minutes !== null) {
-			const used = Number((await q.query<Row>(`select coalesce(sum(extract(epoch from (coalesce(ended_at, $2) - began_at))) / 60, 0) m from pim_forge.forge_compute_usage where owner_id = $1 and began_at >= date_trunc('month', $2::timestamptz)`, [ownerId, this.at(this.clock())])).rows[0]!.m);
+			const now = new Date(this.clock());
+			const used = await this.minutesIn(q, ownerId, new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)), new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1)));
 			if (used >= minutes) throw new ForgeError("quota", `compute_quota: ${minutes} compute minutes this month are spent`);
+			remaining = Math.max(1, Math.ceil(minutes - used));
 		}
 		const usd = pick("usd");
 		if (usd !== null) {
 			const spent = Number((await q.query<Row>(`select coalesce(sum(spent_usd), 0) s from pim_forge.forge_threads where owner_id = $1 and created_at >= date_trunc('month', $2::timestamptz)`, [ownerId, this.at(this.clock())])).rows[0]!.s);
 			if (spent >= usd) throw new ForgeError("quota", `usd_quota: $${usd} of coding spend this month is used`);
 		}
+		return { wallClockMin: session === null ? remaining : remaining === null ? session : Math.min(session, remaining) };
 	}
 
 	/**
@@ -89,18 +114,22 @@ export class ForgeScheduler {
 			const pool = (await q.query<Row>("select * from pim_forge.forge_pools where pool_id = $1", [poolId])).rows[0];
 			if (!pool || !pool.enabled) return { kind: "unhealthy", poolId } as Admission;
 			const existing = (await q.query("select 1 from pim_forge.forge_slots where thread_id = $1", [threadId])).rows.length;
-			if (existing) return { kind: "slot", poolId, probe: false } as Admission;
-			await this.checkQuota(q, ownerId, tenantId, { startingWorkspaceThread: true });
+			if (existing) {
+				// A slot already held keeps the end its stretch was given.
+				const cap = (await q.query<Row>("select cap_at from pim_forge.forge_compute_usage where thread_id = $1 and ended_at is null order by id desc limit 1", [threadId])).rows[0]?.cap_at;
+				return { kind: "slot", poolId, probe: false, wallClockMin: cap ? Math.max(1, Math.ceil((new Date(cap).getTime() - this.clock()) / MINUTE_MS)) : null } as Admission;
+			}
+			const { wallClockMin } = await this.checkQuota(q, ownerId, tenantId, { startingWorkspaceThread: true });
 			const now = this.clock();
 			const b = await this.breaker(q, poolId);
 			if (!poolAvailable(b, now)) return { kind: "unhealthy", poolId } as Admission;
 			const held = Number((await q.query<Row>("select count(*) c from pim_forge.forge_slots where pool_id = $1", [poolId])).rows[0]!.c);
 			const waiting = Number((await q.query<Row>("select count(*) c from pim_forge.forge_queue where pool_id = $1 and thread_id <> $2", [poolId, threadId])).rows[0]!.c);
 			if (held < pool.size && waiting === 0) {
-				await this.takeSlot(q, threadId, poolId, ownerId);
+				await this.takeSlot(q, threadId, poolId, ownerId, wallClockMin);
 				const reserved = reservePool(b, threadId);
 				await this.saveBreaker(q, poolId, reserved);
-				return { kind: "slot", poolId, probe: b.retryAt !== null } as Admission;
+				return { kind: "slot", poolId, probe: b.retryAt !== null, wallClockMin } as Admission;
 			}
 			await q.query(
 				"insert into pim_forge.forge_queue (thread_id, pool_id, owner_id, deadline_at) values ($1,$2,$3,$4) on conflict (thread_id) do nothing",
@@ -112,12 +141,12 @@ export class ForgeScheduler {
 		});
 	}
 
-	private async takeSlot(q: Queryable, threadId: string, poolId: string, ownerId: string) {
+	private async takeSlot(q: Queryable, threadId: string, poolId: string, ownerId: string, wallClockMin: number | null) {
 		const at = this.at(this.clock());
 		await q.query("delete from pim_forge.forge_queue where thread_id = $1", [threadId]);
 		await q.query("insert into pim_forge.forge_slots (thread_id, pool_id, owner_id, acquired_at) values ($1,$2,$3,$4)", [threadId, poolId, ownerId, at]);
 		const provider = (await q.query<Row>("select provider from pim_forge.forge_pools where pool_id = $1", [poolId])).rows[0]!.provider;
-		await q.query("insert into pim_forge.forge_compute_usage (owner_id, thread_id, provider, began_at, reason) values ($1,$2,$3,$4,'slot')", [ownerId, threadId, provider, at]);
+		await q.query("insert into pim_forge.forge_compute_usage (owner_id, thread_id, provider, began_at, reason, cap_at) values ($1,$2,$3,$4,'slot',$5)", [ownerId, threadId, provider, at, wallClockMin === null ? null : this.at(at.getTime() + wallClockMin * MINUTE_MS)]);
 	}
 
 	/** Promotes in every pool: fills slots freed by a caller that couldn't, and expires overdue waiters (the 30-minute deadline). */
@@ -152,7 +181,7 @@ export class ForgeScheduler {
 					await q.query("insert into pim_forge.forge_queue (thread_id, pool_id, owner_id, deadline_at, requeued) values ($1,$2,$3,$4,true)", [e.thread_id, poolId, e.owner_id, this.at(now + QUEUE_DEADLINE_MS)]);
 				} else {
 					await q.query("delete from pim_forge.forge_queue where thread_id = $1", [e.thread_id]);
-					await this.store.setState(q, e.thread_id, "failed", "queue_timeout", "No workspace slot became free in time, even after one requeue");
+					await this.store.failEarly(q, e.thread_id, "queue_timeout", "No workspace slot became free in time, even after one requeue");
 				}
 			}
 			const pool = (await q.query<Row>("select * from pim_forge.forge_pools where pool_id = $1", [poolId])).rows[0];
@@ -164,15 +193,16 @@ export class ForgeScheduler {
 				if (held >= pool.size || !poolAvailable(b, now)) break;
 				const next = (await q.query<Row>("select * from pim_forge.forge_queue where pool_id = $1 order by seq limit 1 for update", [poolId])).rows[0];
 				if (!next) break;
+				let wallClockMin: number | null;
 				try {
-					await this.checkQuota(q, next.owner_id, null, { startingWorkspaceThread: true });
+					({ wallClockMin } = await this.checkQuota(q, next.owner_id, null, { startingWorkspaceThread: true }));
 				} catch (error) {
 					// Over quota now: the thread fails the way a direct admission would, and the ones behind it go on.
 					await q.query("delete from pim_forge.forge_queue where thread_id = $1", [next.thread_id]);
-					await this.store.setState(q, next.thread_id, "failed", "compute_quota", error instanceof Error ? error.message : null);
+					await this.store.failEarly(q, next.thread_id, "compute_quota", error instanceof Error ? error.message : null);
 					continue;
 				}
-				await this.takeSlot(q, next.thread_id, poolId, next.owner_id);
+				await this.takeSlot(q, next.thread_id, poolId, next.owner_id, wallClockMin);
 				b = reservePool(b, next.thread_id);
 				await this.store.setState(q, next.thread_id, "provisioning", null, null);
 				promoted.push(next.thread_id);
@@ -182,9 +212,44 @@ export class ForgeScheduler {
 		});
 	}
 
-	/** The held workspace has nothing to do: its slot is released after the idle grace unless work arrives. */
-	async markIdle(threadId: string): Promise<void> {
-		await this.db.query("update pim_forge.forge_slots set idle_since = coalesce(idle_since, $2) where thread_id = $1", [threadId, this.at(this.clock())]);
+	/**
+	 * A sandbox that is no thread's, such as a harness sign-in's, is about to run: checks the person's quota as a thread's is, and counts its minutes from now under `key` until `endSandbox`.
+	 * A stretch begun again under the same key ends the one before. Throws as `quota` when the person may not; answers how long it may run, in minutes, or null for no limit.
+	 */
+	async beginSandbox(ownerId: string, key: string, provider: string, o: { maxMinutes?: number } = {}): Promise<{ wallClockMin: number | null }> {
+		return tx(this.db, async (q) => {
+			await q.query("select pg_advisory_xact_lock(hashtext($1))", [`forge_owner:${ownerId}`]);
+			await this.endStretch(q, key, "restart");
+			const { wallClockMin } = await this.checkQuota(q, ownerId, null, { startingWorkspaceThread: true });
+			const limit = wallClockMin === null ? (o.maxMinutes ?? null) : Math.min(wallClockMin, o.maxMinutes ?? wallClockMin);
+			const at = this.at(this.clock());
+			await q.query("insert into pim_forge.forge_compute_usage (owner_id, thread_id, provider, began_at, reason, cap_at) values ($1,$2,$3,$4,'sandbox',$5)", [ownerId, key, provider, at, limit === null ? null : this.at(at.getTime() + limit * MINUTE_MS)]);
+			return { wallClockMin: limit };
+		});
+	}
+
+	/** The sandbox counted under `key` stopped running. */
+	async endSandbox(key: string, reason = "stop"): Promise<void> {
+		await tx(this.db, (q) => this.endStretch(q, key, reason));
+	}
+
+	private async endStretch(q: Queryable, key: string, reason: string): Promise<void> {
+		await q.query("update pim_forge.forge_compute_usage set ended_at = $2, reason = $3 where thread_id = $1 and ended_at is null", [key, this.at(this.clock()), reason]);
+	}
+
+	/**
+	 * The threads whose workspace has run past the end its quota gave it (the session limit, or the minutes the month had left), beyond a grace in which the sandbox host's own wall clock stops it first;
+	 * the worker gives their sandboxes back. A sign-in's sandbox is deleted by the host at its limit, so its stretch is ended here at the end it was given.
+	 */
+	async overCap(): Promise<string[]> {
+		const now = this.clock();
+		await this.db.query("update pim_forge.forge_compute_usage set ended_at = cap_at, reason = 'session_limit' where ended_at is null and cap_at is not null and cap_at <= $1 and thread_id like 'login:%'", [this.at(now)]);
+		return (await this.db.query<Row>("select u.thread_id from pim_forge.forge_compute_usage u join pim_forge.forge_slots s on s.thread_id = u.thread_id where u.ended_at is null and u.cap_at is not null and u.cap_at <= $1 order by u.cap_at", [this.at(now - SESSION_CAP_GRACE_MS)])).rows.map((r) => r.thread_id as string);
+	}
+
+	/** The held workspace has nothing to do: its slot is released after the idle grace (`graceMs`, longer for a thread that waits for the person) unless work arrives. */
+	async markIdle(threadId: string, graceMs = IDLE_SLOT_GRACE_MS): Promise<void> {
+		await this.db.query("update pim_forge.forge_slots set idle_since = coalesce(idle_since, $2) where thread_id = $1", [threadId, this.at(this.clock() + graceMs - IDLE_SLOT_GRACE_MS)]);
 	}
 
 	async markBusy(threadId: string): Promise<void> {

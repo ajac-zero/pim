@@ -171,11 +171,12 @@ describe("the web app's apps, gallery and admin routes", () => {
 		const bobId = (await stack.admin.query("SELECT owner_id FROM pim_app.accounts WHERE username = 'bob'")).rows[0].owner_id;
 		const thisMonth = new Date().toISOString().slice(0, 7);
 		const at = (minutesAgo: number) => new Date(Math.max(Date.parse(`${thisMonth}-01T00:00:00Z`) + 1_000, Date.now() - minutesAgo * 60_000));
-		await stack.admin.query("INSERT INTO pim_forge.forge_compute_usage (owner_id, thread_id, provider, began_at, ended_at) VALUES ($1,'t1','sandbox-manager',$2,$3), ($4,'t2','sandbox-manager',$5,NULL), ($1,'t3','sandbox-manager','2020-01-05','2020-01-06')", [adaId, new Date(`${thisMonth}-01T10:00:00Z`), new Date(`${thisMonth}-01T10:30:00Z`), bobId, at(0)]);
+		await stack.admin.query("INSERT INTO pim_forge.forge_compute_usage (owner_id, thread_id, provider, began_at, ended_at) VALUES ($1,'t1','sandbox-manager',$2,$3), ($4,'t2','sandbox-manager',$5,NULL), ($1,'t3','sandbox-manager','2020-01-05','2020-01-06'), ($1,'t4','sandbox-manager',$6,$7)", [adaId, new Date(`${thisMonth}-01T10:00:00Z`), new Date(`${thisMonth}-01T10:30:00Z`), bobId, at(0), new Date(Date.parse(`${thisMonth}-01T00:00:00Z`) - 40 * 60_000), new Date(Date.parse(`${thisMonth}-01T00:00:00Z`) + 20 * 60_000)]);
 		const usage = (await call("ada", "GET", "/api/admin/compute")).json.usage;
 		expect(usage).toMatchObject({ month: thisMonth, running: 1, byProvider: [{ provider: "sandbox-manager", running: 1 }] });
-		expect(usage.minutes).toBeGreaterThanOrEqual(30);
-		expect(usage.top[0]).toEqual({ username: "ada", minutes: 30, running: 0 });
+		// A stretch that crossed midnight on the 1st counts toward this month only for the 20 minutes that ran in it.
+		expect(usage.minutes).toBeGreaterThanOrEqual(50);
+		expect(usage.top[0]).toEqual({ username: "ada", minutes: 50, running: 0 });
 		expect(usage.top.map((t: { username: string }) => t.username)).toContain("bob");
 		// Checking a provider: one that the sandbox pools name but the environment gives no address for says so; an unknown one is not found.
 		expect((await call("ada", "POST", "/api/admin/compute/providers/sandbox-manager/validate", {})).json).toMatchObject({ ok: false, message: expect.stringContaining("environment") });

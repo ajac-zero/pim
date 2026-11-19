@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { IDLE_SLOT_GRACE_MS, POOL_COOLDOWN_MS, QUEUE_DEADLINE_MS } from "../src/scheduler";
+import { IDLE_SLOT_GRACE_MS, loginKey, POOL_COOLDOWN_MS, QUEUE_DEADLINE_MS, SESSION_CAP_GRACE_MS } from "../src/scheduler";
 import { stack } from "./stack";
 
 describe("ForgeScheduler on PostgreSQL", () => {
@@ -134,5 +134,53 @@ describe("ForgeScheduler on PostgreSQL", () => {
 		await s.pool.query("update pim_forge.forge_quotas set compute_minutes = null where subject_id = 'quinn'");
 		await s.pool.query("update pim_forge.forge_threads set spent_usd = 0.75 where thread_id = $1", [a]);
 		await expect(s.scheduler.admit(b, "q", "quinn")).rejects.toMatchObject({ message: expect.stringContaining("usd_quota") });
+	});
+
+	it("holds a workspace to the session limit or the month's minutes left, whichever is less, and refuses once they are spent", async () => {
+		await s.scheduler.upsertPool({ poolId: "mins", provider: "local", size: 10 });
+		await s.pool.query("insert into pim_forge.forge_quotas (subject_type, subject_id, compute_minutes, max_session_minutes) values ('user', 'sam', 60, 45), ('user', 'zed', null, 0)");
+		const [a, b, c] = [await thread("sam"), await thread("sam"), await thread("sam")];
+		// The first session is held to 45 minutes; it runs 40.
+		const first = await s.scheduler.admit(a, "mins", "sam");
+		expect(first).toMatchObject({ kind: "slot", wallClockMin: 45 });
+		// A thread that holds its slot already keeps the end it was given, counted from when it began.
+		s.advance(10 * 60_000);
+		expect(await s.scheduler.admit(a, "mins", "sam")).toMatchObject({ kind: "slot", wallClockMin: 35 });
+		s.advance(30 * 60_000);
+		await s.scheduler.release(a);
+		// 20 minutes are left, which is less than a session.
+		expect(await s.scheduler.admit(b, "mins", "sam")).toMatchObject({ kind: "slot", wallClockMin: 20 });
+		s.advance(20 * 60_000);
+		await s.scheduler.release(b);
+		await expect(s.scheduler.admit(c, "mins", "sam")).rejects.toMatchObject({ code: "quota", message: expect.stringContaining("60 compute minutes") });
+		// A session limit of 0 means no workspace at all.
+		await expect(s.scheduler.admit(await thread("zed"), "mins", "zed")).rejects.toMatchObject({ code: "quota", message: expect.stringContaining("session length limit is 0") });
+	});
+
+	it("counts a stretch toward each month it ran in, by when it ran", async () => {
+		const day = new Date(s.clock());
+		const first = Date.UTC(day.getUTCFullYear(), day.getUTCMonth(), 1);
+		await s.pool.query("insert into pim_forge.forge_quotas (subject_type, subject_id, compute_minutes) values ('user', 'mia', 25)");
+		// 30 minutes of October and 20 of November: only the 20 count against November's 25.
+		await s.pool.query("insert into pim_forge.forge_compute_usage (owner_id, thread_id, provider, began_at, ended_at) values ('mia', 'x', 'local', $1, $2)", [new Date(first - 30 * 60_000), new Date(first + 20 * 60_000)]);
+		s.advance(Math.max(0, first + 21 * 60_000 - s.clock()));
+		expect(await s.scheduler.admit(await thread("mia"), "mins", "mia")).toMatchObject({ kind: "slot", wallClockMin: 5 });
+	});
+
+	it("counts a harness sign-in's sandbox against the quota, and ends it at its limit", async () => {
+		await s.pool.query("insert into pim_forge.forge_quotas (subject_type, subject_id, max_concurrent) values ('user', 'ned', 1)");
+		expect(await s.scheduler.beginSandbox("ned", loginKey("ned", "codex"), "local", { maxMinutes: 20 })).toEqual({ wallClockMin: 20 });
+		// It holds the person's one workspace, so a thread is refused until it ends.
+		const t = await thread("ned");
+		await expect(s.scheduler.admit(t, "mins", "ned")).rejects.toMatchObject({ code: "quota", message: expect.stringContaining("concurrent") });
+		await s.scheduler.endSandbox(loginKey("ned", "codex"));
+		expect((await s.scheduler.admit(t, "mins", "ned")).kind).toBe("slot");
+		await s.scheduler.release(t);
+		// One nobody ended stops counting at the end it was given, so a restart doesn't leave it running.
+		await s.scheduler.beginSandbox("ned", loginKey("ned", "claude-code"), "local", { maxMinutes: 20 });
+		s.advance(21 * 60_000);
+		await s.scheduler.overCap();
+		expect((await s.pool.query("select ended_at is not null as ended, reason from pim_forge.forge_compute_usage where thread_id = $1", [loginKey("ned", "claude-code")])).rows[0]).toEqual({ ended: true, reason: "session_limit" });
+		expect(SESSION_CAP_GRACE_MS).toBeGreaterThan(0);
 	});
 });

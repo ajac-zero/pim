@@ -7,14 +7,15 @@ import { createHash } from "node:crypto";
 import { type Row, type Queryable } from "./db";
 import { CapabilityUnavailableError, ForgeError, LeaseLostError } from "./errors";
 import { capabilitiesOf, LEGACY_AMP_WORKSPACE_MESSAGE, MAX_RESUMES, MAX_SESSION_RESTARTS, type Harness } from "./harnesses";
-import { type AttachmentFetcher, type Objects, type OrbClients, type TurnPort, type TurnRequest, type TurnResult } from "./ports";
+import { type AttachmentFetcher, type GitHost, type Objects, type OrbClients, type TurnPort, type TurnRequest, type TurnResult } from "./ports";
 import { computeTag, Provisioner, type ComputeHandle, type ComputeProvider, type ComputeSpec } from "./compute";
 import { EnvironmentStopped, SNAPSHOT_SKIP_TTL_MS, environmentOwner, prepareEnvironment } from "./environment";
-import { type ForgeScheduler } from "./scheduler";
-import { DUE, type ForgeStore, type ThreadRow } from "./store";
-import { type CheckpointDeps, checkpointWorkspace, ensureBase, gitIn } from "./checkpoint";
+import { WAITING_SLOT_GRACE_MS, type ForgeScheduler } from "./scheduler";
+import { DUE, rootOperation, type ForgeStore, type ThreadRow } from "./store";
+import { type CheckpointDeps, autosaveWorkspace, checkpointWorkspace, ensureBase, gitIn } from "./checkpoint";
 import { REPO_DIR } from "./git-checkout";
 import { retryPlan } from "./retry";
+import { orbMessageText, pushedByAgent } from "./orb-branch";
 import { repoName } from "./authz";
 import { NO_ENVIRONMENT, SETUP_ENV, SETUP_TIMEOUT_MS, type CodingEnvironment } from "@pim/coding/environment-cache";
 
@@ -31,6 +32,8 @@ export type WorkerDeps = {
 	/** The workspace image as the manager names it: part of an environment's key. */
 	image?: string;
 	orbs: OrbClients;
+	/** The git host, which an Amp thread's pushed branch is looked for on. */
+	git?: GitHost;
 	objects: Objects;
 	attachments?: AttachmentFetcher;
 	/** Brings the git grant in a sandbox that already exists up to date (see `refreshGitCredentials`): before a turn of a thread that was aborted, whose grant was cut off. */
@@ -54,8 +57,10 @@ export type WorkerDeps = {
 	clock?: () => number;
 };
 
-/** `resume-<root>-<n>` and `retry-<root>-<n>` belong to the turn `root`; its wake is keyed by the root so a resumed turn ends once. */
-export const rootOperation = (op: string) => op.replace(/^(?:resume|retry)-(.*)-\d+$/, "$1");
+export { rootOperation };
+
+/** How long a host that has no room (a full manager, a low disk) is left alone before it is asked again. */
+const WAIT_FOR_ROOM_MS = 30_000;
 
 export type StepResult = "busy" | "done" | "queued" | "retry" | "skipped";
 
@@ -76,8 +81,11 @@ export class ForgeWorker {
 		this.holder = d.holder ?? `worker-${randomUUID()}`;
 		this.clock = d.clock ?? Date.now;
 		// A host that keeps environment snapshots is told whose sandbox it is, so the person's dependency cache and snapshots follow them.
-		this.provisioner = d.compute ? new Provisioner(d.store, d.compute, this.clock, undefined, (t) => ({ ...(d.computeSpec?.(t) ?? {}), ...(d.compute!.environments ? { environment: environmentOwner(t) } : {}) })) : null;
+		this.provisioner = d.compute ? new Provisioner(d.store, d.compute, this.clock, undefined, (t) => ({ ...(d.computeSpec?.(t) ?? {}), ...(this.wallClock.has(t.threadId) ? { wallClockMin: this.wallClock.get(t.threadId)! } : {}), ...(d.compute!.environments ? { environment: environmentOwner(t) } : {}) })) : null;
 	}
+
+	/** How long the sandbox of a thread being provisioned may run, as its admission gave it (the session limit, or the month's minutes left); the sandbox host stops it then. */
+	private readonly wallClock = new Map<string, number | null>();
 
 	/** Threads that need a step: provisioning, queued and promoted, running (after a crash), with pending input, or with an orb to poll. */
 	async sweep(): Promise<StepResult[]> {
@@ -85,6 +93,7 @@ export class ForgeWorker {
 			await this.d.store.db.query<Row>(
 				`select thread_id from pim_forge.forge_threads t where state in ('provisioning', 'running')
 				 or (state in ('idle', 'queued', 'waiting_input') and exists (select 1 from pim_forge.forge_inbox i where i.thread_id = t.thread_id and i.status = 'pending' and ${DUE}))
+				 or (state = 'failed' and exists (select 1 from pim_forge.forge_inbox i where i.thread_id = t.thread_id and i.status = 'pending' and i.kind = 'revive'))
 				 order by created_at`,
 			)
 		).rows.map((r) => r.thread_id as string);
@@ -94,7 +103,7 @@ export class ForgeWorker {
 	}
 
 	/**
-	 * Gives back the sandboxes of threads that have been idle past the grace: the checkout is bundled to Objects, the sandbox deleted, its slot freed, and the thread keeps its transcript and branch.
+	 * Gives back the sandboxes of threads that have been idle past the grace (a thread that failed, or waits for a login, is idle in this sense: it keeps its state and is provisioned again when continued): the checkout is bundled to Objects, the sandbox deleted, its slot freed, and the thread keeps its transcript and branch.
 	 * The next turn is provisioned again and restored from that bundle; a CLI's vendor session lived in the sandbox and starts anew (the first turn after tells it what it was asked and what it last said, as v1 did for a lost session).
 	 */
 	async reap(autosave?: (threadId: string) => Promise<void>): Promise<string[]> {
@@ -106,7 +115,7 @@ export class ForgeWorker {
 			try {
 				const t = await store.get(id);
 				const pending = (await store.db.query<Row>("select 1 from pim_forge.forge_inbox where thread_id = $1 and status in ('pending', 'sending')", [id])).rows.length > 0;
-				if (!t || t.state !== "idle" || pending || !t.workspaceRef) {
+				if (!t || !["idle", "failed", "waiting_input"].includes(t.state) || pending || !t.workspaceRef) {
 					await scheduler.markBusy(id);
 					continue;
 				}
@@ -115,9 +124,32 @@ export class ForgeWorker {
 				await store.fenced(id, epoch, async (q) => {
 					await store.patch(q, id, { workspace_ref: null, provisioning: null });
 					await q.query("delete from pim_forge.forge_harness_sessions where thread_id = $1", [id]);
-					await store.appendEvent(q, id, { kind: "workspace.released", data: { reason: "idle" } });
+					await store.appendEvent(q, id, { kind: "workspace.released", data: { reason: t.state === "idle" ? "idle" : t.state } });
 				});
 				await scheduler.release(id, "idle");
+				reaped.push(id);
+			} finally {
+				await store.releaseLease(id, this.holder, epoch);
+			}
+		}
+		// A workspace past the end its quota gave it (the session limit, or the month's minutes left) is given back whatever it is doing, once no turn of this worker is in it: the host's own wall
+		// clock normally stopped it first, and what is left here is a sandbox that kept running or a slot that kept counting. The next turn is provisioned again, and checked against the quota afresh.
+		for (const id of await scheduler.overCap()) {
+			if (this.turns.has(id)) continue;
+			const epoch = await store.acquireLease(id, this.holder, this.d.leaseMs ?? 60_000);
+			if (epoch === null) continue;
+			try {
+				const t = await store.get(id);
+				if (t?.workspaceRef) {
+					await autosave?.(id).catch(() => {});
+					await this.d.compute?.destroy(t.workspaceRef).catch(() => {});
+					await store.fenced(id, epoch, async (q) => {
+						await store.patch(q, id, { workspace_ref: null, provisioning: null });
+						await q.query("delete from pim_forge.forge_harness_sessions where thread_id = $1", [id]);
+						await store.appendEvent(q, id, { kind: "workspace.released", data: { reason: "session_limit" } });
+					});
+				}
+				await scheduler.release(id, "session_limit");
 				reaped.push(id);
 			} finally {
 				await store.releaseLease(id, this.holder, epoch);
@@ -151,6 +183,7 @@ export class ForgeWorker {
 			await this.d.store.db.query<Row>(
 				`select thread_id from pim_forge.forge_threads t where state in ('provisioning', 'running')
 				 or (state in ('idle', 'queued', 'waiting_input') and exists (select 1 from pim_forge.forge_inbox i where i.thread_id = t.thread_id and i.status in ('pending', 'sending', 'uncertain') and ${DUE}))
+				 or (state = 'failed' and exists (select 1 from pim_forge.forge_inbox i where i.thread_id = t.thread_id and i.status = 'pending' and i.kind = 'revive'))
 				 or (harness = 'amp' and orb is not null and state in ('running', 'waiting_input', 'idle') and (last_seen_at is null or last_seen_at < now() - (case when state = 'running' then $1 else $2 end)::interval))
 				 order by updated_at`,
 				[`${this.d.orbPollMs ?? 3000} milliseconds`, `${(this.d.orbPollMs ?? 3000) * 10} milliseconds`],
@@ -184,7 +217,9 @@ export class ForgeWorker {
 		const renew = setInterval(() => void this.d.store.acquireLease(threadId, this.holder, ttl).catch(() => {}), Math.max(1000, ttl / 3));
 		try {
 			const thread = await this.d.store.get(threadId);
-			if (!thread || thread.state === "archived" || thread.state === "failed") return "skipped";
+			if (!thread || thread.state === "archived") return "skipped";
+			// A thread that failed is left alone, unless its sandbox is wanted back for a push or a merge.
+			if (thread.state === "failed" && !(await this.d.store.db.query("select 1 from pim_forge.forge_inbox where thread_id = $1 and status = 'pending' and kind = 'revive'", [threadId])).rows.length) return "skipped";
 			return capabilitiesOf(thread.harness).family === "remote-orb" ? await this.stepOrb(thread, epoch) : await this.stepSandbox(thread, epoch);
 		} catch (error) {
 			if (error instanceof LeaseLostError) return "busy";
@@ -200,60 +235,32 @@ export class ForgeWorker {
 	private async stepSandbox(thread: ThreadRow, epoch: number): Promise<StepResult> {
 		const { store, scheduler } = this.d;
 		if (!this.d.compute || !this.provisioner) {
-			await store.fenced(thread.threadId, epoch, (q) => store.setState(q, thread.threadId, "failed", "no_backend", "This deployment has no coding sandbox provider"));
+			await store.fenced(thread.threadId, epoch, (q) => store.failEarly(q, thread.threadId, "no_backend", "This deployment has no coding sandbox provider"));
 			return "done";
 		}
-		if (!thread.workspaceRef) {
-			// A thread that names no pool takes the first with room by priority, as v1 placed it; one pinned at its start stays on that pool.
-			const poolId = thread.placement?.pool ?? (await scheduler.choosePool()) ?? this.d.defaultPool ?? "default";
-			const admitted = await scheduler.admit(thread.threadId, poolId, thread.ownerId);
-			if (admitted.kind === "queued") {
-				// Where it waits is where it will run when promoted.
-				if (thread.placement?.pool !== poolId) await store.fenced(thread.threadId, epoch, (q) => store.patch(q, thread.threadId, { placement: { ...(thread.placement ?? {}), pool: poolId } }));
-				return "queued";
-			}
-			if (admitted.kind === "unhealthy") {
-				await store.fenced(thread.threadId, epoch, async (q) => {
-					await store.patch(q, thread.threadId, { placement: { pool: poolId } });
-					await store.setState(q, thread.threadId, "queued", "pool_unhealthy", null);
-				});
-				return "queued";
-			}
-			try {
-				await this.provisioner.provision(thread.threadId, epoch);
-				await scheduler.report(poolId, thread.threadId, "success");
-			} catch (error) {
-				if (error instanceof LeaseLostError) throw error;
-				const ambiguous = error instanceof Error && error.name === "AmbiguousCreateError";
-				await scheduler.report(poolId, thread.threadId, ambiguous ? "failure" : error instanceof ForgeError ? "ignored" : "failure");
-				// An ambiguous create leaves the thread provisioning: the next step reconciles by tag instead of failing it or creating a second sandbox.
-				if (ambiguous || (error instanceof ForgeError && error.code === "conflict")) return "retry";
-				await store.fenced(thread.threadId, epoch, (q) => store.setState(q, thread.threadId, "failed", "provision_failed", String(error instanceof Error ? error.message : error).slice(0, 500)));
-				await scheduler.release(thread.threadId, "provision_failed");
-				return "done";
-			}
-			let environment: CodingEnvironment | null = null;
-			if (this.d.prepareWorkspace) {
-				const fresh = (await store.get(thread.threadId))!;
-				try {
-					await this.d.prepareWorkspace(fresh, fresh.workspaceRef);
-				} catch (error) {
-					await store.fenced(thread.threadId, epoch, (q) => store.setState(q, thread.threadId, "failed", "checkout_failed", String(error instanceof Error ? error.message : error).slice(0, 500)));
-					await scheduler.release(thread.threadId, "checkout_failed");
-					return "done";
-				}
-				// What the thread started from, and the repository's environment: restored from the person's snapshot of it, or built, once per workspace.
-				const based = await ensureBase(this.dep, store, fresh).catch(() => fresh);
-				environment = await this.environment(based, epoch, poolId, false);
-			}
-			await store.fenced(thread.threadId, epoch, async (q, t) => {
-				await store.patch(q, thread.threadId, { placement: { pool: poolId }, ...(environment ? { provisioning: { ...(t.provisioning ?? {}), environment } } : {}) });
-				if (environment?.state === "failed") await store.setState(q, thread.threadId, "idle", "environment_failed", environment.error ?? null);
-				else await store.setState(q, thread.threadId, "idle");
-			});
+		// A host that said it has no room is asked again after a while, not on every sweep.
+		if (Number(thread.provisioning?.waitUntil ?? 0) > this.clock()) return "retry";
+		// What a run left behind in a sandbox that went away is settled first (a login lock is let go); then the sandbox is made again if it is gone.
+		if (thread.workspaceRef) await this.recover(thread.threadId, epoch);
+		const early = await this.ready(thread.threadId, epoch);
+		if (early) return early;
+		const ready = (await store.get(thread.threadId))!;
+		if (ready.state === "failed") {
+			// Brought back for a push or a merge only: the thread stays as it failed, and the sandbox goes again after the grace.
+			await store.fenced(thread.threadId, epoch, (q) => q.query("update pim_forge.forge_inbox set status = 'done' where thread_id = $1 and kind = 'revive' and status in ('pending', 'taken')", [thread.threadId]));
+			await scheduler.markIdle(thread.threadId);
+			return "done";
 		}
-		await this.recover(thread.threadId, epoch);
+		let checked = true;
 		for (;;) {
+			// A sandbox that went away while a turn ran (the turn then ended as interrupted) is made again before the thread goes on.
+			if (!checked) {
+				if (await this.hasDueInput(thread.threadId)) {
+					const lost = await this.ready(thread.threadId, epoch);
+					if (lost) return lost;
+				}
+				checked = true;
+			}
 			let revived = false;
 			const next = await store.fenced(thread.threadId, epoch, async (q, t) => {
 				if (t.state === "archived") return null;
@@ -268,7 +275,7 @@ export class ForgeWorker {
 					return null;
 				}
 				// An abort clears what waited, so an input that is here after one was sent after it: the thread goes on, with a grant of its own again.
-				if (t.cancelState !== "none") {
+				if (t.cancelState !== "none" && item.kind !== "revive") {
 					await store.patch(q, thread.threadId, { cancel_state: "none" });
 					revived = true;
 				}
@@ -276,6 +283,11 @@ export class ForgeWorker {
 			});
 			if (!next) break;
 			if (revived) await this.refresh(thread.threadId);
+			// The sandbox is only wanted back (to push or merge what it holds): it is made, and the thread stays as it is.
+			if (next.kind === "revive") {
+				await store.fenced(thread.threadId, epoch, (q) => q.query("update pim_forge.forge_inbox set status = 'done' where thread_id = $1 and operation_id = $2", [thread.threadId, next.operationId]));
+				continue;
+			}
 			// A rebuild of the environment asked for between turns.
 			if (next.kind === "environment") {
 				const t = (await store.get(thread.threadId))!;
@@ -289,10 +301,128 @@ export class ForgeWorker {
 				continue;
 			}
 			if (!(await this.runTurn(thread.threadId, epoch, next))) return "retry";
+			checked = false;
 		}
+		// What has nothing more to do gives its sandbox back after a grace: a thread between turns, one that failed (it keeps what it needs to be continued), and one that waits for a login.
 		const after = await store.get(thread.threadId);
-		if (after && after.state === "idle") await scheduler.markIdle(thread.threadId);
+		if (after?.state === "idle" || after?.state === "failed") await scheduler.markIdle(thread.threadId);
+		else if (after?.state === "waiting_input") await scheduler.markIdle(thread.threadId, WAITING_SLOT_GRACE_MS);
 		return "done";
+	}
+
+	/** Whether the thread has an input to run now. */
+	private async hasDueInput(threadId: string): Promise<boolean> {
+		return (await this.d.store.db.query(`select 1 from pim_forge.forge_inbox where thread_id = $1 and status = 'pending' and ${DUE} limit 1`, [threadId])).rows.length > 0;
+	}
+
+	/**
+	 * Makes sure the thread has a sandbox: one that is gone (its host restarted, its volume was lost) is forgotten and made again, restored from the thread's last autosave. A result is returned
+	 * when the step must end here (queued, retry, failed); null when the sandbox is there.
+	 */
+	private async ready(threadId: string, epoch: number): Promise<StepResult | null> {
+		const { store } = this.d;
+		let thread = (await store.get(threadId))!;
+		if (thread.workspaceRef && (await this.forgetLostWorkspace(thread, epoch))) thread = (await store.get(threadId))!;
+		return thread.workspaceRef ? null : this.provisionWorkspace(thread, epoch);
+	}
+
+	/** Forgets the thread's sandbox when the host no longer has it, and what only lived in it (a CLI's session). True when it was gone. */
+	private async forgetLostWorkspace(thread: ThreadRow, epoch: number): Promise<boolean> {
+		const handle = thread.workspaceRef as ComputeHandle;
+		// A host that can't be asked is not a sandbox that is gone: the turn finds out, and is retried.
+		const found = await this.d.compute!.find(handle.tag ?? computeTag(thread)).catch(() => undefined);
+		if (found !== null) return false;
+		const { store } = this.d;
+		await store.fenced(thread.threadId, epoch, async (q) => {
+			await store.patch(q, thread.threadId, { workspace_ref: null, provisioning: null });
+			await q.query("delete from pim_forge.forge_harness_sessions where thread_id = $1", [thread.threadId]);
+			await store.appendEvent(q, thread.threadId, { kind: "workspace.lost", data: { provider: handle.provider } });
+		});
+		return true;
+	}
+
+	/** Places the thread, makes its sandbox and its checkout (restored from the last autosave when there is one), and readies the environment. */
+	private async provisionWorkspace(thread: ThreadRow, epoch: number): Promise<StepResult | null> {
+		const { store, scheduler } = this.d;
+		const provisioner = this.provisioner!;
+		// A thread that names no pool takes the first with room by priority, as v1 placed it; one pinned at its start stays on that pool.
+		const poolId = thread.placement?.pool ?? (await scheduler.choosePool()) ?? this.d.defaultPool ?? "default";
+		let admitted;
+		try {
+			admitted = await scheduler.admit(thread.threadId, poolId, thread.ownerId);
+		} catch (error) {
+			if (!(error instanceof ForgeError && error.code === "quota")) throw error;
+			await store.fenced(thread.threadId, epoch, (q) => store.failEarly(q, thread.threadId, /^\w+/.exec(error.message)?.[0] ?? "compute_quota", error.message));
+			return "done";
+		}
+		if (admitted.kind === "slot") this.wallClock.set(thread.threadId, admitted.wallClockMin);
+		if (admitted.kind === "queued") {
+			// Where it waits is where it will run when promoted.
+			if (thread.placement?.pool !== poolId) await store.fenced(thread.threadId, epoch, (q) => store.patch(q, thread.threadId, { placement: { ...(thread.placement ?? {}), pool: poolId } }));
+			return "queued";
+		}
+		if (admitted.kind === "unhealthy") {
+			await store.fenced(thread.threadId, epoch, async (q) => {
+				await store.patch(q, thread.threadId, { placement: { pool: poolId } });
+				await store.setState(q, thread.threadId, "queued", "pool_unhealthy", null);
+			});
+			return "queued";
+		}
+		try {
+			await provisioner.provision(thread.threadId, epoch);
+			await scheduler.report(poolId, thread.threadId, "success");
+		} catch (error) {
+			if (error instanceof LeaseLostError) throw error;
+			const ambiguous = error instanceof Error && error.name === "AmbiguousCreateError";
+			await scheduler.report(poolId, thread.threadId, ambiguous ? "failure" : error instanceof ForgeError ? "ignored" : "failure");
+			// An ambiguous create leaves the thread provisioning: the next step reconciles by tag instead of failing it or creating a second sandbox.
+			if (ambiguous) return "retry";
+			if (error instanceof ForgeError && error.code === "conflict") {
+				// A full host, or a disk that is low: the thread waits where it is (the slot it holds keeps its place in the queue) and the host is asked again after a while.
+				const lowDisk = /^low_disk/.test(error.message);
+				if (lowDisk || /capacity/i.test(error.message)) {
+					await store.fenced(thread.threadId, epoch, async (q, t) => {
+						await store.patch(q, thread.threadId, { provisioning: { ...(t.provisioning ?? {}), waitUntil: this.clock() + WAIT_FOR_ROOM_MS } });
+						if (lowDisk && t.stateReason !== "low_disk") await store.setState(q, thread.threadId, "provisioning", "low_disk", error.message.slice(0, 500));
+					});
+				}
+				return "retry";
+			}
+			await store.fenced(thread.threadId, epoch, (q) => store.failEarly(q, thread.threadId, "provision_failed", String(error instanceof Error ? error.message : error).slice(0, 500)));
+			await scheduler.release(thread.threadId, "provision_failed");
+			return "done";
+		} finally {
+			this.wallClock.delete(thread.threadId);
+		}
+		let environment: CodingEnvironment | null = null;
+		if (this.d.prepareWorkspace) {
+			const fresh = (await store.get(thread.threadId))!;
+			try {
+				await this.d.prepareWorkspace(fresh, fresh.workspaceRef);
+			} catch (error) {
+				// The checkout didn't come: the sandbox goes, so that continuing the thread makes a new one instead of failing in this one for good.
+				await this.d.compute!.destroy(fresh.workspaceRef).catch(() => {});
+				await store.fenced(thread.threadId, epoch, async (q) => {
+					await store.patch(q, thread.threadId, { workspace_ref: null, provisioning: null });
+					await store.failEarly(q, thread.threadId, "checkout_failed", String(error instanceof Error ? error.message : error).slice(0, 500));
+				});
+				await scheduler.release(thread.threadId, "checkout_failed");
+				return "done";
+			}
+			// What the thread started from, and the repository's environment: restored from the person's snapshot of it, or built, once per workspace.
+			const based = await ensureBase(this.dep, store, fresh).catch(() => fresh);
+			environment = await this.environment(based, epoch, poolId, false);
+		}
+		await store.fenced(thread.threadId, epoch, async (q, t) => {
+			await store.patch(q, thread.threadId, { placement: { pool: poolId }, provisioning: { ...(t.provisioning ?? {}), waitUntil: undefined, ...(environment ? { environment } : {}) } });
+			// A thread brought back only for a push or a merge goes back to the state it was in, unless the person has sent it something since.
+			const back = await q.query<Row>("select payload -> 'restore' as restore from pim_forge.forge_inbox r where thread_id = $1 and kind = 'revive' and status in ('pending', 'taken') and not exists (select 1 from pim_forge.forge_inbox o where o.thread_id = r.thread_id and o.kind <> 'revive' and o.status = 'pending') order by seq limit 1", [thread.threadId]);
+			const restore = back.rows[0]?.restore as { state: "failed" | "waiting_input"; reason: string | null; detail: string | null } | null | undefined;
+			if (environment?.state === "failed") await store.setState(q, thread.threadId, "idle", "environment_failed", environment.error ?? null);
+			else if (restore && (restore.state === "failed" || restore.state === "waiting_input")) await store.setState(q, thread.threadId, restore.state, restore.reason, restore.detail);
+			else await store.setState(q, thread.threadId, "idle");
+		});
+		return null;
 	}
 
 	/** Gives a sandbox that exists a fresh git grant, for a thread whose grant was cut off by an abort. */
@@ -402,7 +532,7 @@ export class ForgeWorker {
 			const done = (await q.query<Row>("select status from pim_forge.forge_harness_runs where thread_id = $1 and operation_id = $2", [threadId, item.operationId])).rows[0];
 			if (done && done.status !== "interrupted") return null;
 			if (t.budgetUsd !== null && t.spentUsd >= t.budgetUsd) {
-				await store.setState(q, threadId, "failed", "budget", `Spent $${t.spentUsd} of $${t.budgetUsd}`);
+				await store.failEarly(q, threadId, "budget", `Spent $${t.spentUsd} of $${t.budgetUsd}`, item.operationId);
 				await store.appendEvent(q, threadId, { kind: "app.budget_stop", data: { spentUsd: t.spentUsd, budgetUsd: t.budgetUsd } });
 				return null;
 			}
@@ -492,6 +622,8 @@ export class ForgeWorker {
 			const made = await checkpointWorkspace(this.dep, await ensureBase(this.dep, store, t), operationId);
 			if (made) await store.fenced(threadId, epoch, (q) => store.appendEvent(q, threadId, { kind: "thread.checkpoint", data: { operationId, seq: made.seq, sha: made.sha, message: made.message } }));
 			const now = (await store.get(threadId)) ?? t;
+			// What the thread has done is kept outside the sandbox too, so a sandbox that is lost is made again with it.
+			await autosaveWorkspace({ ...this.dep, objects: this.d.objects }, now).catch(() => {});
 			if (this.d.autopush && result.outcome !== "login_required" && now.cancelState === "none") await this.autopush(now, epoch);
 		} catch (error) {
 			console.warn(JSON.stringify({ event: "pim.forge.checkpoint_failed", thread: threadId, error: String(error instanceof Error ? error.message : error).slice(0, 300) }));
@@ -602,7 +734,7 @@ export class ForgeWorker {
 		}
 		const client = await this.d.orbs(thread);
 		if (!client) {
-			await store.fenced(thread.threadId, epoch, (q) => store.setState(q, thread.threadId, "failed", "no_backend", "No Amp credential is configured"));
+			await store.fenced(thread.threadId, epoch, (q) => store.failEarly(q, thread.threadId, "no_backend", "No Amp credential is configured"));
 			return "done";
 		}
 		if (!thread.orb) return this.startOrb(thread, epoch, client);
@@ -633,7 +765,7 @@ export class ForgeWorker {
 				await store.fenced(thread.threadId, epoch, (q) => store.patch(q, thread.threadId, { provisioning: { kind: "orb", client: client.id, key, phase: "uncertain", at: this.clock() } }));
 				return "retry";
 			}
-			await store.fenced(thread.threadId, epoch, (q) => store.setState(q, thread.threadId, "failed", error instanceof OrbError ? error.code : "error", String(error instanceof Error ? error.message : error).slice(0, 500)));
+			await store.fenced(thread.threadId, epoch, (q) => store.failEarly(q, thread.threadId, error instanceof OrbError ? error.code : "error", String(error instanceof Error ? error.message : error).slice(0, 500)));
 			return "done";
 		}
 		await store.fenced(thread.threadId, epoch, async (q) => {
@@ -685,6 +817,7 @@ export class ForgeWorker {
 			if (error instanceof OrbUnreachableError) return "retry";
 			throw error;
 		}
+		const branch = await this.orbBranch(thread, messages);
 		await store.fenced(thread.threadId, epoch, async (q, t) => {
 			let turn = (t.orb?.turn as string | undefined) ?? thread.startOperation;
 			for (const { m, text } of mirrored) {
@@ -699,7 +832,7 @@ export class ForgeWorker {
 			}
 			const reported = (t.orb as { reportedUsd?: number } | null)?.reportedUsd ?? 0;
 			if (usd !== null && usd > reported) await store.appendEvent(q, t.threadId, { kind: "model_call", costUsd: usd - reported, sourceCursor: `usage:${usd}`, data: { via: "orb", harness: "amp", reportedTotalUsd: usd } });
-			await store.patch(q, t.threadId, { last_seen_at: new Date(this.clock()), orb: { ...t.orb, turn, ...(usd !== null && usd > reported ? { reportedUsd: usd } : {}) } });
+			await store.patch(q, t.threadId, { last_seen_at: new Date(this.clock()), orb: { ...t.orb, turn, ...(branch ? { branch } : {}), ...(usd !== null && usd > reported ? { reportedUsd: usd } : {}) } });
 			if (status.state === "working") {
 				if (t.state !== "running") await store.setState(q, t.threadId, "running");
 			} else if (status.state === "awaiting_approval") {
@@ -714,6 +847,26 @@ export class ForgeWorker {
 			}
 		});
 		return "done";
+	}
+
+	/**
+	 * The branch or commit the agent said it pushed in `messages` (what is new since the last look), when the git host has it: the Amp thread's diff, pull request and merge follow it. Null when nothing new says so,
+	 * the host can't be read, or the branch is the one already recorded.
+	 */
+	private async orbBranch(thread: ThreadRow, messages: readonly OrbMessage[]): Promise<string | null> {
+		const git = this.d.git;
+		const texts = messages.filter((m) => m.role === "assistant").map(orbMessageText).reverse();
+		if (!git?.branches || !texts.some((t) => /push|origin|HEAD|->/i.test(t))) return null;
+		try {
+			const [branches, defaultBranch] = await Promise.all([git.branches(thread.repo), git.defaultBranch(thread.repo)]);
+			const baseRef = thread.ref ?? null;
+			const from = branches.get(baseRef ?? defaultBranch) ?? branches.get(defaultBranch) ?? null;
+			const found = await pushedByAgent({ texts, branches, from, defaultBranch, baseRef, resolveCommit: git.resolveCommit ? (ref) => git.resolveCommit!(thread.repo, ref) : undefined });
+			return found && found !== thread.orb?.branch ? found : null;
+		} catch {
+			// A host that can't be read leaves the branch unknown for now: what the agent said is read again with the next messages.
+			return null;
+		}
 	}
 
 	/**

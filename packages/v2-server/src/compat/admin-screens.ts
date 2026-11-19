@@ -197,7 +197,7 @@ export function screenRoutes(env: Env): Route[] {
 		// ---- managed compute and the computer host: not part of this deployment yet ----
 		route("GET", "/api/admin/compute", async ({ app, principal }) => {
 			await admin(app, await principal(), "admin:compute");
-			const quota = await app.db.anonymous(async (tx) => (await tx.query("SELECT max_concurrent, compute_minutes FROM pim_forge.forge_quotas WHERE subject_type = 'deployment' AND subject_id = '*'")).rows[0]);
+			const quota = await app.db.anonymous(async (tx) => (await tx.query("SELECT max_concurrent, compute_minutes, max_session_minutes FROM pim_forge.forge_quotas WHERE subject_type = 'deployment' AND subject_id = '*'")).rows[0]);
 			// The providers coding sandboxes run on are the ones its pools name (the pools themselves are below, from Forge); a provider is set up in the deployment's environment, not here.
 			const names = (await app.db.anonymous(async (tx) => (await tx.query("SELECT DISTINCT provider FROM pim_forge.forge_pools ORDER BY provider")).rows)).map((r) => String(r.provider));
 			// Everyone's sandbox minutes are in rows each owner alone can read: the totals come through a definer function that returns sums only (migration 0703).
@@ -206,7 +206,7 @@ export function screenRoutes(env: Env): Route[] {
 			const byProvider = (overview?.byProvider ?? []).map((r) => ({ provider: r.provider, minutes: Math.round(Number(r.minutes)), running: r.running }));
 			const accounts = new Map((await app.db.anonymous(async (tx) => (await tx.query("SELECT owner_id, username FROM pim_app.accounts WHERE owner_id = ANY($1)", [(overview?.top ?? []).map((r) => r.ownerId)])).rows)).map((r) => [r.owner_id as string, r.username as string]));
 			const usage = { month, minutes: byProvider.reduce((n, r) => n + r.minutes, 0), running: byProvider.reduce((n, r) => n + r.running, 0), byProvider, top: (overview?.top ?? []).map((r) => ({ username: accounts.get(r.ownerId) ?? null, minutes: Math.round(Number(r.minutes)), running: r.running })) };
-			return ok({ providers: names.map((id) => ({ id, kind: id, name: id, settings: {}, credentialsSet: {}, codingSandbox: true, agentComputer: false })), kinds: names.map((id) => ({ kind: id, name: id, fields: [] })), quota: { maxConcurrentWorkspaces: quota?.max_concurrent === null || quota === undefined ? null : Number(quota.max_concurrent), monthlySandboxMinutes: quota?.compute_minutes === null || quota === undefined ? null : Number(quota.compute_minutes), maxSessionMinutes: null }, usage });
+			return ok({ providers: names.map((id) => ({ id, kind: id, name: id, settings: {}, credentialsSet: {}, codingSandbox: true, agentComputer: false })), kinds: names.map((id) => ({ kind: id, name: id, fields: [] })), quota: { maxConcurrentWorkspaces: quota?.max_concurrent === null || quota === undefined ? null : Number(quota.max_concurrent), monthlySandboxMinutes: quota?.compute_minutes === null || quota === undefined ? null : Number(quota.compute_minutes), maxSessionMinutes: quota?.max_session_minutes === null || quota === undefined ? null : Number(quota.max_session_minutes) }, usage });
 		}),
 		// One cheap read against the sandbox manager the deployment's environment names, as v1's Check did: whether it answers, and how many of its workspaces are running.
 		route("POST", "/api/admin/compute/providers/:id/validate", async ({ app, principal, params }) => {

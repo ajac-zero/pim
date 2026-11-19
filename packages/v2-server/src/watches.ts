@@ -14,6 +14,7 @@ import type { Pool } from "pg";
 import type { App } from "@pim/v2-app/app";
 import { openString, sealString } from "@pim/v2-app/crypto";
 import type { EnvelopeCrypto } from "@pim/v2-contracts/platform";
+import type { TriggerHealth } from "@pim/triggers/spec";
 import { newSecret, verifyWebhook } from "@pim/shared/webhook";
 import { AuthRefused } from "./native/http.ts";
 import { McpAuthError, parseCredential, refresh, type Transport, withSession } from "./connector-tools.ts";
@@ -82,25 +83,30 @@ const callbackOf = (deps: WatchDeps, ownerId: string, c: ConnectorRecord) => `${
 
 /**
  * Asks the server to deliver this watch's events (again: the draft makes it idempotent over the callback, the event and its arguments, so renewing is the same request). Records what it
- * answered: the subscription's id and when the grant runs out. A refusal ends the watch with the reason; anything else (the server not answering) is thrown for the caller to settle.
+ * answered: the subscription's id and when the grant runs out. A refusal says what the trigger's health is (`health`) and whether it is for good (`final`: the watch ends with the reason);
+ * a connector the server no longer accepts the sign-in of waits for it to be signed in again instead; anything else (the server not answering) is thrown for the caller to settle.
  */
-export async function subscribe(deps: WatchDeps, ownerId: string, w: Watch): Promise<{ ok: true; renewBefore: Date | null } | { ok: false; error: string }> {
+export async function subscribe(deps: WatchDeps, ownerId: string, w: Watch): Promise<{ ok: true; renewBefore: Date | null } | { ok: false; error: string; health: TriggerHealth; final: boolean }> {
 	const c = await connectorOf(deps.app, ownerId, w.connector_id);
-	if (!c) return { ok: false, error: "The connector was removed." };
-	if (!deps.publicUrl) return { ok: false, error: "Pim does not know its public address (PIM_PUBLIC_URL), so a server cannot call it back." };
+	if (!c) return { ok: false, error: "The connector was removed.", health: "configuration_error", final: true };
+	if (!deps.publicUrl) return { ok: false, error: "Pim does not know its public address (PIM_PUBLIC_URL), so a server cannot call it back.", health: "configuration_error", final: true };
+	if (c.status !== "connected") return { ok: false, error: c.status === "auth_required" ? "The connector needs signing in again." : "The connector is not connected.", health: c.status === "auth_required" ? "auth_required" : "reconnecting", final: false };
 	const secret = await openString(deps.crypto, w.secret, `watch:${ownerId}/${w.trigger_id}`);
 	let answer: any;
 	try {
 		answer = await connectorSession(deps, ownerId, c, (rpc) => rpc("events/subscribe", { name: w.event, arguments: w.arguments, delivery: { mode: "webhook", url: callbackOf(deps, ownerId, c), secret }, cursor: w.cursor, ttlMs: GRANT_MS }));
 	} catch (error) {
-		if (error instanceof McpAuthError || error instanceof AuthRefused) return { ok: false, error: "The server no longer accepts the connector's sign-in." };
+		if (error instanceof McpAuthError || error instanceof AuthRefused) return { ok: false, error: "The server no longer accepts the connector's sign-in.", health: "auth_required", final: false };
 		// A refusal of the request itself (an unknown event, bad arguments) is the server's answer; no answer at all is for the caller.
 		if (error instanceof Error && /^The server answered|did not answer|reply held|could not|timed out|aborted|fetch failed/i.test(error.message)) throw error;
-		return { ok: false, error: error instanceof Error ? error.message.slice(0, 300) : "The server refused the subscription." };
+		return { ok: false, error: error instanceof Error ? error.message.slice(0, 300) : "The server refused the subscription.", health: "configuration_error", final: true };
 	}
 	const refreshBefore = answer?.refreshBefore;
 	const renewBefore = typeof refreshBefore === "number" ? new Date(refreshBefore) : typeof refreshBefore === "string" && !Number.isNaN(Date.parse(refreshBefore)) ? new Date(refreshBefore) : new Date(deps.now() + GRANT_MS);
 	await deps.app.db.owner(ownerId, (tx) => tx.query("UPDATE pim_app.watch_subscriptions SET status = 'active', provider_id = $3, renew_before = $4, last_error = NULL WHERE owner_id = $1 AND trigger_id = $2", [ownerId, w.trigger_id, typeof answer?.id === "string" ? answer.id.slice(0, 256) : null, renewBefore]));
+	// The server took it: whatever was wrong with reaching it is over, and the backoff starts again.
+	await deps.app.triggers.noteObservation(ownerId, w.trigger_id, "observed", new Date(deps.now()));
+	await deps.app.triggers.setHealth(ownerId, w.trigger_id, "healthy", null, ["unknown", "reconnecting", "auth_required"]);
 	return { ok: true, renewBefore };
 }
 
@@ -116,6 +122,18 @@ export const newWatchSecret = async (deps: WatchDeps, ownerId: string, triggerId
 	return { secret, sealed: await sealString(deps.crypto, secret, `watch:${ownerId}/${triggerId}`) };
 };
 
+/**
+ * Records, on the watch and on its trigger, why the server could not be asked or refused: a final refusal ends the watch, and any other trouble is tried again with the trigger's own
+ * backoff (half a minute, doubling to a quarter of an hour), so the Triggers screen and `get_trigger` say what is wrong instead of an enabled trigger that never hears anything.
+ */
+async function troubled(deps: WatchDeps, owner: string, trigger: string, trouble: { error: string; health: TriggerHealth; final: boolean }): Promise<void> {
+	await deps.app.db.owner(owner, (tx) => tx.query("UPDATE pim_app.watch_subscriptions SET status = CASE WHEN $3 THEN 'ended' ELSE status END, last_error = $4 WHERE owner_id = $1 AND trigger_id = $2", [owner, trigger, trouble.final, trouble.error]));
+	await deps.app.triggers.setHealth(owner, trigger, trouble.health, trouble.error.slice(0, 200));
+	if (!trouble.final) await deps.app.triggers.noteObservation(owner, trigger, "failed", new Date(deps.now()));
+}
+
+const noAnswer = (what: string, error: unknown) => ({ error: `${what} failed: ${error instanceof Error ? error.message.slice(0, 200) : "no answer"}`, health: "reconnecting" as TriggerHealth, final: false });
+
 /** Subscribes again those grants that run out within the margin, across owners. Returns how many were renewed. */
 export async function renewDue(deps: WatchDeps, pool: Pool): Promise<number> {
 	const client = await pool.connect();
@@ -123,7 +141,7 @@ export async function renewDue(deps: WatchDeps, pool: Pool): Promise<number> {
 	try {
 		await client.query("BEGIN");
 		await client.query("SELECT set_config('pim.scope', 'all', true)");
-		due = (await client.query("SELECT s.owner_id, s.trigger_id FROM pim_app.watch_subscriptions s JOIN pim_app.triggers t ON t.owner_id = s.owner_id AND t.id = s.trigger_id AND t.lifecycle = 'enabled' WHERE s.status = 'active' AND s.renew_before IS NOT NULL AND s.renew_before <= $1 LIMIT 100", [new Date(deps.now() + RENEW_MARGIN_MS)])).rows;
+		due = (await client.query("SELECT s.owner_id, s.trigger_id FROM pim_app.watch_subscriptions s JOIN pim_app.triggers t ON t.owner_id = s.owner_id AND t.id = s.trigger_id AND t.lifecycle = 'enabled' WHERE s.status = 'active' AND s.renew_before IS NOT NULL AND s.renew_before <= $1 AND (t.retry_after IS NULL OR t.retry_after <= $2) LIMIT 100", [new Date(deps.now() + RENEW_MARGIN_MS), new Date(deps.now())])).rows;
 		await client.query("COMMIT");
 	} finally {
 		client.release();
@@ -135,10 +153,10 @@ export async function renewDue(deps: WatchDeps, pool: Pool): Promise<number> {
 		try {
 			const r = await subscribe(deps, owner, w);
 			if (r.ok) renewed++;
-			else await deps.app.db.owner(owner, (tx) => tx.query("UPDATE pim_app.watch_subscriptions SET status = 'ended', last_error = $3 WHERE owner_id = $1 AND trigger_id = $2", [owner, trigger, r.error]));
+			else await troubled(deps, owner, trigger, r);
 		} catch (error) {
-			// The server did not answer: it is tried again on the next pass, and the reason is kept for whoever lists the watch.
-			await deps.app.db.owner(owner, (tx) => tx.query("UPDATE pim_app.watch_subscriptions SET last_error = $3 WHERE owner_id = $1 AND trigger_id = $2", [owner, trigger, `Renewing failed: ${error instanceof Error ? error.message.slice(0, 200) : "no answer"}`]));
+			// The server did not answer: it is tried again after a backoff, and the reason is kept for whoever lists the watch and on the trigger.
+			await troubled(deps, owner, trigger, noAnswer("Renewing", error));
 		}
 	}
 	return renewed;
@@ -166,7 +184,7 @@ export async function reconcileWatches(deps: WatchDeps, pool: Pool): Promise<num
 			 WHERE t.lifecycle = 'enabled' AND t.source = 'connector_event' AND s.trigger_id IS NULL LIMIT 50`,
 		)).rows;
 		// A subscription the server never answered (it was down, or the tool died between its two steps) is asked for again after a minute.
-		pending = (await client.query("SELECT owner_id, trigger_id FROM pim_app.watch_subscriptions WHERE status = 'pending' AND created_at < $1 LIMIT 50", [new Date(deps.now() - 60_000)])).rows;
+		pending = (await client.query("SELECT s.owner_id, s.trigger_id FROM pim_app.watch_subscriptions s LEFT JOIN pim_app.triggers t ON t.owner_id = s.owner_id AND t.id = s.trigger_id WHERE s.status = 'pending' AND s.created_at < $1 AND (t.retry_after IS NULL OR t.retry_after <= $2) LIMIT 50", [new Date(deps.now() - 60_000), new Date(deps.now())])).rows;
 		await client.query("COMMIT");
 	} finally {
 		client.release();
@@ -192,10 +210,10 @@ export async function reconcileWatches(deps: WatchDeps, pool: Pool): Promise<num
 		if (!w) continue;
 		try {
 			const r = await subscribe(deps, owner, w);
-			if (!r.ok) await deps.app.db.owner(owner, (tx) => tx.query("UPDATE pim_app.watch_subscriptions SET status = 'ended', last_error = $3 WHERE owner_id = $1 AND trigger_id = $2", [owner, trigger, r.error]));
+			if (!r.ok) await troubled(deps, owner, trigger, r);
 			changed++;
 		} catch (error) {
-			await deps.app.db.owner(owner, (tx) => tx.query("UPDATE pim_app.watch_subscriptions SET last_error = $3 WHERE owner_id = $1 AND trigger_id = $2", [owner, trigger, `Subscribing failed: ${error instanceof Error ? error.message.slice(0, 200) : "no answer"}`]));
+			await troubled(deps, owner, trigger, noAnswer("Subscribing", error));
 		}
 	}
 	return changed;
@@ -245,15 +263,21 @@ export async function receiveWatchEvent(deps: WatchDeps, ownerId: string, key: s
 			return typeof envelope.challenge === "string" ? { status: 200, body: { challenge: envelope.challenge } } : refused(400, "No challenge");
 		case "gap":
 			await touch("last_error = 'The server reported events it could not replay.'");
+			await deps.app.triggers.setHealth(ownerId, matched.trigger_id, "gap", "events_missed");
 			return { status: 204 };
-		case "terminated":
-			await touch("status = 'ended', last_error = $3", `The server ended the subscription (code ${Number(envelope.error?.code) || 0}); watch again to resume.`);
+		case "terminated": {
+			const reason = `The server ended the subscription (code ${Number(envelope.error?.code) || 0}); watch again to resume.`;
+			await touch("status = 'ended', last_error = $3", reason);
+			await deps.app.triggers.setHealth(ownerId, matched.trigger_id, "configuration_error", reason.slice(0, 200));
 			return { status: 204 };
+		}
 		case undefined: {
 			if (typeof envelope?.eventId !== "string" || typeof envelope.name !== "string" || envelope.data === null || typeof envelope.data !== "object") return refused(400, "Not an event");
 			if (headers.get("webhook-id") !== envelope.eventId) return refused(400, "The webhook id is not the event's id");
-			const fresh = await deps.app.db.owner(ownerId, async (tx) => !!(await tx.query("INSERT INTO pim_app.connector_events (owner_id, connector_id, delivery_id, payload, received_at) VALUES ($1,$2,$3,$4,now()) ON CONFLICT DO NOTHING", [ownerId, found, envelope.eventId, JSON.stringify(envelope.data)])).rowCount);
-			if (fresh) await deps.app.triggers.fireConnectorEvent(ownerId, found, envelope.name, envelope.data, envelope.eventId);
+			// The delivery belongs to the watch whose secret signed it: a server that gives two watches the same event id delivers it once to each, and nothing here fires another watch's trigger.
+			const fresh = await deps.app.db.owner(ownerId, async (tx) => !!(await tx.query("INSERT INTO pim_app.connector_events (owner_id, connector_id, delivery_id, payload, received_at) VALUES ($1,$2,$3,$4,now()) ON CONFLICT DO NOTHING", [ownerId, found, `${matched!.trigger_id}:${envelope.eventId}`, JSON.stringify(envelope.data)])).rowCount);
+			if (fresh && envelope.name === matched.event) await deps.app.triggers.fireConnectorEvent(ownerId, found, envelope.name, envelope.data, envelope.eventId, matched.trigger_id);
+			await deps.app.triggers.setHealth(ownerId, matched.trigger_id, "healthy", null, ["unknown", "gap", "reconnecting", "auth_required"]);
 			await touch("last_event_at = now(), cursor = coalesce($3, cursor), last_error = NULL", typeof envelope.cursor === "string" ? envelope.cursor.slice(0, 512) : null);
 			return { status: 204 };
 		}

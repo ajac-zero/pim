@@ -36,6 +36,8 @@ function providers() {
 	const issued = new Set<string>();
 	const subscribed: { name: string; arguments: unknown; delivery: { url: string; secret: string }; cursor: unknown }[] = [];
 	const unsubscribed: { name: string; delivery: { url: string } }[] = [];
+	/** How the server answers `events/subscribe`: as it should, with an error of its own (a refusal), or not at all (it is down). */
+	const answer = { subscribe: "ok" as "ok" | "refuse" | "down" };
 	const mcpTools = [{ name: "lookup", description: "Look a thing up", inputSchema: { type: "object", properties: { q: { type: "string" } } }, annotations: { readOnlyHint: true } }];
 	const server: Server = createServer((req, res) => {
 		let raw = "";
@@ -111,6 +113,8 @@ function providers() {
 				if (m.method === "tools/list") return reply({ tools: mcpTools });
 				if (m.method === "events/list") return reply({ events: [{ name: "ticket.created", description: "A ticket was opened", delivery: ["webhook"], inputSchema: { type: "object", properties: { project: { type: "string" } } } }, { name: "polled.only", description: "No webhook", delivery: ["poll"] }] });
 				if (m.method === "events/subscribe") {
+					if (answer.subscribe === "down") return send(503, {});
+					if (answer.subscribe === "refuse") return send(200, { jsonrpc: "2.0", id: m.id, error: { code: -32602, message: "No such project" } });
 					subscribed.push(m.params);
 					return reply({ id: "sub-1", refreshBefore: new Date(Date.now() + 60_000).toISOString() });
 				}
@@ -123,7 +127,7 @@ function providers() {
 			send(404, {});
 		});
 	});
-	return { server, log, clients, live, grant, subscribed, unsubscribed, setOrigin: (o: string) => (origin = o), calls: (path: string) => log.filter((l) => l.path === path) };
+	return { server, log, clients, live, grant, subscribed, unsubscribed, answer, setOrigin: (o: string) => (origin = o), calls: (path: string) => log.filter((l) => l.path === path) };
 }
 
 real("native and OAuth connectors", () => {
@@ -428,6 +432,65 @@ real("native and OAuth connectors", () => {
 		expect(await reconcileWatches(deps, d.stack.admin as never)).toBe(1);
 		expect(stand.unsubscribed).toHaveLength(unsubscribedBefore + 2);
 		expect(await rows()).toEqual([]);
+	}, 120_000);
+	it("fires only the trigger of the watch that delivered an event and applies its condition, and shows a subscription's trouble on the trigger, backing off when the server is down", async () => {
+		const mcpId = (await web.call("GET", "/api/mcp")).json.servers.find((x: { url: string }) => x.url === `${standOrigin}/mcp`).id as string;
+		const agent = (await web.call("POST", "/api/agents", { name: "Repos", description: "Watches repos", instructions: "Watch.", apps: [], contacts: [] })).json.id as string;
+		const crypto = keyringFromProcessEnv({ PIM_KEK_T1: process.env.PIM_KEK_T1_TEST!, PIM_KEK_CURRENT: "t1" })!;
+		const clock = { at: Date.now() };
+		const deps = { app, crypto, transport: { fetch, allowPrivate: true, check: async (u: string) => new URL(u) }, publicUrl: origin, now: () => clock.at };
+		const key = (await d.stack.admin.query("SELECT event_key FROM pim_app.connectors WHERE id = $1", [mcpId])).rows[0].event_key;
+		const make = async (project: string, extra: object = {}) => {
+			const made = await web.call("POST", "/api/triggers", { agentId: agent, label: `Repo ${project}`, instruction: `Look at ${project}`, destination: { type: "new_chat" }, source: { kind: "connector_event", connectorId: mcpId, event: "ticket.created", arguments: { project } }, enabled: true, ...extra });
+			expect(made.status, JSON.stringify(made.json)).toBe(201);
+			return made.json.id as string;
+		};
+		const [repoA, repoB] = [await make("A"), await make("B", { condition: { when: { op: "compare", path: ["priority"], cmp: "gt", value: 2 } } })];
+		const before = stand.subscribed.length;
+		expect(await reconcileWatches(deps, d.stack.admin as never)).toBe(2);
+		const secrets = Object.fromEntries(stand.subscribed.slice(before).map((s) => [(s.arguments as { project: string }).project, s.delivery.secret]));
+		const deliver = async (project: string, eventId: string, data: object) => {
+			const raw = JSON.stringify({ eventId, name: "ticket.created", timestamp: new Date().toISOString(), data });
+			const ts = String(Math.floor(Date.now() / 1000));
+			return fetch(`${base(gate)}/mcp/events/${ownerId}/${key}`, { method: "POST", headers: { "content-type": "application/json", "x-pim-ingress-secret": d.ingressSecret, "webhook-id": eventId, "webhook-timestamp": ts, "webhook-signature": await signWebhook(secrets[project]!, eventId, ts, raw), "x-mcp-subscription-id": "sub-1" }, body: raw });
+		};
+		const runs = async (id: string) => (await d.stack.admin.query("SELECT count(*)::int AS n FROM pim_app.trigger_runs WHERE trigger_id = $1 AND phase IN ('fired', 'pending')", [id])).rows[0].n as number;
+		// Each firing starts a turn of its own, which answers with what is scripted here (two firings are expected).
+		faux.setResponses([fauxAssistantMessage("noted A"), fauxAssistantMessage("noted B")] as never);
+		// Repo A's server delivers: repo B's trigger, watching the same event with other arguments, takes nothing of it.
+		expect((await deliver("A", "x-1", { title: "A's ticket", priority: 1 })).status).toBe(204);
+		expect([await runs(repoA), await runs(repoB)]).toEqual([1, 0]);
+		// The same event id from the other watch is its own delivery; its condition holds back a low priority and lets a high one through.
+		expect((await deliver("B", "x-1", { title: "B's ticket", priority: 1 })).status).toBe(204);
+		expect([await runs(repoA), await runs(repoB)]).toEqual([1, 0]);
+		expect((await deliver("B", "x-2", { title: "B's urgent ticket", priority: 3 })).status).toBe(204);
+		expect([await runs(repoA), await runs(repoB)]).toEqual([1, 1]);
+		await waitFor("the two firings' turns", async () => (faux.getPendingResponseCount() === 0 ? true : undefined), 60_000);
+		const health = async (id: string) => (await d.stack.admin.query("SELECT health, health_detail, failures, retry_after FROM pim_app.triggers WHERE id = $1", [id])).rows[0];
+		expect(await health(repoA)).toMatchObject({ health: "healthy" });
+
+		// The server goes down when the grant is to be renewed: the trigger says it is reconnecting and the next try waits, doubling; when it is back, it is well again.
+		await d.stack.admin.query("UPDATE pim_app.watch_subscriptions SET renew_before = $2 WHERE trigger_id = $1", [repoA, new Date(clock.at)]);
+		stand.answer.subscribe = "down";
+		expect(await renewDue(deps, d.stack.admin as never)).toBe(0);
+		expect(await health(repoA)).toMatchObject({ health: "reconnecting", failures: 1 });
+		expect(await renewDue(deps, d.stack.admin as never)).toBe(0); // inside the backoff: nobody asks
+		expect((await health(repoA)).failures).toBe(1);
+		clock.at += 40_000;
+		expect(await renewDue(deps, d.stack.admin as never)).toBe(0);
+		expect((await health(repoA)).failures).toBe(2);
+		stand.answer.subscribe = "ok";
+		clock.at += 70_000;
+		expect(await renewDue(deps, d.stack.admin as never)).toBe(2); // both watches are due now
+		expect(await health(repoA)).toMatchObject({ health: "healthy", failures: 0, retry_after: null });
+
+		// A server that refuses the request itself ends the watch for good, and the trigger says why.
+		await d.stack.admin.query("UPDATE pim_app.watch_subscriptions SET status = 'pending', created_at = now() - interval '5 minutes' WHERE trigger_id = $1", [repoB]);
+		stand.answer.subscribe = "refuse";
+		await reconcileWatches(deps, d.stack.admin as never);
+		stand.answer.subscribe = "ok";
+		expect((await d.stack.admin.query("SELECT status, last_error FROM pim_app.watch_subscriptions WHERE trigger_id = $1", [repoB])).rows[0]).toMatchObject({ status: "ended", last_error: "No such project" });
+		expect(await health(repoB)).toMatchObject({ health: "configuration_error", health_detail: "No such project" });
 	}, 120_000);
 	it("lets an agent find, connect, add and remove connectors, asking the person before it changes anything", async () => {
 		const newAgent = async (name: string) => (await web.call("POST", "/api/agents", { name, description: `${name} helps`, instructions: `You are ${name}.`, apps: [], contacts: [] })).json.id as string;

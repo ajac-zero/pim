@@ -252,6 +252,19 @@ describe("connectors", () => {
 		expect(fire).toHaveLength(1);
 		expect(fire[0].payload).toMatchObject({ text: expect.stringContaining("[Connector event] issue.created\nhandle it"), trigger: trigger.id });
 
+		// A watch's delivery fires only the trigger of its own subscription, and a trigger's condition decides whether an event fires it.
+		const second = await app.triggers.create(u.principal, { spec: { ...spec(agent.id, connector.id, "issue.created"), label: "Other repo" } });
+		await app.triggers.setLifecycle(u.principal, second.id, "enabled");
+		expect(await app.triggers.fireConnectorEvent(o, connector.id, "issue.created", { id: 8 }, "w-1", trigger.id)).toBe(1);
+		expect((await app.triggers.runs(u.principal, second.id)).length).toBe(0);
+		const filtered = await app.triggers.create(u.principal, { spec: { ...spec(agent.id, connector.id, "issue.filtered"), condition: { when: { op: "compare", path: ["priority"], cmp: "gt", value: 2 } } } });
+		await app.triggers.setLifecycle(u.principal, filtered.id, "enabled");
+		expect(await app.triggers.fireConnectorEvent(o, connector.id, "issue.filtered", { priority: 1 }, "f-1")).toBe(0);
+		expect(await app.triggers.fireConnectorEvent(o, connector.id, "issue.filtered", { priority: 3 }, "f-2")).toBe(1);
+		expect((await app.triggers.runs(u.principal, filtered.id)).length).toBe(1);
+		await app.triggers.setLifecycle(u.principal, second.id, "paused");
+		await app.triggers.setLifecycle(u.principal, filtered.id, "paused");
+
 		// A paused trigger and a suspended owner receive nothing.
 		await app.triggers.setLifecycle(u.principal, trigger.id, "paused");
 		expect(((await (await send(payload, sign(payload), "d-3")).json()) as { fired: number }).fired).toBe(0);
@@ -358,6 +371,48 @@ describe("triggers", () => {
 		const runs = await app.triggers.runs(u.principal, t.id);
 		expect(runs.map((r) => [r.id.split(":").at(-1), r.phase, r.detail.reason ?? null]).sort()).toEqual([["e1", "fired", null], ["e2", "pending", null]]);
 		expect((await app.db.owner(u.account.ownerId, (tx) => tx.query("SELECT count(*)::int AS n FROM pim_app.conversations WHERE kind = 'trigger'"))).rows[0]!.n).toBe(1);
+	});
+
+	it("does not replay a pause when a time trigger is resumed, and says in its firing that it is a trigger, when it was due and what was missed", async () => {
+		const u = await mk("trigpause");
+		const o = u.account.ownerId;
+		const agent = await app.agents.create(u.principal, { name: "Pauser" });
+		const t = await app.triggers.create(u.principal, { spec: cron(agent.id) });
+		await app.triggers.setLifecycle(u.principal, t.id, "enabled", new Date("2026-11-16T00:00:00Z"));
+		await app.triggers.setLifecycle(u.principal, t.id, "paused", new Date("2026-11-16T00:30:00Z"));
+		// Resumed at 10:30: the 01:00 to 10:00 firings fell during the pause and none of them runs, though 10:00 is within its catch-up.
+		await app.triggers.setLifecycle(u.principal, t.id, "enabled", new Date("2026-11-16T10:30:00Z"));
+		expect(await app.triggers.tickTime(o, new Date("2026-11-16T10:31:00Z"))).toEqual({ fired: 0, missed: 0 });
+		expect(await app.triggers.tickTime(o, new Date("2026-11-16T11:01:00Z"))).toEqual({ fired: 1, missed: 0 });
+		const fire = await app.db.owner(o, async (tx) => (await tx.query("SELECT payload FROM pim_app.accepted_commands WHERE kind = 'trigger_fire' AND payload->>'trigger' = $1", [t.id])).rows);
+		expect(fire).toHaveLength(1);
+		expect(fire[0].payload.text).toBe(`[Trigger "Hourly" ${t.id}] check in\n\n(Due at 2026-11-16T11:00:00.000Z (UTC).)`);
+	});
+
+	it("loses a source's place when its source is edited, and ends a process watch when it expires", async () => {
+		const u = await mk("trigreset");
+		const o = u.account.ownerId;
+		const agent = await app.agents.create(u.principal, { name: "Resetter" });
+		const poll = { ...cron(agent.id), source: { kind: "poll", command: "price-check", intervalMs: 300_000 }, condition: { when: { op: "compare", path: ["price"], cmp: "lt", value: 500 } } };
+		const t = await app.triggers.create(u.principal, { spec: poll });
+		const state = async () => (await app.db.owner(o, async (tx) => (await tx.query("SELECT checkpoint, last_observed_at FROM pim_app.triggers WHERE id = $1", [t.id])).rows[0])) as { checkpoint: unknown; last_observed_at: Date | null };
+		const remember = () => app.db.owner(o, (tx) => tx.query("UPDATE pim_app.triggers SET checkpoint = '{\"position\":4,\"cursor\":null}', last_observed_at = now() WHERE id = $1", [t.id]));
+		await remember();
+		// A changed threshold keeps the source's place; a changed command loses it.
+		await app.triggers.update(u.principal, t.id, { spec: { ...poll, condition: { when: { op: "compare", path: ["price"], cmp: "lt", value: 400 } } } });
+		expect(await state()).toMatchObject({ checkpoint: { position: 4 } });
+		await remember();
+		await app.triggers.update(u.principal, t.id, { spec: { ...poll, source: { ...poll.source, command: "other-check" } } });
+		expect(await state()).toEqual({ checkpoint: null, last_observed_at: null });
+
+		const watch = { ...cron(agent.id), label: "Build", source: { kind: "process", handle: "h-4242", expiresAt: Date.now() + 3_600_000 } };
+		const p = await app.triggers.create(u.principal, { spec: watch });
+		await app.db.owner(o, (tx) => tx.query("UPDATE pim_app.triggers SET lifecycle = 'enabled', enabled = true WHERE id = $1", [p.id]));
+		await app.triggers.tickTime(o, new Date(Date.now() + 1_000_000));
+		expect((await app.triggers.get(u.principal, p.id)).lifecycle).toBe("enabled");
+		await app.triggers.tickTime(o, new Date(Date.now() + 4 * 3_600_000));
+		expect((await app.triggers.get(u.principal, p.id)).lifecycle).toBe("ended");
+		expect((await app.triggers.runs(u.principal, p.id)).map((r) => [r.phase, r.detail.reason])).toEqual([["skipped", "expired"]]);
 	});
 
 	it("needs a computer grant for a computer trigger, and a paired computer for the grant", async () => {

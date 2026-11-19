@@ -171,7 +171,7 @@ export async function tickTriggers(app: App, pool: Pool, now = new Date()): Prom
 		await client.query("BEGIN");
 		await client.query("SELECT set_config('pim.scope', 'all', true)");
 		// Those with a time trigger switched on, and those with an occurrence waiting behind a trigger's running turn.
-		owners = (await client.query("SELECT owner_id FROM pim_app.triggers WHERE lifecycle = 'enabled' AND source = 'time' UNION SELECT owner_id FROM pim_app.trigger_runs WHERE phase = 'pending'")).rows.map((r) => r.owner_id as string);
+		owners = (await client.query("SELECT owner_id FROM pim_app.triggers WHERE lifecycle = 'enabled' AND source IN ('time', 'process') UNION SELECT owner_id FROM pim_app.trigger_runs WHERE phase = 'pending'")).rows.map((r) => r.owner_id as string);
 		await client.query("COMMIT");
 	} finally {
 		client.release();

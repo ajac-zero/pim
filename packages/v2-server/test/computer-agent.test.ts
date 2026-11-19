@@ -323,6 +323,10 @@ real("an agent on a paired computer", () => {
 		expect(JSON.stringify(run.detail)).not.toContain('"n"');
 		// The line that doesn't match the condition fired nothing: one run in all.
 		expect((await fired()).rowCount).toBe(1);
+		// The chat is told it is a trigger firing, which source saw something and that what it saw is not passed on.
+		const told = (await d.stack.admin.query("SELECT payload->>'text' AS text FROM pim_app.accepted_commands WHERE kind = 'trigger_fire' AND payload->>'trigger' = $1", [made.id])).rows[0].text as string;
+		expect(told).toContain(`[Trigger "Watch" ${made.id}] Tell me what the stream saw.`);
+		expect(told).toContain("What it saw isn't kept or passed on.");
 		// What the runtime says of the source is the trigger's health, and the last observation is on it.
 		const live = await waitFor("the runtime to say the source runs", async () => { const t = (await web.call("GET", `/api/triggers/${made.id}`)).json; return t.health === "healthy" ? t : undefined; }, 30_000);
 		expect(live.observation).toMatchObject({ lastObservedAt: expect.any(Number), failures: 0 });

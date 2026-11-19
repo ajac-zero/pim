@@ -11,6 +11,7 @@ import { type ComputerTriggersHost, TRIGGERS_ENVELOPE } from "@pim/v2-app/relay"
 import { runsOnComputer, type TriggerHealth, type TriggerSpec } from "@pim/triggers/spec";
 import { RETRY_AFTER_MS } from "@pim/v2-app/triggers";
 import { evaluate } from "@pim/triggers/condition";
+import { type FiringEvidence, firingText } from "@pim/triggers/firing-text";
 import type { JsonValue } from "@pim/triggers/validate";
 import type { Principal } from "@pim/v2-contracts/identity";
 import { BadRequestError, NotFoundError } from "@pim/v2-app/errors";
@@ -301,13 +302,16 @@ async function fireComputerEvent(app: App, ownerId: string, computerId: string, 
 	}
 	let taken: Awaited<ReturnType<App["triggers"]["fireOccurrence"]>>;
 	try {
-		taken = await app.triggers.fireOccurrence(ownerId, event.triggerId, `computer:${event.eventId}`, { source: source.kind, eventId: event.eventId, observedAt: event.observedAt });
+		const evidence: FiringEvidence = { kind: "computer_event", triggerId: event.triggerId, label: spec.label, source: source.kind, eventId: event.eventId, observedAt: event.observedAt };
+		taken = await app.triggers.fireOccurrence(ownerId, event.triggerId, `computer:${event.eventId}`, { source: source.kind, eventId: event.eventId, observedAt: event.observedAt }, firingText(spec.instruction, evidence));
 	} catch {
 		// A handover that failed backs off: the source is told when to offer it again, and the trigger shows the failures.
 		const retryAfter = await app.triggers.noteObservation(ownerId, event.triggerId, "failed");
 		return { result: "deferred", reason: "handover_failed", retryAfterMs: Math.max(1_000, (retryAfter?.getTime() ?? now) - now) };
 	}
 	if (taken === "full") return { result: "deferred", reason: "backpressure", retryAfterMs: RETRY_AFTER_MS };
+	// Its agent or chat is gone: the run is recorded as failed and the trigger's health says why, so the source is told it is not wanted.
+	if (taken === "failed") return { result: "rejected", reason: "configuration_error" };
 	if (advanced !== undefined) await app.db.owner(ownerId, (tx) => tx.query("UPDATE pim_app.triggers SET condition_state = $2 WHERE id = $1", [event.triggerId, advanced]));
 	await app.triggers.noteObservation(ownerId, event.triggerId, "observed", new Date(event.observedAt));
 	await keep();

@@ -93,10 +93,11 @@ export function enforceDelivery(answer: { stopReason: string; errorMessage?: str
 /** How the message starts that has the majordomo open its first chat by introducing itself (see ../majordomo.ts); apps don't show it. */
 export const INTRODUCTION = "[Introduction]";
 
-/** How the messages start that Pim gives an agent itself, not the person: an approval's decision, a scheduled task, a connector event, tasks' answers. */
+/** How the messages start that Pim gives an agent itself, not the person: an approval's decision, a scheduled task or a trigger firing, a connector event, tasks' answers. */
 export const NOTICE_PREFIXES = [
 	[/^\[Approval ([^\]]+)\]\s*/, "approval"],
 	[/^\[Scheduled task[^\]]*\]\s*/, "schedule"],
+	[/^\[Trigger "[^\n]*" [^\]\s]+\]\s*/, "schedule"],
 	[/^\[(?:Connector|App) event\]\s*/, "event"],
 	[/^\[Task update\]\s*/, "task"],
 	[/^\[Room\]\s*/, "room"],

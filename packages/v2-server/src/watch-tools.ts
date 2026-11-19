@@ -107,6 +107,7 @@ export function watchTools(deps: WatchToolDeps): ToolRegistration[] {
 				return refused(`${c.name} did not answer (${error instanceof Error ? error.message : "no answer"}).`, c.name);
 			}
 			await w.app.triggers.setLifecycle(p, id, "enabled");
+			await w.app.triggers.setHealth(ownerId, id, "healthy", null, ["unknown"]);
 			return text(`Watching ${c.name} for "${a.event}" (watch ${id}). Each event will arrive here as a message starting with "[Connector event]".`);
 		},
 	} as never) as unknown as ToolRegistration;

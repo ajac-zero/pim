@@ -1321,6 +1321,11 @@ describe("noticeOf", () => {
       "event",
     );
     expect(noticeOf("[App event] github: issue opened")?.kind).toBe("event");
+    expect(
+      noticeOf(
+        '[Trigger "Morning brief" tg_1] Check the news.\n\n(Due at 2026-11-16T08:00:00.000Z.)',
+      ),
+    ).toMatchObject({ kind: "schedule", title: "Check the news." });
     expect(noticeOf("Please check [Approval a1] for me")).toBeNull();
     expect(noticeOf("[Approval]")).toBeNull();
   });

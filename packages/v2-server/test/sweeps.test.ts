@@ -116,6 +116,63 @@ describe("maintenance sweeps", () => {
 		expect((await gate.triggers.get(ada, trigger.id)).lifecycle).toBe("ended");
 	});
 
+	it("keeps a firing the space cannot run yet, says so in the trigger's health and hands it on later, ends one whose agent is gone without stopping the others, and starts a condition over when the trigger changes", async () => {
+		const ada = { kind: "user", ownerId: owner, role: "admin", sessionId: "s" } as never;
+		await gate.identity.setRegistrationOpen(ada, true);
+		const bob = await gate.identity.register({ username: "budgeted" });
+		const o = bob.ownerId;
+		const u = { kind: "user", ownerId: o, role: "member", sessionId: "budgeted-session" } as never;
+		// A member's runs count against the day's limit, which the deployed processes switch on.
+		const limited = new App(connectApp(stack.url("gate"), 4), new MemoryObjectStore()).limitSpaces();
+		const cron = (agentId: string, source: unknown, extra: object = {}) => ({ version: 1, owningAgentId: agentId, originChatId: "api", label: "Hourly", instruction: "check in", source, condition: null, destination: { type: "new_chat" }, delivery: {}, authorizationRef: null, ...extra });
+		const hourly = { kind: "time", schedule: "cron", expression: "0 * * * *", timeZone: "UTC" };
+		const agent = await limited.agents.create(u, { name: "Blocked" });
+		const gone = await limited.agents.create(u, { name: "Gone" });
+		const t = await limited.triggers.create(u, { spec: cron(agent.id, hourly) });
+		const orphan = await limited.triggers.create(u, { spec: cron(gone.id, hourly) });
+		const once = await limited.triggers.create(u, { spec: cron(agent.id, { kind: "time", schedule: "once", at: Date.parse("2026-11-16T10:00:00Z"), maxLatenessMs: 3_600_000 }) });
+		for (const x of [t, orphan, once]) await limited.triggers.setLifecycle(u, x.id, "enabled", new Date("2026-11-16T00:00:00Z"));
+		await limited.agents.remove(u, gone.id);
+		const health = async (id: string) => (await stack.admin.query("SELECT health, health_detail FROM pim_app.triggers WHERE id = $1", [id])).rows[0] as { health: string; health_detail: string | null };
+		expect(await health(orphan.id)).toMatchObject({ health: "configuration_error", health_detail: expect.stringContaining("agent was deleted") });
+		await limited.db.owner(o, (tx) => limited.quota.setOverride(tx, o, { dailyRuns: 0 }));
+		// Nothing may run today: the firings wait (the one-time trigger's only firing is kept), the health says why, and the tick still goes through every trigger.
+		await limited.triggers.tickTime(o, new Date("2026-11-16T10:01:00Z"));
+		expect((await limited.triggers.runs(u, t.id)).map((r) => r.phase)).toEqual(["pending"]);
+		expect((await limited.triggers.runs(u, once.id)).map((r) => r.phase)).toEqual(["pending"]);
+		expect(await health(t.id)).toMatchObject({ health: "budget_blocked" });
+		expect((await limited.triggers.runs(u, orphan.id)).map((r) => [r.phase, r.error])).toEqual([["failed", expect.stringContaining("agent was deleted")]]);
+		expect(await health(orphan.id)).toMatchObject({ health: "configuration_error" });
+		// Still blocked a while later; once the limit is lifted, the firings go out and the health is well again.
+		expect(await limited.triggers.deliverPending(o, new Date("2026-11-16T10:30:00Z"))).toBe(0);
+		await limited.db.owner(o, (tx) => limited.quota.setOverride(tx, o, null));
+		expect(await limited.triggers.deliverPending(o, new Date("2026-11-16T10:31:00Z"))).toBe(2);
+		expect((await limited.triggers.runs(u, t.id)).map((r) => r.phase)).toEqual(["fired"]);
+		expect((await limited.triggers.runs(u, once.id)).map((r) => r.phase)).toEqual(["fired"]);
+		expect(await health(t.id)).toMatchObject({ health: "healthy" });
+		// A firing that waited past its deadline is never handed on.
+		await limited.db.owner(o, (tx) => limited.quota.setOverride(tx, o, { dailyRuns: 0 }));
+		await limited.triggers.tickTime(o, new Date("2026-11-16T12:01:00Z"));
+		expect(await limited.triggers.deliverPending(o, new Date(Date.now() + 25 * 3_600_000))).toBe(0);
+		expect((await limited.triggers.runs(u, t.id)).map((r) => r.phase).sort()).toEqual(["failed", "fired"]);
+
+		// A condition's memory goes with a change of the trigger, or a pause: an edited threshold never inherits an old edge.
+		const poll = cron(agent.id, { kind: "poll", command: "price-check", intervalMs: 300_000 }, { condition: { when: { op: "compare", path: ["price"], cmp: "lt", value: 500 } } });
+		const p = await limited.triggers.create(u, { spec: poll });
+		const remembered = async () => (await stack.admin.query("SELECT condition_state FROM pim_app.triggers WHERE id = $1", [p.id])).rows[0].condition_state;
+		const remember = () => stack.admin.query("UPDATE pim_app.triggers SET condition_state = '{\"version\":1}' WHERE id = $1", [p.id]);
+		await remember();
+		await limited.triggers.update(u, p.id, { spec: { ...poll, condition: { when: { op: "compare", path: ["price"], cmp: "lt", value: 400 } } } });
+		expect(await remembered()).toBeNull();
+		await remember();
+		await limited.triggers.update(u, p.id, { spec: { ...poll, condition: { when: { op: "compare", path: ["price"], cmp: "lt", value: 400 } } } });
+		expect(await remembered()).not.toBeNull(); // nothing changed
+		await stack.admin.query("UPDATE pim_app.triggers SET lifecycle = 'enabled' WHERE id = $1", [p.id]);
+		await limited.triggers.setLifecycle(u, p.id, "paused");
+		expect(await remembered()).toBeNull();
+		await limited.db.end();
+	});
+
 	it("runs a trigger one turn at a time: an occurrence waits behind the running turn, a full trigger turns the source away, and a state keeps only its newest", async () => {
 		const ada = { kind: "user", ownerId: owner, role: "admin", sessionId: "s" } as never;
 		const agent = await gate.agents.create(ada, { name: "Serial" });

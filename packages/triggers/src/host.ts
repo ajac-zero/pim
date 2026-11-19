@@ -44,7 +44,10 @@ import { defineDoc } from "@earendil-works/pi-durable";
 import type { PiReceipt } from "agents/harness/pi";
 import { HttpError } from "@pim/shared/http";
 import type { ChatCreation, ChatLookup, HandedSource, HostPreflight, RunStatus, SubmissionLookup, SubmitResult, TriggerAgentHost, TriggerEvidence } from "./coordinator";
+import { firingText } from "./firing-text";
 import type { TriggerDestination } from "./spec";
+
+export { firingText };
 
 /** How `submitTo` keeps one key for an operation across retries: `exact` uses the key as given, and `keep` is told the key before the input is submitted. */
 export type StableOperation = { readonly exact: boolean; keep(operationId: string): void };
@@ -424,29 +427,6 @@ export class PimTriggerHost implements TriggerAgentHost<TriggerEvidence> {
 async function receiptOf(chatId: string, key: string): Promise<string> {
 	const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${chatId}\n${key}`)));
 	return `pim-trigger:${btoa(String.fromCharCode(...digest)).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "")}`;
-}
-
-/**
- * What the agent reads when a trigger fires: its instruction, and only when
- * it was due, which connector's event it was, by name, id and time, or which
- * kind of source on the person's computer saw something, with the event's id
- * and time. A connector's event reads as a `[Connector event]` message, as
- * `watch_connector_event` promises (../extensions/app-events.ts), followed by
- * what the event carried where Pim kept it for the run (`contents`, which
- * marks it as data, not instructions). What an observer on the computer saw
- * is never kept, so it is never here.
- */
-export function firingText(instruction: string, evidence: TriggerEvidence, contents: string | null = null): string {
-	if (evidence.kind === "connector_event") {
-		const head = `[Connector event] ${evidence.connectorId} sent "${evidence.event}" (event ${evidence.eventId} at ${new Date(evidence.observedAt).toISOString()}) for trigger "${evidence.label}" ${evidence.triggerId}.\nYour instruction for this trigger: ${instruction}`;
-		return `${head}\n${contents ?? "What the event carried isn't kept or passed on."}`;
-	}
-	if (evidence.kind === "computer_event") {
-		return `[Trigger "${evidence.label}" ${evidence.triggerId}] ${instruction}\n\n(On what its ${evidence.source} on the person's computer saw at ${new Date(evidence.observedAt).toISOString()}, event ${evidence.eventId}. What it saw isn't kept or passed on.)`;
-	}
-	const missed = evidence.older && evidence.older.count > 0 ? ` ${evidence.older.count} earlier ${evidence.older.count === 1 ? "firing" : "firings"} were missed and won't run.` : "";
-	const zone = evidence.schedule.schedule === "cron" ? ` (${evidence.schedule.timeZone})` : "";
-	return `[Trigger "${evidence.label}" ${evidence.triggerId}] ${instruction}\n\n(Due at ${new Date(evidence.scheduledFor).toISOString()}${zone}.${missed})`;
 }
 
 function errorText(error: unknown): string {

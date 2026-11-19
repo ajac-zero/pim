@@ -351,6 +351,30 @@ describe("the API's clients", () => {
 		expect((await call(ada, "GET", "/api/trigger-runs/tr1")).body).toMatchObject({ id: "tr1", triggerId: made.id, phase: "fired", dueAt: 1000, evidence: { reason: "time", scheduledFor: 1000 } });
 		expect((await call(bob, "GET", "/api/trigger-runs/tr1")).status).toBe(404);
 	});
+
+	it("shows a delivered run's chat and how it ended, a waiting one as pending, and the trigger's health", async () => {
+		const made = (await call(ada, "POST", "/api/triggers", { label: "Stream", instruction: "go", agentId: agent, source: { kind: "stream", command: "tail -f x" }, condition: { when: { op: "exists", path: ["n"] } }, destination: { type: "new_chat" } })).body;
+		const owner = await ownerOf(ada);
+		await app.db.owner(owner, (tx) => tx.query("UPDATE pim_app.triggers SET lifecycle = 'enabled', health = 'gap', health_detail = 'lost_lines', last_observed_at = now(), failures = 2 WHERE id = $1", [made.id]));
+		const first = await app.triggers.fireOccurrence(owner, made.id, "computer:a", { source: "stream" });
+		const second = await app.triggers.fireOccurrence(owner, made.id, "computer:b", { source: "stream" });
+		expect([first, second]).toEqual(["fired", "queued"]);
+		const runs = async () => (await call(ada, "GET", `/api/triggers/${made.id}/runs`)).body.runs as { id: string; state: string; outcomeKnown: boolean; chatId: string | null; occurrenceStatus: string }[];
+		const byEvent = (all: Awaited<ReturnType<typeof runs>>, event: string) => all.find((r) => r.id.endsWith(`:${event}`))!;
+		// Handed to a chat it is queued, linked to that chat; the one behind it waits, with no chat yet.
+		expect(byEvent(await runs(), "computer:a")).toMatchObject({ state: "queued", outcomeKnown: false, chatId: expect.any(String) });
+		expect(byEvent(await runs(), "computer:b")).toMatchObject({ state: "pending", occurrenceStatus: "pending", chatId: null });
+		// Once its command is taken and its chat is idle the run is completed, and says it is over.
+		await app.db.owner(owner, (tx) => tx.query("UPDATE pim_app.accepted_commands SET state = 'runtime_committed', committed_at = now() - interval '1 minute' WHERE command_id LIKE $1", [`trigger:${made.id}:computer:a`]));
+		const done = byEvent(await runs(), "computer:a");
+		expect(done).toMatchObject({ state: "completed", outcomeKnown: true, chatId: expect.any(String), occurrenceStatus: "delivered" });
+		expect((await call(ada, "GET", `/api/trigger-runs/${done.id}`)).body).toMatchObject({ state: "completed", chatId: done.chatId });
+		// What the source did lately is on the trigger, as health, for the screen and the agent; with no computer paired it is waiting for one.
+		expect((await call(ada, "GET", `/api/triggers/${made.id}`)).body).toMatchObject({ health: "waiting_computer", observation: { failures: 2, lastObservedAt: expect.any(Number) } });
+		await app.db.owner(owner, (tx) => tx.query("INSERT INTO pim_app.computers (id, owner_id, name, protocol) VALUES ('pc1', $1, 'Laptop', 2)", [owner]));
+		expect((await call(ada, "GET", `/api/triggers/${made.id}`)).body).toMatchObject({ health: "gap", healthDetail: "lost_lines" });
+		await app.db.owner(owner, (tx) => tx.query("DELETE FROM pim_app.computers WHERE id = 'pc1'"));
+	});
 });
 
 describe("diagnostics", () => {

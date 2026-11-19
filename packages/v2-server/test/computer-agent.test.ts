@@ -296,6 +296,9 @@ real("an agent on a paired computer", () => {
 		expect(JSON.stringify(run.detail)).not.toContain('"n"');
 		// The line that doesn't match the condition fired nothing: one run in all.
 		expect((await fired()).rowCount).toBe(1);
+		// What the runtime says of the source is the trigger's health, and the last observation is on it.
+		const live = await waitFor("the runtime to say the source runs", async () => { const t = (await web.call("GET", `/api/triggers/${made.id}`)).json; return t.health === "healthy" ? t : undefined; }, 30_000);
+		expect(live.observation).toMatchObject({ lastObservedAt: expect.any(Number), failures: 0 });
 		// Changing what runs makes the grant stale: it is not run again until it is granted anew.
 		const changed = (await web.call("PATCH", `/api/triggers/${made.id}`, { source: { kind: "stream", command: "echo '{\"n\":2}'; sleep 300" } }, { "if-match": `"${(await web.call("GET", `/api/triggers/${made.id}`)).json.revision}"` })).json;
 		expect(changed.grant.state).toBe("not_current");
@@ -303,6 +306,8 @@ real("an agent on a paired computer", () => {
 		expect(stale.rowCount).toBe(1);
 		daemon?.kill("SIGKILL");
 		await connected(false);
+		// The computer went away: what it ran is reconnecting until it says hello again.
+		await waitFor("the trigger to be reconnecting", async () => ((await web.call("GET", `/api/triggers/${made.id}`)).json.health === "reconnecting" ? true : undefined), 15_000);
 	}, 240_000);
 
 	it.skipIf(!CHROME)("opens pages and clicks links freely, but sending a form waits for a person (the real daemon's Chrome)", async () => {

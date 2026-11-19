@@ -10,13 +10,14 @@ import type { Tx } from "@pim/v2-app/db";
 import type { Principal } from "@pim/v2-contracts/identity";
 import { grantComputerTrigger, sourceConfigHash } from "../computer-triggers.ts";
 import { previewFirings } from "@pim/triggers/time";
-import { runsOnComputer, TRIGGER_LIFECYCLES, type TriggerLifecycle, type TriggerSpec } from "@pim/triggers/spec";
+import { runsOnComputer, TRIGGER_LIFECYCLES, type TriggerHealth, type TriggerLifecycle, type TriggerSpec } from "@pim/triggers/spec";
 
 const ms = (value: Date | string | null | undefined): number | null => (value ? new Date(value).getTime() : null);
 const DAY = 86_400_000;
 const DELIVERY_TTL_MS = DAY;
 
-export type Row = { id: string; lifecycle: TriggerLifecycle; spec: TriggerSpec; created_at: Date; updated_at: Date };
+export type Row = { id: string; lifecycle: TriggerLifecycle; spec: TriggerSpec; created_at: Date; updated_at: Date; health: TriggerHealth; health_detail: string | null; last_observed_at: Date | null; failures: number; retry_after: Date | null };
+const COLUMNS = "id, lifecycle, spec, created_at, updated_at, health, health_detail, last_observed_at, failures, retry_after";
 export type Context = { computerPaired: boolean; granted: Map<string, string | null> };
 
 export async function contextOf(tx: Tx): Promise<Context> {
@@ -70,8 +71,10 @@ export async function viewOf(app: App, row: Row, ctx: Context) {
 		id: row.id,
 		revision: revisionOf(row),
 		lifecycle: row.lifecycle,
-		health: "unknown",
-		healthDetail: null,
+		// An enabled trigger on the computer with no computer paired is waiting for one; otherwise what the computer's runtime and its connection said last.
+		health: required && row.lifecycle === "enabled" && !ctx.computerPaired ? "waiting_computer" : row.health,
+		healthDetail: row.health_detail,
+		...(required ? { observation: { lastObservedAt: ms(row.last_observed_at), failures: row.failures, retryAfter: ms(row.retry_after) } } : {}),
 		agentId: spec.owningAgentId,
 		label: spec.label,
 		instruction: spec.instruction,
@@ -90,7 +93,7 @@ export async function viewOf(app: App, row: Row, ctx: Context) {
 
 export async function load(app: App, p: Principal, id: string) {
 	return app.db.owner(p.ownerId, async (tx) => {
-		const row = (await tx.query("SELECT id, lifecycle, spec, created_at, updated_at FROM pim_app.triggers WHERE id = $1 AND lifecycle <> 'deleted'", [id])).rows[0] as Row | undefined;
+		const row = (await tx.query(`SELECT ${COLUMNS} FROM pim_app.triggers WHERE id = $1 AND lifecycle <> 'deleted'`, [id])).rows[0] as Row | undefined;
 		if (!row) throw new NotFoundError("No such trigger");
 		return { row, ctx: await contextOf(tx) };
 	});
@@ -130,24 +133,35 @@ async function defaultAgent(app: App, p: Principal): Promise<string> {
 	return id;
 }
 
-const RUN_STATE: Record<string, { state: string; status: string }> = {
-	fired: { state: "accepted", status: "delivered" },
-	delivered: { state: "accepted", status: "delivered" },
-	skipped: { state: "missed", status: "missed" },
-	failed: { state: "not_submitted", status: "failed" },
-};
+/** Where a run is, as the triggers screen words it. A run handed to a chat is `queued` until the Runner has taken it, then `running` until its turn ends; the turn ending is `completed`, never that its work succeeded. */
+function runState(r: Record<string, any>): { state: string; status: string } {
+	const reason = ((r.detail ?? {}) as { reason?: string }).reason;
+	switch (r.phase as string) {
+		case "pending": return { state: "pending", status: "pending" };
+		case "fired": return r.command_state === "runtime_committed" ? { state: "running", status: "delivered" } : { state: "queued", status: "delivered" };
+		case "delivered": return { state: "accepted", status: "delivered" };
+		case "completed": return { state: "completed", status: "delivered" };
+		case "unknown": return { state: "outcome_unknown", status: "outcome_unknown" };
+		case "failed": return { state: "failed", status: "failed" };
+		case "skipped": return reason === "superseded" ? { state: "superseded", status: "superseded" } : reason === "missed" ? { state: "missed", status: "missed" } : { state: "not_submitted", status: "skipped" };
+		default: return { state: "outcome_unknown", status: "outcome_unknown" };
+	}
+}
+const RUN_FINAL = new Set(["completed", "failed", "missed", "superseded", "not_submitted", "cancelled"]);
 
 /** A run as the triggers screen and `GET /api/trigger-runs/:run` read it: what the occurrence was, and where it got to. */
 function runView(r: Record<string, any>, row: Row) {
 	const at = ms(r.at)!;
 	const detail = (r.detail ?? {}) as { scheduledFor?: number; older?: unknown; event?: string };
-	const mapped = RUN_STATE[r.phase as string] ?? { state: "outcome_unknown", status: "outcome_unknown" };
+	const mapped = runState(r);
+	const delivered = ms(r.delivered_at);
 	return {
-		id: r.id as string, triggerId: row.id, revision: revisionOf(row), state: mapped.state, outcomeKnown: mapped.state !== "accepted" && mapped.state !== "outcome_unknown", occurrenceStatus: mapped.status, phase: r.phase as string,
+		id: r.id as string, triggerId: row.id, revision: revisionOf(row), state: mapped.state, outcomeKnown: RUN_FINAL.has(mapped.state), occurrenceStatus: mapped.status, phase: r.phase as string,
 		dueAt: detail.scheduledFor ?? at,
 		evidence: detail.scheduledFor !== undefined ? { reason: "time", scheduledFor: detail.scheduledFor, ...(detail.older === undefined ? {} : { older: detail.older }) } : { reason: detail.event ?? "event", truth: "true", observedAt: at, fields: [] },
-		chatId: (r.chat as string | null) ?? null, deliverBy: null, submittedAt: r.phase === "fired" ? at : null, acceptedAt: r.phase === "fired" ? at : null, endedAt: r.phase === "fired" ? null : at,
-		deferrals: 0, unknownAnswers: 0, createdAt: at, updatedAt: at,
+		chatId: (r.chat as string | null) ?? null, deliverBy: null, submittedAt: delivered ?? (r.phase === "fired" ? at : null), acceptedAt: r.command_state === "runtime_committed" ? ms(r.committed_at) : null, endedAt: ms(r.ended_at),
+		deferrals: 0, unknownAnswers: mapped.state === "outcome_unknown" ? 1 : 0, createdAt: at, updatedAt: ms(r.ended_at) ?? delivered ?? at,
+		...(r.last_error ? { error: r.last_error as string } : {}),
 	};
 }
 
@@ -168,7 +182,7 @@ export function triggerRoutes(): Route[] {
 			const cursor = /^(\d+):(.+)$/.exec(q.get("cursor") ?? "");
 			const { rows, ctx } = await app.db.owner(p.ownerId, async (tx) => ({
 				rows: (await tx.query(
-					`SELECT id, lifecycle, spec, created_at, updated_at FROM pim_app.triggers
+					`SELECT ${COLUMNS} FROM pim_app.triggers
 					 WHERE lifecycle <> 'deleted' AND ($1::text IS NULL OR lifecycle = $1) AND ($2::text IS NULL OR spec->>'owningAgentId' = $2) AND ($3::text IS NULL OR spec->'source'->>'kind' = $3)
 					   AND ($4::bigint IS NULL OR (created_at, id) > (to_timestamp($4::bigint / 1000.0), $5))
 					 ORDER BY created_at, id LIMIT $6`,
@@ -257,21 +271,25 @@ export function triggerRoutes(): Route[] {
 		route("GET", "/api/trigger-runs/:run", async ({ app, principal, params }) => {
 			const p = await principal();
 			await app.identity.authz.enforce(p, "api:read");
-			const found = await app.db.owner(p.ownerId, async (tx) => (await tx.query(
-				`SELECT r.id, r.trigger_id, r.phase, r.command_id, r.detail, r.at, c.public_chat_id AS chat
+			const run = () => app.db.owner(p.ownerId, async (tx) => (await tx.query(
+				`SELECT r.id, r.trigger_id, r.phase, r.command_id, r.detail, r.at, r.delivered_at, r.ended_at, r.last_error, c.public_chat_id AS chat, c.state AS command_state, c.committed_at
 				 FROM pim_app.trigger_runs r LEFT JOIN pim_app.accepted_commands c ON c.command_id = r.command_id AND c.owner_id = r.owner_id
 				 WHERE r.id = $1 AND r.phase <> 'test'`, [params[0]!])).rows[0]);
+			const found = await run();
 			if (!found) throw new NotFoundError("No such trigger run");
-			return ok(runView(found, (await load(app, p, found.trigger_id)).row));
+			// A run that is over says so: settled before it is shown.
+			await app.triggers.settle(p.ownerId, found.trigger_id);
+			return ok(runView((await run())!, (await load(app, p, found.trigger_id)).row));
 		}),
 		route("GET", "/api/triggers/:id/runs", async ({ app, principal, params, url }) => {
 			const p = await principal();
 			await app.identity.authz.enforce(p, "api:read");
 			const { row } = await load(app, p, params[0]!);
+			await app.triggers.settle(p.ownerId, row.id);
 			const limit = Math.min(Math.max(Number(url.searchParams.get("limit")) || 20, 1), 50);
 			const cursor = /^(\d+):(.+)$/.exec(url.searchParams.get("cursor") ?? "");
 			const runs = await app.db.owner(p.ownerId, async (tx) => (await tx.query(
-				`SELECT r.id, r.phase, r.command_id, r.detail, r.at, c.public_chat_id AS chat
+				`SELECT r.id, r.phase, r.command_id, r.detail, r.at, r.delivered_at, r.ended_at, r.last_error, c.public_chat_id AS chat, c.state AS command_state, c.committed_at
 				 FROM pim_app.trigger_runs r LEFT JOIN pim_app.accepted_commands c ON c.command_id = r.command_id AND c.owner_id = r.owner_id
 				 WHERE r.trigger_id = $1 AND r.phase <> 'test' AND ($2::bigint IS NULL OR (r.at, r.id) < (to_timestamp($2::bigint / 1000.0), $3))
 				 ORDER BY r.at DESC, r.id DESC LIMIT $4`,

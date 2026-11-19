@@ -115,4 +115,52 @@ describe("maintenance sweeps", () => {
 		expect((await gate.triggers.runs(ada, trigger.id)).map((r) => r.phase)).toEqual(["fired"]);
 		expect((await gate.triggers.get(ada, trigger.id)).lifecycle).toBe("ended");
 	});
+
+	it("runs a trigger one turn at a time: an occurrence waits behind the running turn, a full trigger turns the source away, and a state keeps only its newest", async () => {
+		const ada = { kind: "user", ownerId: owner, role: "admin", sessionId: "s" } as never;
+		const agent = await gate.agents.create(ada, { name: "Serial" });
+		const spec = (source: object, condition: object | null, delivery: object) => ({ version: 1, owningAgentId: agent.id, originChatId: "api", label: "Serial", instruction: "go", source, condition, destination: { type: "new_chat" }, delivery, authorizationRef: null });
+		const stream = await gate.triggers.create(ada, { spec: spec({ kind: "stream", command: "tail -f log", cwd: null }, { when: { op: "exists", path: ["n"] } }, { maxPendingEvents: 2 }) });
+		const phases = async (id: string) => Object.fromEntries((await gate.triggers.runs(ada, id)).map((r) => [r.id.split(":").slice(3).join(":"), r.phase]));
+		const commit = (id: string, eventId: string, secondsAgo = 60) => stack.admin.query("UPDATE pim_app.accepted_commands SET state = 'runtime_committed', committed_at = now() - make_interval(secs => $3) WHERE command_id = $1 AND owner_id = $2", [`trigger:${id}:computer:${eventId}`, owner, secondsAgo]);
+		const fire = (id: string, eventId: string) => gate.triggers.fireOccurrence(owner, id, `computer:${eventId}`, { source: "stream", eventId });
+		// Switched on (a computer source needs a grant to be, which this does not test).
+		await stack.admin.query("UPDATE pim_app.triggers SET lifecycle = 'enabled' WHERE owner_id = $1 AND id = $2", [owner, stream.id]);
+		let busy = new Set<string>();
+		gate.triggers.chatBusy = async (_owner, chats) => new Set(chats.filter((c) => busy.has(c)));
+
+		// The first goes to a chat; while its command waits for a Runner the next two wait behind it, and a fourth finds no room and is not recorded, so its source offers it again.
+		expect(await fire(stream.id, "e1")).toBe("fired");
+		expect(await fire(stream.id, "e2")).toBe("queued");
+		expect(await fire(stream.id, "e3")).toBe("queued");
+		expect(await fire(stream.id, "e4")).toBe("full");
+		expect(await fire(stream.id, "e2")).toBe("duplicate");
+		expect(await phases(stream.id)).toEqual({ e1: "fired", e2: "pending", e3: "pending" });
+		expect(await gate.triggers.deliverPending(owner)).toBe(0);
+
+		// The Runner took the first and its chat is working: still going. Once the chat is idle the run is over, and the next waiting occurrence goes, one at a time.
+		await commit(stream.id, "e1");
+		const chatOf = async (eventId: string) => (await stack.admin.query("SELECT public_chat_id FROM pim_app.accepted_commands WHERE command_id = $1", [`trigger:${stream.id}:computer:${eventId}`])).rows[0]?.public_chat_id as string;
+		busy = new Set([await chatOf("e1")]);
+		expect(await gate.triggers.deliverPending(owner)).toBe(0);
+		busy = new Set();
+		expect(await gate.triggers.deliverPending(owner)).toBe(1);
+		expect(await phases(stream.id)).toEqual({ e1: "completed", e2: "fired", e3: "pending" });
+		expect(await chatOf("e2")).toBeTruthy();
+		expect(await gate.triggers.deliverPending(owner)).toBe(0);
+		await commit(stream.id, "e2");
+		expect(await gate.triggers.deliverPending(owner)).toBe(1);
+		expect(await phases(stream.id)).toEqual({ e1: "completed", e2: "completed", e3: "fired" });
+		// A refused command failed; a run nothing has said anything of for a day is of unknown outcome.
+		await stack.admin.query("UPDATE pim_app.accepted_commands SET state = 'rejected' WHERE command_id = $1", [`trigger:${stream.id}:computer:e3`]);
+		expect(await gate.triggers.settle(owner, stream.id)).toBe(false);
+		expect((await phases(stream.id)).e3).toBe("failed");
+
+		// A state keeps one waiting snapshot: the newer replaces the older, which is recorded as superseded.
+		const poll = await gate.triggers.create(ada, { spec: spec({ kind: "poll", command: "date", cwd: null, intervalMs: 60_000, deadlineMs: 10_000 }, { when: { op: "exists", path: ["n"] } }, {}) });
+		const poked = (eventId: string) => gate.triggers.fireOccurrence(owner, poll.id, `computer:${eventId}`, { source: "poll", eventId });
+		expect([await poked("p1"), await poked("p2"), await poked("p3")]).toEqual(["fired", "queued", "queued"]);
+		expect(await phases(poll.id)).toEqual({ p1: "fired", p2: "skipped", p3: "pending" });
+		expect((await gate.triggers.runs(ada, poll.id)).find((r) => r.phase === "skipped")!.detail).toMatchObject({ reason: "superseded" });
+	});
 });

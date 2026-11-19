@@ -131,7 +131,7 @@ export async function tickSchedules(app: App, now = new Date()): Promise<number>
 }
 
 /**
- * Fires the time triggers that are due, for each owner who has one switched on. Which owners those are is read across owners (`pim.scope = 'all'`,
+ * Fires the time triggers that are due, for each owner who has one switched on, and hands on what waited behind a trigger's running turn. Which owners those are is read across owners (`pim.scope = 'all'`,
  * migration 0623); what fires, and when, is the owner's own. Returns how many triggers fired.
  */
 export async function tickTriggers(app: App, pool: Pool, now = new Date()): Promise<number> {
@@ -140,7 +140,8 @@ export async function tickTriggers(app: App, pool: Pool, now = new Date()): Prom
 	try {
 		await client.query("BEGIN");
 		await client.query("SELECT set_config('pim.scope', 'all', true)");
-		owners = (await client.query("SELECT DISTINCT owner_id FROM pim_app.triggers WHERE lifecycle = 'enabled' AND source = 'time'")).rows.map((r) => r.owner_id as string);
+		// Those with a time trigger switched on, and those with an occurrence waiting behind a trigger's running turn.
+		owners = (await client.query("SELECT owner_id FROM pim_app.triggers WHERE lifecycle = 'enabled' AND source = 'time' UNION SELECT owner_id FROM pim_app.trigger_runs WHERE phase = 'pending'")).rows.map((r) => r.owner_id as string);
 		await client.query("COMMIT");
 	} finally {
 		client.release();
@@ -149,6 +150,8 @@ export async function tickTriggers(app: App, pool: Pool, now = new Date()): Prom
 	for (const owner of owners) {
 		try {
 			fired += (await app.triggers.tickTime(owner, now)).fired;
+			// What waited behind a trigger's turn goes on once the turn is over.
+			fired += await app.triggers.deliverPending(owner, now);
 		} catch (error) {
 			console.error("trigger tick", owner, error);
 		}

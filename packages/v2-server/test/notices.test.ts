@@ -105,4 +105,23 @@ describe("watching a file over the Live socket", () => {
 			stop();
 		}
 	});
+
+	it("tells an app to watch its files again when it lets go of one this process never heard it hold, once for each socket", async () => {
+		(app.relay as unknown as { acquire: unknown }).acquire = async () => ({ onFileEvent: () => () => undefined, watch: async () => ({ watching: true, exists: true, sha256: "abc", size: 3 }), unwatch: async () => true });
+		const stop = serveSays(app, pulse);
+		try {
+			// The socket c9 opened its file before this process started: letting it go is the first this process hears of it.
+			await pulse.publishSay(ada, { kind: "unwatch_file", data: { path: "/workspace/notes/old.md" }, connection: "c9" });
+			await pulse.publishSay(ada, { kind: "unwatch_file", data: { path: "/workspace/notes/other.md" }, connection: "c9" });
+			await until("the resync", () => notices(ada, "file_resync").length === 1);
+			// A socket this process knows (it watched through it) is not asked to start over.
+			await pulse.publishSay(ada, { kind: "watch_file", data: { path: "/workspace/notes/a.md" }, connection: "c10" });
+			await pulse.publishSay(ada, { kind: "unwatch_file", data: { path: "/workspace/notes/a.md" }, connection: "c10" });
+			await until("the file as it is", () => notices(ada, "file_changed").length > 0);
+			await new Promise((resolve) => setTimeout(resolve, 150));
+			expect(notices(ada, "file_resync")).toHaveLength(1);
+		} finally {
+			stop();
+		}
+	});
 });

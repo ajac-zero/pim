@@ -316,7 +316,8 @@ export function triggerTools(deps: { ownerId: string; runtime: RuntimeDb; read: 
 			Type.Object({ agentId: O(S({ description: "For the majordomo: another agent's connectors." })) }),
 			(app, call) => guarded(async () => json({ sources: sourcesOf(await app.db.owner(call.p.ownerId, (tx) => contextOf(tx))) })),
 		),
-		write(
+		// Replay-safe: it parks until the person decides and runs again, and recording the grant twice is recording it once.
+		read(
 			"trigger_computer_grant",
 			"Asks the person to let a trigger's source (a poll, a stream or a process watch) run on their computer, exactly as the trigger has it now. It runs as their own user, with that user's access. A changed source needs asking again. Only the person can answer: no standing approval or majordomo does. Then resume_trigger enables it.",
 			Type.Object({ triggerId: S({ description: "The trigger's id." }) }),

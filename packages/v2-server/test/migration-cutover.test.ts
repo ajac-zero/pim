@@ -27,6 +27,7 @@ import { MemoryObjects } from "@pim/v2-forge/ports";
 import { ForgeScheduler } from "@pim/v2-forge/scheduler";
 import { ForgeStore } from "@pim/v2-forge/store";
 import { ForgeWorker } from "@pim/v2-forge/worker";
+import { digestOf } from "../src/compat/admin-util.ts";
 import { chatUuid, promoteToLive } from "../src/migration-bridge.ts";
 import type { Process } from "../src/main.ts";
 import { waitFor } from "../../v2-runtime/test/support/rig.ts";
@@ -62,9 +63,44 @@ async function legacyDomain(admin: Pool, objects: FsObjectStore, conversation: s
 	];
 	const session = String(conversation);
 	rows.push(["pim_agent_sessions", session, { session, agent: "ag_poet" }], ["pim_chat_links", "lnk1", { id: "lnk1", session, shared_at: at }]);
+	// What apps kept and were given, besides their versions (art_1 is the fixture's own habit tracker): its data, what the person let one version use, the circle it is shared with, a picture
+	// kept with a page, a drawing, a diagram, and an app with a backend that was running on the person's computer on a port of its own.
+	const put = async (path: string, bytes: Buffer) => {
+		const hash = createHash("sha256").update(bytes).digest("hex");
+		await objects.put("ARTIFACTS", `${legacy}/${hash}`, bytes);
+		return { path, sha256: hash, size: bytes.length, type: "x" };
+	};
+	const art = async (id: string, title: string, kind: string, files: { path: string; bytes: Buffer }[]) => {
+		const stored = await Promise.all(files.map((f) => put(f.path, f.bytes)));
+		const digest = createHash("sha256").update(stored.map((f) => f.sha256).join()).digest("hex");
+		rows.push(["pim_artifacts", id, { id, title, kind, session: null, head: 1, created_at: at, updated_at: at }], ["pim_artifact_versions", `${id}:1`, { artifact: id, version: 1, content: "", sha256: digest, size: 1, source: "agent", created_at: at }]);
+		for (const f of stored) rows.push(["pim_artifact_files", `${id}:1:${f.path}`, { artifact: id, version: 1, ...f }]);
+		return digest;
+	};
+	await art("art_pic", "Pic", "html", [{ path: "index.html", bytes: Buffer.from('<!doctype html><img src="dot.png">') }, { path: "dot.png", bytes: PNG }]);
+	await art("art_svg", "Drawing", "svg", [{ path: "image.svg", bytes: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"></svg>') }]);
+	await art("art_flow", "Flow", "mermaid", [{ path: "diagram.mmd", bytes: Buffer.from("graph TD; A-->B") }]);
+	await art("art_host", "Backend", "hosted", [{ path: "pim.app.json", bytes: Buffer.from('{"backend":{"command":"node server.js"},"access":"public"}') }, { path: "server.js", bytes: Buffer.from("// server") }]);
+	rows.push(
+		["pim_artifact_data", "art_1:own:streak", { artifact: "art_1", scope: "own", key: "streak", value: "12", size: 8, updated_at: at }],
+		["pim_artifact_data", "art_1:shared:goal", { artifact: "art_1", scope: "shared", key: "goal", value: "daily", size: 9, updated_at: at }],
+		["pim_artifact_grants", "art_1:model", { artifact: "art_1", sha256: createHash("sha256").update(HABIT_HTML).digest("hex"), capability: "model", granted_at: at }],
+		["pim_artifact_circles", "art_1:c_friends", { artifact: "art_1", circle: "c_friends" }],
+		["pim_hosted_apps", "art_host", { artifact: "art_host", port: 18_007, version: 1, access: "public" }],
+		// What a circle's guests did, what the circle may use of a connector, a room with a seat, the models' cost, and an unused invitation.
+		["pim_guest_activity", "1", { id: 1, at, username: "grace", circle_id: "c_friends", tool: "send_email", outcome: "asked", summary: "Grace asked to send mail" }],
+		["pim_tool_permissions", "c_friends:conn_gmail:send_email", { audience: "c_friends", app: "conn_gmail", tool: "send_email", permission: "on" }],
+		["pim_rooms", session, { session, mode: "open", created_at: at }],
+		["pim_room_seats", "seat1", { conversation: "seat-conv", room: session, agent: "ag_poet", depth: 0, joined_at: at }],
+		["pim_model_calls", "1", { id: 1, ts: at, chat_id: session, run_kind: "chat", provider: "faux", model: "m", input: 100, output: 20, cache_read: 5, cache_write_5m: 0, cache_write_1h: 0, cost_usd: 0.0125 }],
+		["pim_usage_daily", "old", { day: "2026-01-02", model: "m", run_kind: "chat", chat_id: session, calls: 3, errors: 0, input: 300, output: 60, cache_read: 0, cache_write_5m: 0, cache_write_1h: 0, cost_usd: 0.05, unpriced_calls: 0 }],
+	);
 	for (const [table, pk, row] of rows) await admin.query("INSERT INTO pim_ops.legacy_rows (owner_id, source, table_name, pk, row) VALUES ($1,'Pim',$2,$3,$4)", [ADA, table, pk, JSON.stringify(row)]);
+	// The gallery's entry for the habit tracker (the fixture's pa_1) is in the landing as the fixture made it; an invitation nobody used is the Directory's.
+	await admin.query("INSERT INTO pim_ops.legacy_rows (owner_id, source, table_name, pk, row) VALUES ('_deployment','Directory','invites',$1,$2)", ["ee".repeat(32), JSON.stringify({ hash: "ee".repeat(32), note: "for Heidi", created_at: at, used_by: null, used_at: null })]);
 }
 const ADA = "o_own_ada";
+const HABIT_HTML = "<!doctype html><title>Habit tracker</title>";
 /** A real one-pixel PNG: the icon object is sniffed as an image when served. */
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==", "base64");
 
@@ -150,8 +186,8 @@ real("a cutover rehearsal", () => {
 		// The person's named memory scopes keep their names, and a circle keeps the scopes it reads.
 		expect(await as("SELECT key, name FROM pim_app.memory_scopes WHERE owner_id = $1", [ADA])).toEqual([{ key: "s_career", name: "Career" }]);
 		expect((await as("SELECT memory_scopes FROM pim_app.circles WHERE owner_id = $1", [ADA]))[0]).toEqual({ memory_scopes: ["everyone"] });
-		// What the person chose for a connector's tool is carried: their own choice as it was, an agent's as on or off (asking meant off), a circle's not at all; the connector keeps its approval policy.
-		expect(await as("SELECT audience, app, tool, permission FROM pim_app.tool_permissions WHERE owner_id = $1 ORDER BY audience", [ADA])).toEqual([{ audience: "agent:ag_1", app: "conn_gmail", tool: "send_email", permission: "off" }, { audience: "owner", app: "conn_gmail", tool: "send_email", permission: "ask" }]);
+		// What the person chose for a connector's tool is carried: their own choice as it was, an agent's as on or off (asking meant off), a circle's as it was; the connector keeps its approval policy.
+		expect(await as("SELECT audience, app, tool, permission FROM pim_app.tool_permissions WHERE owner_id = $1 ORDER BY audience", [ADA])).toEqual([{ audience: "agent:ag_1", app: "conn_gmail", tool: "send_email", permission: "off" }, { audience: "circle:c_friends", app: "conn_gmail", tool: "send_email", permission: "on" }, { audience: "owner", app: "conn_gmail", tool: "send_email", permission: "ask" }]);
 		expect(await as("SELECT approval FROM pim_app.connectors WHERE owner_id = $1 AND id = 'conn_gmail'", [ADA])).toEqual([{ approval: "all" }]);
 		expect(await count(`SELECT count(*) n FROM pim_app.conversations WHERE owner_id = '${ADA}' AND agent_id = 'ag_poet'`)).toBeGreaterThan(0);
 		expect((await as("SELECT body, files, version FROM pim_app.skills WHERE owner_id = $1 AND name = 'Haiku'", [ADA]))[0]).toMatchObject({ body: "Five, seven, five.", files: { "ref.md": "# reference\n" }, version: 1 });
@@ -161,6 +197,23 @@ real("a cutover rehearsal", () => {
 		expect(await count(`SELECT count(*) n FROM pim_app.shares WHERE owner_id = '${ADA}' AND link = 'lnk1'`)).toBe(1);
 		expect(await count(`SELECT count(*) n FROM pim_app.artifact_versions WHERE owner_id = '${ADA}'`)).toBeGreaterThan(0);
 		expect(await count(`SELECT count(*) n FROM pim_app.note_updates WHERE owner_id = '${ADA}'`)).toBeGreaterThan(0);
+		// Apps came across whole: a picture kept as its bytes, a drawing and a diagram as the kinds they are, an app with a backend with the port and version it was running, and who may open each.
+		const files = async (id: string) => (await as<{ files: Record<string, string> }>("SELECT files FROM pim_app.artifact_versions WHERE owner_id = $1 AND artifact_id = $2 AND version = 1", [ADA, id]))[0]!.files;
+		expect((await files("art_pic"))["dot.png"]).toBe(`pim-binary:${PNG.toString("base64")}`);
+		expect(await as("SELECT id, kind FROM pim_app.artifacts WHERE owner_id = $1 AND id IN ('art_svg', 'art_flow', 'art_host') ORDER BY id", [ADA])).toEqual([{ id: "art_flow", kind: "mermaid" }, { id: "art_host", kind: "backend" }, { id: "art_svg", kind: "svg" }]);
+		expect((await as("SELECT access, circles, backend_port, backend_version, label FROM pim_app.artifacts WHERE owner_id = $1 AND id = 'art_host'", [ADA]))[0]).toMatchObject({ access: "public", backend_port: 18_007, backend_version: 1, label: expect.stringContaining("art-host") });
+		expect((await as("SELECT access, circles FROM pim_app.artifacts WHERE owner_id = $1 AND id = 'art_1'", [ADA]))[0]).toEqual({ access: "shared", circles: ["c_friends"] });
+		// What an app kept (its own and what everyone sees) and what the person let a version use, held to the version's digest here.
+		expect(await as("SELECT scope, key, value FROM pim_app.app_data WHERE owner_id = $1 AND app_key = 'art_1' ORDER BY scope", [ADA])).toEqual([{ scope: "own", key: "streak", value: "12" }, { scope: "shared", key: "goal", value: "daily" }]);
+		expect(await as("SELECT sha256, capability FROM pim_app.app_grants WHERE owner_id = $1 AND app_key = 'art_1'", [ADA])).toEqual([{ sha256: digestOf({ "index.html": HABIT_HTML }), capability: "model" }]);
+		// The app the person published keeps its address in the gallery, as it was: for people signed in, not for anyone with the link.
+		expect(await as("SELECT public_id, artifact_id, version, public FROM pim_app.published_artifacts WHERE owner_id = $1", [ADA])).toEqual([{ public_id: "pa_1", artifact_id: "art_1", version: 1, public: false }]);
+		// What guests of the circle did, a room with its seat, what the models cost, and an invitation nobody had used.
+		expect(await as("SELECT username, audience, tool, outcome FROM pim_app.guest_activity WHERE owner_id = $1", [ADA])).toEqual([{ username: "grace", audience: "circle:c_friends", tool: "send_email", outcome: "asked" }]);
+		expect((await as("SELECT room_mode, kind FROM pim_app.conversations WHERE public_chat_id IN (SELECT public_chat_id FROM pim_app.room_members WHERE owner_id = $1)", [ADA]))[0]).toEqual({ room_mode: "open", kind: "group" });
+		expect(await as("SELECT member FROM pim_app.room_members WHERE owner_id = $1", [ADA])).toEqual([{ member: "ag_poet" }]);
+		expect(await as("SELECT id, model, input_tokens, output_tokens, cost_microusd FROM pim_app.model_calls WHERE owner_id = $1 ORDER BY at", [ADA])).toEqual([{ id: "legacy-day-2026-01-02-0", model: "m", input_tokens: "300", output_tokens: "60", cost_microusd: "50000" }, { id: "legacy-1", model: "m", input_tokens: "105", output_tokens: "20", cost_microusd: "12500" }]);
+		expect(await as("SELECT code_hash, note, used_by FROM pim_app.invites ORDER BY code_hash")).toEqual([{ code_hash: "ab".repeat(32), note: "for grace", used_by: "o_own_grace" }, { code_hash: "ee".repeat(32), note: "for Heidi", used_by: null }]);
 		// The ChatGPT sign-in came across as it was, sealed under the application's keys, with the same agent host id: nobody signs in again.
 		const plan = (await as<{ secret: string; email: string; host_id: string }>("SELECT secret, email, host_id FROM pim_app.chatgpt_credentials WHERE owner_id = $1", [ADA]))[0]!;
 		expect(plan).toMatchObject({ email: "ada@example.test", host_id: "urn:uuid:11111111-1111-4111-8111-111111111111" });

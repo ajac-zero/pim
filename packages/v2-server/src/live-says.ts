@@ -61,10 +61,20 @@ export function serveSays(app: App, pulse: Pick<Pulse, "onSay" | "publishNotice"
 		tell(ownerId, { path, kind: state.exists === false ? "deleted" : "modified", sha256: state.sha256 ?? null, size: state.size ?? null }, `file:${path}:watched:${connection}:${Date.now()}`);
 	};
 
+	/** The connections this process has told to watch their files again. */
+	const resynced = new Set<string>();
+
 	const unwatch = async (ownerId: string, connection: string, requested: unknown) => {
 		const path = filesPath(requested);
 		const hold = holds.get(connection);
 		const count = path === null ? undefined : hold?.paths.get(path);
+		// A socket lets go of a file though this process has heard nothing else of it: this process started after the socket did (a restart, or a replica added), so what the socket watches is not
+		// watched here. Its app is told to watch its files again (`file_resync`), once for each socket, and it asks as it did when it opened them.
+		if (path !== null && !hold && !resynced.has(connection)) {
+			resynced.add(connection);
+			if (resynced.size > 5000) resynced.clear();
+			void pulse.publishNotice(ownerId, { kind: "file_resync", key: `resync:${connection}` }).catch(() => undefined);
+		}
 		if (path === null || !hold || count === undefined) return;
 		if (count > 1) hold.paths.set(path, count - 1);
 		else hold.paths.delete(path);
@@ -76,6 +86,7 @@ export function serveSays(app: App, pulse: Pick<Pulse, "onSay" | "publishNotice"
 			try {
 				const path = (said.data as { path?: unknown } | undefined)?.path;
 				if (said.kind === "closed") {
+					resynced.delete(said.connection);
 					const hold = holds.get(said.connection);
 					holds.delete(said.connection);
 					if (hold) await release(hold.ownerId, hold.paths);

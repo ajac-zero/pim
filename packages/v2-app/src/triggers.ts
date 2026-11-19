@@ -252,6 +252,13 @@ export class Triggers {
 		const spec = row.spec as TriggerSpec;
 		const principal: Principal = { kind: "agent", ownerId: OwnerId.parse(ownerId), agentId: `trigger:${row.id}` };
 		const commandId = `trigger:${row.id}:${occurrence}`;
+		// What waits to be handed to a Runner is bounded: a trigger holds at most `maxPendingEvents` firings there (one for a source that reports a state, such as a timetable), so a Runner that is
+		// down or behind, or a source that fires faster than turns end, never piles up work without end. A firing that finds it full is recorded as skipped, and its chat is never made.
+		const pending = Number((await this.db.owner(ownerId, (tx) => tx.query("SELECT count(*) AS n FROM pim_app.command_inbox i JOIN pim_app.accepted_commands a ON a.owner_id = i.owner_id AND a.command_id = i.command_id WHERE a.kind = 'trigger_fire' AND a.payload->>'trigger' = $1", [row.id]))).rows[0]!.n);
+		if (pending >= (spec.delivery.maxPendingEvents ?? 1) && !(await this.db.owner(ownerId, (tx) => tx.query("SELECT 1 FROM pim_app.accepted_commands WHERE command_id = $1", [commandId]))).rowCount) {
+			await this.#run(ownerId, row.id, commandId, "skipped", null, { ...detail, reason: "pending_full" });
+			return true;
+		}
 		const hash = createHash("sha256").update(commandId).digest("hex");
 		let chatId = spec.destination.type === "existing_chat" ? spec.destination.chatId : `${hash.slice(0, 8)}-${hash.slice(8, 12)}-5${hash.slice(13, 16)}-a${hash.slice(17, 20)}-${hash.slice(20, 32)}`;
 		if (spec.destination.type === "new_chat") await this.conversations.create(principal, { id: chatId, agentId: spec.owningAgentId, title: spec.label, kind: "trigger" }).catch((e) => { if ((e as { code?: string }).code !== "23505") throw e; });

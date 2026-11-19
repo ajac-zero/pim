@@ -11,8 +11,9 @@
  * - `pim_forge`: coding threads (a remote Amp thread keeps its handle and is adopted, never started again).
  *
  * - the space's domain (`promoteDomain`): agents, skills and their versions, memories, goals, triggers (with the post-cutover skip so nothing catches up),
- *   providers and connectors (secrets re-sealed from the ops envelopes under the application's keys), circles, chat links, profiles, apps with their versions, notes
- *   (the Yjs document as the first update), objects' metadata and ACLs, and the settings a person explicitly set.
+ *   providers and connectors (secrets re-sealed from the ops envelopes under the application's keys), circles, chat links, profiles, apps with their versions (binary files as
+ *   bytes, drawings, diagrams, backend apps with their port) and what belongs to them (data, grants, circles, published address), notes (the Yjs document as the first update),
+ *   rooms and their seats, circles' tool permissions and guest activity, the models' cost history, objects' metadata and ACLs, and the settings a person explicitly set.
  *
  * It is idempotent per tenant and runs as the schema owner. **Not promoted** (they remain in `pim_ops.legacy_rows` and the ops ledger, listed in
  * docs/architecture/v2-implementation-status.md): legacy schedules (they are triggers, promoted as such), deployment-level providers, templates and bots,
@@ -22,6 +23,8 @@ import { createHash } from "node:crypto";
 import type { ConversationRecord, DocumentRecord, EntryRecord, SubmissionRecord, TaskRecord } from "@earendil-works/pi-durable";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { projectEntries } from "@pim/shared/transcript";
+import { binaryValue } from "@pim/v2-app/app-files";
+import { appLabel, parseManifest } from "@pim/v2-app/apps";
 import { chatgptContext } from "@pim/v2-app/chatgpt";
 import { KeyringCrypto, sealString } from "@pim/v2-app/crypto";
 import { mergeNoteUpdates, noteUpdateFromText } from "@pim/v2-app/note-import";
@@ -34,6 +37,7 @@ import { PgPiStorage } from "@pim/v2-runtime/storage";
 import type { Pool, PoolClient } from "pg";
 import { randomBytes, randomUUID } from "node:crypto";
 import { openBlob, vaultKey } from "@pim/coding/vault/crypto";
+import { digestOf } from "./compat/admin-util.ts";
 import { base64UrlDecode } from "@pim/shared/encoding";
 import { type CodingVaultKey, HARNESSES } from "@pim/shared/harnesses";
 import { ForgeVault } from "@pim/v2-forge/vault";
@@ -118,8 +122,8 @@ async function promoteIdentity(pool: Pool, owner: string, rpId: string, legacyRp
 	await asOwner(pool, owner, async (c) => {
 		const t = (await c.query("SELECT * FROM pim_ops.tenants WHERE owner_id = $1", [owner])).rows[0];
 		await c.query(
-			"INSERT INTO pim_app.accounts (owner_id, username, role, status, bot, created_at, activated_at, status_reason) VALUES ($1,$2,$3,$4,false,$5,$6,$7) ON CONFLICT (owner_id) DO NOTHING",
-			[owner, t.username, t.role, t.status, ts(t.created_at_ms), ts(t.activated_at_ms), t.status_reason],
+			"INSERT INTO pim_app.accounts (owner_id, username, role, status, bot, created_at, activated_at, status_reason) VALUES ($1,$2,$3,$4,$8,$5,$6,$7) ON CONFLICT (owner_id) DO NOTHING",
+			[owner, t.username, t.role, t.status, ts(t.created_at_ms), ts(t.activated_at_ms), t.status_reason, t.role === "guest"],
 		);
 		await c.query("INSERT INTO pim_app.usernames (username, owner_id) VALUES ($1,$2) ON CONFLICT DO NOTHING", [t.username, owner]);
 		for (const k of (await c.query("SELECT * FROM pim_ops.passkeys WHERE owner_id = $1", [owner])).rows) {
@@ -385,6 +389,15 @@ const parseJson = (value: unknown, fallback: unknown = null): any => {
 const slug = (text: string) => text.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 63) || "item";
 
 type Domain = { counts: Record<string, number>; skipped: string[] };
+
+/** What an app with a backend says about how it runs, or nothing when its manifest is not one this Pim reads: the app is promoted all the same. */
+function safeManifest(text: string | undefined): object {
+	try {
+		return parseManifest(text ?? "");
+	} catch {
+		return {};
+	}
+}
 const bump = (d: Domain, kind: string, n = 1) => void (d.counts[kind] = (d.counts[kind] ?? 0) + n);
 
 /** The legacy rows of one table of one tenant, as the landing kept them. */
@@ -437,6 +450,16 @@ async function promoteDomain(pool: Pool, owner: string, options: PromoteOptions,
 	const artifacts = await rows("pim_artifacts");
 	const artifactVersions = await rows("pim_artifact_versions");
 	const artifactFiles = await rows("pim_artifact_files");
+	const artifactData = await rows("pim_artifact_data");
+	const artifactGrants = await rows("pim_artifact_grants");
+	const artifactCircles = await rows("pim_artifact_circles");
+	const hostedApps = await rows("pim_hosted_apps");
+	const guestActivity = await rows("pim_guest_activity");
+	const rooms = await rows("pim_rooms");
+	const roomSeats = await rows("pim_room_seats");
+	const modelCalls = await rows("pim_model_calls");
+	const usageDaily = await rows("pim_usage_daily");
+	const publishedApps = (await legacyRows(pool, "_deployment", "published_artifacts")).filter((r) => String(r.owner_id) === legacyId);
 	const noteUpdates = await rows("pim_note_updates");
 	const storedFiles = await rows("pim_stored_files");
 	const agentSessions = await rows("pim_agent_sessions");
@@ -500,11 +523,11 @@ async function promoteDomain(pool: Pool, owner: string, options: PromoteOptions,
 	// Apps and notes. A legacy app is a row of `pim_artifacts` whose versions are rows of `pim_artifact_versions`, each with its files in `pim_artifact_files`, whose bytes are in the
 	// ARTIFACTS bucket at `<owner>/<sha256>`. A note is such an app of kind `markdown` with one README.md.
 	const decoder = new TextDecoder("utf-8", { fatal: true });
-	const MAIN = { html: "index.html", jsx: "App.jsx", markdown: "README.md" } as const;
-	type PlannedApp = { a: Record<string, any>; kind: "html" | "jsx" | "backend" | "note"; versions: { v: number; files: Record<string, string>; at: unknown }[] };
+	const MAIN = { html: "index.html", jsx: "App.jsx", markdown: "README.md", svg: "image.svg", mermaid: "diagram.mmd", hosted: "pim.app.json" } as const;
+	type PlannedApp = { a: Record<string, any>; kind: "html" | "jsx" | "svg" | "mermaid" | "backend" | "note"; versions: { v: number; files: Record<string, string>; at: unknown; sha256: string | null }[] };
 	const plannedApps: PlannedApp[] = [];
 	for (const a of artifacts) {
-		const kind = a.kind === "jsx" ? "jsx" : a.kind === "hosted" ? "backend" : a.kind === "html" || a.kind === "app" ? "html" : a.kind === "markdown" ? "note" : null;
+		const kind = a.kind === "jsx" ? "jsx" : a.kind === "hosted" ? "backend" : a.kind === "html" || a.kind === "app" ? "html" : a.kind === "svg" ? "svg" : a.kind === "mermaid" ? "mermaid" : a.kind === "markdown" ? "note" : null;
 		if (!kind) {
 			d.skipped.push(`app ${a.id}: a ${a.kind} is not promoted as an app (kept in the landing)`);
 			continue;
@@ -518,15 +541,16 @@ async function promoteDomain(pool: Pool, owner: string, options: PromoteOptions,
 					d.skipped.push(`app ${a.id} v${v.version}: ${f.path} has no bytes to promote`);
 					continue;
 				}
+				// A file that is not text (a picture, a dataset) is kept in the version as its bytes, as v2's apps keep them.
 				try {
 					files[String(f.path)] = decoder.decode(bytes);
 				} catch {
-					d.skipped.push(`app ${a.id} v${v.version}: ${f.path} is binary; its bytes are copied as an object, not inlined in the version`);
+					files[String(f.path)] = binaryValue(bytes);
 				}
 			}
 			// A version from before files were kept apart holds its main file in the row.
-			if (Object.keys(files).length === 0 && typeof v.content === "string" && v.content !== "") files[MAIN[kind === "note" ? "markdown" : kind === "backend" ? "html" : kind]] = v.content;
-			versions.push({ v: Number(v.version), files, at: v.created_at });
+			if (Object.keys(files).length === 0 && typeof v.content === "string" && v.content !== "") files[MAIN[kind === "note" ? "markdown" : kind === "backend" ? "hosted" : kind]] = v.content;
+			versions.push({ v: Number(v.version), files, at: v.created_at, sha256: typeof v.sha256 === "string" ? v.sha256 : null });
 		}
 		if (versions.length === 0 || Object.keys(versions.at(-1)!.files).length === 0) {
 			d.skipped.push(`app ${a.id}: its files were not given, so it was not promoted empty`);
@@ -643,18 +667,20 @@ async function promoteDomain(pool: Pool, owner: string, options: PromoteOptions,
 			if (!credential) d.skipped.push(`MCP server ${m.id}: signed in again by its owner (${options.crypto ? "it held no tokens" : "no keys were given"})`);
 			else d.skipped.push(`MCP server ${m.id}: its tools are not switched on until its owner enables them (the old Pim did not keep the list)`);
 		}
-		// What the person chose for each connector tool (Off, Ask, On), and each connector's approval policy. A choice for Pim's own tools or a circle has no home here yet.
+		// What the person chose for each connector tool (Off, Ask, On), and each connector's approval policy, for themselves, for each agent, and for each circle (the audience `circle:<id>`).
+		// A choice for Pim's own tools has no switch here: an agent's own tools are not turned on or off by person.
 		for (const m of mcpServers) {
 			if (["writes", "all", "none"].includes(String(m.approval))) await c.query("UPDATE pim_app.connectors SET approval = $2 WHERE id = $1", [m.id, m.approval]);
 		}
 		for (const t of toolPermissions) {
-			const audience = t.audience === "" ? "owner" : String(t.audience).startsWith("agent:") ? String(t.audience) : null;
+			const circle = circles.find((ci) => ci.id === t.audience);
+			const audience = t.audience === "" ? "owner" : String(t.audience).startsWith("agent:") ? String(t.audience) : circle ? `circle:${circle.id}` : null;
 			if (!audience || !t.app || !["off", "ask", "on"].includes(String(t.permission))) {
-				d.skipped.push(`tool permission ${t.audience || "owner"}/${t.app || "pim"}/${t.tool}: ${audience && t.app ? "unknown choice" : "only the owner's and an agent's choices for a connector's tools are carried"}`);
+				d.skipped.push(`tool permission ${t.audience || "owner"}/${t.app || "pim"}/${t.tool}: ${audience && t.app ? "unknown choice" : t.app ? "its audience is neither the owner, an agent nor a circle" : "Pim's own tools have no per-person switch here"}`);
 				continue;
 			}
 			// An agent's switch is on or off; asking meant off there.
-			const permission = audience === "owner" ? t.permission : t.permission === "on" ? "on" : "off";
+			const permission = audience === "owner" || audience.startsWith("circle:") ? t.permission : t.permission === "on" ? "on" : "off";
 			const r = await c.query("INSERT INTO pim_app.tool_permissions (owner_id, audience, app, tool, permission) VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING", [owner, audience, t.app, t.tool, permission]);
 			bump(d, "tool permissions", r.rowCount ?? 0);
 		}
@@ -684,8 +710,50 @@ async function promoteDomain(pool: Pool, owner: string, options: PromoteOptions,
 			const mine = members.filter((m) => m.circle_id === ci.id).map((m) => owners.get(String(m.owner_id)) ?? String(m.owner_id));
 			const known = new Set((await c.query("SELECT owner_id FROM pim_app.accounts WHERE owner_id = ANY($1)", [mine])).rows.map((r) => r.owner_id));
 			for (const m of mine) if (!known.has(m)) d.skipped.push(`circle ${ci.id}: member ${m} has no account here`);
-			const r = await c.query("INSERT INTO pim_app.circles (id, owner_id, name, members, memory_scopes) VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING", [ci.id, owner, ci.name, mine.filter((m) => known.has(m)), parseJson(ci.memory_scopes, [])]);
+			const r = await c.query("INSERT INTO pim_app.circles (id, owner_id, name, members, memory_scopes, enabled) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING", [ci.id, owner, ci.name, mine.filter((m) => known.has(m)), parseJson(ci.memory_scopes, []), ci.enabled === 0 ? false : true]);
 			bump(d, "circles", r.rowCount ?? 0);
+		}
+		// A group chat is its host chat (with how its agents take turns) and a seat for each other agent, which is a chat of its own that sits in the room.
+		for (const room of rooms) {
+			const host = chatOf.get(String(room.session));
+			if (!host) {
+				d.skipped.push(`room ${room.session}: its chat was not promoted`);
+				continue;
+			}
+			await c.query("UPDATE pim_app.conversations SET room_mode = $2, kind = CASE WHEN kind = 'normal' THEN 'group' ELSE kind END WHERE public_chat_id = $1", [host, room.mode === "open" ? "open" : "mentions"]);
+			for (const seat of roomSeats.filter((x) => String(x.room) === String(room.session))) {
+				const seatChat = chatOf.get(String(seat.conversation)) ?? null;
+				const known = (await c.query("SELECT 1 FROM pim_app.agents WHERE id = $1", [String(seat.agent)])).rowCount;
+				if (!known) {
+					d.skipped.push(`room ${room.session}: its seat for agent ${seat.agent} has no agent here`);
+					continue;
+				}
+				const r = await c.query("INSERT INTO pim_app.room_members (public_chat_id, owner_id, member, role, seat_chat_id) VALUES ($1,$2,$3,'agent',$4) ON CONFLICT DO NOTHING", [host, owner, String(seat.agent), seatChat]);
+				if (seatChat) await c.query("UPDATE pim_app.conversations SET room_of = $2 WHERE public_chat_id = $1 AND room_of IS NULL", [seatChat, host]);
+				bump(d, "room seats", r.rowCount ?? 0);
+			}
+			bump(d, "rooms");
+		}
+		// What the person's models cost them: each call the old Pim still had, and for the days before those, its daily totals as one entry each (a day's number of calls is lost, its tokens and cost are not).
+		const firstCall = modelCalls.reduce((least, x) => Math.min(least, Number(x.ts)), Number.POSITIVE_INFINITY);
+		const kindOf = (kind: unknown, thread: unknown) => (thread ? "coding_thread" : kind === "chat" || kind === null || kind === undefined ? "chat" : "background");
+		for (const x of modelCalls) {
+			const r = await c.query("INSERT INTO pim_app.model_calls (id, owner_id, run_kind, public_chat_id, provider, model, input_tokens, output_tokens, cost_microusd, at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT DO NOTHING", [`legacy-${x.id}`, owner, kindOf(x.run_kind, x.coding_thread_id), chatOf.get(String(x.chat_id)) ?? null, String(x.provider), String(x.model), Number(x.input ?? 0) + Number(x.cache_read ?? 0) + Number(x.cache_write_5m ?? 0) + Number(x.cache_write_1h ?? 0), Number(x.output ?? 0), Math.round(Number(x.cost_usd ?? 0) * 1_000_000), ms(x.ts)]);
+			bump(d, "model calls", r.rowCount ?? 0);
+		}
+		let daily = 0;
+		for (const x of usageDaily) {
+			const at = Date.parse(`${x.day}T12:00:00Z`);
+			if (!(at < firstCall)) continue;
+			const r = await c.query("INSERT INTO pim_app.model_calls (id, owner_id, run_kind, public_chat_id, provider, model, input_tokens, output_tokens, cost_microusd, at) VALUES ($1,$2,$3,$4,NULL,$5,$6,$7,$8,$9) ON CONFLICT DO NOTHING", [`legacy-day-${x.day}-${daily++}`, owner, kindOf(x.run_kind, null), chatOf.get(String(x.chat_id)) ?? null, String(x.model), Number(x.input ?? 0) + Number(x.cache_read ?? 0) + Number(x.cache_write_5m ?? 0) + Number(x.cache_write_1h ?? 0), Number(x.output ?? 0), Math.round(Number(x.cost_usd ?? 0) * 1_000_000), new Date(at)]);
+			bump(d, "usage days", r.rowCount ?? 0);
+		}
+		// What guests of those circles did with the person's tools, newest last as it was kept.
+		for (const g of guestActivity) {
+			const guest = (await c.query("SELECT owner_id FROM pim_app.accounts WHERE username = $1", [String(g.username)])).rows[0]?.owner_id as string | undefined;
+			const outcome = ["ran", "asked", "refused"].includes(String(g.outcome)) ? String(g.outcome) : "refused";
+			const r = await c.query("INSERT INTO pim_app.guest_activity (owner_id, at, guest, username, audience, tool, outcome, summary) SELECT $1,$2,$3,$4,$5,$6,$7,$8 WHERE NOT EXISTS (SELECT 1 FROM pim_app.guest_activity WHERE owner_id = $1 AND at = $2 AND username = $4 AND tool = $6 AND summary = $8)", [owner, ms(g.at), guest ?? String(g.username), String(g.username), `circle:${g.circle_id}`, String(g.tool), outcome, String(g.summary ?? "")]);
+			bump(d, "guest activity", r.rowCount ?? 0);
 		}
 		for (const l of links) {
 			const chat = chatOf.get(String(l.session));
@@ -712,10 +780,36 @@ async function promoteDomain(pool: Pool, owner: string, options: PromoteOptions,
 				await c.query("INSERT INTO pim_app.note_updates (owner_id, note_id, seq, data, origin, fence) VALUES ($1,$2,1,$3,'import',0) ON CONFLICT DO NOTHING", [owner, a.id, Buffer.from(noteBody(p))]);
 				continue;
 			}
-			const r = await c.query("INSERT INTO pim_app.artifacts (id, owner_id, title, kind, latest_version, access, created_at) VALUES ($1,$2,$3,$4,$5,'private',$6) ON CONFLICT DO NOTHING", [a.id, owner, a.title, kind, versions.at(-1)!.v, ms(a.created_at)]);
+			// Who may open it: the circles it was shared with, or what a backend app was last run with. An app with a backend keeps its port and the version run last, which is
+			// still running on the person's computer, so it answers at once after the cutover.
+			const circlesOf = artifactCircles.filter((x) => x.artifact === a.id).map((x) => String(x.circle));
+			const hosted = hostedApps.find((x) => x.artifact === a.id);
+			const access = kind === "backend" && hosted ? (hosted.access === "public" ? "public" : hosted.access === "circles" ? "shared" : "private") : circlesOf.length > 0 ? "shared" : "private";
+			const r = await c.query("INSERT INTO pim_app.artifacts (id, owner_id, title, kind, latest_version, access, circles, label, backend_port, backend_version, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT DO NOTHING", [a.id, owner, a.title, kind, versions.at(-1)!.v, access, access === "shared" ? circlesOf : [], kind === "backend" ? appLabel(owner, a.id) : null, kind === "backend" && hosted ? Number(hosted.port) : null, kind === "backend" && hosted ? Number(hosted.version) : null, ms(a.created_at), ms(a.updated_at ?? a.created_at)]);
 			if (!r.rowCount) continue;
 			bump(d, "apps");
-			for (const v of versions) await c.query("INSERT INTO pim_app.artifact_versions (artifact_id, owner_id, version, files, message, created_at) VALUES ($1,$2,$3,$4,'Imported',$5) ON CONFLICT DO NOTHING", [a.id, owner, v.v, JSON.stringify(v.files), ms(v.at)]);
+			for (const v of versions) await c.query("INSERT INTO pim_app.artifact_versions (artifact_id, owner_id, version, files, message, manifest, created_at) VALUES ($1,$2,$3,$4,'Imported',$5,$6) ON CONFLICT DO NOTHING", [a.id, owner, v.v, JSON.stringify(v.files), JSON.stringify(kind === "backend" ? safeManifest(v.files["pim.app.json"]) : {}), ms(v.at)]);
+			// What the app kept through the bridge (`window.pim.storage` and `.shared`), and what the person let each version use: a grant is for a version's digest, which here is the digest of its files.
+			for (const x of artifactData.filter((x) => x.artifact === a.id)) {
+				const k = await c.query("INSERT INTO pim_app.app_data (owner_id, app_key, scope, key, value, size, updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING", [owner, a.id, x.scope === "shared" ? "shared" : "own", x.key, x.value, Number(x.size), ms(x.updated_at)]);
+				bump(d, "app data", k.rowCount ?? 0);
+			}
+			for (const x of artifactGrants.filter((x) => x.artifact === a.id)) {
+				const version = versions.find((v) => v.sha256 === x.sha256);
+				if (!version) continue;
+				const k = await c.query("INSERT INTO pim_app.app_grants (owner_id, app_key, sha256, capability, granted_at) VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING", [owner, a.id, digestOf(version.files), x.capability, ms(x.granted_at)]);
+				bump(d, "app grants", k.rowCount ?? 0);
+			}
+		}
+		// What the person published: the gallery's entry keeps its id (its public link works as before) and points at the version that was published.
+		for (const x of publishedApps) {
+			const app = plannedApps.find((p) => p.a.id === x.artifact_id);
+			if (!app || app.kind === "note" || app.kind === "backend" || !app.versions.some((v) => v.v === Number(x.version))) {
+				d.skipped.push(`published app ${x.id}: its app ${x.artifact_id} (version ${x.version}) was not promoted`);
+				continue;
+			}
+			const k = await c.query("INSERT INTO pim_app.published_artifacts (public_id, owner_id, artifact_id, version, public, published_at, uses) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING", [x.id, owner, x.artifact_id, Number(x.version), Number(x.public) === 1, ms(x.published_at), Number(x.uses ?? 0)]);
+			bump(d, "published apps", k.rowCount ?? 0);
 		}
 		// Objects: metadata and ACL, under the new owner's key; bytes are copied when the caller can. Vault blobs and skills' content-addressed files are not objects here.
 		for (const o of objectRows) {
@@ -795,6 +889,18 @@ async function promoteDeployment(pool: Pool, options: PromoteOptions, d: Domain)
 		const m = parseJson(value, null) as { provider?: unknown; id?: unknown } | null;
 		return m && typeof m.provider === "string" && typeof m.id === "string" ? { provider: m.provider.replace(/^own:/, ""), id: m.id } : null;
 	};
+
+	// Invitations that were not used yet still work: only their digests were kept, and the code a person was given hashes to the same. They belong to the admin who has been here longest.
+	const issuer = (await pool.query("SELECT owner_id FROM pim_app.accounts WHERE role = 'admin' ORDER BY created_at LIMIT 1")).rows[0]?.owner_id as string | undefined;
+	for (const i of await rows("invites")) {
+		if (!issuer) {
+			d.skipped.push("invitations: not promoted, this deployment has no admin yet");
+			break;
+		}
+		const usedBy = i.used_by ? (owners.get(String(i.used_by)) ?? null) : null;
+		const r = await asOwner(pool, issuer, (c) => c.query("INSERT INTO pim_app.invites (code_hash, owner_id, note, created_at, used_by, used_at) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING", [i.hash, issuer, i.note ?? null, ms(i.created_at), usedBy, i.used_at ? ms(i.used_at) : null]));
+		bump(d, "invitations", r.rowCount ?? 0);
+	}
 
 	for (const { id, row, provider, runnable } of await sharedProviders(pool, options)) {
 		if (!provider) {

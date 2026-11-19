@@ -3,14 +3,14 @@
  * and say what to do each time), `list_watches` and `stop_watch`. A watch is a trigger on the connector's event delivering to the chat that made it, with a subscription at the server
  * (`watches.ts`); each event arrives as a message that starts with "[Connector event]". Subscribing needs no approval; what the agent then does is still subject to the usual approvals.
  */
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { defineTool, type ToolRegistration } from "@earendil-works/pi-durable";
 import type { Principal } from "@pim/v2-contracts/identity";
 import { BadRequestError } from "@pim/v2-app/errors";
 import { connectorOf, connectorSession, listEvents, newWatchSecret, subscribe, unsubscribe, type WatchDeps } from "./watches.ts";
 
-type Result = { content: { type: "text"; text: string }[]; isError?: boolean };
-const text = (s: string, isError = false): Result => ({ content: [{ type: "text", text: s }], ...(isError ? { isError } : {}) });
+type Result = { output: { type: "text"; text: string }[]; isError?: boolean };
+const text = (s: string, isError = false): Result => ({ output: [{ type: "text", text: s }], ...(isError ? { isError } : {}) });
 const json = (v: unknown): Result => text(JSON.stringify(v, null, 1));
 const iso = (d: Date | null) => (d ? d.toISOString() : null);
 

@@ -1,4 +1,4 @@
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { defineExtension, defineTool, GenerationTask, hook, section } from "@earendil-works/pi-durable";
 import { closedUiSources, compile, uiBlockIds, uiBlockReference, type UiProgram } from "@pim/ui-lang";
 import { deliveryOwed, enforceDelivery, DELIVERY_REMINDER, LENGTH_REMINDER, NOT_DELIVERED, OUT_OF_OUTPUT_TOKENS } from "@pim/shared/transcript";

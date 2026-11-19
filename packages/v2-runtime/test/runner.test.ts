@@ -208,7 +208,7 @@ describe("assessInspection", () => {
 	it("parks a run waiting on a suspended tool, and needs an owner for one waiting on a ready tool", () => {
 		const parked = assessInspection({ scheduling: "running", submissions: [], tasks: [task(1, 1, "pi.generation", { kind: "waiting", on: [2] }), task(2, 1, "pi.tool", { kind: "suspended" })] }, now, { longWaitMs: 60_000 });
 		expect(parked).toMatchObject({ needsOwner: false, nextDueAt: undefined });
-		const busy = assessInspection({ scheduling: "running", submissions: [], tasks: [task(1, 1, "pi.generation", { kind: "waiting", on: [2] }), task(2, 1, "pi.tool", { kind: "ready", migrates: false })] }, now, { longWaitMs: 60_000 });
+		const busy = assessInspection({ scheduling: "running", submissions: [], tasks: [task(1, 1, "pi.generation", { kind: "waiting", on: [2] }), task(2, 1, "pi.tool", { kind: "pending", migrates: false })] }, now, { longWaitMs: 60_000 });
 		expect(busy.needsOwner).toBe(true);
 	});
 	it("turns a far sleep into a due time and keeps a near one", () => {
@@ -216,7 +216,7 @@ describe("assessInspection", () => {
 		expect(far).toMatchObject({ needsOwner: false, nextDueAt: now + 120_000 });
 		const near = assessInspection({ scheduling: "running", submissions: [], tasks: [task(1, 1, "pi.generation", { kind: "running" }, { phase: "retry", until: now + 5_000 })] }, now, { longWaitMs: 60_000 });
 		expect(near.needsOwner).toBe(true);
-		const poll = assessInspection({ scheduling: "running", submissions: [], tasks: [task(1, 1, "pi.generation", { kind: "ready", migrates: false }, { phase: "poll", pollAt: now + 90_000 })] }, now, { longWaitMs: 60_000, liveDue: [now + 70_000] });
+		const poll = assessInspection({ scheduling: "running", submissions: [], tasks: [task(1, 1, "pi.generation", { kind: "pending", migrates: false }, { phase: "poll", pollAt: now + 90_000 })] }, now, { longWaitMs: 60_000, liveDue: [now + 70_000] });
 		expect(poll).toMatchObject({ needsOwner: false, nextDueAt: now + 70_000 });
 	});
 	it("needs an owner for a queued input unless a parked run holds it", () => {

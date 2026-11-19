@@ -1,5 +1,5 @@
 import { Buffer } from "node:buffer";
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { defineExtension, defineTool } from "@earendil-works/pi-durable";
 import { FILES_ROOT, filesPath, imageType } from "../files";
 import { text } from "./services";

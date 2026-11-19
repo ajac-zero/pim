@@ -84,7 +84,7 @@ export type PimServices = {
 };
 
 export function text(value: string, isError = false): ToolExecutionResult {
-	return { content: [{ type: "text", text: value }], ...(isError ? { isError } : {}) };
+	return { output: [{ type: "text", text: value }], ...(isError ? { isError } : {}) };
 }
 
 export function json(value: unknown): ToolExecutionResult {

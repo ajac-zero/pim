@@ -1,4 +1,4 @@
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { defineExtension, defineTool, type ToolRegistration } from "@earendil-works/pi-durable";
 import { describePage, type PimBrowser } from "../browser";
 import { approvalNote, defineGatedAction, fileApproval, type GatedAction, ownToolPermission } from "./approvals";

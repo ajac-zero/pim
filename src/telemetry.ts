@@ -258,9 +258,9 @@ export class Telemetry {
 				const result = await active.run(trace.setSpan(parent, span), () => tool.execute(args, api, context));
 				if (result.isError) {
 					span.setAttribute("error.type", "tool_error");
-					span.setStatus({ code: SpanStatusCode.ERROR, message: textOf(result.content ?? []) });
+					span.setStatus({ code: SpanStatusCode.ERROR, message: textOf(result.output ?? []) });
 				}
-				span.setAttributes(telemetry.#capture("gen_ai.tool.call.result", () => textOf(result.content ?? [])));
+				span.setAttributes(telemetry.#capture("gen_ai.tool.call.result", () => textOf(result.output ?? [])));
 				return result;
 			} catch (error) {
 				span.recordException(error instanceof Error ? error : String(error));

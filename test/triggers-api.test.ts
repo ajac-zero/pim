@@ -634,7 +634,7 @@ describe("triggers' API where triggers are on", () => {
 			const first = await create.execute(args as never, callApi, undefined as never);
 			const second = await create.execute(args as never, callApi, undefined as never);
 			const other = await create.execute(args as never, { ...(callApi as object), taskId: "task-other" } as never, undefined as never);
-			const text = (result: { content?: readonly { type: string; text?: string }[] }) => JSON.parse(result.content![0]!.text!);
+			const text = (result: { output?: readonly { type: string; text?: string }[] }) => JSON.parse(result.output![0]!.text!);
 			return { first: text(first), second: text(second), other: text(other) };
 		});
 		expect(made.first.replayed).toBe(false);

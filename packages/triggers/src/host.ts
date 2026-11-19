@@ -57,6 +57,7 @@ export const TriggerChatDoc = defineDoc<{ operationId: string }>({
 	history: "latest",
 	fork: "initial",
 	initial: () => ({ operationId: "" }),
+	checkpointWhen: () => true,
 });
 
 const SCHEMA = `

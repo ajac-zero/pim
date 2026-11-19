@@ -10,7 +10,7 @@
  */
 import { createHash } from "node:crypto";
 import { posix } from "node:path";
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { defineTool, type ToolRegistration } from "@earendil-works/pi-durable";
 import type { App } from "@pim/v2-app/app";
 import { sniffImage } from "@pim/v2-app/objects";
@@ -23,8 +23,8 @@ import type { Db as RuntimeDb } from "@pim/v2-runtime/db";
 import { type BrowserTransport, type Computer as BrowserComputer, describePage, PimBrowser } from "./computer-browser.ts";
 
 type Part = { type: "text"; text: string } | { type: "image"; data: string; mimeType: string };
-type Result = { content: Part[]; isError?: boolean };
-const text = (s: string, isError = false): Result => ({ content: [{ type: "text", text: s }], ...(isError ? { isError } : {}) });
+type Result = { output: Part[]; isError?: boolean };
+const text = (s: string, isError = false): Result => ({ output: [{ type: "text", text: s }], ...(isError ? { isError } : {}) });
 
 export const FILES_ROOT = "/workspace";
 const DEFAULT_COMMAND_MS = 120_000;
@@ -118,9 +118,9 @@ function mcpResult(r: Mcp): Result {
 		else content.push({ type: "text", text: clip(JSON.stringify(part)) });
 	}
 	if (content.length === 0) content.push({ type: "text", text: r.structuredContent !== undefined ? clip(JSON.stringify(r.structuredContent)) : "(no content)" });
-	return { content, ...(r.isError ? { isError: true } : {}) };
+	return { output: content, ...(r.isError ? { isError: true } : {}) };
 }
-const mcpText = (r: Result) => r.content.map((p) => (p.type === "text" ? p.text : `[image ${p.mimeType}]`)).join("\n");
+const mcpText = (r: Result) => r.output.map((p) => (p.type === "text" ? p.text : `[image ${p.mimeType}]`)).join("\n");
 
 const reason = (error: unknown) => (error instanceof CapabilityUnavailableError ? `${error.message}. Nothing was done; the person can pair a computer in Settings → Computer.` : error instanceof Error ? error.message : String(error));
 
@@ -162,7 +162,7 @@ export function computerTools(deps: ComputerToolDeps, kit: ComputerToolKit): Too
 
 	type Prepared = { result: Result } | { summary: string };
 	type Gated = { action: string; tool: string; resource?: Record<string, string>; args: Record<string, unknown>; prepare?: () => Promise<Prepared>; run: (computer: RemoteComputer) => Promise<{ text: string; isError?: boolean; content?: Part[] }> };
-	const waiting = { content: [{ type: "text", text: "Waiting for a person's approval." }], control: { suspend: true } } as never;
+	const waiting = { output: [{ type: "text", text: "Waiting for a person's approval." }], control: { suspend: true } } as never;
 	const gated = async (api: any, g: Gated): Promise<Result> => {
 		const { app, chat, p } = await caller(api);
 		await app.identity.authz.enforce(p, "computer:use");
@@ -201,7 +201,7 @@ export function computerTools(deps: ComputerToolDeps, kit: ComputerToolKit): Too
 		try {
 			const done = await g.run(computer);
 			await ops.transition(ownerId, operationId, "completed", { summary: done.text, isError: done.isError === true });
-			return done.content ? { content: done.content, ...(done.isError ? { isError: true } : {}) } : text(done.text, done.isError === true);
+			return done.content ? { output: done.content, ...(done.isError ? { isError: true } : {}) } : text(done.text, done.isError === true);
 		} catch (error) {
 			const message = reason(error);
 			// A call the computer answered with an error did not take effect as asked; one that may have run, or whose answer was lost, is left for a person.
@@ -257,7 +257,7 @@ export function computerTools(deps: ComputerToolDeps, kit: ComputerToolKit): Too
 				}
 				const whole = Buffer.concat(pieces);
 				const fitted = await fitImage(whole);
-				if (fitted) return { content: [fitted, { type: "text", text: `${a.path} (${size} bytes${fitted.data.length === Math.ceil(whole.length / 3) * 4 ? "" : "; scaled down to fit"})` }] };
+				if (fitted) return { output: [fitted, { type: "text", text: `${a.path} (${size} bytes${fitted.data.length === Math.ceil(whole.length / 3) * 4 ? "" : "; scaled down to fit"})` }] };
 			}
 			if (bytes.subarray(0, 8192).includes(0)) return text(`${a.path} is a binary file (${size} bytes), not text. To open it with a program, use shell: ${whereIs(computer, a.path)}`, true);
 			const lines = bytes.toString("utf8").split("\n");
@@ -394,7 +394,7 @@ export function computerTools(deps: ComputerToolDeps, kit: ComputerToolKit): Too
 				args: { action, summary: summarizeDesktop(a) },
 				run: async (c) => {
 					const r = await callDriver(c, action, { ...rest, ...(foreground ? { delivery_mode: "foreground" } : {}) }, thread);
-					return { text: mcpText(r), isError: r.isError === true, content: r.content };
+					return { text: mcpText(r), isError: r.isError === true, content: r.output };
 				},
 			});
 		}),

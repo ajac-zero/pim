@@ -1,4 +1,4 @@
-import { Type, type TSchema } from "@earendil-works/pi-ai";
+import { Type, type TSchema } from "typebox";
 import { isDeliveryReminder, ROOM_POST, type TranscriptMessage } from "@pim/shared/transcript";
 
 /**

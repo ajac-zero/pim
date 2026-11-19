@@ -10,7 +10,7 @@ import { createModels, type Message } from "@earendil-works/pi-ai";
 import type { App } from "@pim/v2-app/app";
 import type { Principal } from "@pim/v2-contracts/identity";
 import { transcriptPage } from "@pim/v2-live/projections/snapshots";
-import { currentOpenaiProvider } from "../openai-catalog.ts";
+import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 import { INTRODUCTION, isDeliveryReminder, ROOM_POST, type TranscriptMessage } from "@pim/shared/transcript";
 
 type Env = Record<string, string | undefined>;
@@ -132,7 +132,7 @@ async function endpointOf(app: App, env: Env, p: Principal): Promise<Endpoint | 
  * a streamed Responses request and the fields the plan accepts (it rejects `max_output_tokens`), which pi-ai chooses. `resource` is where OpenAI's API is, unless a proxy stands in.
  */
 export async function planAnswer(endpoint: { resource: string; token: string; model: string }, task: UtilityTask, input: string, fetcher?: typeof fetch): Promise<string> {
-	const base = currentOpenaiProvider();
+	const base = openaiProvider();
 	const moved = (list: readonly any[]) => list.map((m) => ({ ...m, baseUrl: endpoint.resource }));
 	const provider = endpoint.resource === "https://api.openai.com/v1" ? base : { ...base, getModels: () => moved(base.getModels()), ...(base.getAllModels ? { getAllModels: () => moved(base.getAllModels!()) } : {}) };
 	const credentials = { read: async () => ({ type: "api_key", key: endpoint.token }), list: async () => [{ providerId: "openai", type: "api_key" }], modify: async (_id: string, fn: (c: unknown) => Promise<unknown>) => fn(undefined), delete: async () => {} };

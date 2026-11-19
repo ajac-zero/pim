@@ -1,4 +1,4 @@
-// Family A: a real pi-durable 1.1.0 Harness per `pi` coding thread, on PgPiStorage, with the coding tools (read, write, edit, bash, test, git…) executing inside the sandbox through its Workspace.
+// Family A: a real pi-durable Harness per `pi` coding thread, on PgPiStorage, with the coding tools (read, write, edit, bash, test, git…) executing inside the sandbox through its Workspace.
 // Every tool call is journaled in `forge_tool_journal` before it acts, so a call interrupted by a crash is never run twice; a resumed turn re-opens the log, `resume()`s the unfinished run, and finds its submission again by request id.
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Models } from "@earendil-works/pi-ai";

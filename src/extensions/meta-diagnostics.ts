@@ -1,4 +1,4 @@
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { defineTool, section } from "@earendil-works/pi-durable";
 import { DEFAULT_LIMIT, DIAGNOSTIC_KINDS, EVENT_KEEP, MAX_LIMIT, scrub } from "../diagnostics";
 import { definePimExtension } from "./define";

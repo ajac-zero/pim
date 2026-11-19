@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { createModels, Type } from "@earendil-works/pi-ai";
+import { createModels } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { createRegistry, defineExtension, defineTool, type HarnessOptions } from "@earendil-works/pi-durable";
 import { OwnerId, type PartitionId, type PublicChatId } from "@pim/v2-contracts/identity";
@@ -30,13 +31,13 @@ export async function createTurnRig(stack: Stack) {
 		replay: "safe",
 		execute: async (args) => {
 			echoRuns.push(args.text);
-			return { content: [{ type: "text", text: `echo:${args.text}` }] };
+			return { output: [{ type: "text", text: `echo:${args.text}` }] };
 		},
 	});
 	const registry = createRegistry();
 	registry.install(defineExtension({ name: "echo", tools: [echo] }));
 	const agent = { model: { provider: "faux", modelId: "m" } };
-	const options = (): HarnessOptions => ({ models, registry, settings: { retry: { enabled: false, maxRetries: 0, baseDelayMs: 1_000 }, progress: { partialIntervalMs: 60, outputIntervalMs: 100 } } as never });
+	const options = (): HarnessOptions => ({ models, registry, settings: { retry: { enabled: false, maxRetries: 0, baseDelayMs: 1_000 }, progress: { partialIntervalMs: 60, outputIntervalMs: 100, persistWithinMs: 0 } } as never });
 	const runner = new Runner({ db: stack.runtime, harnessOptions: options, homeRoot: () => ({ agent }), chatAgent: () => agent, listen: false, ownerFilter: ADA, pollMs: 40, idleUnloadMs: 0, steward: { holderId: "runner-1", leaseTtlMs: 8_000 } });
 	const home = (await new PartitionDirectory(stack.runtime).createPartition(ADA, { kind: "home" })) as PartitionId;
 	await runner.start();

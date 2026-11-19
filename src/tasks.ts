@@ -1,4 +1,4 @@
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { defineExtension, defineTool, section } from "@earendil-works/pi-durable";
 import { text } from "./extensions/services";
 import { type Agent, agentCalled, agentLabel } from "./agents";

@@ -488,7 +488,7 @@ export class Sockets {
 		void stream.closed.then((end) => {
 			if (this.host.watches.get(connection.id) !== stream) return;
 			this.host.watches.delete(connection.id);
-			this.#watchLost(connection, "watch ended", end.reason === "listener_error" ? end.error : end.reason);
+			this.#watchLost(connection, "watch ended", end.kind === "listener_error" ? end.error : end.kind);
 		});
 		const id = this.host.store.publicId(session);
 		this.send(connection, { type: "events", session: id, events: [stream.snapshot] });

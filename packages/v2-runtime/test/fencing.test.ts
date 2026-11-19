@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { Harness, StorageRejected } from "@earendil-works/pi-durable";
+import { Harness } from "@earendil-works/pi-durable";
 import { PartitionDirectory } from "../src/directory.ts";
 import { OwnershipLost } from "../src/errors.ts";
 import { Steward } from "../src/ownership.ts";
@@ -21,7 +21,7 @@ afterAll(async () => {
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 describe("fenced ownership", () => {
-	it("fences a stale owner's open, commit and Harness work with StorageRejected, and none of its writes land", async () => {
+	it("fences a stale owner's open, commit and Harness work with OwnershipLost, and none of its writes land", async () => {
 		const { db } = database;
 		const ownerId = uniqueOwner();
 		const partitionId = await new PartitionDirectory(db).createPartition(ownerId, { kind: "home" });
@@ -40,12 +40,11 @@ describe("fenced ownership", () => {
 		const leaseB = await b.acquire(ownerId, partitionId);
 		expect(leaseB?.epoch).toBe(2n);
 
-		// Runner A's open, commit and Harness commit all fail with StorageRejected; B owns the partition.
+		// Runner A's open and commits fail with OwnershipLost; B owns the partition.
 		await expect(PgPiStorage.openForOwner({ db, fence: leaseA! })).rejects.toBeInstanceOf(OwnershipLost);
 		const failure = await rootA.commit((tx) => tx.appendEntry(rootA.id, { kind: "note", data: "from A after the steal" }), BACKGROUND_CONTEXT).catch((error: unknown) => error);
-		expect(failure).toBeInstanceOf(StorageRejected);
 		expect(failure).toBeInstanceOf(OwnershipLost);
-		// StorageRejected tells pi nothing committed, so A's Session was not poisoned by it.
+		// Losing the fence fails A's Session, so none of its tasks can keep running.
 
 		const storageB = await PgPiStorage.openForOwner({ db, fence: leaseB! });
 		const harnessB = await Harness.open(storageB, rig.harnessOptions(), BACKGROUND_CONTEXT);
@@ -69,6 +68,8 @@ describe("fenced ownership", () => {
 		const directory = new PartitionDirectory(db);
 		const partitionId = await directory.createPartition(ownerId, { kind: "home" });
 		const rig = createRig(db, ownerId);
+		// pi charges a request interrupted by ownership loss as a failed attempt before retrying it on recovery.
+		rig.settings.retry = { enabled: true, maxRetries: 2, baseDelayMs: 10 };
 		let streamSignal: AbortSignal | undefined;
 		let release!: () => void;
 		const hold = new Promise<void>((resolve) => {

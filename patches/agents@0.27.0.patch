@@ -26,10 +26,50 @@ index 36ac5754a0615b307e0ad69362bc1a19cff08069..cf133a42382d3c313bea7ac17d3550f6
    pi(): Promise<Harness>;
    /** @internal */
 diff --git a/dist/harness/pi/index.js b/dist/harness/pi/index.js
-index 74e18490d21addac297ac627880e316b326795db..d598e005742751ef51d3c1d7fa25daf2deeb8faf 100644
+index 74e18490d21addac297ac627880e316b326795db..513921ca70aca830d04f7d0938b95f31d66752aa 100644
 --- a/dist/harness/pi/index.js
 +++ b/dist/harness/pi/index.js
-@@ -273,6 +273,14 @@ function wakeJobId(session) {
+@@ -4,7 +4,7 @@ import { t as LifecycleCapability } from "../../capability-B4WbF81e.js";
+ import "../../lifecycle-CFu6OV03.js";
+ import { LiveDoc, ROOT_CONVERSATION_ID, watchEvents } from "@earendil-works/pi-durable";
+ import { SQLITE_MIGRATIONS, SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
+-import { Type } from "@earendil-works/pi-ai";
++import { Type } from "typebox";
+ //#region src/harness/pi/context.ts
+ /** chord's `BACKGROUND_CONTEXT`: no values, never cancelled. */
+ const BACKGROUND_CONTEXT = Object.freeze({
+@@ -140,6 +140,9 @@ var Statements = class {
+ 	run(sql, params) {
+ 		_classPrivateFieldGet2(_sql, this).exec(_classPrivateFieldGet2(_prefixer, this).rewrite(sql), ...params.map(binding));
+ 	}
++	runCounted(sql, params) {
++		return _classPrivateFieldGet2(_sql, this).exec(_classPrivateFieldGet2(_prefixer, this).rewrite(sql), ...params.map(binding)).rowsWritten;
++	}
+ 	get(sql, params) {
+ 		const first = _classPrivateFieldGet2(_sql, this).exec(_classPrivateFieldGet2(_prefixer, this).rewrite(sql), ...params.map(binding)).next();
+ 		return first.done ? void 0 : row(first.value);
+@@ -174,6 +177,10 @@ var DurableObjectSqliteTransaction = class {
+ 		_assertClassBrand(_DurableObjectSqliteTransaction_brand, this, _assertActive).call(this);
+ 		_classPrivateFieldGet2(_statements, this).run(sql, params);
+ 	}
++	async runCounted(sql, ...params) {
++		_assertClassBrand(_DurableObjectSqliteTransaction_brand, this, _assertActive).call(this);
++		return _classPrivateFieldGet2(_statements, this).runCounted(sql, params);
++	}
+ 	async get(sql, ...params) {
+ 		_assertClassBrand(_DurableObjectSqliteTransaction_brand, this, _assertActive).call(this);
+ 		return _classPrivateFieldGet2(_statements, this).get(sql, params);
+@@ -219,6 +226,9 @@ var DurableObjectSqliteDatabase = class {
+ 	run(sql, ...params) {
+ 		return _classPrivateFieldGet2(_queue, this).run(() => _classPrivateFieldGet2(_statements2, this).run(sql, params));
+ 	}
++	runCounted(sql, ...params) {
++		return _classPrivateFieldGet2(_queue, this).run(() => _classPrivateFieldGet2(_statements2, this).runCounted(sql, params));
++	}
+ 	get(sql, ...params) {
+ 		return _classPrivateFieldGet2(_queue, this).run(() => _classPrivateFieldGet2(_statements2, this).get(sql, params));
+ 	}
+@@ -273,6 +283,14 @@ function wakeJobId(session) {
  function sessionOfJob(payload) {
  	return typeof payload === "object" && payload !== null && "session" in payload && typeof payload.session === "string" ? payload.session : void 0;
  }
@@ -44,7 +84,7 @@ index 74e18490d21addac297ac627880e316b326795db..d598e005742751ef51d3c1d7fa25daf2
  /** pi-durable's stored reference to a pi-ai model. */
  function modelRef(model) {
  	return {
-@@ -387,6 +395,17 @@ var PiHarness = class extends LifecycleCapability {
+@@ -387,6 +405,17 @@ var PiHarness = class extends LifecycleCapability {
  			status: record.status === "queued" ? "queued" : "running"
  		}));
  	}
@@ -62,7 +102,7 @@ index 74e18490d21addac297ac627880e316b326795db..d598e005742751ef51d3c1d7fa25daf2
  	/** The opened pi Harness, for anything the interface does not cover. */
  	async pi() {
  		return (await _assertClassBrand(_PiHarness_brand, this, _open).call(this)).pi;
-@@ -486,6 +505,7 @@ async function _wakeStep(session) {
+@@ -486,6 +515,7 @@ async function _wakeStep(session) {
  	if (!conversation) return void 0;
  	const tasks = (await pi.inspect(BG)).tasks.filter((task) => task.record.conversationId === conversation.id);
  	if (tasks.length === 0) return _classPrivateFieldGet2(_admitting, this).has(session) ? heartbeat : void 0;
@@ -70,7 +110,7 @@ index 74e18490d21addac297ac627880e316b326795db..d598e005742751ef51d3c1d7fa25daf2
  	const wakeAt = await _assertClassBrand(_PiHarness_brand, this, _longWait).call(this, pi, conversation.id, BG);
  	if (wakeAt !== void 0) return { rescheduleAt: wakeAt };
  	if (tasks.every((task) => task.record.background)) return heartbeat;
-@@ -498,8 +518,14 @@ async function _wakeStep(session) {
+@@ -498,8 +528,14 @@ async function _wakeStep(session) {
  	return heartbeat;
  }
  async function _waitForIdle(conversation) {
@@ -85,7 +125,7 @@ index 74e18490d21addac297ac627880e316b326795db..d598e005742751ef51d3c1d7fa25daf2
  	try {
  		await conversation.waitForIdle(withAbortSignal(budget.signal, BG));
  	} catch (error) {
-@@ -509,6 +535,7 @@ async function _waitForIdle(conversation) {
+@@ -509,6 +545,7 @@ async function _waitForIdle(conversation) {
  		});
  	} finally {
  		clearTimeout(timer);

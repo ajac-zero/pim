@@ -1,5 +1,6 @@
-import type { Context } from "@earendil-works/chord";
-import { type JsonValue, Type } from "@earendil-works/pi-ai";
+import type { Context } from "@earendil-works/chord/context";
+import { type JsonValue } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import {
 	defineExtension,
 	defineTask,
@@ -283,11 +284,7 @@ export function createOptMem(options: OptMemOptions) {
 			},
 			retry: async (task, runtime, context) => {
 				const { scope, lo, hi, attempt, until } = task.state.checkpoint;
-				await runtime.sleep(until, context);
-				await runtime.commit(
-					() => ({ status: "running", checkpoint: { phase: "summarize", scope, lo, hi, attempt: attempt + 1 } }),
-					context,
-				);
+				await runtime.sleepUntil(until, { phase: "summarize", scope, lo, hi, attempt: attempt + 1 }, context);
 			},
 		},
 		abort: async (_task, runtime, context) => {

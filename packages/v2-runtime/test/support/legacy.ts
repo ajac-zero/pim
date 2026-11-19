@@ -16,7 +16,7 @@ export const NapTask = defineTask<{ note: string }, { phase: "sleep" }, string>(
 	initial: () => ({ phase: "sleep" }),
 	phases: {
 		sleep: async (_task, runtime, context) => {
-			await runtime.sleep(Date.now() + 3_600_000, context);
+			await runtime.sleepUntil(Date.now() + 3_600_000, { phase: "sleep" }, context);
 		},
 	},
 	abort: async (_task, runtime, context) => {

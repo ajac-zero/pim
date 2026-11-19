@@ -1,4 +1,4 @@
-// Family A: a real pi-durable 1.1.0 Harness per thread, on PostgreSQL, with the coding tools running in the sandbox.
+// Family A: a real pi-durable 1.5.2 Harness per thread, on PostgreSQL, with the coding tools running in the sandbox.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
@@ -83,7 +83,7 @@ describe("pi on pi-durable and PostgreSQL", () => {
 		// A stale epoch can validate a write in memory but never reaches the log.
 		const before = await piCommitCount(s.store, a);
 		const stale = await PgPiStorage.open(s.store, a, epoch - 1);
-		await expect(stale.commit([], undefined as never)).rejects.toMatchObject({ code: "lease_lost" });
+		await expect(stale.commit([], () => {}, undefined as never)).rejects.toMatchObject({ code: "lease_lost" });
 		expect(await piCommitCount(s.store, a)).toBe(before);
 	});
 });

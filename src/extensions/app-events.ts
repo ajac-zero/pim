@@ -1,4 +1,4 @@
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { defineTool, type ToolRegistration } from "@earendil-works/pi-durable";
 import { type TriggerActor, type TriggerApi, TriggerApiError } from "@pim/triggers/api";
 import type { AppCatalog } from "./app-catalog";

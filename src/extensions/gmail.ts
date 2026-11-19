@@ -1,4 +1,4 @@
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { type AppToolContext, defineAppTool, type NativeAppDefinition } from "./define";
 import { fenced, type GmailContent, type GmailSummary, mimeGmailContent } from "./gmail-adapter";
 import { GOOGLE_SCOPES, GoogleApiError, googleApp, googleJson, GoogleTooLarge } from "./google";

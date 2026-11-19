@@ -1,6 +1,8 @@
+import { StorageRejected } from "../src/errors.ts";
+import { commitWrites } from "@earendil-works/pi-durable/testing";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { Harness, StorageRejected, type ConversationRecord } from "@earendil-works/pi-durable";
+import { Harness, type ConversationRecord } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { PartitionDirectory, ROOT_SESSION } from "../src/directory.ts";
 import { importLegacySpace, type LegacySpace, planFamilies, readLegacySqlite } from "../src/splitter.ts";
@@ -137,8 +139,8 @@ describe("legacy SQLite space → conversation-family partitions", () => {
 		const family = (await runner.activate(ownerId, chatPartition))!;
 		expect(family.home).toBe(false);
 		expect(() => family.harness.root(ctx)).toThrow(/never called on partition/);
-		await expect(family.storage.commit([{ type: "conversation", value: { id: 1 as never } }], ctx)).rejects.toBeInstanceOf(StorageRejected);
-		await expect(family.storage.commit([{ type: "conversation", value: { id: 1 as never } }], ctx)).rejects.toThrow(/home partition/);
+		await expect(commitWrites(family.storage, [{ type: "conversation", value: { id: 1 as never } }], ctx)).rejects.toBeInstanceOf(StorageRejected);
+		await expect(commitWrites(family.storage, [{ type: "conversation", value: { id: 1 as never } }], ctx)).rejects.toThrow(/home partition/);
 		// Nothing but the family's conversations is in this partition.
 		const conversations = await family.harness.createConversation({ ownership: { kind: "ownerless" }, agent: rig.agent }, ctx);
 		expect(conversations.id).toBeGreaterThan(space.metadata.nextId - 1);

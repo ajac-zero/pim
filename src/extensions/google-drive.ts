@@ -1,4 +1,4 @@
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { env } from "cloudflare:workers";
 import { deploymentSettings } from "../deployment";
 import { type AppActionContext, type AppCredential, type AppToolContext, defineAppTool } from "./define";

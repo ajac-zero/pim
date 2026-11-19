@@ -1,4 +1,4 @@
-import { Type, type TSchema } from "@earendil-works/pi-ai";
+import { Type, type TSchema } from "typebox";
 import { defineExtension, defineTool, section, type ToolRegistration } from "@earendil-works/pi-durable";
 import type { Guest } from "./circles";
 import { text } from "./extensions/services";

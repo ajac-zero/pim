@@ -1,4 +1,4 @@
-import type { Context } from "@earendil-works/chord";
+import type { Context } from "@earendil-works/chord/context";
 import type { ToolExecutionApi, ToolExecutionResult } from "@earendil-works/pi-durable";
 import { describe, expect, it } from "vitest";
 import { type CodingToolsDeps, createCodingTools, MemoryToolJournal, parseTestSummary, type TestRun } from "../src/tools/index";
@@ -19,7 +19,7 @@ const spec: WorkspaceSpec = {
 
 const encode = (value: string) => new TextEncoder().encode(value);
 const decode = (value: Uint8Array) => new TextDecoder().decode(value);
-const textOf = (result: ToolExecutionResult) => (result.content ?? []).map((part) => (part.type === "text" ? part.text : "")).join("");
+const textOf = (result: ToolExecutionResult) => (result.output ?? []).map((part) => (part.type === "text" ? part.text : "")).join("");
 
 let tasks = 0;
 

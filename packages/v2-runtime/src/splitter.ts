@@ -1,5 +1,5 @@
 import type { ConversationRecord, DocumentRecord, EntryRecord, SubmissionRecord, TaskRecord } from "@earendil-works/pi-durable";
-import type { JsonValue } from "@earendil-works/chord";
+import type { JsonValue } from "@earendil-works/chord/json";
 import { createHash } from "node:crypto";
 import { type Db, SCHEMA } from "./db.ts";
 import { ident } from "./storage.ts";

@@ -252,7 +252,7 @@ describe("scheduled tasks", () => {
 				},
 			} as never;
 			const args = { instruction: "Stretch.", label: "Stretch", delay_seconds: 600 } as never;
-			const read = (result: { content?: readonly { type: string; text?: string }[] }) => JSON.parse(result.content![0]!.text!);
+			const read = (result: { output?: readonly { type: string; text?: string }[] }) => JSON.parse(result.output![0]!.text!);
 			const first = read(await tool.execute(args, call, undefined as never));
 			// Replayed five minutes on: the same task, at the same time, not five minutes later.
 			triggerClock.offset = 5 * MINUTE;

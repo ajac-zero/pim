@@ -1,5 +1,5 @@
 import { createPiTools } from "@cloudflare/computer/tools/pi-ai";
-import { type TSchema, Type } from "@earendil-works/pi-ai";
+import { type TSchema, Type } from "typebox";
 import { defineExtension, type ToolExecutionResult, type ToolRegistration } from "@earendil-works/pi-durable";
 import { type Computer, DEFAULT_COMMAND_MS, FileConflictError, MAX_COMMAND_MS } from "../computer";
 import { sha256Hex } from "../file-changes";
@@ -106,9 +106,9 @@ function definitions(services: FileServices) {
 			if (session && services.saw && (name === "read" || name === "write" || name === "edit" || name === "delete") && !result.isError) {
 				await services.saw(session, filesPath(rest.path)!, sha256 ?? undefined).catch(() => undefined);
 			}
-			const content = result.content as ToolExecutionResult["content"];
-			if (sha256 !== null && !result.isError) return { content: [...(content ?? []), { type: "text", text: `sha256 of the whole file: ${sha256}` }] };
-			return { content, ...(result.isError ? { isError: true } : {}) };
+			const content = result.content as ToolExecutionResult["output"];
+			if (sha256 !== null && !result.isError) return { output: [...(content ?? []), { type: "text", text: `sha256 of the whole file: ${sha256}` }] };
+			return { output: content, ...(result.isError ? { isError: true } : {}) };
 		} catch (error) {
 			return text(error instanceof Error ? error.message : String(error), true);
 		}
@@ -155,7 +155,7 @@ export function fileDeleteAction(services: FileServices): GatedAction {
 		},
 		async run(args, { session }) {
 			const result = await run("delete", args as Record<string, unknown>, crypto.randomUUID(), undefined, session);
-			const said = (result.content ?? []).flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n");
+			const said = (result.output ?? []).flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n");
 			if (result.isError) throw new Error(said || "The file could not be deleted.");
 			return said || "Deleted.";
 		},

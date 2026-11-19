@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { Context } from "@earendil-works/chord";
+import type { Context } from "@earendil-works/chord/context";
 import { BACKGROUND_CONTEXT, withAbortSignal } from "@earendil-works/chord/context";
 import {
 	type Conversation,
@@ -158,20 +158,22 @@ export class ResidentPartition {
 		// The fence is checked in PostgreSQL before Harness.open reads live tasks, because open rewrites running tasks to pending.
 		this.#storage = await PgPiStorage.openForOwner({ db: runner.db, fence: lease, onFault: (error) => this.#fault(error) });
 		const options = await runner.harnessOptions(partition);
-		const models = runner.admission === undefined ? options.models : admitModels(options.models, { admission: runner.admission, ownerId: lease.ownerId, signal: lease.signal });
+		const models = () => {
+			const source = typeof options.models === "function" ? options.models() : options.models;
+			return runner.admission === undefined ? source : admitModels(source, { admission: runner.admission, ownerId: lease.ownerId, signal: lease.signal });
+		};
 		const raw = await Harness.open(this.#storage, { ...options, models }, this.context);
 		this.#harness = this.home ? raw : forbidRoot(raw, lease.partitionId);
 		if (this.home) await raw.root(this.context, await runner.homeRoot?.(lease.ownerId));
 		this.#unsubscribe.push(
-			raw.subscribeCommits((publication) => {
+			raw.observeCommits({ advance: (publication) => {
 				this.#dirty = true;
 				for (const change of publication.changes) {
 					if (change.type === "task") this.#observeTask(change.value.id, change.value.state.status, change.value.state.status === "waiting" ? change.value.state.on.length : -1);
 				}
-			}),
-			raw.subscribeClose(() => {
+			}, end: () => {
 				this.#dirty = false;
-			}),
+			} }).detach,
 			lease.onLost((reason) => void this.dispose(reason)),
 		);
 		// Whatever the previous owner left in flight outside the database is reconciled, never repeated.
@@ -234,7 +236,7 @@ export class ResidentPartition {
 		if (stallMs <= 0 || now - this.#watchedAt < Math.min(stallMs / 4, 5_000)) return;
 		this.#watchedAt = now;
 		const inspection = await this.#harness.inspect(this.context);
-		const running = inspection.tasks.filter((t) => ["running", "ready", "completing"].includes(t.state.kind) && !((sleepUntil(t.record.state.checkpoint) ?? 0) > now));
+		const running = inspection.tasks.filter((t) => ["running", "pending", "completing"].includes(t.state.kind) && !((sleepUntil(t.record.state.checkpoint) ?? 0) > now));
 		if (running.length === 0) {
 			this.#watch = undefined;
 			return;
@@ -290,7 +292,7 @@ export class ResidentPartition {
 	}
 
 	/**
-	 * Apply the durable signals (approval decisions, tool completions). Patched pi-durable 1.1.0 remembers a `resumeTask`
+	 * Apply the durable signals (approval decisions, tool completions). Patched pi-durable remembers a `resumeTask`
 	 * for a task that has not suspended yet only in memory, so a decision lives in PostgreSQL and is applied again at
 	 * every open until its task has been seen to leave the waiting state.
 	 */

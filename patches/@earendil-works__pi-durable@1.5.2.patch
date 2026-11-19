@@ -1,0 +1,428 @@
+diff --git adist/harness/events.d.ts b/dist/harness/events.d.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..2a0dd4a2d2ae7c2d77f9a2ffdf2b770ad0db0067
+--- /dev/null
++++ b/dist/harness/events.d.ts
+@@ -0,0 +1,173 @@
++import type { Context } from "@earendil-works/chord/context";
++import type { JsonValue } from "@earendil-works/chord/json";
++import type { AssistantMessage, Message, Usage } from "@earendil-works/pi-ai";
++import type { WatchEnd } from "@earendil-works/chord/watch";
++import type { ConversationId, EntryRecord, JsonObject, SubmissionId, SubmissionRecord, TaskId } from "../types.ts";
++import type { InboxItem } from "./inbox.ts";
++import type { CompactionStatus, ToolSlot } from "./live.ts";
++import type { AgentState, CompactionReason, Harness, ToolDiagnostic } from "./types.ts";
++import { type UsageState } from "./usage.ts";
++type Block = AssistantMessage["content"][number];
++/** A queued input carries its content; a queued write does not. */
++type QueuedItem = {
++    id: SubmissionId;
++    mode: "steer" | "followUp";
++    content: Extract<InboxItem, { content: unknown }>["content"];
++} | {
++    id: SubmissionId;
++    mode: "write";
++};
++/** One change to the in-flight assistant message, relative to that message. */
++export type MessageChange = {
++    type: "text_start" | "thinking_start" | "toolcall_start";
++    contentIndex: number;
++    block: Block;
++} | {
++    type: "text_delta" | "thinking_delta";
++    contentIndex: number;
++    delta: string;
++} | {
++    type: "toolcall_delta";
++    contentIndex: number;
++    path: readonly (string | number)[];
++    delta: string;
++} | {
++    type: "block";
++    contentIndex: number;
++    block: Block;
++} | {
++    type: "message";
++    message: AssistantMessage;
++};
++export type SnapshotEvent = {
++    type: "snapshot";
++    entries: readonly EntryRecord[];
++    run?: {
++        inputs: readonly SubmissionId[];
++    };
++    /** Current generation attempt: its in-flight partial, retry backoff, or deferred poll. */
++    generation?: {
++        attempt: number;
++        message?: AssistantMessage;
++        retry?: {
++            at: number;
++            error: string;
++        };
++        deferred?: {
++            pollAt: number;
++        };
++    };
++    tools: readonly ToolSlot[];
++    /** `pi.live.compactions`: live compactions with their attempt and retry backoff. */
++    compactions: readonly CompactionStatus[];
++    inbox: readonly QueuedItem[];
++    /** `pi.agent`; `{}` when absent. */
++    agent: AgentState;
++    usage: UsageState;
++};
++/** Experimental agent event, shaped like the coding agent's session events (spec §9.4). */
++export type AgentEvent = SnapshotEvent | {
++    type: "run_start";
++    inputs: readonly SubmissionId[];
++} | {
++    type: "run_end";
++    inputs: readonly SubmissionId[];
++} | {
++    type: "turn_start";
++} | {
++    type: "turn_end";
++} | {
++    type: "message_start";
++    message: Message;
++}
++/** `usage` is the partial's current usage, as in the coding agent's JSON mode. */
++ | {
++    type: "message_update";
++    usage: Usage;
++    changes: readonly MessageChange[];
++} | {
++    type: "message_end";
++    entry: EntryRecord;
++} | {
++    type: "tool_execution_start";
++    toolCallId: string;
++    toolName: string;
++    args: JsonObject;
++} | {
++    type: "tool_execution_update";
++    toolCallId: string;
++    toolName: string;
++    /** A front trim and then an append of the retained window, or its replacement. */
++    output?: {
++        trimStart?: number;
++        append?: string;
++    } | {
++        set: string;
++    };
++    details?: JsonValue;
++    diagnostics?: readonly ToolDiagnostic[];
++}
++/** `entry` is absent when the tool task faulted or was orphaned. */
++ | {
++    type: "tool_execution_end";
++    toolCallId: string;
++    toolName: string;
++    entry?: EntryRecord;
++} | {
++    type: "inbox_update";
++    items: readonly QueuedItem[];
++} | {
++    type: "submission";
++    record: SubmissionRecord;
++} | {
++    type: "auto_retry_start";
++    attempt: number;
++    at: number;
++    errorMessage: string;
++} | {
++    type: "auto_retry_end";
++    attempt: number;
++} | {
++    type: "deferred_poll";
++    pollAt: number;
++} | {
++    type: "entry_appended";
++    entry: EntryRecord;
++} | {
++    type: "agent_changed";
++    agent: AgentState;
++} | {
++    type: "usage_changed";
++    usage: UsageState;
++} | {
++    type: "task_failed";
++    taskId: TaskId;
++    kind: string;
++    message: string;
++} | {
++    type: "compaction_start";
++    taskId: TaskId;
++    reason: CompactionReason;
++    blocking: boolean;
++}
++/** The task's receipt tells whether it produced a summary; the summary entry has its own events. */
++ | {
++    type: "compaction_end";
++    taskId: TaskId;
++    reason: CompactionReason;
++};
++/** Serialized stream of one conversation's event batches, one per commit. */
++export interface AgentEventStream {
++    /** The `snapshot` event at attachment. */
++    readonly snapshot: SnapshotEvent;
++    start(listener: (events: readonly AgentEvent[], context: Context) => Promise<void>): void;
++    stop(): Promise<WatchEnd>;
++    readonly closed: Promise<WatchEnd>;
++}
++/**
++ * Experimental: attach to one conversation's agent events (spec §9.4). The snapshot and the registration for later
++ * commits are captured atomically on the Session line; overflow replaces undelivered batches with one snapshot.
++ */
++export declare function watchEvents(harness: Harness, conversationId: ConversationId, context: Context): Promise<AgentEventStream>;
++export {};
++//# sourceMappingURL=events.d.ts.map
+diff --git a/dist/harness/events.js b/dist/harness/events.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..c66fc8e3564a0fb3e90dbec3e888ba2c9cd36cb6
+--- /dev/null
++++ b/dist/harness/events.js
+@@ -0,0 +1,35 @@
++import { AgentDoc } from "./agent.js";
++import { UsageDoc } from "./usage.js";
++
++// Compatibility for hosts still sending the pre-1.5 event protocol. V2 renders its own projections.
++function snapshotOf(view) {
++    const live = view.docs["pi.live"] ?? {};
++    return {
++        type: "snapshot",
++        entries: view.entries,
++        ...(live.run === undefined ? {} : { run: { inputs: live.run.inputs } }),
++        ...(live.generation === undefined ? {} : { generation: live.generation }),
++        tools: live.tools ?? [],
++        compactions: live.compactions ?? [],
++        inbox: (view.docs["pi.inbox"]?.items ?? []).map((item) => item.mode === "write" ? { id: item.id, mode: item.mode } : { id: item.id, mode: item.mode, content: item.content }),
++        agent: view.docs["pi.agent"] ?? AgentDoc.definition.initial(),
++        usage: view.docs["pi.usage"] ?? UsageDoc.definition.initial(),
++    };
++}
++
++export async function watchEvents(harness, conversationId, context) {
++    const conversation = await harness.conversation(conversationId, context);
++    if (conversation === undefined)
++        throw new Error(`Conversation ${conversationId} does not exist`);
++    // Every entry, as the pre-1.5 snapshot held: a pi 1.5 watch starts with the newest 50 and drops the oldest past 100.
++    const watch = await conversation.watch(context, { min: Number.MAX_SAFE_INTEGER, max: Number.MAX_SAFE_INTEGER });
++    return {
++        snapshot: snapshotOf(watch.value),
++        start: (listener) => watch.start(async (call, ctx) => {
++            if (call.kind === "value")
++                await listener([snapshotOf(call.value)], ctx);
++        }),
++        stop: () => watch.stop(),
++        closed: watch.closed,
++    };
++}
+diff --git a/dist/harness/generation.js b/dist/harness/generation.js
+index 27e60bb9b479b5600a7314f13bba25177a5e47d9..79a0a41e13569f222b40a93a7b05aa69db6d442e 100644
+--- a/dist/harness/generation.js
++++ b/dist/harness/generation.js
+@@ -630,11 +630,17 @@ async function classify(runtime, request, message, context) {
+         policy.enabled &&
+         attempt <= policy.maxRetries;
+     const until = retry ? runtime.now() + retryDelayMs(policy, attempt) : 0;
++    const suspend = message.stopReason === "error" && !overflow && !retry && policy.suspend?.(message, conversationId) === true;
+     await runtime.commit(async (tx) => {
+         // Read before the first table write; only a failure uses it.
+-        const failure = retry ? undefined : await prepareFailure(tx, runtime);
++        const failure = retry || suspend ? undefined : await prepareFailure(tx, runtime);
+         const live = await tx.doc(LiveDoc, conversationId);
+         await appendAssistant(tx, conversationId, message);
++        if (suspend) {
++            live.generation = { attempt, retry: { at: 0, error: message.errorMessage ?? "" } };
++            const checkpoint = { phase: "retry", attempt: 0, ...(compacted === undefined ? {} : { compacted }), until: 0 };
++            return { status: "waiting", checkpoint, on: [], policy: "allSettled" };
++        }
+         if (failure === undefined) {
+             live.generation = { attempt, retry: { at: until, error: message.errorMessage ?? "" } };
+             const checkpoint = {
+diff --git a/dist/harness/harness.js b/dist/harness/harness.js
+index e286f00f872ebec79367a594938040c6a37a879f..9c8e6073cbdaa4d249a3b0e59d9f29018da4ce4f 100644
+--- a/dist/harness/harness.js
++++ b/dist/harness/harness.js
+@@ -211,6 +211,10 @@ class HarnessImpl extends SessionImpl {
+     abortTask(id, context) {
+         return this.#tasks.abort(id, context);
+     }
++    resumeTask(id, context) {
++        this.#tasks.resume();
++        return this.#tasks.resumeTask(id, context);
++    }
+     async waitForTask(id, context) {
+         this.#tasks.resume();
+         return this.#tasks.waitForTask(id, context);
+diff --git a/dist/harness/scheduler.js b/dist/harness/scheduler.js
+index df651a4f8f0769d10daee02292ea91380b158d5e..20a7abe3d09b69c1bd19d346bcc1e362ae4d7a35 100644
+--- a/dist/harness/scheduler.js
++++ b/dist/harness/scheduler.js
+@@ -156,6 +156,8 @@ export class TaskScheduler {
+      * one of their tasks fails.
+      */
+     #failFastChecks = new Set();
++    /** Early wake requests live in memory; the host durably redelivers them after reopen. */
++    #resumeRequested = new Set();
+     /**
+      * Live tasks with `abandonOnRestart` found at open, from an earlier Harness. The first reservation pass abort-marks
+      * them with reason `restart`, so nothing of them or below them runs a phase again.
+@@ -420,6 +422,22 @@ export class TaskScheduler {
+         }
+         return marked.result;
+     }
++    /** Wake a suspended task from its checkpoint, or remember an early wake until it suspends. */
++    async resumeTask(id, context) {
++        return this.#session.commitWith(async (tx) => {
++            const current = await tx.task(id);
++            if (current === undefined)
++                throw new Error(`Task ${id} does not exist`);
++            if (current.state.status === "terminal" || current.state.status === "completing")
++                return "terminal";
++            if (current.state.status === "waiting" && current.state.on.length === 0) {
++                tx.setTask(withState(current, { status: "pending", checkpoint: current.state.checkpoint }));
++                return "resumed";
++            }
++            this.#resumeRequested.add(id);
++            return "requested";
++        }, context);
++    }
+     async waitForTask(id, context) {
+         // Check and register on the line so no terminal publication falls between them.
+         const found = await this.#session.readOnLine(async (storage) => {
+@@ -592,6 +610,7 @@ export class TaskScheduler {
+             if (liveness && dirty !== undefined && !this.#addScopesAbove(record, dirty))
+                 dirty = undefined;
+             if (record.state.status === "terminal") {
++                this.#resumeRequested.delete(record.id);
+                 this.#failedMigrations.delete(record.id);
+                 this.#failFastChecks.delete(record.id);
+                 this.#taskWaiters.resolve(record.id, record);
+@@ -599,6 +618,8 @@ export class TaskScheduler {
+                 this.#scheduleReconcile();
+                 continue;
+             }
++            if (record.state.status === "waiting" && record.state.on.length === 0 && this.#resumeRequested.delete(record.id))
++                queueMicrotask(() => void this.resumeTask(record.id, this.#context).catch(this.#report));
+             if (record.abortRequested && previous?.abortRequested !== true) {
+                 this.#cascadePending = true;
+                 // Signal a run invocation of the newly marked task; its next step ends it. Abort listeners are task code, which
+@@ -1880,6 +1901,7 @@ export class TaskScheduler {
+             // after its time comes, which the timer, `resume()`, or any change starts.
+             if (record === undefined ||
+                 record.state.status === "completing" ||
++                (!record.abortRequested && record.state.status === "waiting" && record.state.on.length === 0) ||
+                 this.#waitingOn(record, true).length > 0 ||
+                 this.#notDue(record)) {
+                 dropped.push(id);
+@@ -2010,6 +2032,8 @@ export class TaskScheduler {
+             return { kind: "running" };
+         if (record.state.status === "completing")
+             return { kind: "completing" };
++        if (!record.abortRequested && record.state.status === "waiting" && record.state.on.length === 0)
++            return { kind: "suspended" };
+         const on = this.#waitingOn(record);
+         if (on.length > 0)
+             return { kind: "waiting", on };
+diff --git a/dist/harness/tool.js b/dist/harness/tool.js
+index 2da76582241fad1f38970312a9135c290333560e..c9c852df265aab796a32b36635671508c0e6000a 100644
+--- a/dist/harness/tool.js
++++ b/dist/harness/tool.js
+@@ -409,12 +409,26 @@ async function run(runtime, input, call, tool, args, context) {
+     ended = true;
+     // No admission starts after `ended`; let those underway commit, so settlement aborts and lists their calls.
+     await Promise.allSettled(admissions);
+-    reported.output.end();
++    if (ending === COMPLETED && result?.control?.suspend === true && tool.replay !== "safe")
++        result = harnessError("tool_error", `Tool ${call.name} cannot suspend: it is not replay-safe`);
++    const suspended = ending === COMPLETED && result?.control?.suspend === true;
++    if (!suspended)
++        reported.output.end();
+     // Details still waiting for a progress commit settle with the terminal commit, the final flush.
+     const pending = await progress.stop();
+     try {
+-        const settled = await finalResult(runtime, input, call, tool, result, reported, context);
+-        await settle(runtime, input, call, ending, settled, context, durationMs);
++        if (suspended) {
++            await runtime.commit(async () => ({
++                status: "waiting",
++                checkpoint: { phase: "execute", arguments: args, replay: "safe" },
++                on: [],
++                policy: "allSettled",
++            }), context);
++        }
++        else {
++            const settled = await finalResult(runtime, input, call, tool, result, reported, context);
++            await settle(runtime, input, call, ending, settled, context, durationMs);
++        }
+     }
+     catch (error) {
+         for (const waiter of pending)
+diff --git a/dist/harness/types.d.ts b/dist/harness/types.d.ts
+index 7f4a0ba59df6d5870248c60c055dd188fdab51c4..27b802ba30f124b57278268c9e7fbfadfea52419 100644
+--- a/dist/harness/types.d.ts
++++ b/dist/harness/types.d.ts
+@@ -129,6 +129,8 @@ export type ToolControl = {
+      * The last handoff in call order wins.
+      */
+     readonly handoff?: string;
++    /** Suspend a replay-safe call without a result until `Harness.resumeTask()` executes it again. */
++    readonly suspend?: true;
+ };
+ /** Remark about a call for the model and the UI, such as truncation or a spill path; never part of the tool's data. */
+ export type ToolDiagnostic = {
+@@ -513,6 +515,8 @@ export type ConversationRetryPolicy = {
+     maxRetries: number;
+     baseDelayMs: number;
+     maxAgentDelayMs?: number;
++    /** Hold an exhausted model request until `Harness.resumeTask()` instead of failing the run. */
++    suspend?: (message: AssistantMessage, conversationId: ConversationId) => boolean;
+ };
+ /** Automatic compaction thresholds (spec §8.7); manual compaction ignores `enabled`. */
+ export type CompactionPolicy = {
+@@ -723,6 +727,10 @@ export type TaskInspection = {
+         readonly kind: "waiting";
+         readonly on: readonly TaskId[];
+     }
++    /** Waits only for `Harness.resumeTask()`. */
++     | {
++        readonly kind: "suspended";
++    }
+     /** Sleeps until the Harness clock reaches `until`. */
+      | {
+         readonly kind: "sleeping";
+@@ -859,6 +867,8 @@ export interface Harness extends Session {
+      * definition cannot take it settles as `orphaned` instead.
+      */
+     abortTask(id: TaskId, context: Context): Promise<"marked" | "terminal">;
++    /** Wake a suspended task; a live task not yet suspended wakes as soon as it suspends (`requested`). */
++    resumeTask(id: TaskId, context: Context): Promise<"resumed" | "requested" | "terminal">;
+     /** Resolve with the terminal receipt; cancelling `context` cancels only this wait. */
+     waitForTask<R>(id: TaskId<R>, context: Context): Promise<SettledTask<R>>;
+     /** Resolve when the ordinary ownership scope of every ownerless conversation has no live non-background task. */
+diff --git a/dist/index.d.ts b/dist/index.d.ts
+index 051d498c54f04ec527cacde335d5ab5d1bf93dd1..ff0c9fe0fe8b660b33dbe205a17bc262611e60c2 100644
+--- a/dist/index.d.ts
++++ b/dist/index.d.ts
+@@ -6,6 +6,7 @@ export { AgentDoc, configure, DEFAULT_COMPACTION_POLICY, DEFAULT_PROGRESS_POLICY
+ export { type CompactionCheckpoint, type CompactionInput, CompactionTask, type SummaryRequest, } from "./harness/compaction.ts";
+ export { defineExtension, defineTool, hook, runEndTask, section, wrapSection, wrapTool } from "./harness/define.ts";
+ export { type GenerationCheckpoint, type GenerationInput, type GenerationResult, GenerationTask, } from "./harness/generation.ts";
++export { type AgentEvent, type AgentEventStream, type SnapshotEvent, type MessageChange, type ToolEventCall, watchEvents } from "./harness/events.ts";
+ export { DEFAULT_HARNESS_IDENTITY, Harness } from "./harness/harness.ts";
+ export { InboxDoc, type InboxItem, type InboxState } from "./harness/inbox.ts";
+ export { type CompactionFailure, type CompactionStatus, LiveDoc, type LiveRun, type LiveState, type NestedToolSlot, type NestedToolSummary, type RunFailure, type RunFailureReason, type ToolSlot, } from "./harness/live.ts";
+diff --git a/dist/index.js b/dist/index.js
+index 0f748f53ffb1be5bd1fe46c0f8f01d1335e7a41c..a4f6dbb0693b57f74c4496db075380c9ef3f4d5a 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -5,6 +5,7 @@ export { AgentDoc, configure, DEFAULT_COMPACTION_POLICY, DEFAULT_PROGRESS_POLICY
+ export { CompactionTask, } from "./harness/compaction.js";
+ export { defineExtension, defineTool, hook, runEndTask, section, wrapSection, wrapTool } from "./harness/define.js";
+ export { GenerationTask, } from "./harness/generation.js";
++export { watchEvents } from "./harness/events.js";
+ export { DEFAULT_HARNESS_IDENTITY, Harness } from "./harness/harness.js";
+ export { InboxDoc } from "./harness/inbox.js";
+ export { LiveDoc, } from "./harness/live.js";

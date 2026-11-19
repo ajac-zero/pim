@@ -1,4 +1,4 @@
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { fenced, type GmailContent, type GmailSummary, mimeGmailContent } from "./gmail-adapter.ts";
 import { GOOGLE_AUTHORIZE_PARAMS, GOOGLE_SCOPES, GoogleApiError, GoogleTooLarge, googleCheck, googleJson } from "./google.ts";
 import type { NativeApp, NativeTool, ToolContext } from "./native.ts";

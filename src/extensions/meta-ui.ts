@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { defineTool, section } from "@earendil-works/pi-durable";
 import { pimOrigin } from "../accounts";
 import { match, type Route } from "@pim/shared/http";

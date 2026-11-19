@@ -1,4 +1,4 @@
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { call } from "./http.ts";
 import type { NativeApp, NativeTool, ToolContext } from "./native.ts";
 

@@ -1,4 +1,5 @@
-import { type ImageContent, type TextContent, type TSchema, Type } from "@earendil-works/pi-ai";
+import { type ImageContent, type TextContent } from "@earendil-works/pi-ai";
+import { type TSchema, Type } from "typebox";
 import { defineExtension, defineTool, section, type ToolRegistration } from "@earendil-works/pi-durable";
 import { OWNER, type PimStore, type ToolPermission } from "../store";
 import type { AppCatalog } from "./app-catalog";
@@ -288,7 +289,7 @@ export function mcpExtensions(
 						const ref = services.keepWidget(String(api.conversationId), result.widget);
 						content.push({ type: "text", text: `To show the person this result, add "${ref}" to send_to_user's widgets.` });
 					}
-					return { content, ...(result.isError ? { isError: true } : {}) };
+					return { output: content, ...(result.isError ? { isError: true } : {}) };
 				},
 			}) as ToolRegistration,
 		);

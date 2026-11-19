@@ -1,7 +1,8 @@
 // What keeps a chat from staying busy for ever: a model stream that goes silent is cut off (and, before any output, the request goes to the next model), and a tool whose
 // work never ends is stopped by the person's stop or by its timeout. The Runner's own stop and watchdog are tested in v2-runtime/test/runner.test.ts.
 import { describe, expect, it } from "vitest";
-import { createModels, Type } from "@earendil-works/pi-ai";
+import { createModels } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 import { defineTool } from "@earendil-works/pi-durable";
 import { stoppable } from "../src/agent-tools.ts";
@@ -58,9 +59,9 @@ describe("a tool that never returns", () => {
 	it("ends with an error result at its timeout, and a tool that returns is untouched", async () => {
 		const result = await hung(80).execute({}, {}, { abortSignal: new AbortController().signal });
 		expect(result.isError).toBe(true);
-		expect(result.content[0].text).toMatch(/did not finish/);
-		const quick = stoppable(defineTool({ name: "q", description: "x", parameters: Type.Object({}), execute: async () => ({ content: [{ type: "text", text: "ok" }] }) } as never) as never, 50) as any;
-		expect((await quick.execute({}, {}, { abortSignal: new AbortController().signal })).content[0].text).toBe("ok");
+		expect(result.output[0].text).toMatch(/did not finish/);
+		const quick = stoppable(defineTool({ name: "q", description: "x", parameters: Type.Object({}), execute: async () => ({ output: [{ type: "text", text: "ok" }] }) } as never) as never, 50) as any;
+		expect((await quick.execute({}, {}, { abortSignal: new AbortController().signal })).output[0].text).toBe("ok");
 	});
 });
 

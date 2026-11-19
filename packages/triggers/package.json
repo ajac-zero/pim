@@ -13,7 +13,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@earendil-works/pi-durable": "1.1.0",
+    "@earendil-works/pi-durable": "1.5.2",
     "@pim/shared": "workspace:*",
     "agents": "0.27.0"
   },

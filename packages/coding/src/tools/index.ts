@@ -2,8 +2,9 @@
 //
 // A tool call can be cut off when the Durable Object is evicted, and the harness runs a tool again on recovery only when the tool says that is safe. Every tool here says so, and each makes it true in its own way: tools that only read simply run again; `write` and `edit` record what they are about to write in the journal first, so a rerun returns the recorded result when the file already holds it and writes again only when the file is still as it was; `bash`, `test` and the git subcommands that change things record that they started, and a rerun reports that the call was interrupted without running anything.
 
-import type { Context, JsonValue } from "@earendil-works/chord";
-import { type TSchema, Type } from "@earendil-works/pi-ai";
+import type { Context } from "@earendil-works/chord/context";
+import type { JsonValue } from "@earendil-works/chord/json";
+import { type TSchema, Type } from "typebox";
 import { defineTool, type ToolExecutionApi, type ToolExecutionResult, type ToolRegistration } from "@earendil-works/pi-durable";
 import { WORKSPACE_ROOT, type Workspace, WorkspaceFileError, WorkspaceLimitError, WorkspacePathError } from "../workspace/types";
 import { redact } from "@pim/shared/redact";
@@ -91,9 +92,9 @@ export type CodingToolsDeps = {
 /** A mistake in what the model asked for, reported back to it as an error result. */
 class ToolInputError extends Error {}
 
-const text = (value: string, isError = false): ToolExecutionResult => ({ content: [{ type: "text", text: value }], ...(isError ? { isError } : {}) });
+const text = (value: string, isError = false): ToolExecutionResult => ({ output: [{ type: "text", text: value }], ...(isError ? { isError } : {}) });
 
-const textOf = (result: ToolExecutionResult) => (result.content ?? []).map((part) => (part.type === "text" ? part.text : "")).join("");
+const textOf = (result: ToolExecutionResult) => (result.output ?? []).map((part) => (part.type === "text" ? part.text : "")).join("");
 
 const encode = (value: string) => new TextEncoder().encode(value);
 

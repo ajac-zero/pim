@@ -54,7 +54,7 @@ export function assessInspection(inspection: HarnessInspection, now: number, opt
 				});
 				break;
 			default: {
-				const at = task.state.kind === "completing" ? undefined : sleepUntil(task.record.state.checkpoint);
+				const at = task.state.kind === "sleeping" ? task.state.until : task.state.kind === "completing" ? undefined : sleepUntil(task.record.state.checkpoint);
 				result = at !== undefined && at - now >= options.longWaitMs;
 				if (result && at !== undefined) due.push(at);
 			}

@@ -5,7 +5,7 @@
  * parking until the host decides (the Gate carries the decision back to this task, in the guest's own chat). The host's credential is opened here with the
  * deployment's keys and used for this one call; it never reaches the guest's agent, and the guest's agent never sees a connector the host did not grant.
  */
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { defineTool, type ToolRegistration } from "@earendil-works/pi-durable";
 import type { App } from "@pim/v2-app/app";
 import type { Boundary, GuestConnector } from "@pim/v2-app/guests";
@@ -16,8 +16,8 @@ import type { ExternalOperations } from "@pim/v2-runtime/external";
 import type { Db as RuntimeDb } from "@pim/v2-runtime/db";
 import { listTools, McpAuthError, type McpTool, parseCredential, refresh, resultText, type Transport, withSession } from "./connector-tools.ts";
 
-type Result = { content: { type: "text"; text: string }[]; isError?: boolean };
-const text = (s: string, isError = false): Result => ({ content: [{ type: "text", text: s }], ...(isError ? { isError } : {}) });
+type Result = { output: { type: "text"; text: string }[]; isError?: boolean };
+const text = (s: string, isError = false): Result => ({ output: [{ type: "text", text: s }], ...(isError ? { isError } : {}) });
 
 export type GuestToolsDeps = {
 	ownerId: string;
@@ -131,7 +131,7 @@ export function guestToolset(deps: GuestToolsDeps): ToolRegistration[] {
 						const filed = await app.guests.file(b, { chat: chat ?? "", taskId, callId: String(api.callId), connector: c.id, service: c.name, tool: tool.name, arguments: redact(args.arguments), resource: { connector: c.id, tool: tool.name } });
 						if (filed.state === "timed_out_denied") return await refused(app, b, tool.name, `${b.hostName} didn't answer within a day, so the call was not made.`);
 						await app.guests.log(b, tool.name, "asked", `Asked ${b.hostName} to approve ${tool.name} of ${c.name}`);
-						return { content: [{ type: "text", text: `Waiting for ${b.hostName} to approve.` }], control: { suspend: true } } as never;
+						return { output: [{ type: "text", text: `Waiting for ${b.hostName} to approve.` }], control: { suspend: true } } as never;
 					}
 				} else if (!(await app.guests.countCall(b))) {
 					return await refused(app, b, tool.name, `You have used the calls ${b.hostName} allows a day. They reset at midnight UTC.`);

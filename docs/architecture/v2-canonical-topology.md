@@ -7,7 +7,7 @@ The portable persistent-backend rearchitecture is built by six workstreams in pa
 | Branch | Owns | Builds |
 | --- | --- | --- |
 | `pim/v2-canonical` | `packages/v2-contracts/**`, `packages/v2-server/**`, `docs/architecture/**`, root wiring (`package.json`, `tsconfig`, `scripts/ci-scope.mjs`, `.github/workflows/ci.yml`) | Contracts, `0001_foundation.sql`, integration: the runtime source for Live's projector, cross-workstream grants, end-to-end tests |
-| `pim/v2-runtime` | `packages/v2-runtime/**` | PostgreSQL pi-durable 1.1.0 storage, partition lease and epoch fencing, Steward, Dispatch and Runner lifecycle |
+| `pim/v2-runtime` | `packages/v2-runtime/**` | PostgreSQL pi-durable 1.5.2 storage, partition lease and epoch fencing, Steward, Dispatch and Runner lifecycle |
 | `pim/v2-application` | `packages/v2-app/**` | Application ledger, RBAC, grants and standing approvals, tokens, sessions and envelope crypto, Gate HTTP API, agent features, Canvas, Relay, Objects |
 | `pim/v2-live-ui` | `packages/v2-live/**`, `web/**` | Projections, NATS Pulse, cursor replay, Live WebSocket server, the live client |
 | `pim/v2-forge` | `packages/v2-forge/**` | Coding control plane, coding grants, five harnesses, sandbox isolation, wake delivery |

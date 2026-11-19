@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { type TSchema, Type } from "@earendil-works/pi-ai";
+import { type TSchema, Type } from "typebox";
 import { defineTool, section } from "@earendil-works/pi-durable";
 import {
 	assertHostOpsCaller,

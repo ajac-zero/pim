@@ -5,8 +5,10 @@ import {
 	type Conversation,
 	type ConversationId,
 	type EntryId,
+	ConversationBusy,
 	Harness,
 	type HarnessOptions,
+	InboxDoc,
 	LiveDoc,
 	type SubmissionDraft,
 	type TaskId,
@@ -475,7 +477,13 @@ const inputCommand: CommandHandler = async (resident, command, context) => {
 	const held = command.kind === "user_message" ? await resident.heldGeneration(conversation, context) : undefined;
 	if (held !== undefined && command.payload.retry === true) return resident.resumeHeld(command, held);
 	const whenBusy = command.payload.whenBusy as "steer" | "followUp" | "reject" | undefined;
-	await conversation.submit({ type: "input", content, requestId: command.piRequestId, ...(whenBusy === undefined ? {} : { whenBusy }) }, context);
+	try {
+		await conversation.submit({ type: "input", content, requestId: command.piRequestId, ...(whenBusy === undefined ? {} : { whenBusy }) }, context);
+	} catch (error) {
+		// A message sent to be refused while the agent is at work was not taken, and never will be.
+		if (error instanceof ConversationBusy) throw new CommandRejected(`Conversation ${command.conversationId} is at work`);
+		throw error;
+	}
 	if (held !== undefined) await resident.resumeHeld(command, held);
 };
 
@@ -516,6 +524,30 @@ const forkCommand: CommandHandler = async (resident, command, context) => {
 	await parent.fork(Number(command.payload.at) as EntryId, { ownership: { kind: "ownerless" } }, context);
 };
 
+/**
+ * Changes a message queued behind the conversation's running turn, before the agent reads it: `steer` has it join the running work after the agent's
+ * current step, `edit` replaces its content, `cancel` takes it back. A message the agent has read already, or that was taken back, is no longer there:
+ * nothing changes, and nothing is retried. Only inputs are changed, never the entries Pim queued for itself.
+ */
+const queueChangeCommand: CommandHandler = async (resident, command, context) => {
+	const conversation = await conversationOf(resident, command, context);
+	const id = Number(command.payload.id);
+	const change = command.payload.change;
+	if (!Number.isSafeInteger(id) || (change !== "steer" && change !== "cancel" && change !== "edit")) throw new CommandRejected(`Command ${command.commandId} names no change of a queued message`);
+	if (change === "edit" && command.payload.content === undefined) throw new CommandRejected(`Command ${command.commandId} edits a queued message to nothing`);
+	await conversation.commit(async (tx) => {
+		const items = (await tx.doc(InboxDoc, conversation.id)).items;
+		const index = items.findIndex((item) => item.id === id);
+		const item = items[index];
+		if (!item || item.mode === "write") return;
+		if (change === "steer") item.mode = "steer";
+		else if (change === "cancel") {
+			tx.settleSubmission(item.id, { status: "unanswered", reason: "aborted" });
+			items.splice(index, 1);
+		} else item.content = command.payload.content as typeof item.content;
+	}, context);
+};
+
 /** What each contract command kind does in the owning partition. */
 const BUILTIN_COMMANDS: Readonly<Record<string, CommandHandler>> = {
 	user_message: inputCommand,
@@ -526,6 +558,7 @@ const BUILTIN_COMMANDS: Readonly<Record<string, CommandHandler>> = {
 	abort: abortCommand,
 	compaction_handoff: handoffCommand,
 	fork: forkCommand,
+	queue_change: queueChangeCommand,
 };
 
 /**

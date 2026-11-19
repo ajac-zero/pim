@@ -5,6 +5,7 @@ import { codingNoticeOf, EMPTY_STREAM } from "~/lib/pim-view";
 import {
   applyBusy,
   applyMessage,
+  applyQueue,
   entryOf,
   sessionOf,
   streamOf,
@@ -300,6 +301,40 @@ describe("a v2 chat drawn by the same reducer as v1's", () => {
       agent: { id: "m" },
       model: { override: true, model: { id: "u1" } },
     });
+  });
+});
+
+describe("the messages queued behind a running turn", () => {
+  const queued = [
+    { id: 7, mode: "followUp" as const, content: "and then this" },
+    {
+      id: 8,
+      mode: "steer" as const,
+      content: [
+        { type: "text", text: "now" },
+        { type: "image", data: "x", mimeType: "image/png" },
+      ],
+    },
+    // What Pim queued for itself, and what is not the person's, is not theirs to change.
+    { id: 9, mode: "followUp" as const, content: "[Task update] done" },
+  ];
+
+  it("shows the person's own, from a snapshot and as the live queue changes", () => {
+    const state = streamOf([user(1, "go"), assistant(2, "", [], true)], queued);
+    expect(state.view.queue).toEqual([
+      { id: 7, text: "and then this", images: 0, steer: false },
+      { id: 8, text: "now", images: 1, steer: true },
+    ]);
+    // A message that joined the run, or was taken back, leaves the queue; the transcript is not touched by it.
+    const later = applyQueue(state, queued.slice(0, 1));
+    expect(later.view.queue.map((item) => item.id)).toEqual([7]);
+    expect(later.view.entries).toEqual(state.view.entries);
+    // A committed message keeps the queue as it is.
+    expect(
+      applyMessage(later, user(3, "and then this")).view.queue.map(
+        (item) => item.id,
+      ),
+    ).toEqual([7]);
   });
 });
 

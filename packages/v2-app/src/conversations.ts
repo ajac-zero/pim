@@ -8,7 +8,7 @@ import { effectivePrincipal, OwnerId, type Principal } from "@pim/v2-contracts/i
 
 /** What a client can submit: the runtime's commands, and two application operations that only change metadata here (unarchive, delegate). */
 export type AdmitKind = CommandKind | "unarchive" | "delegate";
-const RUNTIME_KINDS = new Set<string>(["user_message", "approval_decision", "task_wake", "trigger_fire", "coding_wake", "compaction_handoff", "abort", "fork"]);
+const RUNTIME_KINDS = new Set<string>(["user_message", "approval_decision", "task_wake", "trigger_fire", "coding_wake", "compaction_handoff", "abort", "fork", "queue_change"]);
 export type Admission = { commandId: string; piRequestId: string; duplicate: boolean; state: "inbox_accepted" | "runtime_committed" | "rejected"; chatId: string | null; result?: Record<string, unknown> };
 
 const uuidFrom = (seed: string): string => {

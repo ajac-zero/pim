@@ -6,7 +6,7 @@
 import { randomUUID } from "node:crypto";
 import type { TranscriptMessage } from "@pim/shared/transcript";
 import type { App } from "@pim/v2-app/app";
-import { BadRequestError } from "@pim/v2-app/errors";
+import { BadRequestError, ConflictError } from "@pim/v2-app/errors";
 import { ok, type Reply, type Route, route } from "@pim/v2-app/http";
 import { transcriptPage } from "@pim/v2-live/projections/snapshots";
 import { messageParts } from "../message-images.ts";
@@ -49,6 +49,13 @@ export function outcomeOf(messages: readonly TranscriptMessage[], since: number)
 	}
 	const status = last.stopReason === "error" ? "failed" : last.stopReason === "aborted" ? "aborted" : "done";
 	return { status, replies, ...(replies.length > 0 ? { text: replies.join("\n\n") } : {}), ...(status === "failed" ? { reason: last.error ?? "The run ended with an error." } : {}) };
+}
+
+/** Whether the agent is at work in the chat: its run, or a message of the person's it has not taken yet. */
+async function chatBusy(app: App, ownerId: string, chat: string): Promise<boolean> {
+	return app.db.owner(ownerId, async (tx) => (await tx.query(
+		`SELECT coalesce((SELECT busy FROM pim_projection.sidebar_session_projection WHERE chat_id = $1::text), false)
+		        OR EXISTS (SELECT 1 FROM pim_app.accepted_commands WHERE public_chat_id = $1::uuid AND kind = 'user_message' AND state = 'inbox_accepted') AS busy`, [chat])).rows[0]!.busy as boolean);
 }
 
 /** When the command was accepted, or null for one this chat never took. */
@@ -96,7 +103,11 @@ export function apiClientRoutes(): Route[] {
 			if (!text.trim() && !content && b.payload === undefined) throw new BadRequestError("A message needs content");
 			const commandId = String(b.commandId ?? b.operationId ?? `cmd_${randomUUID()}`);
 			const p = await principal();
-			const admission = await app.conversations.admit(p, { commandId, kind: "user_message", chatId: params[0]!, payload: b.payload ?? { text, ...(content ? { content } : {}) } });
+			// What a message does when the agent is at work: it waits for the run to end (`followUp`, the default), joins it after the agent's current step (`steer`), or is refused (`reject`).
+			const whenBusy = b.whenBusy;
+			if (whenBusy !== undefined && whenBusy !== "followUp" && whenBusy !== "steer" && whenBusy !== "reject") throw new BadRequestError("whenBusy must be followUp, steer or reject");
+			if (whenBusy === "reject" && (await chatBusy(app, p.ownerId, params[0]!))) throw new ConflictError("The agent is at work in this chat", "busy");
+			const admission = await app.conversations.admit(p, { commandId, kind: "user_message", chatId: params[0]!, payload: b.payload ?? { text, ...(content ? { content } : {}), ...(whenBusy ? { whenBusy } : {}) } });
 			// `wait` holds the answer until the turn has ended: its replies, or why it failed; a turn that outlasts the wait answers `pending`, and the operation can be followed.
 			if (b.wait === true) {
 				const outcome = await awaitOutcome(app, p.ownerId, params[0]!, commandId, waitMs());

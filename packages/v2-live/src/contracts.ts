@@ -19,7 +19,7 @@ export type OutboxPayloads = {
 	/** A message committed to a chat or coding thread (`publicChatId`, or `payload.threadId` for coding); `partial` while it streams. The final commit replaces the partial. */
 	"chat.entry": { /** A pi entry, which Live projects into a message; or `message`, already one (a coding thread's events are not pi entries). */ entry?: EntryRecord; message?: TranscriptMessage; partial?: boolean; stream?: "chat" | "coding"; threadId?: string; /** Where the message sorts, when its entry id does not say (a streaming partial has no entry yet). */ position?: number; /** The id of the partial message this one replaces, which is dropped from the transcript. */ replaces?: string };
 	/** What the sidebar shows of a chat: a merge into its summary. */
-	"chat.meta": { title?: string | null; busy?: boolean; unread?: boolean; stalled?: boolean; updatedAt?: number; summary?: Record<string, JsonValue> };
+	"chat.meta": { title?: string | null; busy?: boolean; unread?: boolean; stalled?: boolean; updatedAt?: number; summary?: Record<string, JsonValue>; /** The inputs queued behind the running turn (pi's inbox items, without its passive writes): replaces what was queued. */ queue?: JsonValue[] };
 	/** The state a person gave an interactive `ui` block, keyed by the message that holds it. */
 	"chat.ui_state": { entryId: string; block: string; state: JsonValue };
 	"coding.thread": { threadId: string; title?: string | null; harness?: string; state?: string; running?: boolean; unread?: boolean; updatedAt?: number; summary?: Record<string, JsonValue> };

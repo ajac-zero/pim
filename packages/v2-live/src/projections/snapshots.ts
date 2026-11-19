@@ -17,6 +17,8 @@ export type TranscriptPage = {
 	messages: (TranscriptMessage & { partial: boolean; uiState: Record<string, unknown> })[];
 	/** Pass as `before` for the page of older messages; null when this page starts the transcript. */
 	nextBefore: string | null;
+	/** A chat's inputs queued behind its running turn (pi's inbox items), as of `liveCursor`; empty for a coding thread. */
+	queue: unknown[];
 	liveCursor: string | null;
 };
 
@@ -56,9 +58,11 @@ export function transcriptPage(pool: Pool, ownerId: string, id: string, options:
 			);
 			const more = rows.length > limit;
 			const page = rows.slice(0, limit).reverse();
+			const queued = kind === "chat" ? (await client.query("SELECT queue FROM pim_projection.sidebar_session_projection WHERE owner_id = $1 AND chat_id = $2", [ownerId, id])).rows[0]?.queue : undefined;
 			return {
 				messages: page.map((row) => ({ ...(row.message as TranscriptMessage), partial: row.partial as boolean, uiState: row.ui_state as Record<string, unknown> })),
 				nextBefore: more ? String(page[0]!.position) : null,
+				queue: (queued as unknown[] | undefined) ?? [],
 				liveCursor: await liveCursor(client, ownerId, kind === "chat" ? chatTopic(id) : codingTopic(id)),
 			};
 		},

@@ -11,10 +11,12 @@ import { EMPTY_STREAM } from "~/lib/pim-view";
 import {
   applyBusy,
   applyMessage,
+  applyQueue,
   type SidebarRow,
   sessionOf,
   streamOf,
   type V2Message,
+  type V2Queued,
 } from "~/lib/v2-view";
 
 /**
@@ -74,6 +76,8 @@ export async function fetchSidebar(
 
 type ChatPage = {
   messages: V2Message[];
+  /** The person's messages queued behind the running turn, as of the cursor. */
+  queue?: V2Queued[];
   nextBefore: string | null;
   liveCursor: string | null;
 };
@@ -107,6 +111,7 @@ export class V2Link {
   #chat: {
     id: string;
     messages: V2Message[];
+    queue: V2Queued[];
     nextBefore: string | null;
     stream: StreamState;
   } | null = null;
@@ -156,7 +161,7 @@ export class V2Link {
   /** Follows this chat (null: none) and, while the app is open, the sidebar. */
   followChat(id: string | null): void {
     this.#chat = id
-      ? { id, messages: [], nextBefore: null, stream: EMPTY_STREAM }
+      ? { id, messages: [], queue: [], nextBefore: null, stream: EMPTY_STREAM }
       : null;
     this.#follow();
   }
@@ -205,6 +210,7 @@ export class V2Link {
       return { liveCursor: page.liveCursor };
     }
     chat.messages = page.messages;
+    chat.queue = page.queue ?? [];
     chat.nextBefore = page.nextBefore;
     chat.stream = this.#drawn(chat);
     this.#publish();
@@ -231,8 +237,12 @@ export class V2Link {
   }
 
   /** A chat drawn from its messages, at work as the sidebar last said: a reload or a page of older messages in the middle of a long tool call still shows the turn going on. */
-  #drawn(chat: { id: string; messages: V2Message[] }): StreamState {
-    const stream = streamOf(chat.messages);
+  #drawn(chat: {
+    id: string;
+    messages: V2Message[];
+    queue: V2Queued[];
+  }): StreamState {
+    const stream = streamOf(chat.messages, chat.queue);
     const busy = this.#busy.get(chat.id);
     return busy === undefined ? stream : applyBusy(stream, busy);
   }
@@ -281,7 +291,10 @@ export class V2Link {
       }
       const chat = this.#chat;
       if (!chat || update.topic !== `chat:${chat.id}`) continue;
-      if (event.kind === "message" || event.kind === "message.partial") {
+      if (event.kind === "queue") {
+        chat.queue = (event.data as { items?: V2Queued[] }).items ?? [];
+        chat.stream = applyQueue(chat.stream, chat.queue);
+      } else if (event.kind === "message" || event.kind === "message.partial") {
         const { message, partial } = event.data as {
           message: V2Message;
           partial: boolean;

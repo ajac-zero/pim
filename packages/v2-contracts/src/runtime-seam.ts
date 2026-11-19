@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { OwnerId, PartitionId, PublicChatId } from "./identity.ts";
 
-export const COMMAND_KINDS = ["user_message", "approval_decision", "task_wake", "trigger_fire", "coding_wake", "compaction_handoff", "abort", "fork"] as const;
+export const COMMAND_KINDS = ["user_message", "approval_decision", "task_wake", "trigger_fire", "coding_wake", "compaction_handoff", "abort", "fork", "queue_change"] as const;
 export const CommandKind = z.enum(COMMAND_KINDS);
 export type CommandKind = z.infer<typeof CommandKind>;
 

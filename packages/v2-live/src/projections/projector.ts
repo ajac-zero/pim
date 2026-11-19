@@ -164,17 +164,20 @@ export class Projector {
 			case "chat.meta": {
 				const p = event.payload as OutboxPayloads["chat.meta"];
 				const { rows } = await client.query(
-					`INSERT INTO pim_projection.sidebar_session_projection (owner_id, chat_id, title, busy, unread, stalled, updated_at, summary, partition_id, commit_seq, projection_version)
-					 VALUES ($1, $2, $3::text, coalesce($4::boolean, false), coalesce($5::boolean, false), coalesce($6::boolean, false), coalesce($7::bigint, 0), $8::jsonb, $9, $10, $11)
+					`INSERT INTO pim_projection.sidebar_session_projection (owner_id, chat_id, title, busy, unread, stalled, updated_at, summary, partition_id, commit_seq, projection_version, queue)
+					 VALUES ($1, $2, $3::text, coalesce($4::boolean, false), coalesce($5::boolean, false), coalesce($6::boolean, false), coalesce($7::bigint, 0), $8::jsonb, $9, $10, $11, coalesce($13::jsonb, '[]'::jsonb))
 					 ON CONFLICT (owner_id, chat_id) DO UPDATE SET
 					   title = CASE WHEN $12::boolean THEN excluded.title ELSE sidebar_session_projection.title END,
 					   busy = coalesce($4::boolean, sidebar_session_projection.busy), unread = coalesce($5::boolean, sidebar_session_projection.unread), stalled = coalesce($6::boolean, sidebar_session_projection.stalled),
 					   updated_at = greatest(sidebar_session_projection.updated_at, coalesce($7::bigint, 0)), summary = sidebar_session_projection.summary || excluded.summary,
+					   queue = coalesce($13::jsonb, sidebar_session_projection.queue),
 					   partition_id = excluded.partition_id, commit_seq = excluded.commit_seq, projection_version = excluded.projection_version
 					 WHERE sidebar_session_projection.commit_seq <= excluded.commit_seq OR sidebar_session_projection.partition_id <> excluded.partition_id
 					 RETURNING chat_id, title, busy, unread, stalled, updated_at, summary`,
-					[ownerId, event.publicChatId, p.title ?? null, p.busy ?? null, p.unread ?? null, p.stalled ?? null, p.updatedAt ?? null, JSON.stringify(p.summary ?? {}), partitionId, seq, version, p.title !== undefined],
+					[ownerId, event.publicChatId, p.title ?? null, p.busy ?? null, p.unread ?? null, p.stalled ?? null, p.updatedAt ?? null, JSON.stringify(p.summary ?? {}), partitionId, seq, version, p.title !== undefined, p.queue === undefined ? null : JSON.stringify(p.queue)],
 				);
+				// The chat on screen shows its queue, and what changed in it.
+				if (p.queue !== undefined) await emit(chatTopic(event.publicChatId), "queue", { items: p.queue } as unknown as JsonValue, "queue");
 				const row = rows[0];
 				if (row) await emit(SIDEBAR_TOPIC, "sidebar.summary", { chatId: row.chat_id, title: row.title, busy: row.busy, unread: row.unread, stalled: row.stalled, updatedAt: num(row.updated_at), summary: row.summary }, `chat:${event.publicChatId}`);
 				return;

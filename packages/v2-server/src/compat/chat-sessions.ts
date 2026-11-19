@@ -3,10 +3,10 @@
  * ```ui block of one of its messages holds, and renaming or deleting it. Everything is read and written as the signed-in owner, through the
  * application's tables, so row-level security decides what a person can reach.
  *
- * The utility model's side jobs (a title, a summary, an improved prompt, suggestions) are in ./utility.ts and are off until one is chosen. Not here:
- * changing the queue behind a running turn, which lives in the runtime's inbox, not in the application's tables.
+ * The utility model's side jobs (a title, a summary, an improved prompt, suggestions) are in ./utility.ts and are off until one is chosen. The queue behind
+ * a running turn lives in the runtime's inbox; the chat's projection shows it, and a change to a queued message goes to the runtime as a command.
  */
-import { isDeliveryReminder } from "@pim/shared/transcript";
+import { fromPerson, isDeliveryReminder, withoutFileChanges } from "@pim/shared/transcript";
 import { checkUiState } from "@pim/ui-lang";
 import { uiProgramsOf } from "../reply-blocks.ts";
 import { randomUUID } from "node:crypto";
@@ -80,6 +80,31 @@ async function roomView(app: App, p: Principal, id: string) {
 	return (await roomViews(app, p.ownerId, [id])).get(id) ?? null;
 }
 
+type QueuedInput = { id: number; mode: "steer" | "followUp"; content: string | ({ type: string; text?: string })[] };
+
+const queuedText = (content: QueuedInput["content"]) => (typeof content === "string" ? content : content.flatMap((part) => (part.type === "text" ? [part.text ?? ""] : [])).join("\n"));
+
+/**
+ * Changes one of the person's messages queued behind the work in a chat, before the agent reads it: `steer` has it join the running work after the agent's
+ * current step rather than wait for the run to end; `text` rewrites it, keeping its images; `cancel` takes it back. Judged against the queue as the chat shows it;
+ * the runtime applies the change in the chat's partition, and nothing happens when the agent has read the message by then.
+ */
+async function changeQueued(app: App, p: Principal, chat: string, id: number, change: "steer" | "cancel" | { text: string }): Promise<void> {
+	await app.identity.authz.enforce(p, "api:write");
+	await sessionView(app, p, chat);
+	const queue = await app.db.owner(p.ownerId, async (tx) => ((await tx.query("SELECT queue FROM pim_projection.sidebar_session_projection WHERE chat_id = $1", [chat])).rows[0]?.queue ?? []) as QueuedInput[]);
+	const item = queue.find((queued) => queued.id === id);
+	if (!item) throw new ConflictError("The agent has this message already", "not_queued");
+	if (!fromPerson(queuedText(withoutFileChanges(item.content as never) as QueuedInput["content"]))) throw new NotFoundError("No such message of yours is queued");
+	let payload: Record<string, unknown> = { id, change: change === "steer" || change === "cancel" ? change : "edit" };
+	if (typeof change === "object") {
+		const images = typeof item.content === "string" ? [] : item.content.filter((part) => part.type !== "text");
+		if (change.text.trim() === "" && images.length === 0) throw new BadRequestError("A message needs text or an image");
+		payload = { ...payload, content: images.length === 0 ? change.text : [...(change.text.trim() === "" ? [] : [{ type: "text", text: change.text }]), ...images] };
+	}
+	await app.conversations.admit(p, { commandId: `queue-${randomUUID()}`, kind: "queue_change", chatId: chat, payload });
+}
+
 /** A task as the app's `AgentTask`: who handed it out, who has it, and how it stands. */
 const TASKS = `SELECT t.task_id, t.title, t.status, t.result, t.created_at, t.updated_at, t.task_chat, t.started_by,
 	tc.agent_id AS to_agent, ta.name AS to_name, sc.agent_id AS from_agent, sa.name AS from_name
@@ -104,9 +129,6 @@ const FAMILY = `WITH RECURSIVE family(chat) AS (
 const summarized = new Map<string, number>();
 
 export function sessionRoutes(env: Record<string, string | undefined> = process.env): Route[] {
-	const gone = () => {
-		throw new ConflictError("That message is no longer in the queue", "not_queued");
-	};
 	const needsModel = (what: string): never => {
 		throw new CapabilityUnavailableError(what, "no utility model is configured on this Pim");
 	};
@@ -260,9 +282,20 @@ export function sessionRoutes(env: Record<string, string | undefined> = process.
 		}),
 
 		// ---- the queue behind a running turn: the runtime's inbox owns it ----
-		route("POST", "/api/sessions/:id/queue/:item/steer", async ({ principal }) => (await principal(), gone())),
-		route("PUT", "/api/sessions/:id/queue/:item", async ({ principal }) => (await principal(), gone())),
-		route("DELETE", "/api/sessions/:id/queue/:item", async ({ principal }) => (await principal(), gone())),
+		route("POST", "/api/sessions/:id/queue/:item/steer", async ({ app, principal, params }) => {
+			await changeQueued(app, await principal(), chatId(params[0]!), Number(params[1]), "steer");
+			return ok({ id: Number(params[1]) });
+		}),
+		route("PUT", "/api/sessions/:id/queue/:item", async ({ app, principal, params, json }) => {
+			const text = (await json()).text;
+			if (typeof text !== "string") throw new BadRequestError("text is a string");
+			await changeQueued(app, await principal(), chatId(params[0]!), Number(params[1]), { text });
+			return ok({ id: Number(params[1]) });
+		}),
+		route("DELETE", "/api/sessions/:id/queue/:item", async ({ app, principal, params }) => {
+			await changeQueued(app, await principal(), chatId(params[0]!), Number(params[1]), "cancel");
+			return ok({ id: Number(params[1]) });
+		}),
 
 		// ---- the chat list, without the seats of group chats ----
 		route("GET", "/api/sessions", async ({ app, principal, url }) => {

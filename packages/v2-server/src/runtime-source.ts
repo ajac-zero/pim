@@ -126,8 +126,16 @@ async function translate(pool: Pool, storage: PgPiStorage, ownerId: OwnerId, par
 		}
 	}
 	let busy: boolean | undefined;
+	let queue: unknown[] | undefined;
 	for (const change of changes.filter((c) => c.type === "document.change")) {
-		const live = await liveState(pool, storage, ownerId, partitionId, change.id);
+		const kind = await documentKind(pool, ownerId, partitionId, change.id);
+		// The messages queued behind a run are the conversation's inbox document; the person sees theirs and can change them.
+		if (kind === "pi.inbox") {
+			queue = ((await storage.document(change.id as never, "current", BACKGROUND_CONTEXT))?.value as { items?: { mode: string }[] } | undefined)?.items?.filter((item) => item.mode !== "write") ?? [];
+			continue;
+		}
+		if (kind !== "pi.live") continue;
+		const live = (await storage.document(change.id as never, "current", BACKGROUND_CONTEXT))?.value as LiveState | undefined;
 		if (live === undefined) continue;
 		busy = live.run !== undefined;
 		const message = live.generation?.message;
@@ -137,18 +145,18 @@ async function translate(pool: Pool, storage: PgPiStorage, ownerId: OwnerId, par
 			events.push(event("chat.entry", { entry: { id: partialId(conversationId), kind: "pi.assistant", model: [message] }, partial: true, position: Number(top.rows[0]?.top ?? 0) + 1 }));
 		}
 	}
-	if (events.length > 0 || busy !== undefined) events.push(event("chat.meta", { updatedAt: committedAt.getTime(), ...(busy === undefined ? {} : { busy }) }));
+	if (events.length > 0 || busy !== undefined || queue !== undefined) {
+		events.push(event("chat.meta", { updatedAt: committedAt.getTime(), ...(busy === undefined ? {} : { busy }), ...(queue === undefined ? {} : { queue, summary: { queued: queue.length } }) }));
+	}
 	return events;
 }
 
 type LiveState = { run?: unknown; generation?: { message?: unknown } };
 
-/** The conversation's live document, if document `id` is one. Its content is what a run is doing now, so it is read as it stands. */
-async function liveState(pool: Pool, storage: PgPiStorage, ownerId: OwnerId, partitionId: PartitionId, id: number): Promise<LiveState | undefined> {
+/** What kind of document `id` is (`pi.live`, `pi.inbox`), when it is not retired. */
+async function documentKind(pool: Pool, ownerId: OwnerId, partitionId: PartitionId, id: number): Promise<string | undefined> {
 	const found = await withOwner(pool, ownerId, (client) =>
-		client.query("SELECT 1 FROM pim_runtime.documents WHERE owner_id = $1 AND partition_id = $2 AND id = $3 AND retired_at IS NULL AND record::jsonb->>'kind' = 'pi.live'", [ownerId, partitionId, id]),
+		client.query<{ kind: string }>("SELECT record::jsonb->>'kind' AS kind FROM pim_runtime.documents WHERE owner_id = $1 AND partition_id = $2 AND id = $3 AND retired_at IS NULL", [ownerId, partitionId, id]),
 	);
-	if (found.rowCount === 0) return undefined;
-	const doc = await storage.document(id as never, "current", BACKGROUND_CONTEXT);
-	return doc?.value as LiveState | undefined;
+	return found.rows[0]?.kind;
 }

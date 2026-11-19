@@ -98,8 +98,18 @@ export function entryOf(m: V2Message): EntryRecord | null {
 
 const asEvent = (event: object) => event as unknown as AgentEvent;
 
-/** A chat's view from the messages of a snapshot: the committed ones, and the answer still being written, if any. */
-export function streamOf(messages: readonly V2Message[]): StreamState {
+/** A pi inbox item: an input queued behind the running turn. */
+export type V2Queued = {
+  id: number;
+  mode: "steer" | "followUp";
+  content: unknown;
+};
+
+/** A chat's view from the messages of a snapshot: the committed ones, and the answer still being written, if any, and the messages queued behind it. */
+export function streamOf(
+  messages: readonly V2Message[],
+  queue: readonly V2Queued[] = [],
+): StreamState {
   const final = new Set(messages.filter((m) => !m.partial).map((m) => m.id));
   const entries = messages.flatMap((m) => {
     const entry = m.partial ? null : entryOf(m);
@@ -115,7 +125,7 @@ export function streamOf(messages: readonly V2Message[]): StreamState {
       entries,
       run: writing ? {} : undefined,
       tools: [],
-      inbox: [],
+      inbox: queue,
       generation: writing ? { message: assistantOf(writing) } : undefined,
     }),
   );
@@ -159,6 +169,14 @@ export function applyMessage(state: StreamState, m: V2Message): StreamState {
     ),
     m,
   );
+}
+
+/** The messages queued behind the chat's running turn changed. */
+export function applyQueue(
+  state: StreamState,
+  queue: readonly V2Queued[],
+): StreamState {
+  return reduce(state, asEvent({ type: "inbox_update", items: queue }));
 }
 
 /** Whether the chat is at work, as the sidebar's summary says: it ends the answer being written when it is not. */

@@ -32,7 +32,7 @@
 
 import { Buffer } from "node:buffer";
 import type { ChildProcess } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { type FSWatcher, realpathSync, statSync, watch } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
@@ -3072,6 +3072,57 @@ export async function ensureDisplayd(url: string, say: (line: string) => void): 
 	}
 }
 
+/**
+ * displayd inside the container image (deploy/Dockerfile.computer), which sets `PIM_DISPLAYD_EMBEDDED=1`: there is no systemd and no root there, so pim-computer starts displayd itself as a
+ * child, with its state and token in the computer's home (the token file where `DisplayClient` looks for it) and its displays' contexts in /tmp, and starts it again if it exits. The
+ * displays are processes of their own, which the next displayd re-adopts. Returns null where this isn't asked for or the display's programs (Xvnc, openbox, dbus-daemon, xauth) are
+ * not installed, saying why; it never throws.
+ */
+export async function startEmbeddedDisplayd(options: { env?: NodeJS.ProcessEnv; home?: string; node?: string; say: (line: string) => void; spawnProcess?: (command: string, args: string[], options: { env: NodeJS.ProcessEnv; stdio: ["ignore", "pipe", "pipe"] }) => ChildProcess; restartMs?: number }): Promise<{ stop(): void } | null> {
+	const env = options.env ?? process.env;
+	if (env.PIM_DISPLAYD_EMBEDDED !== "1") return null;
+	const { say } = options;
+	try {
+		const main = env.PIM_DISPLAYD_MAIN ?? "/app/displayd/src/main.js";
+		await fs.access(main);
+		for (const program of ["Xvnc", "openbox", "dbus-daemon", "xauth"]) {
+			const found = await Promise.all((env.PATH ?? "/usr/local/bin:/usr/bin:/bin").split(":").map((dir) => fs.access(path.join(dir, program)).then(() => true, () => false)));
+			if (!found.some(Boolean)) {
+				say(`displayd: ${program} is missing in this image, so there are no displays of their own.`);
+				return null;
+			}
+		}
+		const home = options.home ?? env.HOME ?? "/home/node";
+		const dir = path.join(home, ".displayd");
+		await fs.mkdir(path.join(dir, "state"), { recursive: true, mode: 0o700 });
+		const tokenFile = path.join(dir, "token");
+		if (!(await fs.readFile(tokenFile, "utf8").catch(() => "")).trim()) await fs.writeFile(tokenFile, `${randomBytes(24).toString("hex")}\n`, { mode: 0o600 });
+		// Xvnc's sockets: the directory X expects, which a read-only root has only in /tmp.
+		await fs.mkdir("/tmp/.X11-unix", { recursive: true, mode: 0o1777 }).catch(() => {});
+		const childEnv = { ...env, DISPLAYD_TOKEN_FILE: tokenFile, DISPLAYD_STATE_DIR: path.join(dir, "state"), DISPLAYD_CONTEXT_DIR: env.DISPLAYD_CONTEXT_DIR ?? "/tmp/pim-displays", DISPLAYD_HOST: "127.0.0.1" };
+		const start = options.spawnProcess ?? (await import("node:child_process")).spawn;
+		let stopped = false;
+		let child: ChildProcess | undefined;
+		const run = () => {
+			child = start(options.node ?? process.execPath, [main], { env: childEnv, stdio: ["ignore", "pipe", "pipe"] });
+			const lines = (chunk: Buffer) => chunk.toString("utf8").split("\n").filter(Boolean).forEach((line) => say(`displayd: ${line}`));
+			child.stdout?.on("data", lines);
+			child.stderr?.on("data", lines);
+			child.on("error", (error) => say(`displayd: couldn't start: ${error.message}`));
+			child.on("exit", (code) => {
+				if (stopped) return;
+				say(`displayd: exited (${code}); starting it again.`);
+				setTimeout(() => !stopped && run(), options.restartMs ?? 2_000).unref();
+			});
+		};
+		run();
+		return { stop: () => ((stopped = true), void child?.kill("SIGTERM")) };
+	} catch (error) {
+		say(`displayd: couldn't be started: ${error instanceof Error ? error.message : String(error)}`);
+		return null;
+	}
+}
+
 /** `pim-computer status`: whether it's installed and runs, where it connects, and its last words. */
 async function status(): Promise<void> {
 	const service = await computerService();
@@ -3312,7 +3363,9 @@ async function main(): Promise<void> {
 		apps,
 	};
 	// An update of pim-computer is how an older computer gets displayd, which runs on in the background and never stops this.
-	void ensureDisplayd(url, log);
+	const embedded = await startEmbeddedDisplayd({ say: log });
+	if (embedded) process.on("exit", () => embedded.stop());
+	else void ensureDisplayd(url, log);
 	const hello = {
 		type: "hello",
 		version: PROTOCOL_VERSION,

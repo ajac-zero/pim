@@ -4,7 +4,9 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { displaydSetupScript, displaydUnit, ensureDisplayd } from "../pim-computer";
+import { EventEmitter } from "node:events";
+import { chmodSync } from "node:fs";
+import { displaydSetupScript, displaydUnit, ensureDisplayd, startEmbeddedDisplayd } from "../pim-computer";
 import { displaydBundle, displaydFiles } from "../../displayd/bundle.js";
 
 const setup = { url: "https://pim.test/", user: "cua", home: "/home/cua", node: "/usr/local/lib/nodejs/bin/node" };
@@ -58,6 +60,66 @@ describe("displayd's service on a computer", () => {
 			delete process.env.PIM_DISPLAYD;
 		}
 		expect(said).toEqual([]);
+	});
+});
+
+describe("displayd inside the container image", () => {
+	/** A directory with the display's programs in it (empty scripts), and a displayd main file. */
+	const image = (programs = ["Xvnc", "openbox", "dbus-daemon", "xauth"]) => {
+		const bin = tmp();
+		for (const program of programs) {
+			writeFileSync(path.join(bin, program), "#!/bin/sh\n");
+			chmodSync(path.join(bin, program), 0o755);
+		}
+		const main = path.join(tmp(), "main.js");
+		writeFileSync(main, "");
+		return { bin, main };
+	};
+	const fakeChild = () => Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter(), killed: [] as string[], kill(signal: string) { this.killed.push(signal); return true; } });
+
+	it("is not started where the image does not ask for it, or where the display's programs are not installed", async () => {
+		const said: string[] = [];
+		expect(await startEmbeddedDisplayd({ env: { PATH: "/bin" }, say: (l) => said.push(l) })).toBeNull();
+		const { bin, main } = image(["Xvnc", "openbox"]);
+		expect(await startEmbeddedDisplayd({ env: { PIM_DISPLAYD_EMBEDDED: "1", PIM_DISPLAYD_MAIN: main, PATH: bin }, home: tmp(), say: (l) => said.push(l) })).toBeNull();
+		expect(said).toEqual(["displayd: dbus-daemon is missing in this image, so there are no displays of their own."]);
+	});
+
+	it("starts displayd as a child with a token in the computer's home, where the display client looks for it, and starts it again when it exits", async () => {
+		const { bin, main } = image();
+		const home = tmp();
+		const started: { args: string[]; env: NodeJS.ProcessEnv }[] = [];
+		const children: ReturnType<typeof fakeChild>[] = [];
+		const said: string[] = [];
+		const running = await startEmbeddedDisplayd({
+			env: { PIM_DISPLAYD_EMBEDDED: "1", PIM_DISPLAYD_MAIN: main, PATH: bin },
+			home,
+			node: "/usr/bin/node",
+			say: (l) => said.push(l),
+			restartMs: 5,
+			spawnProcess: ((_command: string, args: string[], options: { env: NodeJS.ProcessEnv }) => {
+				started.push({ args, env: options.env });
+				children.push(fakeChild());
+				return children.at(-1)!;
+			}) as never,
+		});
+		expect(running).not.toBeNull();
+		const token = readFileSync(path.join(home, ".displayd", "token"), "utf8").trim();
+		expect(token).toMatch(/^[0-9a-f]{48}$/);
+		expect(started[0]).toMatchObject({ args: [main], env: { DISPLAYD_TOKEN_FILE: path.join(home, ".displayd", "token"), DISPLAYD_STATE_DIR: path.join(home, ".displayd", "state"), DISPLAYD_CONTEXT_DIR: "/tmp/pim-displays", DISPLAYD_HOST: "127.0.0.1" } });
+		children[0]!.stdout.emit("data", Buffer.from("listening on 127.0.0.1:9900\n"));
+		expect(said).toContain("displayd: listening on 127.0.0.1:9900");
+		// It exits: it is started again, with the same token.
+		children[0]!.emit("exit", 1);
+		for (let i = 0; i < 100 && started.length < 2; i++) await new Promise((r) => setTimeout(r, 10));
+		expect(started).toHaveLength(2);
+		expect(readFileSync(path.join(home, ".displayd", "token"), "utf8").trim()).toBe(token);
+		// Stopped, it stays stopped.
+		running!.stop();
+		expect(children[1]!.killed).toEqual(["SIGTERM"]);
+		children[1]!.emit("exit", 0);
+		await new Promise((r) => setTimeout(r, 30));
+		expect(started).toHaveLength(2);
 	});
 });
 

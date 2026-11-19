@@ -23,11 +23,11 @@ const run = promisify(execFile)
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 // One bash process is the group leader and the supervisor: it starts the X server, a private
-// session bus, the window manager, the accessibility bus and the display's Cua Driver (an MCP
+// session bus, the window manager, the accessibility bus and the display's Cua Driver, when this computer has one (an MCP
 // server on a loopback port that sees only this display's windows), writes `ready` when all are up, and
 // exits, taking the group with it, as soon as any of them does. Nothing listens on TCP but the
 // loopback VNC port; X itself is a unix socket guarded by the cookie in XAUTHORITY.
-const SUPERVISOR = String.raw`
+export const SUPERVISOR = String.raw`
 set -u
 umask 077
 cd "$PIM_DIR"
@@ -41,7 +41,9 @@ for _ in $(seq 50); do [ -S "$PIM_DIR/bus" ] && break; sleep 0.1; done
 openbox >"$PIM_DIR/openbox.log" 2>&1 &
 ATSPI=$(command -v at-spi-bus-launcher || echo /usr/libexec/at-spi-bus-launcher)
 "$ATSPI" --launch-immediately >"$PIM_DIR/atspi.log" 2>&1 &
-"$PIM_DRIVER_BIN" serve --listen "127.0.0.1:$PIM_DRIVER_PORT" --token-file "$PIM_DIR/driver-token" >"$PIM_DIR/driver.log" 2>&1 &
+if [ -x "$PIM_DRIVER_BIN" ]; then
+	"$PIM_DRIVER_BIN" serve --listen "127.0.0.1:$PIM_DRIVER_PORT" --token-file "$PIM_DIR/driver-token" >"$PIM_DIR/driver.log" 2>&1 &
+fi
 sleep 0.5
 touch "$PIM_DIR/ready"
 wait -n
@@ -113,8 +115,14 @@ export class RealRunner {
 		return this.isAlive(pgid, spec) && existsSync(path.join(spec.dir, 'ready')) && existsSync(`/tmp/.X11-unix/X${spec.display}`) && (await connects(spec.vncPort)) && (await this.probeDriver(spec))
 	}
 
+	// A computer without Cua's driver (the container image: Cua's binaries are not shipped) has displays without desktop tools: the display, its VNC takeover and the agents' browser on it
+	// work, and the desktop tools answer that there is no driver. The display is healthy without one.
+	hasDriver() {
+		return existsSync(this.driverBin)
+	}
+
 	probeDriver(spec) {
-		return connects(spec.driverPort)
+		return this.hasDriver() ? connects(spec.driverPort) : Promise.resolve(true)
 	}
 
 	async kill(pgid, spec) {

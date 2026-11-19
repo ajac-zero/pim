@@ -204,13 +204,15 @@ real("the vertical slice", () => {
 		// What the live socket delivered for each committed message is what the snapshot holds.
 		const live = messages(`chat:${chatId}`).filter((m) => !m.partial).map((m) => m.message.id);
 		for (const id of live) expect(snap.messages.map((m) => m.id)).toContain(id);
-		// The shared-chat page, read by someone with no session, is the same transcript.
+		// The shared-chat page, read by someone with no session, is a sanitized copy of what the person read: no reasoning, tool calls or results.
 		const link = (await web.call("PUT", `/api/sessions/${chatId}/link`)).json.link;
+		expect(link).toMatchObject({ id: expect.any(String), url: expect.stringContaining(`/shared/${ownerId}/${link.id}`), sharedAt: expect.any(Number), messages: expect.any(Number) });
 		const anonymous = new Client(base(gate), d.ingressSecret);
-		const shared = await anonymous.call("GET", `/api/shared/${ownerId}/${link}`);
+		const shared = await anonymous.call("GET", `/api/shared/${ownerId}/${link.id}`);
 		expect(shared.status).toBe(200);
-		expect(shared.json.messages.map((m: { id: string }) => m.id)).toEqual(snap.messages.map((m) => m.id));
-		expect(shared.json.messages.map((m: { parts: { type: string; text?: string }[] }) => textOf(m))).toEqual(snap.messages.map((m) => textOf(m)));
+		expect(shared.json.messages.length).toBe(link.messages);
+		expect(shared.json.messages.some((m: { role: string; text: string }) => m.role === "agent" && m.text.includes("All done"))).toBe(true);
+		expect(JSON.stringify(shared.json)).not.toMatch(/tool-call|tool-result|thinking|"parts"/);
 	}, 60_000);
 
 	it("runs a coding thread under an explicit grant and a standing approval, wakes the chat that started it, and records its spend", async () => {

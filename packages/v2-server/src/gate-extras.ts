@@ -10,15 +10,17 @@ import { principalId } from "@pim/v2-app/authz";
 import type { TranscriptSource } from "@pim/v2-app/sharing";
 import { roomViews } from "./rooms.ts";
 import { MAX_PAGE, sidebarPage, transcriptPage } from "@pim/v2-live/projections/snapshots";
+import { sharedMessages } from "./shared-chat.ts";
+import type { TranscriptMessage } from "@pim/shared/transcript";
 import { nameOneUntitled } from "./compat/utility.ts";
 import { HARNESSES } from "@pim/v2-forge/harnesses";
 import type { ForgeParts } from "./forge-assembly.ts";
 import type { Authenticate, Caller, Handler } from "@pim/v2-forge/http/common";
 import type { Pool } from "pg";
 
-/** Shared chats read the same projected transcript a person sees, as that chat's owner. */
+/** Shared chats and exports read the projected transcript a person sees, as that chat's owner; a public link shows `shared`, the part of it the person read. */
 export function projectedTranscripts(pool: Pool): TranscriptSource {
-	return {
+	const source: TranscriptSource = {
 		read: async (ownerId, chatId, limit) => (await transcriptPage(pool, ownerId, chatId, { limit })).messages,
 		// Page by page back to the first message, so an export is whole however long the chat is.
 		readAll: async (ownerId, chatId) => {
@@ -31,6 +33,7 @@ export function projectedTranscripts(pool: Pool): TranscriptSource {
 			}
 		},
 	};
+	return { ...source, shared: async (ownerId, chatId) => sharedMessages((await source.readAll!(ownerId, chatId)) as TranscriptMessage[]) };
 }
 
 /** A chat's own model as the app's `Session.model`; the app finds the rest of it (name, images) among the choices. */

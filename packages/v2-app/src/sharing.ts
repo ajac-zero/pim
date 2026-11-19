@@ -1,7 +1,7 @@
 import { OwnerId, type Principal } from "@pim/v2-contracts/identity";
 import { Authorizer } from "./authz.ts";
 import type { Db } from "./db.ts";
-import { BadRequestError, GoneError, NotFoundError, RefusedError } from "./errors.ts";
+import { BadRequestError, ConflictError, GoneError, NotFoundError, PimError, RefusedError } from "./errors.ts";
 import { newId, secret } from "./ids.ts";
 import type { Agents } from "./agents.ts";
 import type { Conversations } from "./conversations.ts";
@@ -11,7 +11,23 @@ export interface TranscriptSource {
 	read(ownerId: string, chatId: string, limit: number): Promise<unknown[]>;
 	/** Every message of the chat, oldest first, for an export. */
 	readAll?(ownerId: string, chatId: string): Promise<unknown[]>;
+	/** What the chat's public copy holds: the messages the person read, from the projected transcript. Absent, a public copy has no messages. */
+	shared?(ownerId: string, chatId: string): Promise<SharedMessage[]>;
 }
+
+/** One message in a chat's public copy: what the person said (images only counted) or what their agent sent them with its widgets. Nothing else of the chat is in it. */
+export type SharedMessage =
+	| { role: "user"; text: string; images: number; at: number }
+	| { role: "agent"; text: string; widgets: unknown[]; at: number; from?: string };
+
+/** A chat's public copy, as the shared page reads it. */
+export type SharedChat = { title: string | null; agent: { name: string; symbol: string | null; color: string | null }; sharedAt: number; messages: SharedMessage[] };
+
+/** A chat's link as its owner sees it: `messages` counts what the copy holds, as of `sharedAt`. The address is the route's to add. */
+export type ChatLink = { id: string; sharedAt: number; messages: number };
+
+/** At most this much JSON in one copy. */
+export const MAX_SHARED_BYTES = 1_000_000;
 
 /**
  * Circles, shared chats, people and profiles, visits, bots, templates and the account export: how a person's space meets other people's.
@@ -96,17 +112,37 @@ export class Sharing {
 
 	// ---- shared chats ----
 
-	/** Makes (or returns) a chat's public link. Anyone with it can read the chat, nothing more. */
-	async shareChat(p: Principal, chatId: string): Promise<{ link: string }> {
+	/**
+	 * Makes a chat's public link, or updates the one it has, which keeps its address: the copy it shows is made now, and stays as it is until the owner updates the link
+	 * again. A chat with someone else's agent, an empty chat and one too long for a link are refused.
+	 */
+	async shareChat(p: Principal, chatId: string): Promise<ChatLink> {
 		await this.authz.enforce(p, "api:write");
 		await this.conversations.get(p.ownerId, chatId);
-		return this.db.owner(p.ownerId, async (tx) => {
+		const info = await this.db.owner(p.ownerId, async (tx) => (await tx.query(
+			`SELECT c.title, c.kind, a.name, a.emoji, a.color FROM pim_app.conversations c
+			 LEFT JOIN pim_app.agents a ON a.id = coalesce(c.agent_id, (SELECT value #>> '{}' FROM pim_app.owner_settings WHERE key = 'majordomo')) AND a.deleted_at IS NULL
+			 WHERE c.public_chat_id = $1`, [chatId])).rows[0]);
+		if (info?.kind === "visit") throw new BadRequestError("A chat with someone else's agent can't have a public link");
+		const copy: SharedChat = {
+			title: (info?.title as string | null) ?? null,
+			agent: { name: (info?.name as string | null) ?? "Pim", symbol: (info?.emoji as string | null) ?? null, color: (info?.color as string | null) ?? null },
+			sharedAt: Date.now(),
+			messages: (await this.transcripts?.shared?.(p.ownerId, chatId)) ?? [],
+		};
+		if (copy.messages.length === 0) throw new ConflictError("This chat has nothing to share yet");
+		if (Buffer.byteLength(JSON.stringify(copy)) > MAX_SHARED_BYTES) throw new PimError(413, "too_large", "This chat is too long for a public link");
+		const id = await this.db.owner(p.ownerId, async (tx) => {
 			const cur = (await tx.query("SELECT link FROM pim_app.shares WHERE kind = 'chat' AND resource_id = $1", [chatId])).rows[0];
-			if (cur) return { link: cur.link as string };
+			if (cur) {
+				await tx.query("UPDATE pim_app.shares SET copy = $2, shared_at = to_timestamp($3 / 1000.0) WHERE kind = 'chat' AND resource_id = $1", [chatId, JSON.stringify(copy), copy.sharedAt]);
+				return cur.link as string;
+			}
 			const link = secret(12);
-			await tx.query("INSERT INTO pim_app.shares (id, owner_id, kind, resource_id, audience, link) VALUES ($1,$2,'chat',$3,'link',$4)", [newId("sh"), p.ownerId, chatId, link]);
-			return { link };
+			await tx.query("INSERT INTO pim_app.shares (id, owner_id, kind, resource_id, audience, link, copy, shared_at) VALUES ($1,$2,'chat',$3,'link',$4,$5,to_timestamp($6 / 1000.0))", [newId("sh"), p.ownerId, chatId, link, JSON.stringify(copy), copy.sharedAt]);
+			return link;
 		});
+		return { id, sharedAt: copy.sharedAt, messages: copy.messages.length };
 	}
 
 	async unshareChat(p: Principal, chatId: string): Promise<void> {
@@ -114,19 +150,23 @@ export class Sharing {
 		await this.db.owner(p.ownerId, (tx) => tx.query("DELETE FROM pim_app.shares WHERE kind = 'chat' AND resource_id = $1", [chatId]));
 	}
 
-	async sharedChatLink(p: Principal, chatId: string): Promise<{ link: string | null }> {
+	/** The chat's link, or null without one (a link made before copies were kept shows nothing, so it counts as none until it is updated). */
+	async sharedChatLink(p: Principal, chatId: string): Promise<{ link: ChatLink | null }> {
 		await this.authz.enforce(p, "api:read");
-		return this.db.owner(p.ownerId, async (tx) => ({ link: (await tx.query("SELECT link FROM pim_app.shares WHERE kind = 'chat' AND resource_id = $1", [chatId])).rows[0]?.link ?? null }));
+		return this.db.owner(p.ownerId, async (tx) => {
+			const r = (await tx.query("SELECT link, (extract(epoch FROM shared_at) * 1000)::float8 AS shared_at, jsonb_array_length(copy -> 'messages') AS messages FROM pim_app.shares WHERE kind = 'chat' AND resource_id = $1 AND copy IS NOT NULL", [chatId])).rows[0];
+			return { link: r ? { id: r.link as string, sharedAt: Math.round(r.shared_at as number), messages: Number(r.messages) } : null };
+		});
 	}
 
-	/** `/api/shared/:owner/:link`: public. A deleted author's chat is gone (410); a suspended author's stays up. */
-	async readSharedChat(ownerId: string, link: string, limit = 200) {
-		const share = await this.db.lookup(link, async (tx) => (await tx.query("SELECT resource_id FROM pim_app.shares WHERE link = $1 AND owner_id = $2", [link, ownerId])).rows[0]);
+	/** `/api/shared/:owner/:link`: public, the copy made when the link was made or last updated. A deleted author's chat is gone (410); a suspended author's stays up. */
+	async readSharedChat(ownerId: string, link: string): Promise<SharedChat> {
+		const share = await this.db.lookup(link, async (tx) => (await tx.query("SELECT resource_id, copy FROM pim_app.shares WHERE link = $1 AND owner_id = $2 AND copy IS NOT NULL", [link, ownerId])).rows[0]);
 		if (!share) throw new NotFoundError();
 		const author = await this.authz.account(ownerId);
 		if (!author || author.status === "deleting" || author.status === "deleted") throw new GoneError("The author has deleted their account");
-		const chat = await this.conversations.get(ownerId, share.resource_id);
-		return { title: await this.db.owner(ownerId, async (tx) => (await tx.query("SELECT title FROM pim_app.conversations WHERE public_chat_id = $1", [chat.id])).rows[0]?.title ?? null), author: author.username, messages: this.transcripts ? await this.transcripts.read(ownerId, chat.id, Math.min(limit, 500)) : [] };
+		await this.conversations.get(ownerId, share.resource_id);
+		return share.copy as SharedChat;
 	}
 
 	// ---- profiles and people ----

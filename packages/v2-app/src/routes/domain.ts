@@ -18,10 +18,24 @@ export const domainRoutes: Route[] = [
 	}),
 	route("POST", "/api/sessions/:id/read", async ({ app, principal, params }) => (await app.conversations.markRead(await principal(), params[0]!), none())),
 	route("POST", "/api/sessions/:id/archive", async ({ app, principal, params }) => (await app.conversations.archive(await principal(), params[0]!), none())),
-	route("GET", "/api/sessions/:id/link", async ({ app, principal, params }) => ok(await app.sharing.sharedChatLink(await principal(), params[0]!))),
-	route("PUT", "/api/sessions/:id/link", async ({ app, principal, params }) => ok(await app.sharing.shareChat(await principal(), params[0]!))),
-	route("DELETE", "/api/sessions/:id/link", async ({ app, principal, params }) => (await app.sharing.unshareChat(await principal(), params[0]!), none())),
-	route("GET", "/api/shared/:owner/:link", async ({ app, params, url }) => ok(await app.sharing.readSharedChat(params[0]!, params[1]!, int(url.searchParams.get("limit"), 200)))),
+	// A chat's public link as the web reads it: `{ link: { id, url, sharedAt, messages } }`, and a copy of the chat made when it was made or last updated.
+	route("GET", "/api/sessions/:id/link", async ({ app, principal, params, origin }) => {
+		const p = await principal();
+		const { link } = await app.sharing.sharedChatLink(p, params[0]!);
+		return ok({ link: link && { ...link, url: `${origin}/shared/${p.ownerId}/${link.id}` } });
+	}),
+	route("PUT", "/api/sessions/:id/link", async ({ app, principal, params, origin }) => {
+		const p = await principal();
+		const link = await app.sharing.shareChat(p, params[0]!);
+		return ok({ link: { ...link, url: `${origin}/shared/${p.ownerId}/${link.id}` } });
+	}),
+	route("DELETE", "/api/sessions/:id/link", async ({ app, principal, params }) => {
+		const p = await principal();
+		const had = (await app.sharing.sharedChatLink(p, params[0]!)).link !== null;
+		await app.sharing.unshareChat(p, params[0]!);
+		return ok({ deleted: had });
+	}),
+	route("GET", "/api/shared/:owner/:link", async ({ app, params }) => ({ status: 200, body: await app.sharing.readSharedChat(params[0]!, params[1]!), headers: { "cache-control": "public, max-age=60", "x-robots-tag": "noindex" } })),
 
 	// ---- agents and skills ----
 	route("GET", "/api/agents", async ({ app, principal }) => ok({ agents: await app.agents.list(await principal()) })),

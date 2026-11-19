@@ -11,6 +11,7 @@ import { asSession, bootstrap, freshDatabase, member } from "./support/fixture.t
 
 let urls: Awaited<ReturnType<typeof freshDatabase>>;
 let app: App;
+let emptyChat = "";
 let admin: Awaited<ReturnType<typeof bootstrap>>;
 let server: Server;
 let base: string;
@@ -20,7 +21,7 @@ let crypto = new KeyringCrypto("k1", { k1: key(1) });
 beforeAll(async () => {
 	urls = await freshDatabase();
 	const fetchTools = async () => [{ name: "search", description: "Search" }, { name: "delete_everything" }];
-	app = new App(connect(urls.appUrl, 8), new MemoryObjectStore(), { crypto, fetchTools, transcripts: { read: async (_o, chat) => [{ role: "user", text: `hello from ${chat}` }] } });
+	app = new App(connect(urls.appUrl, 8), new MemoryObjectStore(), { crypto, fetchTools, transcripts: { read: async (_o, chat) => [{ role: "user", text: `hello from ${chat}` }], shared: async (_o, chat) => (chat === emptyChat ? [] : [{ role: "user", text: `hello from ${chat}`, images: 1, at: 1 }]) } });
 	admin = await bootstrap(app, "boss");
 	await app.identity.setRegistrationOpen(admin.principal, true);
 	server = createGate(app);
@@ -406,20 +407,41 @@ describe("circles, sharing and people", () => {
 		expect((await app.apps.list(owner.principal))[0]!.access).toBe("private");
 	});
 
-	it("shares a chat by an unguessable link, hides it again, and 410s for a deleted author", async () => {
+	it("shares a copy of a chat by an unguessable link that stays as it was until updated, hides it again, and 410s for a deleted author", async () => {
 		const u = await mk("chatter");
 		const chat = await app.conversations.create(u.principal, { title: "Plans" });
-		const { link } = (await (await u.http(`/api/sessions/${chat}/link`, { method: "PUT" })).json()) as { link: string };
-		expect((((await (await u.http(`/api/sessions/${chat}/link`, { method: "PUT" })).json()) as any)).link).toBe(link); // stable
-		const shown = (await (await fetch(`${base}/api/shared/${u.account.ownerId}/${link}`)).json()) as any;
-		expect(shown).toMatchObject({ title: "Plans", author: "chatter", messages: [{ text: `hello from ${chat}` }] });
+		type Link = { id: string; url: string; sharedAt: number; messages: number };
+		const put = async () => ((await (await u.http(`/api/sessions/${chat}/link`, { method: "PUT" })).json()) as { link: Link }).link;
+		const link = await put();
+		expect(link).toMatchObject({ url: `${base}/shared/${u.account.ownerId}/${link.id}`, sharedAt: expect.any(Number), messages: 1 });
+		expect(((await (await u.http(`/api/sessions/${chat}/link`)).json()) as any).link).toEqual(link);
+		const read = () => fetch(`${base}/api/shared/${u.account.ownerId}/${link.id}`);
+		const shown = (await (await read()).json()) as any;
+		expect(shown).toEqual({ title: "Plans", agent: { name: "Pim", symbol: null, color: null }, sharedAt: link.sharedAt, messages: [{ role: "user", text: `hello from ${chat}`, images: 1, at: 1 }] });
+		expect((await read()).headers.get("x-robots-tag")).toBe("noindex");
+		// Updating keeps the address and makes the copy again.
+		const updated = await put();
+		expect(updated.id).toBe(link.id);
+		expect(updated.sharedAt).toBeGreaterThanOrEqual(link.sharedAt);
 		expect((await fetch(`${base}/api/shared/${u.account.ownerId}/nope`)).status).toBe(404);
-		expect((await fetch(`${base}/api/shared/${(await mk("chatter2")).account.ownerId}/${link}`)).status).toBe(404); // another owner's path
-		await u.http(`/api/sessions/${chat}/link`, { method: "DELETE" });
-		expect((await fetch(`${base}/api/shared/${u.account.ownerId}/${link}`)).status).toBe(404);
-		const again = ((await (await u.http(`/api/sessions/${chat}/link`, { method: "PUT" })).json()) as any).link;
+		expect((await fetch(`${base}/api/shared/${(await mk("chatter2")).account.ownerId}/${link.id}`)).status).toBe(404); // another owner's path
+		expect(((await (await u.http(`/api/sessions/${chat}/link`, { method: "DELETE" })).json()) as any)).toEqual({ deleted: true });
+		expect((await read()).status).toBe(404);
+		expect(((await (await u.http(`/api/sessions/${chat}/link`)).json()) as any).link).toBeNull();
+		const again = await put();
 		await app.identity.setStatus(admin.principal, u.account.ownerId, "deleted");
-		expect((await fetch(`${base}/api/shared/${u.account.ownerId}/${again}`)).status).toBe(410);
+		expect((await fetch(`${base}/api/shared/${u.account.ownerId}/${again.id}`)).status).toBe(410);
+	});
+
+	it("refuses a public link to an empty chat, and a link made before copies were kept shows nothing", async () => {
+		const u = await mk("emptier");
+		emptyChat = await app.conversations.create(u.principal, { title: "Nothing yet" });
+		expect((await u.http(`/api/sessions/${emptyChat}/link`, { method: "PUT" })).status).toBe(409);
+		const chat = await app.conversations.create(u.principal, { title: "Old" });
+		await app.db.owner(u.account.ownerId, (tx) => tx.query("INSERT INTO pim_app.shares (id, owner_id, kind, resource_id, audience, link) VALUES ('sh_old', $1, 'chat', $2, 'link', 'oldlink')", [u.account.ownerId, chat]));
+		expect((await fetch(`${base}/api/shared/${u.account.ownerId}/oldlink`)).status).toBe(404);
+		expect(((await (await u.http(`/api/sessions/${chat}/link`)).json()) as any).link).toBeNull();
+		expect(((await (await u.http(`/api/sessions/${chat}/link`, { method: "PUT" })).json()) as any).link.id).toBe("oldlink");
 	});
 
 	it("shows a published profile with its templates and bots, visits a bot in the host's space, and hides what is unpublished or deleted", async () => {

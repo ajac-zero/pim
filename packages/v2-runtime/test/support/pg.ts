@@ -31,7 +31,7 @@ export async function createTestDatabase(): Promise<TestDatabase> {
 		appPool() {
 			const appUrl = new URL(url);
 			appUrl.username = "pim_runtime_app";
-			const pool = new pg.Pool({ connectionString: appUrl.toString(), max: 5 });
+			const pool = new pg.Pool({ connectionString: appUrl.toString(), max: 5 }).on("error", () => {});
 			appPools.push(pool);
 			return pool;
 		},

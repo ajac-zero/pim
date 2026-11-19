@@ -47,7 +47,7 @@ describe("coding REST routes", () => {
 		const hash = "a".repeat(32);
 		await s.objects.put(`forge/${id}/attachments/${hash}`, new TextEncoder().encode("png-bytes"), { contentType: "image/png" });
 		await s.objects.put(`forge/${id}/attachments/${"b".repeat(32)}`, new TextEncoder().encode("<svg onload=alert(1)>"), { contentType: "image/svg+xml" });
-		const fetchAs = async (who: string, path: string) => api(new Request(`https://pim.example.test${path}`, { headers: { "x-user": who } }))!;
+		const fetchAs = async (who: string, path: string) => (await api(new Request(`https://pim.example.test${path}`, { headers: { "x-user": who } })))!;
 		const shown = await fetchAs("ada", `/api/coding/${id}/attachments/${hash}`);
 		expect(shown.status).toBe(200);
 		expect(shown.headers.get("content-type")).toBe("image/png");

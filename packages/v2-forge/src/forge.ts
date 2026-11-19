@@ -12,6 +12,7 @@ import { ForgeScheduler } from "./scheduler";
 import { ForgeStore, type OutboxTopic, type ThreadRow } from "./store";
 import { type Credentials } from "./tokens";
 import { threadRef } from "./identity";
+import { StallSupervisor } from "./stall";
 import { MAX_DIFF_CHARS, autosaveWorkspace, checkpointWorkspace, ensureBase, gitIn, keepDiff, latestCheckpoint, makeDiff } from "./checkpoint";
 import { REPO_DIR } from "./git-checkout";
 import { type TestSummary, parseTestSummary } from "@pim/coding/tools/test-results";
@@ -60,6 +61,13 @@ export class Forge {
 	/** A person's answer to an approval Forge filed (a push, pull request or merge): the thread's next try goes ahead or is refused. */
 	decideApproval(actor: Actor, approvalId: string, approve: boolean): Promise<{ threadId: string; action: string }> {
 		return this.c.authz.decide(approvalId, actor, approve);
+	}
+
+	/** What a running thread has been doing lately, as the page's activity strip reads it: when it last did anything, and the quiet spells that would stall it. Undefined while it isn't running. */
+	async activity(actor: Actor, ref: string) {
+		const t = await this.own(actor, ref);
+		const a = await new StallSupervisor(this.c.db, this.c.store, this.c.scheduler.clock).activity(t.threadId);
+		return a ? { running: true as const, lastActivityAt: a.lastActivityAt, current: [] as never[], steps: [] as never[], stalls: a.stalls } : undefined;
 	}
 
 	/** The thread's newest checkpoint: the commit its latest turn ended on. Null before its first. */

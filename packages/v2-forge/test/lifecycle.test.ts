@@ -278,6 +278,8 @@ describe("stall supervision and the outbox", () => {
 		// New progress starts a new spell.
 		await s.store.locked(id, (q) => s.store.appendEvent(q, id, { kind: "message", role: "assistant", data: { text: "alive" } }));
 		s.advance(16 * 60_000 + 60_000);
+		// The page's activity strip reads the same quiet spell.
+		expect(await s.forge.activity(ada, id)).toMatchObject({ running: true, stalls: [expect.objectContaining({ reason: expect.stringContaining("no transcript activity") })] });
 		expect(await s.stall.check(id)).toBe(1);
 	});
 

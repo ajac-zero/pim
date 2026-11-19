@@ -74,7 +74,7 @@ function summary(t: Thread, progress: Progress) {
 }
 
 /** A thread as its page reads it. */
-function view(t: Thread, progress: Progress, unpushed: { commits: number; sha: string; message: string; at: number } | null) {
+function view(t: Thread, progress: Progress, unpushed: { commits: number; sha: string; message: string; at: number } | null, activity?: object) {
 	// Forge's own fields stay (a caller of the API reads `workspaceRef` and `lastPushedSha`); `Forge.status` already left out the nonce that signs the thread's grants.
 	const raw = t;
 	const environment = environmentOf(t);
@@ -106,6 +106,7 @@ function view(t: Thread, progress: Progress, unpushed: { commits: number; sha: s
 		// What the page's Push button is for: the newest commit the git host doesn't have. Forge keeps no checkpoints of its own, so `seq` counts the commits waiting.
 		checkpoint: unpushed && { seq: unpushed.commits, sha: unpushed.sha, message: unpushed.message, operationId: null, createdAt: unpushed.at },
 		parentThread: t.parentId,
+		...(activity ? { activity } : {}),
 		environment,
 	};
 }
@@ -194,7 +195,7 @@ export function webCodingShapes(d: { forge: Forge; authenticate: Authenticate; i
 		if (!caller || caller.actor.role === "guest") return d.inner(req);
 		const { actor } = caller;
 		const forge = d.forge.scopedTo(actor.ownerId);
-		const thread = async (id: string) => view(await forge.status(actor, id), await forge.progress(actor, id), await forge.unpushed(actor, id));
+		const thread = async (id: string) => view(await forge.status(actor, id), await forge.progress(actor, id), await forge.unpushed(actor, id), await forge.activity(actor, id));
 		let m: RegExpExecArray | null;
 
 		if (path === "/api/coding/threads" && req.method === "GET") {

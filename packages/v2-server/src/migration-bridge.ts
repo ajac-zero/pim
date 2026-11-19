@@ -16,7 +16,7 @@
  *
  * It is idempotent per tenant and runs as the schema owner. **Not promoted** (they remain in `pim_ops.legacy_rows` and the ops ledger, listed in
  * docs/architecture/v2-implementation-status.md): legacy schedules (they are triggers, promoted as such), deployment-level providers, templates and bots,
- * standing approvals and grants (an admin records those again, deliberately).
+ * standing approvals (an admin records those again, deliberately). Coding grants: v1 had none (any member could code), so a person who had coding threads is given one (`promoteCodingGrant`) and everyone else waits for an admin.
  */
 import { createHash } from "node:crypto";
 import type { ConversationRecord, DocumentRecord, EntryRecord, SubmissionRecord, TaskRecord } from "@earendil-works/pi-durable";

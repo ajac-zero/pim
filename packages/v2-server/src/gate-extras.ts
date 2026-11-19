@@ -109,6 +109,8 @@ export function toRequest(req: IncomingMessage, origin: string): Request {
 export async function sendResponse(res: ServerResponse, response: Response): Promise<Reply> {
 	const headers: Record<string, string> = {};
 	response.headers.forEach((v, k) => (headers[k] = v));
+	// A live stream (the coding page's) is sent as it is written, not once it ends, which it never does.
+	if (response.body && /^application\/x-ndjson\b/.test(headers["content-type"] ?? "")) return { status: response.status, headers, stream: response.body };
 	return { status: response.status, headers, raw: new Uint8Array(await response.arrayBuffer()) };
 }
 

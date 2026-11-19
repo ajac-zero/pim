@@ -41,6 +41,34 @@ describe("coding REST routes", () => {
 		expect(await api(new Request("https://pim.example.test/api/chats"))).toBeNull();
 	});
 
+	it("serves a mirrored Amp attachment to its owner only, refuses a start v1 would have refused, and never sends what signs a thread's grants", async () => {
+		const first = await call("ada", "POST", "/api/coding/threads", { repo: "https://github.com/acme/app", task: "Look at this", harness: "claude-code", operationId: "rest-att" });
+		const id = first.body.threadId as string;
+		const hash = "a".repeat(32);
+		await s.objects.put(`forge/${id}/attachments/${hash}`, new TextEncoder().encode("png-bytes"), { contentType: "image/png" });
+		await s.objects.put(`forge/${id}/attachments/${"b".repeat(32)}`, new TextEncoder().encode("<svg onload=alert(1)>"), { contentType: "image/svg+xml" });
+		const fetchAs = async (who: string, path: string) => api(new Request(`https://pim.example.test${path}`, { headers: { "x-user": who } }))!;
+		const shown = await fetchAs("ada", `/api/coding/${id}/attachments/${hash}`);
+		expect(shown.status).toBe(200);
+		expect(shown.headers.get("content-type")).toBe("image/png");
+		expect(shown.headers.get("x-content-type-options")).toBe("nosniff");
+		expect(await shown.text()).toBe("png-bytes");
+		// Anything that isn't an image or a video is a download, not a page.
+		const svg = await fetchAs("ada", `/api/coding/${id}/attachments/${"b".repeat(32)}`);
+		expect(svg.headers.get("content-type")).toBe("application/octet-stream");
+		expect(svg.headers.get("content-disposition")).toBe("attachment");
+		expect((await fetchAs("eve", `/api/coding/${id}/attachments/${hash}`)).status).toBe(404);
+		expect((await fetchAs("ada", `/api/coding/${id}/attachments/${"c".repeat(32)}`)).status).toBe(404);
+		expect((await fetchAs("ada", `/api/coding/${id}/attachments/..%2F..%2Fsecret`)).status).toBe(404);
+
+		const refused = (body: object) => call("ada", "POST", "/api/coding/threads", { repo: "https://github.com/acme/app", task: "x", harness: "claude-code", ...body });
+		for (const bad of [{ budgetUsd: 0 }, { budgetUsd: -1 }, { ref: "r".repeat(201) }, { pool: "p".repeat(101) }, { provider: "p".repeat(101) }]) expect(await refused({ operationId: `bad-${JSON.stringify(bad).length}`, ...bad }), JSON.stringify(bad)).toMatchObject({ status: 400, body: { code: "invalid" } });
+		expect((await call("ada", "POST", `/api/coding/threads/${id}/steer`, { text: "x", interrupt: "yes" })).status).toBe(400);
+		const read = (await call("ada", "GET", `/api/coding/threads/${id}`)).body;
+		expect(read).not.toHaveProperty("gatewayNonce");
+		expect(read).not.toHaveProperty("leaseHolder");
+	});
+
 	it("starts a thread (201), the same operation again is the same thread (200), and lists, reads, steers and archives it", async () => {
 		const first = await call("ada", "POST", "/api/coding/threads", { repo: "https://github.com/acme/app", task: "Fix it", harness: "claude-code", operationId: "rest-1" });
 		expect(first.status).toBe(201);

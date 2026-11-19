@@ -68,12 +68,39 @@ async function handle(app: App, routes: Route[], options: GateOptions, req: Inco
 		return send(res, (await options.before?.(ctx, r)) ?? (await r.run(ctx)));
 	}
 	// A path some route answers, with a method none does: 405 and the methods it takes, rather than a 404 that says the path is not there.
-	const allowed = [...new Set(routes.filter((r) => r.pattern.test(url.pathname)).map((r) => r.method))];
-	if (allowed.length > 0) return send(res, { status: 405, headers: { allow: allowed.join(", ") }, body: { error: "method_not_allowed", message: `${url.pathname} takes ${allowed.join(", ")}` } });
+	const known = routes.filter((r) => r.pattern.test(url.pathname));
+	const allowed = [...new Set(known.map((r) => r.method))];
+	if (allowed.length > 0) {
+		// What the path's limits and rules say comes first (a turned-off app is not there at all, whatever the method).
+		const first = known[0]!;
+		const refused = await options.before?.(makeCtx(app, req, url, first.pattern.exec(url.pathname)!.slice(1).map(decodeURIComponent), { origin, appsOrigin: options.appsOrigin }), first);
+		if (refused) return send(res, refused);
+		return send(res, { status: 405, headers: { allow: allowed.join(", ") }, body: { error: "method_not_allowed", message: `${url.pathname} takes ${allowed.join(", ")}` } });
+	}
 	throw new NotFoundError();
 }
 
 export function send(res: ServerResponse, reply: Reply): void {
+	if (reply.stream) {
+		res.writeHead(reply.status, { "cache-control": "no-store", ...reply.headers });
+		const reader = reply.stream.getReader();
+		// A client that goes away ends the stream.
+		res.on("close", () => void reader.cancel().catch(() => {}));
+		void (async () => {
+			try {
+				for (;;) {
+					const { value, done } = await reader.read();
+					if (done) break;
+					if (!res.write(value)) await new Promise((resolve) => res.once("drain", resolve).once("close", resolve));
+				}
+			} catch {
+				// The stream failed or the client left: nothing more to say.
+			} finally {
+				res.end();
+			}
+		})();
+		return;
+	}
 	const raw = reply.raw !== undefined ? Buffer.from(reply.raw) : reply.status === 302 ? Buffer.alloc(0) : Buffer.from(JSON.stringify(reply.body ?? {}));
 	res.writeHead(reply.status, { ...(reply.raw === undefined && reply.status !== 302 ? { "content-type": "application/json" } : {}), "cache-control": "no-store", ...reply.headers, "content-length": String(raw.length) });
 	res.end(raw);

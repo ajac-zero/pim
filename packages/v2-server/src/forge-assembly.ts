@@ -111,7 +111,8 @@ function defaultModels(env: Env): PiPortDeps["models"] {
 
 export function assembleForge(db: ForgeDb, objects: ObjectStore, env: Env, crypto?: EnvelopeCrypto, opts: { scoped?: boolean; /** Whether this deployment can run Amp, for a process that holds no vault of its own (the Runner, which only starts threads). Default: this process has a vault. */ ampConfigured?: boolean; /** Where a person answers what Forge asks them to approve. */ onApprovalFiled?: (filed: ApprovalFiled) => Promise<void> } = {}): ForgeParts {
 	const store = new ForgeStore(db);
-	const authz = new Authz(db, { allowedRepos: (env.PIM_CODING_ALLOWED_REPOS ?? "").split(",").map((r) => r.trim()).filter(Boolean), branchPrefix: env.PIM_CODING_BRANCH_PREFIX ?? "pim/" }, opts.onApprovalFiled);
+	const authz = new Authz(db, { // v1's `PIM_GIT_REPOS` is read when this deployment sets no `PIM_CODING_ALLOWED_REPOS`, so a v1 environment carries over; with neither set, coding is allowed on no repository (v1 allowed every one).
+		allowedRepos: (env.PIM_CODING_ALLOWED_REPOS || env.PIM_GIT_REPOS || "").split(",").map((r) => r.trim()).filter(Boolean), branchPrefix: env.PIM_CODING_BRANCH_PREFIX ?? "pim/" }, opts.onApprovalFiled);
 	const clock = overrides.clock ?? Date.now;
 	const scheduler = new ForgeScheduler(db, store, clock);
 	// Without a configured signing key a process signs with its own, so the broker tokens it issues die with it: fine for a trial, set one in a deployment.

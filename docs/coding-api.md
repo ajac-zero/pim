@@ -214,6 +214,8 @@ For a `claude-code` thread, each turn is one `model_call` with the turn's tokens
 
 `GET /coding/threads/:id/events` is newline-delimited JSON (`application/x-ndjson`), one object a line; with `Accept: text/event-stream` each object is an SSE `data:` line instead. The first is pi's `snapshot` of the conversation, then one `{ type: "events", events }` per change, and `{ type: "output", … }` for what the `bash` and `test` tools print as they run. A `claude-code`, `codex` or `amp` thread's messages arrive as `entry_appended` events once each is complete, and Claude Code's text and thinking as it writes them as `{ type: "partial", kind: "text" | "thinking", text }`, each a piece to add to what came before. Codex and Amp print each message whole.
 
+In v2 the stream carries `snapshot`, `run_start`, `entry_appended` and `run_end` (plus the thread's state), each message once Forge has recorded it; `Accept: text/event-stream` is not offered, and `output` and `partial` lines (a command's output as it prints, a CLI's text as it is written) are not sent.
+
 ## Starting a thread
 
 ```http

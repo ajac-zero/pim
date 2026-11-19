@@ -3,7 +3,7 @@ import type { Principal } from "@pim/v2-contracts/identity";
 import type { App } from "./app.ts";
 import { BadRequestError, ForbiddenError, UnauthorizedError } from "./errors.ts";
 
-export type Reply = { status: number; body?: unknown; headers?: Record<string, string | string[]>; raw?: Uint8Array | string };
+export type Reply = { status: number; body?: unknown; headers?: Record<string, string | string[]>; raw?: Uint8Array | string; /** A body that is sent as it is written, until it ends or the client goes away (a live stream), instead of whole. */ stream?: ReadableStream<Uint8Array> };
 export type Ctx = {
 	app: App;
 	req: IncomingMessage;

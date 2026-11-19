@@ -259,6 +259,43 @@ real("Forge's worker role with the Gate and Maintenance", () => {
 		twoUnpushed = false;
 	}, 60_000);
 
+	it("the page follows a thread live: its conversation as it stands, then each message as the thread records it; its log and diff are in v1's shapes", async () => {
+		const id = (await d.stack.admin.query("select thread_id from pim_forge.forge_threads where start_operation = 'role-pi'")).rows[0].thread_id as string;
+		const res = await fetch(url(`/api/coding/threads/${id}/events`), { headers: { "x-pim-ingress-secret": d.ingressSecret, cookie: web.cookie, accept: "application/x-ndjson" } });
+		expect(res.status).toBe(200);
+		expect(res.headers.get("content-type")).toBe("application/x-ndjson");
+		const reader = res.body!.getReader();
+		const decoder = new TextDecoder();
+		let buffer = "";
+		const next = async (): Promise<any> => {
+			for (;;) {
+				const end = buffer.indexOf("\n");
+				if (end >= 0) {
+					const line = buffer.slice(0, end);
+					buffer = buffer.slice(end + 1);
+					return JSON.parse(line);
+				}
+				const { value, done } = await reader.read();
+				if (done) throw new Error("the stream ended");
+				buffer += decoder.decode(value);
+			}
+		};
+		const snapshot = await next();
+		expect(snapshot.type).toBe("snapshot");
+		expect(snapshot.entries.map((e: any) => e.model[0].role)).toEqual(["user", "assistant", "toolResult", "assistant"]);
+		expect(snapshot.entries.at(-1).model[0].content).toEqual([{ type: "text", text: "Built it." }]);
+		await d.stack.admin.query("insert into pim_forge.forge_events (thread_id, seq, kind, role, data) select $1, max(seq) + 1, 'message', 'assistant', $2 from pim_forge.forge_events where thread_id = $1", [id, { text: "Live now." }]);
+		const live = await next();
+		expect(live).toMatchObject({ type: "events", events: [{ type: "entry_appended", entry: { kind: "pi.message", model: [{ role: "assistant", content: [{ type: "text", text: "Live now." }] }] } }] });
+		await reader.cancel();
+		// A caller that doesn't ask for a stream gets the log, from `since`, with where to ask next.
+		const log = (await web.call("GET", `/api/coding/threads/${id}/log?since=0`)).json;
+		expect(log.events.at(-1)).toMatchObject({ kind: "message", data: { text: "Live now." } });
+		expect(log.next).toBe(Number(log.events.at(-1).seq));
+		expect((await web.call("GET", `/api/coding/threads/${id}/log?since=${log.next}`)).json).toEqual({ events: [], next: log.next });
+		expect((await web.call("GET", `/api/coding/threads/${id}/diff`)).json).toEqual({ since: null, head: null, diff: "", truncated: false });
+	}, 60_000);
+
 	it("the sandbox clones and pushes through /api/coding/git on the Gate: fast-forwards pass; force pushes, main and other branches are refused", async () => {
 		const id = (await d.stack.admin.query("select thread_id from pim_forge.forge_threads where start_operation = 'role-pi'")).rows[0].thread_id as string;
 		const t = await state(id);

@@ -110,6 +110,9 @@ function view(t: Thread, progress: Progress, unpushed: { commits: number; sha: s
 	};
 }
 
+/** How many of a thread's latest messages the live stream's snapshot carries. */
+const SNAPSHOT_ENTRIES = 100;
+
 /** A message the thread recorded, as the pi entry the page's stream folds into its transcript (the page's own reducer reads `entry.model[0]`). */
 const entryOf = (e: { seq: number | string; role: string | null; data: any; at: string | Date }) => {
 	const timestamp = new Date(e.at).getTime();
@@ -149,7 +152,8 @@ function follow(forge: Forge, actor: Parameters<Forge["status"]>[0], id: string,
 				}
 			};
 			let running = (await forge.status(actor, id)).state === "running";
-			send({ type: "snapshot", entries: await drain(), tools: [], ...(running ? { run: {} } : {}) });
+			// The page holds the whole transcript already and reads it again on a snapshot, so the latest of it is enough here.
+			send({ type: "snapshot", entries: (await drain()).slice(-SNAPSHOT_ENTRIES), tools: [], ...(running ? { run: {} } : {}) });
 			const stop = () => void (closed = true);
 			signal.addEventListener("abort", stop, { once: true });
 			while (!closed) {

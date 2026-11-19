@@ -90,9 +90,9 @@ The Gate serves the v1 web app and answers its routes (`packages/v2-server/src/c
 **Deferred**, each answering empty, 404, 409 or 501 rather than with invented data:
 - Email (B3.18) and file-change notices (B4.10).
 - Queue steering: the v2 web view has no queue, and `/api/sessions/:id/queue/*` answers `not_queued`; a message's `whenBusy` and `wait` are accepted and ignored.
-- Connector skills over MCP, widgets from connector tool results, and a live coding events stream (the page rereads the transcript).
-- The utility model and an app's `pim.ask` do not reach a ChatGPT-plan model, and their calls are not metered.
-- A room member's model, agents waking each other in a room, and live pushes of room changes.
+- Connector skills over MCP, widgets from connector tool results, and the live coding stream's partial text and running-command output (the stream follows the conversation a message at a time).
+- The utility model reaches a ChatGPT-plan model with the plan's token (`compat/utility.ts`); an app's `pim.ask` does not, and neither's calls are metered.
+- Live pushes of room changes.
 - Coding environment snapshots and rebuild; harnesses pointed at the model gateway.
 - Process and file computer triggers, trigger health and checkpoints; a real desktop in the computer container.
 - Storage and app limits are shown, not enforced; there is no v2 event log for diagnostics.

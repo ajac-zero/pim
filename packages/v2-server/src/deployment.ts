@@ -5,6 +5,7 @@
  */
 import { LIMIT_NAMES, type Limits, limitVariable } from "@pim/v2-app/quota";
 import { registrationPolicy, type RegistrationMode } from "@pim/v2-app/registration";
+import { emailFrom as emailFromOf, hidePassword, smtpUrl } from "./smtp.ts";
 
 type Env = Readonly<Record<string, string | undefined>>;
 export type DeploymentVariable = { name: string; value: string | null; problem: string | null };
@@ -131,11 +132,18 @@ export function readDeployment(env: Env, origin: string, appsOrigin: string | un
 		if (found === (publicUrl ?? origin) || found === contentOrigin) throw new Error("must be another address than PIM_PUBLIC_URL and PIM_CONTENT_ORIGIN");
 		return found;
 	});
-	// Email is not built: the address is shown so that an operator moving from v1 sees it was read, and Settings shows email as unavailable.
+	// Email is sent only with both: the address it comes from, and the SMTP server that sends it. The server's address is shown with its password hidden.
 	const emailFrom = variable<string | null>("PIM_EMAIL_FROM", null, (value) => {
-		if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) throw new Error("must be an email address, such as pim@example.com");
+		if (emailFromOf(env).problem) throw new Error(emailFromOf(env).problem!);
 		return value;
 	});
+	variable<string | null>("PIM_SMTP_URL", null, (value) => {
+		const server = smtpUrl(value);
+		if (typeof server === "string") throw new Error(server);
+		return hidePassword(value);
+	});
+	const smtp = variables.find((entry) => entry.name === "PIM_SMTP_URL");
+	if (smtp?.value) smtp.value = hidePassword(smtp.value);
 	for (const name of ["PIM_RATE_AUTH", "PIM_RATE_API", "PIM_RATE_PUBLIC"]) variable<number | null>(name, null, count, 0);
 
 	return {

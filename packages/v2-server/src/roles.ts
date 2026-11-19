@@ -52,6 +52,11 @@ import { webCompatRoutes } from "./compat/index.ts";
 import { gateBefore, limitGuestMessages } from "./limits.ts";
 import { nameChatsFromFirstMessage } from "./compat/utility.ts";
 import { checkForUpdate } from "./update-check.ts";
+import { mailerFrom } from "./smtp.ts";
+
+/** Which of a person's chats are working a turn now, as Live's projection of the sidebar has it. */
+const chatBusyOf = (app: App) => async (ownerId: string, chatIds: string[]): Promise<Set<string>> =>
+	new Set((await app.db.owner(ownerId, async (tx) => (await tx.query("SELECT chat_id FROM pim_projection.sidebar_session_projection WHERE chat_id = ANY($1::text[]) AND busy", [chatIds])).rows)).map((r) => r.chat_id as string));
 
 export type Env = Record<string, string | undefined>;
 export type Hooks = {
@@ -106,8 +111,10 @@ export async function startGate(config: ProcessConfig, env: Env, host: Host, nat
 	instrumentPool(db.pool, metrics, "gate");
 	const objects = s3Of(config, env);
 	const crypto = keyringFromProcessEnv(env);
-	const app = new App(db, objects, { fetchTools: mcpFetchTools({ fetch, allowPrivate: env.PIM_CONNECTOR_ALLOW_PRIVATE === "1", check: publicUrl }), ...(crypto ? { crypto } : {}), ...(env.PIM_APP_SECRET_KEY ? { appKey: env.PIM_APP_SECRET_KEY } : {}), transcripts: projectedTranscripts(db.pool), ...(chatgptFromEnv(env) ? { chatgpt: chatgptFromEnv(env)! } : {}), allowHttpConnectors: env.PIM_CONNECTOR_ALLOW_PRIVATE === "1", env }).limitSpaces();
+	const app = new App(db, objects, { fetchTools: mcpFetchTools({ fetch, allowPrivate: env.PIM_CONNECTOR_ALLOW_PRIVATE === "1", check: publicUrl }), ...(crypto ? { crypto } : {}), ...(env.PIM_APP_SECRET_KEY ? { appKey: env.PIM_APP_SECRET_KEY } : {}), transcripts: projectedTranscripts(db.pool), ...(chatgptFromEnv(env) ? { chatgpt: chatgptFromEnv(env)! } : {}), allowHttpConnectors: env.PIM_CONNECTOR_ALLOW_PRIVATE === "1", env, ...(mailerFrom(env) ? { mailer: mailerFrom(env)! } : {}) }).limitSpaces();
 	installRooms(app);
+	// Whether a chat is working a turn is what Live's projection of the sidebar says: it is how a trigger knows its last run is over before it hands on the next.
+	app.triggers.chatBusy = chatBusyOf(app);
 	if (nats) publishRevocations(app, nats);
 	// A computer paired to another process (the `relay` container, another Gate) is reached over NATS.
 	if (nats) app.relay.useBus(natsRelayBus(nats));
@@ -239,7 +246,7 @@ export async function startRunner(config: ProcessConfig, env: Env, host: Host, h
 	appDb?.pool.on("error", () => {});
 	const forgePool = !hooks.harnessOptions && env.PIM_FORGE_DATABASE_URL ? new pg.Pool({ connectionString: env.PIM_FORGE_DATABASE_URL, max: 4 }).on("error", () => {}) : undefined;
 	const objects = appDb || forgePool ? s3Of(config, env) : undefined;
-	const app = appDb && objects ? new App(appDb, objects, { ...(crypto ? { crypto } : {}), ...(env.PIM_APP_SECRET_KEY ? { appKey: env.PIM_APP_SECRET_KEY } : {}) }) : undefined;
+	const app = appDb && objects ? new App(appDb, objects, { ...(crypto ? { crypto } : {}), ...(env.PIM_APP_SECRET_KEY ? { appKey: env.PIM_APP_SECRET_KEY } : {}), ...(mailerFrom(env) ? { mailer: mailerFrom(env)! } : {}) }) : undefined;
 	// With the deployment's keys, so the coding tools see the vault: Amp threads start only when Forge can open the person's Amp key.
 	const forge = forgePool && objects ? assembleForge(forgePool as never, objects, env, crypto, app ? { onApprovalFiled: surfaceForgeApprovals(app) } : {}) : undefined;
 	// The computer's tools reach a paired computer over the Relay's bus (NATS). The connection is made when an agent first uses one, so a Runner that never does needs no NATS.
@@ -351,6 +358,7 @@ export async function startMaintenance(config: ProcessConfig, env: Env, host: Ho
 	let lastTriggers = 0;
 	const { App } = await import("@pim/v2-app/app");
 	const sweeper = new App(app, objects, { env }).limitSpaces();
+	sweeper.triggers.chatBusy = chatBusyOf(sweeper);
 	const notifier = { vapid: vapidFromEnv(env), subject: env.PIM_VAPID_SUBJECT || config.publicUrl, allowPrivate: env.PIM_PUSH_ALLOW_PRIVATE === "1" };
 	const keys = keyringFromProcessEnv(env);
 	let lastRenewal = 0;

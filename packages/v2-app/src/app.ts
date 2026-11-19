@@ -9,6 +9,7 @@ import { KeyringCrypto } from "./crypto.ts";
 import { type Db } from "./db.ts";
 import { Guests } from "./guests.ts";
 import { Identity } from "./identity.ts";
+import { Email, type Mailer } from "./mail.ts";
 import { McpOAuth } from "./mcp.ts";
 import { Memories } from "./memory.ts";
 import { Quota } from "./quota.ts";
@@ -46,6 +47,8 @@ export class App {
 	readonly chatgpt: ChatGPT;
 	readonly connectors: ConnectorsType;
 	readonly usage: Usage;
+	/** The person's confirmed address, and emailing them there: available only when the deployment has a mail sender. */
+	readonly mail: Email;
 	readonly quota: Quota;
 	readonly triggers: Triggers;
 	readonly apps: Apps;
@@ -66,7 +69,7 @@ export class App {
 	/** Tells a person's open apps what happened at once (a canvas to open, a file that changed); connected to the bus by the process that has one. */
 	readonly notices = new Notices();
 
-	constructor(readonly db: Db, store: ObjectStore, opts: { hideSuspended?: boolean; providers?: Partial<Record<ProviderId, ProviderSettings>>; crypto?: EnvelopeCrypto; appKey?: string; fetchTools?: ToolFetcher; exchange?: CodeExchanger; transcripts?: TranscriptSource; chatgpt?: ChatGPTOptions; env?: Record<string, string | undefined>; mcpReplyWaitMs?: number; allowHttpConnectors?: boolean } = {}) {
+	constructor(readonly db: Db, store: ObjectStore, opts: { hideSuspended?: boolean; providers?: Partial<Record<ProviderId, ProviderSettings>>; crypto?: EnvelopeCrypto; appKey?: string; fetchTools?: ToolFetcher; exchange?: CodeExchanger; transcripts?: TranscriptSource; chatgpt?: ChatGPTOptions; env?: Record<string, string | undefined>; mcpReplyWaitMs?: number; allowHttpConnectors?: boolean; mailer?: Mailer } = {}) {
 		this.identity = new Identity(db, opts.env ? () => opts.env! : undefined);
 		this.conversations = new Conversations(db);
 		this.memories = new Memories(db);
@@ -85,6 +88,7 @@ export class App {
 		this.providers = new Providers(db, this.crypto);
 		this.chatgpt = new ChatGPT(db, this.crypto, opts.chatgpt);
 		this.usage = new Usage(db);
+		this.mail = new Email(db, opts.mailer);
 		this.quota = new Quota(opts.env);
 		this.triggers = new Triggers(db, this.conversations);
 		this.connectors = new Connectors(db, this.crypto, this.triggers, this.signin, { ...(opts.fetchTools ? { fetchTools: opts.fetchTools } : {}), ...(opts.exchange ? { exchange: opts.exchange } : {}), ...(opts.allowHttpConnectors ? { allowHttp: true } : {}) });

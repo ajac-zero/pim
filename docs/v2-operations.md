@@ -115,7 +115,7 @@ A deployment is set with variables in `deploy/compose/.env` (`env_file` gives ev
 - **Usernames** are 3 to 32 lowercase letters, digits and single hyphens between them, and not one of about seventy reserved names (`admin`, `support`, `pim`, `api`, ...). Names made before this rule keep working; a name is never given to a second person once its account has lived.
 - **Sign-in providers** are `PIM_GOOGLE_CLIENT_ID` and `_SECRET`, `PIM_GITHUB_CLIENT_ID` and `_SECRET`, and `PIM_OIDC_ISSUER`, `_CLIENT_ID`, `_CLIENT_SECRET` and `_NAME`. A provider with only some of them stays off and Settings says what is missing.
 - **Models:** `PIM_DEFAULT_MODEL`, `PIM_MODELS` (the allow-list: of the gateway's models, people may choose these and the default), `PIM_UTILITY_MODEL`, `PIM_MEMORY_MODEL`, `PIM_IMAGE_MODEL` and `PIM_MEMORY_LINES`. The limits are `PIM_LIMIT_*` and the rate limits `PIM_RATE_*`.
-- **Email** is not built: `PIM_EMAIL_FROM` is read so that Settings shows it, and email is shown as unavailable.
+- **Email** is sent through your own SMTP server: `PIM_SMTP_URL` (`smtps://user:password@host:465`; `smtp://host:25` upgrades to TLS when the server offers it, and a password is sent only over TLS or to the same machine) and `PIM_EMAIL_FROM` (an address that server lets Pim send as). Both are needed; Settings → Deployment shows them, with the password hidden. Each person confirms one address in Settings with a code, and Pim emails only that address (`docs/reference.md`, Email). Set them for the Gate and the Runner alike (`env_file` does).
 
 ## A computer on the same machine
 

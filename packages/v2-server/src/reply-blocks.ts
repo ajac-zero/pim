@@ -91,6 +91,27 @@ export function replyBlocks(message: string): ReplyBlock[] | { error: string } {
 	return blocks;
 }
 
+/** A block as a list of links. */
+function blockMarkdown({ kind, items }: ReplyBlock): string {
+	return items
+		.map((item) => {
+			if (kind === "gallery") return `- [${item.caption ?? "Image"}](${item.url ?? item.image})`;
+			if (kind === "videos") return `- [${item.title ?? "Video"}](${item.url})`;
+			const title = item.url ? `[${item.title}](${item.url})` : item.title;
+			const head = [`**${title}**`, item.meta].filter(Boolean).join(" · ");
+			return item.text ? `- ${head}\n  ${item.text.replace(/\s*\n\s*/g, " ")}` : `- ${head}`;
+		})
+		.join("\n");
+}
+
+/** A reply's ```cards, ```gallery and ```videos blocks as lists of links, for where they can't be drawn, such as an email. */
+export function blocksAsMarkdown(message: string): string {
+	return message.replace(BLOCK, (fence) => {
+		const blocks = replyBlocks(fence);
+		return "error" in blocks || blocks.length === 0 ? fence : blockMarkdown(blocks[0]!);
+	});
+}
+
 /** The images a reply's blocks show, each once. */
 export const blockImages = (blocks: readonly ReplyBlock[]): string[] => [...new Set(blocks.flatMap((block) => block.items.flatMap((item) => (item.image ? [item.image] : []))))];
 

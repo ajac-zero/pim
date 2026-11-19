@@ -1,16 +1,12 @@
 /**
  * The account surfaces the web app's settings and sign-in screens call, in the shapes the app reads: who is signed in (and whether this Pim has
- * its admin yet), passkeys and linked identities with their times as epoch milliseconds, API tokens, the device link, and the email and push
- * email setting, which this Pim does not have and answers as such (push is `notifications.ts`).
+ * its admin yet), passkeys and linked identities with their times as epoch milliseconds, API tokens, the device link, and the address Pim emails
+ * the person at (confirmed with a code, and available only where the deployment has a mail sender; push is `notifications.ts`).
  */
-import { BadRequestError, CapabilityUnavailableError } from "@pim/v2-app/errors";
+import { BadRequestError } from "@pim/v2-app/errors";
 import { ok, type Reply, type Route, route } from "@pim/v2-app/http";
 
 const ms = (value: Date | string | null | undefined): number | null => (value ? new Date(value).getTime() : null);
-
-const unavailable = (what: string, why: string): never => {
-	throw new CapabilityUnavailableError(what, why);
-};
 
 export function accountRoutes(): Route[] {
 	const tokenList: Route["run"] = async ({ app, principal }) => {
@@ -27,7 +23,6 @@ export function accountRoutes(): Route[] {
 		const created = await app.identity.createToken(p, { name, scopes: ["*"] });
 		return ok({ id: created.id, name, createdAt: Date.now(), lastUsedAt: null, token: created.token }, 201);
 	};
-	const noEmail = ok({ available: false, address: null, pending: null });
 	return [
 		route("GET", "/auth/session", async ({ app, maybePrincipal }) => {
 			const p = await maybePrincipal();
@@ -62,10 +57,14 @@ export function accountRoutes(): Route[] {
 		}),
 		route("GET", "/api/tokens", tokenList),
 
-		// Email needs a mail sender this Pim does not run: the settings show it as not available.
-		route("GET", "/api/email", async ({ principal }) => (await principal(), noEmail)),
-		route("PUT", "/api/email", async ({ principal }) => (await principal(), unavailable("email", "this Pim cannot send email"))),
-		route("POST", "/api/email/confirm", async ({ principal }) => (await principal(), unavailable("email", "this Pim cannot send email"))),
-		route("DELETE", "/api/email", async ({ principal }) => (await principal(), noEmail)),
+		// The address Pim emails the person at, confirmed with a code it sends there.
+		route("GET", "/api/email", async ({ app, principal }) => {
+			const p = await principal();
+			await app.identity.authz.enforce(p, "api:read");
+			return ok(await app.mail.state(p.ownerId));
+		}),
+		route("PUT", "/api/email", async ({ app, principal, json }) => ok(await app.mail.start(await principal(), (await json()).address))),
+		route("POST", "/api/email/confirm", async ({ app, principal, json }) => ok(await app.mail.confirm(await principal(), (await json()).code))),
+		route("DELETE", "/api/email", async ({ app, principal }) => ok(await app.mail.remove(await principal()))),
 	];
 }

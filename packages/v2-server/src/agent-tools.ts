@@ -616,10 +616,13 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 			if (outside) return { thread_id: outside.threadId, orb: { thread_id: outside.threadId, url: outside.url }, harness: "amp", provider: "amp-orbs", status: outside.state, external_amp_thread: true };
 			return about(f, actor, given);
 		}),
-		coding("coding_steer", "Tell a coding thread something: more to do, a correction, an answer to its question. During a turn it reads it after its current step, or with interrupt stops what it is doing and starts on it; between turns it starts a new turn; a thread that failed goes on with it.", Type.Object({ ...named, text: O(S({ minLength: 1 })), interrupt: O(Type.Boolean()), retry_environment: O(Type.Boolean({ description: "Not available: this deployment keeps no environment snapshots to rebuild." })) }), "coding:steer", async (f, actor, c, a) => {
-			if (a.retry_environment === true) throw new Error("This deployment keeps no environment snapshots to rebuild; its setup script runs again whenever a workspace is made.");
-			if (!a.text) throw new Error("Say something to the thread: text is required");
+		coding("coding_steer", "Tell a coding thread something: more to do, a correction, an answer to its question. During a turn it reads it after its current step, or with interrupt stops what it is doing and starts on it; between turns it starts a new turn; a thread that failed goes on with it.", Type.Object({ ...named, text: O(S({ minLength: 1 })), interrupt: O(Type.Boolean()), retry_environment: O(Type.Boolean({ description: "Set the thread's environment up again (its setup script runs once more) between turns; no text is needed." })) }), "coding:steer", async (f, actor, c, a) => {
 			const ref = threadArg(a);
+			if (a.retry_environment === true) {
+				await f.forge.rebuildEnvironment(actor, ref);
+				if (!a.text) return { thread_id: (await f.forge.status(actor, ref)).threadId, environment: "rebuilding" };
+			}
+			if (!a.text) throw new Error("Say something to the thread: text is required");
 			await f.forge.steer(actor, ref, a.text, `steer:${ownerId}:${c.api.taskId}:${c.api.callId}`, { interrupt: a.interrupt === true });
 			const t = await f.forge.status(actor, ref);
 			return { thread_id: t.threadId, status: t.state, turn_under_way: t.state === "running" };

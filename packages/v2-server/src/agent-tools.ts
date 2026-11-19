@@ -63,6 +63,8 @@ export type ToolDeps = {
 	toolTimeoutMs?: number | undefined;
 	/** Where images can be drawn (`./image-tools.ts`); absent leaves `generate_image` out, as `PIM_IMAGE_MODEL=off` does. */
 	images?: ImageSources | undefined;
+	/** Where any owner's images are drawn: a bot's guests draw on their host's image model (`./guest-tools.ts`). */
+	imagesOf?: ((ownerId: string) => ImageSources | undefined) | undefined;
 	/** The public id of the chat that a pi conversation is. */
 	chatOf(conversationId: number | string): Promise<string | null>;
 };
@@ -693,7 +695,7 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 	// The admin's majordomo runs the deployment (`./admin-tools.ts`); every other agent is refused there.
 	tools.push(...adminTools({ ownerId, app: deps.app, env: process.env, principalOf, chatOf: deps.chatOf, runtime: runtime as never }));
 	// A guest's agent, and a chat that is someone's visit to a bot, work with a short list of tools: nothing of the owner's computer, files, coding or other connectors.
-	tools.push(...guestToolset({ ownerId, partitionId, runtime, app: deps.app, crypto: deps.crypto, transport, ops, owner, now: deps.now, chatOf: deps.chatOf }));
+	tools.push(...guestToolset({ ownerId, partitionId, runtime, app: deps.app, crypto: deps.crypto, transport, ops, owner, now: deps.now, chatOf: deps.chatOf, imagesOf: deps.imagesOf, fetch: deps.fetch }));
 	// Every tool call that gets this far counts against the owner's day (migration 0621); once the day's allowance is used the call is refused with the space's usual message.
 	const defaultToolCalls = /^\d+$/.test(process.env.PIM_LIMIT_DAILY_TOOL_CALLS?.trim() ?? "") ? Number(process.env.PIM_LIMIT_DAILY_TOOL_CALLS) : null;
 	const withinToolCalls = () => runtime.read<{ ok: boolean }>(ownerId, "SELECT pim_app.runner_count_tool_call($1, $2) AS ok", [ownerId, defaultToolCalls]).then((r) => r.rows[0]?.ok !== false, () => true);

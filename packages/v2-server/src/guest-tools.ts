@@ -11,11 +11,13 @@ import type { App } from "@pim/v2-app/app";
 import type { Boundary, GuestConnector } from "@pim/v2-app/guests";
 import { openString, sealString } from "@pim/v2-app/crypto";
 import { toolDefinition } from "@pim/v2-app/tool-permissions";
-import { PartitionId } from "@pim/v2-contracts/identity";
+import { sniffImage } from "@pim/v2-app/objects";
+import { OwnerId, PartitionId, type Principal } from "@pim/v2-contracts/identity";
 import type { EnvelopeCrypto } from "@pim/v2-contracts/platform";
 import type { ExternalOperations } from "@pim/v2-runtime/external";
 import type { Db as RuntimeDb } from "@pim/v2-runtime/db";
 import { listTools, McpAuthError, type McpTool, parseCredential, refresh, resultText, type Transport, withSession } from "./connector-tools.ts";
+import { type ImageSources, IMAGE_EXTENSIONS, pickImageModel } from "./image-tools.ts";
 
 type Result = { output: { type: "text"; text: string }[]; isError?: boolean };
 const text = (s: string, isError = false): Result => ({ output: [{ type: "text", text: s }], ...(isError ? { isError } : {}) });
@@ -31,6 +33,22 @@ export type GuestToolsDeps = {
 	owner: unknown;
 	now: () => number;
 	chatOf(conversationId: number | string): Promise<string | null>;
+	/** Where a host's images are drawn (`./image-tools.ts`); a bot can share `generate_image` with its guests, which the host's own image model draws. Absent, none can. */
+	imagesOf?: ((ownerId: string) => ImageSources | undefined) | undefined;
+	fetch?: typeof fetch;
+};
+
+/**
+ * `generate_image` is the one tool a bot shares that no connector provides: the host's image model draws it (the host pays), the picture is kept in the host's files, in a
+ * folder of the guest's under `/workspace/bots/<bot>/`, and a copy in the guest's own files is what their chat shows. It is offered as a connector of its own, `pim`.
+ */
+export const IMAGES_CONNECTOR = "pim";
+const GENERATE_IMAGE = "generate_image";
+const IMAGE_CONNECTOR: GuestConnector = { id: IMAGES_CONNECTOR, kind: "pim", name: "Pim", url: "", status: "connected", credential: null, enabledTools: [GENERATE_IMAGE], approval: "none" };
+const IMAGE_TOOL: McpTool = {
+	name: GENERATE_IMAGE,
+	description: "Make an image from a description; the chat shows it to the person as soon as it's made, so don't link or describe it again. Describe what to draw in detail, in English: the subject, the setting, the style, composition, lighting and colors, and any words it should show, in quotes. Make one image unless they ask for more: each one costs.",
+	inputSchema: { type: "object", properties: { prompt: { type: "string", minLength: 1, maxLength: 2000, description: "What to draw, in detail." }, shape: { enum: ["square", "landscape", "portrait"], description: "The image's shape; square by default." } }, required: ["prompt"] },
 };
 
 const redact = (value: unknown) => JSON.parse(JSON.stringify(value ?? {}), (k, v) => (/token|secret|password|authorization|api[_-]?key/i.test(k) ? "[redacted]" : v));
@@ -72,6 +90,29 @@ export function guestToolset(deps: GuestToolsDeps): ToolRegistration[] {
 		tools.catch(() => listed.delete(key));
 		return tools;
 	};
+	/** Draws one image for the guest on the host's image model, keeps it in the host's files and gives the guest's chat its own copy; the answer is a connector tool's. */
+	async function drawForGuest(app: App, b: Boundary, sources: ImageSources, a: Record<string, unknown>, context: { abortSignal?: AbortSignal } | undefined) {
+		const fail = (message: string) => ({ isError: true, content: [{ type: "text", text: message }] });
+		if (typeof a.prompt !== "string" || a.prompt === "" || a.prompt.length > 2000) return fail("prompt is required, up to 2000 characters.");
+		const who = await pickImageModel(sources, deps.fetch ?? fetch);
+		if (!who) return fail("Images can't be made right now.");
+		try {
+			const shape = a.shape === "landscape" || a.shape === "portrait" ? a.shape : "square";
+			const bytes = await who.draw(a.prompt, shape, context?.abortSignal);
+			const type = sniffImage(bytes);
+			if (!type || bytes.length > 25_000_000) throw new Error("The image model answered with something that isn't an image.");
+			const name = `${new Date(deps.now()).toISOString().replace(/[:.]/g, "-")}.${IMAGE_EXTENSIONS[type]}`;
+			const agent = (ownerId: string): Principal => ({ kind: "agent", ownerId: OwnerId.parse(ownerId), agentId: "pim" });
+			const kept = `/workspace/bots/${b.botId}/${b.guest}/${name}`;
+			const shown = `/workspace/images/${name}`;
+			await app.objects.put(agent(b.host), { bytes, contentType: type, purpose: "file", key: `${b.host}/files${kept}` });
+			await app.objects.put(agent(b.guest), { bytes, contentType: type, purpose: "file", key: `${b.guest}/files${shown}` });
+			await runtime.read(b.host, "SELECT pim_app.record_model_call($1, $2, 'chat', NULL, $3, $4, 0, 0, 0)", [b.host, `mc_img_guest_${b.guest}_${name}`.slice(0, 120), "images", who.id]).catch(() => undefined);
+			return { content: [{ type: "text", text: JSON.stringify({ image: { path: shown, model: who.id, type, bytes: bytes.length }, note: "The person sees it in the chat now." }) }] };
+		} catch (error) {
+			return fail(`The image wasn't made: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
 	const refused = async (app: App, b: Boundary | null, tool: string, message: string): Promise<Result> => {
 		if (b) await app.guests.log(b, tool, "refused", message).catch(() => undefined);
 		return text(message, true);
@@ -95,6 +136,10 @@ export function guestToolset(deps: GuestToolsDeps): ToolRegistration[] {
 						if (permission !== "off") out.push({ connector: c.id, service: c.name, tool: t.name, description: t.description ?? null, inputSchema: t.inputSchema, asksFirst: permission === "ask" });
 					}
 				}
+				if (b.kind === "bot" && b.tools.includes(GENERATE_IMAGE) && deps.imagesOf?.(b.host)) {
+					const permission = app.guests.permissionOf(b, IMAGE_CONNECTOR, { name: GENERATE_IMAGE }, permissions);
+					if (permission !== "off") out.push({ connector: IMAGES_CONNECTOR, service: IMAGE_CONNECTOR.name, tool: GENERATE_IMAGE, description: IMAGE_TOOL.description, inputSchema: IMAGE_TOOL.inputSchema, asksFirst: permission === "ask" });
+				}
 				return text(out.length ? JSON.stringify({ host: b.hostName, tools: out }, null, 1) : `${b.hostName} hasn't shared any tools with you.`);
 			} catch (error) {
 				return text(error instanceof Error ? error.message : String(error), true);
@@ -108,7 +153,7 @@ export function guestToolset(deps: GuestToolsDeps): ToolRegistration[] {
 		parameters: Type.Object({ connector: Type.String({ minLength: 1 }), tool: Type.String({ minLength: 1 }), arguments: Type.Optional(Type.Record(Type.String(), Type.Any())) }),
 		// Safe to replay: a parked call finds its approval again (the id is a digest of the call), and a call with effects is made once through its operation.
 		replay: "safe",
-		async execute(args: { connector: string; tool: string; arguments?: Record<string, unknown> }, api: any) {
+		async execute(args: { connector: string; tool: string; arguments?: Record<string, unknown> }, api: any, context?: any) {
 			const app = deps.app;
 			if (!app) return noApp();
 			let b: Boundary | null = null;
@@ -116,8 +161,9 @@ export function guestToolset(deps: GuestToolsDeps): ToolRegistration[] {
 				const chat = await deps.chatOf(api.conversationId);
 				b = await app.guests.boundary(ownerId, chat);
 				const { connectors, permissions } = await app.guests.hostConnectors(b);
-				const c = connectors.find((x) => x.id === args.connector);
-				const tool = c ? (await toolsOf(b, c)).find((t) => t.name === args.tool) : undefined;
+				const images = args.connector === IMAGES_CONNECTOR && args.tool === GENERATE_IMAGE && b.kind === "bot" && b.tools.includes(GENERATE_IMAGE) ? deps.imagesOf?.(b.host) : undefined;
+				const c = images ? IMAGE_CONNECTOR : connectors.find((x) => x.id === args.connector);
+				const tool = images ? IMAGE_TOOL : c ? (await toolsOf(b, c)).find((t) => t.name === args.tool) : undefined;
 				// A tool the host did not grant is answered as one that does not exist: nothing says what else the host has connected.
 				if (!c || !tool) return await refused(app, b, args.tool, `${b.hostName} doesn't share a tool ${args.tool} with you.`);
 				const readOnly = tool.annotations?.readOnlyHint === true;
@@ -137,14 +183,14 @@ export function guestToolset(deps: GuestToolsDeps): ToolRegistration[] {
 				} else if (!(await app.guests.countCall(b))) {
 					return await refused(app, b, tool.name, `You have used the calls ${b.hostName} allows a day. They reset at midnight UTC.`);
 				}
-				const run = () => withBearer(b!, c, (bearer) => withSession(deps.transport, c.url, bearer, (rpc) => rpc("tools/call", { name: tool.name, arguments: args.arguments ?? {} }), 30_000));
+				const run = images ? () => drawForGuest(app, b!, images, args.arguments ?? {}, context) : () => withBearer(b!, c, (bearer) => withSession(deps.transport, c.url, bearer, (rpc) => rpc("tools/call", { name: tool.name, arguments: args.arguments ?? {} }), 30_000));
 				if (readOnly) {
 					const result = await run();
 					await app.guests.log(b, tool.name, "ran", `Used ${tool.name} of ${c.name}`);
 					return text(resultText(result), result?.isError === true);
 				}
-				const operationId = `guest:${deps.partitionId}:${taskId}`;
-				const op = await deps.ops.begin({ operationId, ownerId: deps.owner, partitionId: PartitionId.parse(deps.partitionId), taskId, toolName: "guest_call", capability: `guest:${b.host}:${c.id}`, idempotencyKey: `pim-guest-${ownerId}-${deps.partitionId}-${taskId}` } as never);
+				const operationId = `guest:${deps.partitionId}:${taskId}:${api.callId}`;
+				const op = await deps.ops.begin({ operationId, ownerId: deps.owner, partitionId: PartitionId.parse(deps.partitionId), taskId, toolName: "guest_call", capability: `guest:${b.host}:${c.id}`, idempotencyKey: `pim-guest-${ownerId}-${deps.partitionId}-${taskId}-${api.callId}` } as never);
 				if (op.state === "completed") return text(String((op.receipt as any)?.summary ?? "Done."));
 				if (op.state === "failed" || op.state === "cancelled") return text(`The call did not go through: ${String((op.receipt as any)?.error ?? op.state)}`, true);
 				if (op.state !== "pending") return text(`The call was started, but what became of it is not known (${op.state}). It was not made again.`, true);

@@ -605,6 +605,13 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 			rebuildEnvironment: O(Type.Boolean({ description: "Accepted and ignored: this deployment keeps no environment snapshots, so every workspace is set up fresh." })),
 		}), "coding:start", async (f, actor, c, a) => {
 			const budget = a.budget ?? a.budget_usd;
+			// A pi thread runs on a model the person has: one they don't have is refused here, with nothing started, instead of failing its first turn.
+			if (a.profile && (a.harness ?? "pi") === "pi") {
+				const available = await (await f.models({ ownerId: actor.ownerId } as never)).getAvailable().catch(() => null);
+				const provider = String(a.profile.provider).replace(/^own:/, "");
+				if (available && !available.some((m) => m.provider === provider)) throw new Error(`This Pim has no model provider ${a.profile.provider} for you`);
+				if (available && !available.some((m) => m.provider === provider && m.id === a.profile.model)) throw new Error(`${a.profile.provider} has no model ${a.profile.model}`);
+			}
 			const started = await f.forge.start(actor, { operationId: `coding:${ownerId}:${c.api.taskId}:${c.api.callId}`, task: a.task, repo: a.repo, ref: a.ref, harness: a.harness, pool: a.pool, provider: a.provider, ...(c.chat ? { chatId: c.chat } : {}), ...(budget !== undefined ? { budgetUsd: budget } : {}), ...(a.profile ? { profile: { providerId: a.profile.provider, model: a.profile.model } } : {}), ...(a.parent ? { parent: a.parent } : {}) });
 			const t = await about(f, actor, started.threadId);
 			return { thread_id: t.thread_id, url: t.url, status: t.status, ...(t.position ? { position: t.position, waiting_for: t.waiting_for } : {}), branch: t.branch, provider: t.provider, pool: t.pool };
@@ -690,7 +697,7 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 	// Finding, connecting and managing connectors (`./connector-admin-tools.ts`).
 	tools.push(...connectorAdminTools({ ownerId, runtime, read, write, env: process.env, transport, now: deps.now }));
 	// Watches: events of a connected server, delivered to the chat that asked.
-	tools.push(...watchTools({ ownerId, watch: () => (deps.app && deps.crypto ? { app: deps.app, crypto: deps.crypto, transport, publicUrl: process.env.PIM_PUBLIC_URL, now: deps.now } : undefined), chatOf: deps.chatOf, principalOf: (chat) => (deps.app ? principalOf(deps.app, chat) : Promise.resolve(undefined)) }));
+	tools.push(...watchTools({ ownerId, runtime, watch: () => (deps.app && deps.crypto ? { app: deps.app, crypto: deps.crypto, transport, publicUrl: process.env.PIM_PUBLIC_URL, now: deps.now } : undefined), chatOf: deps.chatOf, principalOf: (chat) => (deps.app ? principalOf(deps.app, chat) : Promise.resolve(undefined)) }));
 
 	// The admin's majordomo runs the deployment (`./admin-tools.ts`); every other agent is refused there.
 	tools.push(...adminTools({ ownerId, app: deps.app, env: process.env, principalOf, chatOf: deps.chatOf, runtime: runtime as never }));

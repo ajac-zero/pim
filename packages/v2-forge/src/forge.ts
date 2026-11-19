@@ -458,6 +458,12 @@ export class Forge {
 		return null;
 	}
 
+	/** Pim pushes only for a thread with a workspace of its own, and not before it has had one: what waits for its first sandbox has nothing to push, and no approval is asked for it. */
+	private assertStarted(t: ThreadRow): void {
+		if (!capabilitiesOf(t.harness).forgePush) throw new ForgeError("unsupported", "Pim can't push or merge an Amp thread: Amp pushes with its own credentials");
+		if (!this.hasWorkspace(t) && (t.state === "provisioning" || t.state === "queued")) throw new ForgeError("workspace_not_running", "This thread has no running workspace");
+	}
+
 	/** Whether the thread's sandbox is there to run commands in. */
 	private hasWorkspace(t: ThreadRow): boolean {
 		return !!t.workspaceRef && !!this.c.compute && !t.computeTornDownAt;
@@ -502,7 +508,7 @@ export class Forge {
 	/** Pushes the thread's work to its own branch, or to another of the branches Pim may push to (`branch`: under the prefix, never the default). */
 	async push(actor: Actor, ref: string, o: { branch?: string } = {}): Promise<Gated<{ outcome: "pushed" | "unchanged"; sha: string; branch: string }>> {
 		const t = await this.own(actor, ref);
-		if (!capabilitiesOf(t.harness).forgePush) throw new ForgeError("unsupported", "Pim can't push or merge an Amp thread: Amp pushes with its own credentials");
+		this.assertStarted(t);
 		const pending = await this.gate(actor, "coding:push", "push", t);
 		if (pending) return { status: "approval_required", ...pending };
 		const branch = o.branch ?? t.branch!;
@@ -544,7 +550,7 @@ export class Forge {
 		const t = await this.own(actor, ref);
 		const remote = capabilitiesOf(t.harness).family === "remote-orb";
 		const branch = remote ? ((t.orb?.branch as string | undefined) ?? null) : t.branch;
-		if (!remote && !capabilitiesOf(t.harness).forgePush) throw new ForgeError("unsupported", "Pim can't push or merge this thread");
+		if (!remote) this.assertStarted(t);
 		const pending = await this.gate(actor, "coding:merge", "merge", t);
 		if (pending) return { status: "approval_required", ...pending };
 		const base = await this.c.git.defaultBranch(t.repo);

@@ -398,6 +398,11 @@ real("the default agent host", () => {
 		expect(threads).toHaveLength(1);
 		expect(threads[0]).toMatchObject({ task: "Fix the flaky test" });
 		expect((await results("coding_start")).at(-1)).toContain(threads[0].thread_id);
+		// A pi thread asked to run on a model the person doesn't have is refused where it starts, with nothing recorded.
+		const threadsNow = (await d.stack.admin.query("SELECT 1 FROM pim_forge.forge_threads WHERE owner_id = $1", [ownerId])).rowCount;
+		await say("a model I don't have", toolUse(fauxToolCall("coding_start", { task: "Nope", repo: REPO, harness: "pi", profile: { provider: "own:nope", model: "x" } })));
+		expect((await results("coding_start")).at(-1)).toMatch(/no model provider own:nope/);
+		expect((await d.stack.admin.query("SELECT 1 FROM pim_forge.forge_threads WHERE owner_id = $1", [ownerId])).rowCount).toBe(threadsNow);
 		// Its state reads back through the tool, as the owner's.
 		await say("how is it going?", toolUse(fauxToolCall("coding_status", { thread: threads[0].thread_id })));
 		expect((await results("coding_status")).at(-1)).toContain(threads[0].thread_id);
@@ -483,12 +488,6 @@ real("the default agent host", () => {
 		expect((await web.call("POST", "/api/admin/coding-grants", { ownerId: "o_nobody", permissions: ["coding:start"], repositories: ["acme/*"] })).status).toBe(404);
 		expect((await web.call("POST", "/api/admin/coding-grants", { ownerId, permissions: ["coding:start"], repositories: ["not a repo"] })).status).toBe(400);
 		expect((await web.call("POST", "/api/admin/coding-grants", { ownerId, permissions: ["admin:grants"], repositories: ["acme/*"] })).status).toBe(400);
-
-		// A pi thread asked to run on a model the person doesn't have is refused where it starts, with nothing recorded.
-		const threadsNow = (await d.stack.admin.query("SELECT 1 FROM pim_forge.forge_threads WHERE owner_id = $1", [ownerId])).rowCount;
-		await say("a model I don't have", toolUse(fauxToolCall("coding_start", { task: "Nope", repo: REPO, harness: "pi", profile: { provider: "own:nope", model: "x" } })));
-		expect((await results("coding_start")).at(-1)).toMatch(/no model provider own:nope/);
-		expect((await d.stack.admin.query("SELECT 1 FROM pim_forge.forge_threads WHERE owner_id = $1", [ownerId])).rowCount).toBe(threadsNow);
 		void forgeDb;
 	}, 120_000);
 	it("manages agents, skills, schedules and triggers", async () => {

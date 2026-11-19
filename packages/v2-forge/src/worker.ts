@@ -8,14 +8,15 @@ import { type Row, type Queryable } from "./db";
 import { CapabilityUnavailableError, ForgeError, LeaseLostError } from "./errors";
 import { capabilitiesOf, LEGACY_AMP_WORKSPACE_MESSAGE, MAX_RESUMES, MAX_SESSION_RESTARTS, type Harness } from "./harnesses";
 import { type AttachmentFetcher, type Objects, type OrbClients, type TurnPort, type TurnRequest, type TurnResult } from "./ports";
-import { Provisioner, type ComputeHandle, type ComputeProvider, type ComputeSpec } from "./compute";
+import { computeTag, Provisioner, type ComputeHandle, type ComputeProvider, type ComputeSpec } from "./compute";
+import { EnvironmentStopped, SNAPSHOT_SKIP_TTL_MS, environmentOwner, prepareEnvironment } from "./environment";
 import { type ForgeScheduler } from "./scheduler";
 import { DUE, type ForgeStore, type ThreadRow } from "./store";
 import { type CheckpointDeps, checkpointWorkspace, ensureBase, gitIn } from "./checkpoint";
 import { REPO_DIR } from "./git-checkout";
 import { retryPlan } from "./retry";
 import { repoName } from "./authz";
-import { SETUP_ENV, SETUP_TIMEOUT_MS } from "@pim/coding/environment-cache";
+import { NO_ENVIRONMENT, SETUP_ENV, SETUP_TIMEOUT_MS, type CodingEnvironment } from "@pim/coding/environment-cache";
 
 export type WorkerDeps = {
 	store: ForgeStore;
@@ -26,7 +27,9 @@ export type WorkerDeps = {
 	/** What a thread's sandbox is made from: its repository (through the git broker) and egress. */
 	computeSpec?: (thread: ThreadRow) => ComputeSpec;
 	/** Makes the checkout in a new sandbox (see git-checkout.ts); runs once, after the sandbox exists. */
-	prepareWorkspace?: (thread: ThreadRow, handle: ComputeHandle) => Promise<void>;
+	prepareWorkspace?: (thread: ThreadRow, handle: ComputeHandle, o?: { restored?: boolean }) => Promise<void>;
+	/** The workspace image as the manager names it: part of an environment's key. */
+	image?: string;
 	orbs: OrbClients;
 	objects: Objects;
 	attachments?: AttachmentFetcher;
@@ -72,7 +75,8 @@ export class ForgeWorker {
 	constructor(private readonly d: WorkerDeps) {
 		this.holder = d.holder ?? `worker-${randomUUID()}`;
 		this.clock = d.clock ?? Date.now;
-		this.provisioner = d.compute ? new Provisioner(d.store, d.compute, this.clock, undefined, d.computeSpec) : null;
+		// A host that keeps environment snapshots is told whose sandbox it is, so the person's dependency cache and snapshots follow them.
+		this.provisioner = d.compute ? new Provisioner(d.store, d.compute, this.clock, undefined, (t) => ({ ...(d.computeSpec?.(t) ?? {}), ...(d.compute!.environments ? { environment: environmentOwner(t) } : {}) })) : null;
 	}
 
 	/** Threads that need a step: provisioning, queued and promoted, running (after a crash), with pending input, or with an orb to poll. */
@@ -228,7 +232,7 @@ export class ForgeWorker {
 				await scheduler.release(thread.threadId, "provision_failed");
 				return "done";
 			}
-			let environment: { state: "ready" | "failed"; error?: string; setupMs?: number } | null = null;
+			let environment: CodingEnvironment | null = null;
 			if (this.d.prepareWorkspace) {
 				const fresh = (await store.get(thread.threadId))!;
 				try {
@@ -238,9 +242,9 @@ export class ForgeWorker {
 					await scheduler.release(thread.threadId, "checkout_failed");
 					return "done";
 				}
-				// What the thread started from, and the repository's setup script, once per workspace (there are no snapshots to restore a prepared one from).
+				// What the thread started from, and the repository's environment: restored from the person's snapshot of it, or built, once per workspace.
 				const based = await ensureBase(this.dep, store, fresh).catch(() => fresh);
-				environment = await this.setup(based, epoch);
+				environment = await this.environment(based, epoch, poolId, false);
 			}
 			await store.fenced(thread.threadId, epoch, async (q, t) => {
 				await store.patch(q, thread.threadId, { placement: { pool: poolId }, ...(environment ? { provisioning: { ...(t.provisioning ?? {}), environment } } : {}) });
@@ -272,6 +276,18 @@ export class ForgeWorker {
 			});
 			if (!next) break;
 			if (revived) await this.refresh(thread.threadId);
+			// A rebuild of the environment asked for between turns.
+			if (next.kind === "environment") {
+				const t = (await store.get(thread.threadId))!;
+				const rebuilt = await this.environment(t, epoch, t.placement?.pool ?? this.d.defaultPool ?? "default", true);
+				await store.fenced(thread.threadId, epoch, async (q, cur) => {
+					if (rebuilt) await store.patch(q, thread.threadId, { provisioning: { ...(cur.provisioning ?? {}), environment: rebuilt } });
+					await q.query("update pim_forge.forge_inbox set status = 'done' where thread_id = $1 and operation_id = $2", [thread.threadId, next.operationId]);
+					if (rebuilt?.state === "failed") await store.setState(q, thread.threadId, "idle", "environment_failed", rebuilt.error ?? null);
+					else if (cur.stateReason === "environment_failed") await store.setState(q, thread.threadId, "idle");
+				});
+				continue;
+			}
 			if (!(await this.runTurn(thread.threadId, epoch, next))) return "retry";
 		}
 		const after = await store.get(thread.threadId);
@@ -286,10 +302,70 @@ export class ForgeWorker {
 	}
 
 	/**
-	 * Runs the repository's setup script in a new checkout: the person's setting for the repository, else the repository's own `.pim/setup.sh`. A script that fails is recorded and shown (state reason `environment_failed`), and the thread goes on, as in v1.
-	 * Null when there is no script to run.
+	 * Readies the thread's environment (`environment.ts`): the repository's toolchains, dependencies and setup script, restored from the person's snapshot of it where the host keeps
+	 * them, else built here and kept. The record is kept on the thread as it goes, so the page follows it. A step that fails is recorded and the thread goes on, as in v1. Null when the
+	 * host gives no workspace to read the repository through.
 	 */
-	private async setup(t: ThreadRow, epoch: number): Promise<{ state: "ready" | "failed"; error?: string; setupMs?: number } | null> {
+	private async environment(t: ThreadRow, epoch: number, poolId: string, rebuild: boolean): Promise<CodingEnvironment | null> {
+		const { store } = this.d;
+		const compute = this.d.compute!;
+		// A host whose workspace is no more than files (a local process sandbox) runs the setup script alone.
+		if (typeof (await compute.workspace?.(t.workspaceRef as ComputeHandle).catch(() => undefined))?.exec !== "function") return this.execSetup(t, epoch);
+		let handle = t.workspaceRef as ComputeHandle;
+		const name = repoName(t.repo);
+		const saved = name ? ((await store.db.query<Row>("select setup_script from pim_forge.forge_repo_settings where owner_id = $1 and repo = $2", [t.ownerId, name])).rows[0]?.setup_script as string | undefined) : undefined;
+		const owner = environmentOwner(t);
+		const save = (env: CodingEnvironment) => store.fenced(t.threadId, epoch, (q, cur) => store.patch(q, t.threadId, { provisioning: { ...(cur.provisioning ?? {}), environment: env } }));
+		try {
+			return await prepareEnvironment(
+				{
+					compute,
+					repoDir: this.d.repoDir ?? REPO_DIR,
+					clock: this.clock,
+					setting: saved?.trim() ? saved : null,
+					pool: poolId,
+					image: this.d.image,
+					event: (kind, data) => store.fenced(t.threadId, epoch, (q) => store.appendEvent(q, t.threadId, { kind, data })).then(() => undefined),
+					save,
+					skipped: async (key) => (await store.db.query("select 1 from pim_forge.forge_environment_skips where owner_id = $1 and key = $2 and decided_at > $3", [t.ownerId, key, new Date(this.clock() - SNAPSHOT_SKIP_TTL_MS)])).rows.length > 0,
+					setSkipped: async (key, skipped) => {
+						if (skipped) await store.db.query("insert into pim_forge.forge_environment_skips (owner_id, key, decided_at) values ($1,$2,$3) on conflict (owner_id, key) do update set decided_at = $3", [t.ownerId, key, new Date(this.clock())]);
+						else await store.db.query("delete from pim_forge.forge_environment_skips where owner_id = $1 and key = $2", [t.ownerId, key]);
+					},
+					// Nothing has worked in the sandbox yet: it is replaced by one restored from the snapshot, which checks the repository out again at the thread's ref and branch.
+					handle: () => handle,
+					refreshGit: () => this.refresh(t.threadId),
+					restore: async (key) => {
+						const fresh = (await store.get(t.threadId))!;
+						await compute.destroy(handle);
+						const created = await compute.create(computeTag(fresh), { ...(this.d.computeSpec?.(fresh) ?? {}), environment: { ...owner, restoreFrom: key } });
+						await store.fenced(t.threadId, epoch, (q) => store.patch(q, t.threadId, { workspace_ref: created, base_sha: null }));
+						handle = created;
+						// A host that couldn't restore the snapshot made a plain sandbox (its checkout is not there yet): the repository is cloned and the environment built in it.
+						const restored = (await compute.exec(created, ["test", "-d", `${this.d.repoDir ?? REPO_DIR}/.git`], { cwd: "/workspace" }).catch(() => ({ code: 1 }))).code === 0;
+						const moved = (await store.get(t.threadId))!;
+						await this.d.prepareWorkspace?.(moved, created, { restored });
+						await ensureBase(this.dep, store, moved).catch(() => undefined);
+						return restored;
+					},
+				},
+				t,
+				{ rebuild, current: ((t.provisioning as { environment?: CodingEnvironment } | null)?.environment as CodingEnvironment | undefined) ?? NO_ENVIRONMENT },
+			);
+		} catch (error) {
+			if (error instanceof LeaseLostError || error instanceof EnvironmentStopped) throw error;
+			const message = String(error instanceof Error ? error.message : error).slice(0, 500);
+			const failed = { ...NO_ENVIRONMENT, state: "failed", error: message, preparedAt: this.clock() } as CodingEnvironment;
+			await save(failed).catch(() => {});
+			return failed;
+		}
+	}
+
+	/**
+	 * The repository's setup script alone, for a sandbox host that gives no workspace to read the repository through (a local process sandbox): the person's setting for the repository, else the
+	 * repository's own `.pim/setup.sh`. A script that fails is recorded and shown, and the thread goes on, as in v1. Null when there is no script to run.
+	 */
+	private async execSetup(t: ThreadRow, epoch: number): Promise<CodingEnvironment | null> {
 		const { store } = this.d;
 		const handle = t.workspaceRef as ComputeHandle;
 		const name = repoName(t.repo);
@@ -305,7 +381,7 @@ export class ForgeWorker {
 		const tail = `${r.stdout}${r.stderr}`.replace(/pimgit_[\w.-]+/g, "[redacted]").slice(-600).trim();
 		const error = ok ? undefined : `The setup script ${r.timedOut ? `didn't finish in ${Math.round(SETUP_TIMEOUT_MS / 60_000)} minutes` : r.code === null ? "couldn't run" : `exited with code ${r.code}`}${tail ? `: ${tail}` : ""}`.slice(0, 700);
 		await store.fenced(t.threadId, epoch, (q) => store.appendEvent(q, t.threadId, { kind: ok ? "environment.ready" : "environment.failed", data: { setupMs, ...(error ? { error } : {}) } }));
-		return ok ? { state: "ready", setupMs } : { state: "failed", error, setupMs };
+		return { ...NO_ENVIRONMENT, state: ok ? "cached" : "failed", readyFrom: ok ? "setup" : null, setupMs, preparedAt: this.clock(), ...(error ? { error } : {}) };
 	}
 
 	/** A run left `running` by a worker that died: it settles as interrupted, and resumes (bounded) without a turn_ended. */

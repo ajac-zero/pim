@@ -311,7 +311,7 @@ describe("stopping, keeping and retrying turns", () => {
 		await s.worker({ turns: { "claude-code": port }, prepareWorkspace: prepare }).step(ok.threadId);
 		const t = (await s.store.get(ok.threadId))!;
 		expect((await s.sandboxes.exec(t.workspaceRef, ["cat", "setup-ran.txt"])).stdout.trim()).toBe("installed");
-		expect(t.provisioning.environment).toMatchObject({ state: "ready" });
+		expect(t.provisioning.environment).toMatchObject({ state: "cached", readyFrom: "setup" });
 
 		await s.forge.repoSettings(ada, "acme/app", { setupScript: "echo boom >&2; exit 3" });
 		const bad = await s.forge.start(ada, startReq(`setup-${++n}`, { harness: "claude-code" }));

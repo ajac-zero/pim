@@ -9,12 +9,13 @@ import { json, type Authenticate, type Handler } from "@pim/v2-forge/http/common
 
 
 const NO_ENVIRONMENT = { state: "none", key: null, source: null, builtAt: null, restoredFromKey: null, provisionMs: null, restoreMs: null, setupMs: null, snapshotMs: null, snapshotBytes: null, snapshotKept: null, readyFrom: null, preparedAt: null, rebuildRequested: false, toolchains: [], dependencies: [], testCommands: [], notes: [], services: [], cachePaths: [] };
-/** The page's environment of a thread: what its setup script did in this workspace (Forge keeps no snapshots, so a prepared one is always set up again). */
+/** The page's environment of a thread: what the thread's own record of readying it says (toolchains, dependencies, the checks found, whether it came from a snapshot). A thread set up before environments were recorded has only whether its setup script worked. */
 const environmentOf = (t: Thread): Record<string, unknown> & { state: string; error?: string } => {
-	const e = (t.provisioning as { environment?: { state: "ready" | "failed"; error?: string; setupMs?: number } } | null)?.environment;
-	return e ? { ...NO_ENVIRONMENT, state: e.state === "failed" ? "failed" : "cached", readyFrom: e.state === "failed" ? null : "setup", setupMs: e.setupMs ?? null, ...(e.error ? { error: e.error } : {}) } : NO_ENVIRONMENT;
+	const e = (t.provisioning as { environment?: Record<string, any> } | null)?.environment;
+	if (!e) return NO_ENVIRONMENT;
+	if (Array.isArray(e.toolchains)) return { ...NO_ENVIRONMENT, ...e } as never;
+	return { ...NO_ENVIRONMENT, state: e.state === "failed" ? "failed" : "cached", readyFrom: e.state === "failed" ? null : "setup", setupMs: e.setupMs ?? null, ...(e.error ? { error: e.error } : {}) };
 };
-const NO_REBUILD = { error: "This deployment keeps no environment snapshots to rebuild", code: "conflict" };
 
 /** What Forge says of how a thread is getting on (`Forge.progress`), for the page's unread dot and its place in the queue. */
 type Progress = { lastTurnEndedAt: number | null; queuePosition: number | null };
@@ -209,7 +210,10 @@ export function webCodingShapes(d: { forge: Forge; authenticate: Authenticate; i
 			return json(made.status, { ...started, ...(await thread(started.threadId)) });
 		}
 		if ((m = /^\/api\/coding\/threads\/([^/]+)$/.exec(path)) && req.method === "GET") return d.inner(new Request(req.url, req)).then(async (r) => (r && r.status === 200 ? json(200, await thread(m![1]!)) : r));
-		if ((m = /^\/api\/coding\/threads\/([^/]+)\/environment\/rebuild$/.exec(path)) && req.method === "POST") return json(409, NO_REBUILD);
+		if ((m = /^\/api\/coding\/threads\/([^/]+)\/environment\/rebuild$/.exec(path)) && req.method === "POST") {
+			await forge.rebuildEnvironment(actor, m[1]!);
+			return json(200, environmentOf(await forge.status(actor, m[1]!)));
+		}
 		if ((m = /^\/api\/coding\/threads\/([^/]+)\/([a-z-]+)$/.exec(path))) {
 			const id = m[1]!;
 			switch (`${req.method} ${m[2]}`) {

@@ -1,4 +1,6 @@
 // A real TurnPort for the vendor CLIs (claude-code, codex, mistral-vibe): `@pim/coding`'s HarnessRunner and command builders/parsers, run through the sandbox's Workspace.
+import { environmentBrief } from "@pim/coding/repo-environment";
+import type { CodingEnvironment } from "@pim/coding/environment-cache";
 import { randomUUID } from "node:crypto";
 import { type CliHarness } from "@pim/coding/harness/types";
 import { authEnv } from "@pim/coding/harness/auth";
@@ -94,7 +96,7 @@ export class CliTurnPort implements TurnPort {
 			if (prepared.status === "busy") return { outcome: "busy", detail: `Another of your coding threads is running ${cli.name}; this one starts when it ends` };
 			if (prepared.status === "login_required") return { outcome: "login_required", detail: `Connect ${cli.name} with ${cli.apiKeyEnv ? "your API key" : "your subscription"}, then continue the thread` };
 			const before = { costUsd: sess ? Number(sess.cost_usd) : 0, usage: sess?.usage ?? null };
-			const r = await runner.run({ prompt: turn.prompt, sessionId, resume: turn.resume, maxBudgetUsd: cli.reportsCost ? turn.maxBudgetUsd : null, model: null, instructions: this.d.instructions ?? FORGE_INSTRUCTIONS, sessionBefore: before }, null).catch((error): RunResult => ({ status: "unanswered", reason: "harness_error", detail: String(error instanceof Error ? error.message : error).slice(0, 500), sessionId: null, sessionCostUsd: null, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, sessionUsage: null, model: null, lines: 0 }));
+			const r = await runner.run({ prompt: turn.prompt, sessionId, resume: turn.resume, maxBudgetUsd: cli.reportsCost ? turn.maxBudgetUsd : null, model: null, instructions: [this.d.instructions ?? FORGE_INSTRUCTIONS, (() => { const e = (thread.provisioning as { environment?: CodingEnvironment } | null)?.environment; return e && Array.isArray(e.toolchains) ? environmentBrief(e) : null; })()].filter(Boolean).join("\n\n"), sessionBefore: before }, null).catch((error): RunResult => ({ status: "unanswered", reason: "harness_error", detail: String(error instanceof Error ? error.message : error).slice(0, 500), sessionId: null, sessionCostUsd: null, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, sessionUsage: null, model: null, lines: 0 }));
 			return this.map(r, sess && sess.session_id === r.sessionId ? before : { costUsd: 0, usage: null });
 		} finally {
 			turn.signal.removeEventListener("abort", onAbort);

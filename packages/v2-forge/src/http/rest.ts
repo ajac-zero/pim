@@ -65,6 +65,7 @@ export function codingRest(d: RestDeps): Handler {
 				if (get) return json(200, await forge.repoSettings(actor, repo));
 				if (req.method === "PUT") return json(200, await forge.repoSettings(actor, repo, { setupScript: (await readJson(req, 80_000)).setupScript }));
 			}
+			if ((m = match("/api/coding/threads/:id/environment/rebuild", path)) && req.method === "POST") return json(202, await forge.rebuildEnvironment(actor, m.id));
 			if ((m = match("/api/coding/threads/:id", path)) && get) return json(200, await forge.status(actor, m.id));
 			if ((m = match("/api/coding/threads/:id/:op", path))) {
 				const id = m.id;

@@ -1,4 +1,6 @@
 // The Forge facade: one authorized surface for REST (`/api/coding/**`) and agent tools (`coding_*`). Both call these methods with an Actor, so a route and a tool can't disagree about who may do what.
+import { randomUUID } from "node:crypto";
+import { NO_ENVIRONMENT } from "@pim/coding/environment-cache";
 import { type OrbClient } from "@pim/coding/orb/types";
 import { pageTranscript, transcriptOutput } from "@pim/coding/transcript";
 import type { TranscriptMessage } from "@pim/shared/transcript";
@@ -172,6 +174,24 @@ export class Forge {
 			if (budgetUsd !== undefined) await q.query("update pim_forge.forge_threads set budget_usd = $2 where thread_id = $1", [t.threadId, budgetUsd]);
 			if (t.state === "failed" || t.state === "waiting_input") await this.c.store.setState(q, t.threadId, "idle");
 			return { queued: await this.c.store.enqueueInbox(q, t.threadId, operationId, "continue", { prompt: "Continue." }) };
+		});
+	}
+
+	/**
+	 * Readies the thread's environment again in its own sandbox, between turns: the repository's setup runs once more (the page's Retry, `coding_steer` with `retry_environment`). A thread on Amp has no sandbox of
+	 * Pim's, so no environment.
+	 */
+	async rebuildEnvironment(actor: Actor, ref: string): Promise<{ queued: boolean }> {
+		const t = await this.own(actor, ref);
+		await this.allow(actor, "coding:steer", t);
+		if (t.state === "archived") throw new ForgeError("archived", "This thread is archived");
+		if (capabilitiesOf(t.harness).family === "remote-orb") throw new ForgeError("conflict", "This thread runs on Amp, which keeps no environment of Pim's to rebuild");
+		if (t.state === "running") throw new ForgeError("conflict", "This coding thread's turn is under way: rebuild its environment between turns");
+		return this.c.store.locked(t.threadId, async (q, cur) => {
+			const queued = await this.c.store.enqueueInbox(q, t.threadId, `environment-${randomUUID()}`, "environment");
+			await this.c.store.patch(q, t.threadId, { provisioning: { ...(cur.provisioning ?? {}), environment: { ...NO_ENVIRONMENT, ...(cur.provisioning?.environment ?? {}), state: "building", rebuildRequested: true, error: undefined } } });
+			if (cur.state === "failed" && cur.stateReason !== "budget") await this.c.store.setState(q, t.threadId, "idle");
+			return { queued };
 		});
 	}
 

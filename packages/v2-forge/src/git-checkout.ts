@@ -26,7 +26,7 @@ export async function refreshGitCredentials(d: CheckoutDeps, thread: ThreadRow, 
 
 /** Writes the credential helper and a push-scoped grant, clones the repository through the broker at the thread's ref, and checks out its own branch. Idempotent: an existing checkout is left alone. */
 /** `restore` is the thread's last autosave bundle (a sandbox given back when idle): the work the clone doesn't have is brought back from it. */
-export async function prepareCheckout(d: CheckoutDeps, thread: ThreadRow, handle: ComputeHandle, restore?: { bundle: Uint8Array; head: string } | null): Promise<void> {
+export async function prepareCheckout(d: CheckoutDeps, thread: ThreadRow, handle: ComputeHandle, restore?: { bundle: Uint8Array; head: string } | null, o: { /** The sandbox was restored from an environment snapshot, which holds the repository as it was when the snapshot was made: it is brought to the thread's ref and branch. */ restored?: boolean } = {}): Promise<void> {
 	const url = await refreshGitCredentials(d, thread, handle);
 	const ws = await d.compute.workspace!(handle);
 	const run = async (cmd: string[]) => {
@@ -34,12 +34,22 @@ export async function prepareCheckout(d: CheckoutDeps, thread: ThreadRow, handle
 		if (r.code !== 0) throw new ForgeError("conflict", `${cmd.slice(0, 2).join(" ")} failed: ${(r.stderr || r.stdout).replace(/pimgit_[\w.-]+/g, "[redacted]").slice(-300)}`);
 		return r;
 	};
-	if ((await d.compute.exec(handle, ["test", "-d", `${REPO_DIR}/.git`], { cwd: "/workspace" })).code === 0) return;
+	const present = (await d.compute.exec(handle, ["test", "-d", `${REPO_DIR}/.git`], { cwd: "/workspace" })).code === 0;
+	if (present && !o.restored) return;
 	await run(["git", "config", "--global", `credential.${url}.helper`, `!node ${WORKSPACE_GIT_AUTH_DIR}/helper.mjs`]);
 	// Without this git doesn't tell the helper which repository it is asked for, and the helper then hands out nothing.
 	await run(["git", "config", "--global", `credential.${url}.useHttpPath`, "true"]);
-	await run(["git", "clone", "--quiet", url, REPO_DIR]);
-	if (thread.ref) await run(["git", "-C", REPO_DIR, "checkout", "--quiet", thread.ref]);
+	if (present) {
+		// The snapshot's checkout is the repository as it was: bring in what is new, and start from the thread's ref.
+		await run(["git", "-C", REPO_DIR, "remote", "set-url", "origin", url]);
+		await run(["git", "-C", REPO_DIR, "fetch", "--quiet", "--tags", "origin"]);
+		const target = thread.ref ?? "origin/HEAD";
+		const remote = thread.ref ? await d.compute.exec(handle, ["git", "-C", REPO_DIR, "rev-parse", "--verify", "--quiet", `origin/${thread.ref}`], { cwd: "/workspace" }) : { code: 0 };
+		await run(["git", "-C", REPO_DIR, "checkout", "--quiet", "--force", "--detach", remote.code === 0 && thread.ref ? `origin/${thread.ref}` : target]);
+	} else {
+		await run(["git", "clone", "--quiet", url, REPO_DIR]);
+		if (thread.ref) await run(["git", "-C", REPO_DIR, "checkout", "--quiet", thread.ref]);
+	}
 	if (thread.branch) await run(["git", "-C", REPO_DIR, "checkout", "--quiet", "-B", thread.branch]);
 	if (restore) {
 		await ws.writeFile("/workspace/.pim-restore.bundle", restore.bundle, 0o600);

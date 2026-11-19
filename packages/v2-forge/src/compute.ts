@@ -5,7 +5,7 @@ import { ForgeError } from "./errors";
 export type ComputeHandle = { readonly id: string; readonly provider: string; readonly tag: string };
 
 /** What a new sandbox is made from: the thread's repository, and what it may reach. A provider fills in what is absent. */
-export type ComputeSpec = { image?: string; repo?: { url: string; ref: string; branch: string }; egressAllow?: string[]; limits?: { cpu: number; memMiB: number; diskMiB: number; pids: number; wallClockMin: number | null } };
+export type ComputeSpec = { /** Whose dependency cache and environment snapshots the sandbox belongs to (a host that keeps snapshots), and the snapshot it starts from. */ environment?: { userId: string; repo: string; restoreFrom?: string }; image?: string; repo?: { url: string; ref: string; branch: string }; egressAllow?: string[]; limits?: { cpu: number; memMiB: number; diskMiB: number; pids: number; wallClockMin: number | null } };
 export type ExecResult = { code: number | null; stdout: string; stderr: string; timedOut?: boolean };
 export type ExecOptions = { cwd?: string; env?: Record<string, string>; timeoutMs?: number; stdin?: string };
 
@@ -17,6 +17,17 @@ export class AmbiguousCreateError extends Error {
 	}
 }
 
+/** A prepared environment kept by key for a person and a repository. */
+export type EnvironmentSnapshot = { key: string; repo: string; createdAt: number; size?: number };
+/** What a host that keeps environment snapshots offers: the person's snapshots of a repository (newest first), keeping one of a sandbox, and deleting one. */
+export interface Environments {
+	/** How fast a snapshot restores, in MB a second; decides whether one is worth keeping. */
+	readonly restoreMBps: number;
+	list(owner: { userId: string; repo: string }): Promise<EnvironmentSnapshot[]>;
+	snapshot(handle: ComputeHandle, o: { userId: string; repo: string; key: string }): Promise<EnvironmentSnapshot>;
+	delete(userId: string, key: string): Promise<boolean>;
+}
+
 /** What Forge needs of a sandbox host (sandbox-manager, a runner fleet, a local process sandbox). `tag` is the idempotency key: `find` by it is how an ambiguous create is settled. */
 export interface ComputeProvider {
 	readonly id: string;
@@ -26,6 +37,8 @@ export interface ComputeProvider {
 	workspace?(handle: ComputeHandle): Promise<import("@pim/coding/workspace/types").Workspace>;
 	exec(handle: ComputeHandle, command: readonly string[], options?: ExecOptions): Promise<ExecResult>;
 	destroy(handle: ComputeHandle): Promise<void>;
+	/** Present only on a host that keeps environment snapshots; a sandbox is then given `spec.environment`. Without it each thread builds its environment in place. */
+	readonly environments?: Environments;
 }
 
 /** How long after an ambiguous create Forge waits before trusting that "not found" means "not created". */

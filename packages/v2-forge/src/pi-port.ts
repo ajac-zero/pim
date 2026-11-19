@@ -9,6 +9,8 @@ import { type ComputeProvider } from "./compute";
 import { PgPiStorage } from "./pi-storage";
 import type { TurnPort, TurnRequest, TurnResult } from "./ports";
 import { type ForgeStore, type ThreadRow } from "./store";
+import { environmentBrief } from "@pim/coding/repo-environment";
+import { NO_ENVIRONMENT, type CodingEnvironment } from "@pim/coding/environment-cache";
 import { rootOperation } from "./worker";
 
 export const PI_CODING_PROMPT = "You are a coding agent working in a sandboxed checkout of the repository. Make the change the task asks for, run its tests, and commit your work on the current branch. Never push; Pim pushes and merges.";
@@ -44,6 +46,12 @@ export type PiPortDeps = {
 const costOf = (usage: { models: Record<string, any> }) => Object.values(usage.models).reduce((sum: number, u: any) => sum + Number(u?.cost?.total ?? 0), 0);
 const textOf = (content: readonly any[] | undefined) => (content ?? []).flatMap((c) => (c?.type === "text" ? [c.text as string] : [])).join("\n");
 
+/** What the thread's record says of its environment, for the agent to be told (what is installed, what failed, the checks to run). */
+const environmentOf = (t: ThreadRow): CodingEnvironment => {
+	const e = (t.provisioning as { environment?: CodingEnvironment } | null)?.environment;
+	return e && Array.isArray(e.toolchains) ? e : NO_ENVIRONMENT;
+};
+
 export class PiTurnPort implements TurnPort {
 	constructor(private readonly d: PiPortDeps) {}
 
@@ -57,7 +65,7 @@ export class PiTurnPort implements TurnPort {
 		registry.install(
 			defineExtension({
 				name: "coding",
-				sections: [section("coding_agent", () => PI_CODING_PROMPT, { tag: false })],
+				sections: [section("coding_agent", () => [PI_CODING_PROMPT, environmentBrief(environmentOf(thread))].filter(Boolean).join("\n\n"), { tag: false })],
 				tools: createCodingTools({
 					workspace: () => this.d.compute.workspace!(handle),
 					journal: new PgToolJournal(store.db, turn.threadId),

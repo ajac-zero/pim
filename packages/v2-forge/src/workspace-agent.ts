@@ -1,7 +1,7 @@
 // The real ComputeProvider: a `@pim/coding` WorkspaceProvider (the sandbox-manager client, `ComposeWorkspaceProvider`, whose sandboxes run workspace-agentd) behind Forge's tag-based contract.
 // The tag is the workspace's session id, and the manager creates idempotently per session, so `find` by tag is how an ambiguous create is settled.
 import { WorkspaceCapacityError, type Workspace, type WorkspaceProvider, type WorkspaceRef, type WorkspaceSpec } from "@pim/coding/workspace/types";
-import { AmbiguousCreateError, type ComputeHandle, type ComputeProvider, type ComputeSpec, type ExecOptions, type ExecResult } from "./compute";
+import { AmbiguousCreateError, type ComputeHandle, type ComputeProvider, type ComputeSpec, type Environments, type ExecOptions, type ExecResult } from "./compute";
 import { ForgeError } from "./errors";
 
 const DEFAULT_LIMITS = { cpu: 2, memMiB: 4096, diskMiB: 10_240, pids: 1024, wallClockMin: null };
@@ -23,6 +23,14 @@ export class WorkspaceAgentComputeProvider implements ComputeProvider {
 		this.id = provider.id;
 	}
 
+	/** Environment snapshots, when the sandbox host keeps them (the manager's `/snapshots`). */
+	get environments(): Environments | undefined {
+		const caps = this.provider.capabilities;
+		if (!caps.environmentSnapshots) return undefined;
+		const p = this.provider;
+		return { restoreMBps: caps.restoreMBps ?? 8, list: (owner) => p.listEnvironments(owner), snapshot: (h, o) => p.snapshotEnvironment(this.ref(h), o), delete: (userId, key) => p.deleteEnvironment(userId, key) };
+	}
+
 	private ref = (h: ComputeHandle): WorkspaceRef => ({ id: h.id, providerId: h.provider, sessionId: h.tag });
 
 	async find(tag: string): Promise<ComputeHandle | null> {
@@ -38,9 +46,18 @@ export class WorkspaceAgentComputeProvider implements ComputeProvider {
 			limits: spec.limits ?? DEFAULT_LIMITS,
 			egress: { allow: [...(this.options.egressAllow ?? []), ...(spec.egressAllow ?? [])] },
 			gitAuth: { mode: spec.repo ? "broker" : "none" },
+			...(spec.environment && this.provider.capabilities.environmentSnapshots ? { environment: spec.environment } : {}),
 		};
 		try {
-			const ref = await this.provider.create(ws);
+			let ref;
+			try {
+				ref = await this.provider.create(ws);
+			} catch (error) {
+				// A snapshot that can't be restored leaves a plain sandbox, to be set up as usual; a full host or an unsettled request is not that.
+				if (!ws.environment?.restoreFrom || error instanceof WorkspaceCapacityError || (error instanceof Error && /fetch failed|timed out|timeout|ETIMEDOUT|ECONNRESET|socket hang up|502|503|504|low_disk/i.test(error.message))) throw error;
+				const { restoreFrom: _gone, ...owner } = ws.environment;
+				ref = await this.provider.create({ ...ws, environment: owner });
+			}
 			return { id: ref.id, provider: this.id, tag };
 		} catch (error) {
 			if (error instanceof WorkspaceCapacityError) throw new ForgeError("conflict", "The sandbox host is at capacity");

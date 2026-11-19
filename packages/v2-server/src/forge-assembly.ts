@@ -164,6 +164,7 @@ export function assembleForge(db: ForgeDb, objects: ObjectStore, env: Env, crypt
 		objects: objects as never,
 		...(wiring ? { attachments: ampAttachmentFetcher(wiring), ampBaseUrl: wiring.baseUrl } : {}),
 		defaultPool: env.PIM_CODING_DEFAULT_POOL ?? "default",
+		...(env.PIM_CODING_IMAGE ? { image: env.PIM_CODING_IMAGE } : {}),
 		clock,
 		...(env.PIM_FORGE_ORB_POLL_MS ? { orbPollMs: Number(env.PIM_FORGE_ORB_POLL_MS) } : {}),
 		...(env.PIM_FORGE_LEASE_MS ? { leaseMs: Number(env.PIM_FORGE_LEASE_MS) } : {}),
@@ -172,10 +173,10 @@ export function assembleForge(db: ForgeDb, objects: ObjectStore, env: Env, crypt
 		refreshCredentials: compute ? async (thread, handle) => void (await refreshGitCredentials({ compute, credentials, publicUrl: brokerUrl }, thread, handle)) : undefined,
 		autopush: env.PIM_CODING_AUTOPUSH !== "0",
 		prepareWorkspace: compute
-			? async (thread, handle) => {
+			? async (thread, handle, o) => {
 					const save = (await db.query("select head_sha, object_key from pim_forge.forge_autosaves where thread_id = $1", [thread.threadId])).rows[0];
 					const got = save ? await objects.get(save.object_key as string) : null;
-					await prepareCheckout({ compute, credentials, publicUrl: brokerUrl }, thread, handle, got && save ? { bundle: got.body, head: save.head_sha as string } : null);
+					await prepareCheckout({ compute, credentials, publicUrl: brokerUrl }, thread, handle, got && save ? { bundle: got.body, head: save.head_sha as string } : null, { restored: o?.restored === true });
 				}
 			: undefined,
 	});

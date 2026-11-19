@@ -386,6 +386,8 @@ real("the default agent host", () => {
 	it("starts a coding thread only under an admin's grant, through Forge", async () => {
 		await say("start a coding thread", toolUse(fauxToolCall("coding_start", { task: "Fix the flaky test", repo: REPO })));
 		expect((await results("coding_start"))[0]).toMatch(/no-coding-grant/);
+		// With no sandbox pool to run a thread in, and no Amp to run one in an orb, the prompt says coding is unavailable; the pool made below takes the line away.
+		expect(await transcript()).toContain("Coding threads are unavailable");
 		expect((await d.stack.admin.query("SELECT 1 FROM pim_forge.forge_threads WHERE owner_id = $1", [ownerId])).rowCount).toBe(0);
 
 		expect((await web.call("POST", "/api/admin/coding-grants", { ownerId, permissions: ["coding:start", "coding:merge"], repositories: ["github.com/acme/*"], pools: ["default"] })).status).toBe(201);
@@ -481,6 +483,12 @@ real("the default agent host", () => {
 		expect((await web.call("POST", "/api/admin/coding-grants", { ownerId: "o_nobody", permissions: ["coding:start"], repositories: ["acme/*"] })).status).toBe(404);
 		expect((await web.call("POST", "/api/admin/coding-grants", { ownerId, permissions: ["coding:start"], repositories: ["not a repo"] })).status).toBe(400);
 		expect((await web.call("POST", "/api/admin/coding-grants", { ownerId, permissions: ["admin:grants"], repositories: ["acme/*"] })).status).toBe(400);
+
+		// A pi thread asked to run on a model the person doesn't have is refused where it starts, with nothing recorded.
+		const threadsNow = (await d.stack.admin.query("SELECT 1 FROM pim_forge.forge_threads WHERE owner_id = $1", [ownerId])).rowCount;
+		await say("a model I don't have", toolUse(fauxToolCall("coding_start", { task: "Nope", repo: REPO, harness: "pi", profile: { provider: "own:nope", model: "x" } })));
+		expect((await results("coding_start")).at(-1)).toMatch(/no model provider own:nope/);
+		expect((await d.stack.admin.query("SELECT 1 FROM pim_forge.forge_threads WHERE owner_id = $1", [ownerId])).rowCount).toBe(threadsNow);
 		void forgeDb;
 	}, 120_000);
 	it("manages agents, skills, schedules and triggers", async () => {

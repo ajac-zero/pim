@@ -39,7 +39,7 @@ import { chatgptCredentialStore, chatgptProvider, type ChatGPTRunnerOptions, typ
 import type { ForgeParts } from "./forge-assembly.ts";
 import { mentionedAgents } from "./rooms.ts";
 import { describeGoal } from "./goal-tools.ts";
-import { agentsSection, ASSISTANT_INSTRUCTIONS, delegatesSection, identity, majordomoRole, MAX_TASK_DEPTH, startedBySection, type Roster } from "./agent-prompts.ts";
+import { agentsSection, ASSISTANT_INSTRUCTIONS, delegatesSection, identity, majordomoRole, MAX_TASK_DEPTH, NO_CODING_SANDBOX_LINE, startedBySection, type Roster } from "./agent-prompts.ts";
 import { createFailover, failureKind, failureMessage } from "./provider-failover.ts";
 import { DESCRIBE_WORK, runUtility } from "./compat/utility.ts";
 import { Progress } from "./progress.ts";
@@ -581,7 +581,7 @@ export function createAgentHost(options: AgentHostOptions) {
 		const models = await refreshCatalog(ownerId);
 		const metered = meter(limited(failover.wrap(models, ownerId), ownerId), (message, model) => void recordCall(ownerId, "background", null, null, `mc_${randomUUID()}`, message, model));
 		const registry = createRegistry();
-		const deps: ToolDeps = { ownerId, partitionId: partition.partitionId, runtime: db, app: options.app, forge: options.forge, relay: options.relay, fetch: options.fetch ?? fetch, now, toolTimeoutMs: options.stallMs?.tool, crypto: options.crypto, allowPrivateConnectors: env.PIM_CONNECTOR_ALLOW_PRIVATE === "1", images: imageSources(ownerId), chatOf: (conversationId) => publicChatId(ownerId, conversationId) };
+		const deps: ToolDeps = { ownerId, partitionId: partition.partitionId, runtime: db, app: options.app, forge: options.forge, relay: options.relay, fetch: options.fetch ?? fetch, now, toolTimeoutMs: options.stallMs?.tool, crypto: options.crypto, allowPrivateConnectors: env.PIM_CONNECTOR_ALLOW_PRIVATE === "1", images: imageSources(ownerId), imagesOf: imageSources, chatOf: (conversationId) => publicChatId(ownerId, conversationId) };
 		const ctx = (conversationId: number | string) => publicChatId(ownerId, conversationId).then((chat) => readContext(ownerId, chat));
 		/** The brief of a visit to someone's space, null in every other chat. */
 		const visitOf = async (conversationId: number | string): Promise<VisitBrief | null> => {
@@ -645,6 +645,14 @@ export function createAgentHost(options: AgentHostOptions) {
 				if (await visitOf(input.conversationId)) return undefined;
 				const roster = await readRoster(ownerId, await publicChatId(ownerId, input.conversationId)).catch(() => undefined);
 				return roster && roster.delegates.length > 0 ? delegatesSection(roster) : undefined;
+			}),
+			// A thread runs in a sandbox of an enabled pool, or in an Amp orb, which needs none and needs the person's Amp login; with neither, the coding tools only answer that they cannot.
+			section("coding_unavailable", async () => {
+				const forge = options.forge;
+				const pooled = forge?.compute ? (await forge.db.query("select 1 from pim_forge.forge_pools where enabled limit 1").catch(() => ({ rows: [] }))).rows.length > 0 : false;
+				if (pooled) return undefined;
+				const amp = (await forge?.vault?.status(ownerId).catch(() => []))?.some((entry) => entry.harness === "amp" && entry.connected);
+				return amp ? undefined : NO_CODING_SANDBOX_LINE;
 			}),
 		]));
 		// Only what send_to_user sends reaches the person, so a turn that ends in plain text is sent back for delivery, and after two reminders it fails (v1's messaging extension).

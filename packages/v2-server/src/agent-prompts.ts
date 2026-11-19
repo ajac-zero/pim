@@ -66,3 +66,6 @@ export function delegatesSection(roster: Roster): string {
 export function startedBySection(from: string): string {
 	return `${from} started this chat to hand you a task: their messages here start with "[From ${from}]". Do it with your tools, then send your answer with send_to_user. What you send while working on it goes back to ${from}, so make your last message complete and self-contained, with what you found or did and anything left open. When a schedule or an event wakes you here later, what you send goes back to ${from} as well: send something only if ${from} needs to know, and otherwise end your turn without sending anything. The person sees this chat too, and may talk with you here themselves: answer them as in any chat.`;
 }
+
+/** The line a chat's prompt carries while no sandbox provider can run a coding thread (v1's `NO_CODING_SANDBOX_LINE`), so an agent does not promise coding work first. */
+export const NO_CODING_SANDBOX_LINE = "Coding threads are unavailable: this Pim has no coding sandbox provider configured, so the coding tools will not work. Say so if asked to work on a repository.";

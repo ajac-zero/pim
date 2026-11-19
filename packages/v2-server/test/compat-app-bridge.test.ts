@@ -201,7 +201,7 @@ describe("an app's bridge and its page", () => {
 			expect((await call("ada", "POST", "/api/apps", { title: "Bad", kind: "jsx", files })).status, JSON.stringify(files)).toBe(400);
 		}
 		// Published, anyone with the link gets the same page, with no space around it.
-		const pub = (await call("ada", "POST", `/api/artifacts/${jsx}/publish`, {})).json;
+		const pub = (await call("ada", "POST", `/api/artifacts/${jsx}/publish`, { public: true })).json;
 		const open = await fetch(`${base}/p/${pub.id}`);
 		expect(open.status).toBe(200);
 		expect(open.headers.get("x-robots-tag")).toBe("noindex");

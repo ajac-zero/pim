@@ -63,7 +63,7 @@ describe("the web app's apps, gallery and admin routes", () => {
 		expect((await call("bob", "GET", `/api/shared-artifacts/ada/${id}/versions/3`)).json.content).toContain("<p>hi</p>");
 		expect((await call("bob", "PUT", `/api/artifacts/${id}`, { title: "mine" })).status).toBe(404);
 
-		const published = (await call("ada", "POST", `/api/artifacts/${id}/publish`, {})).json;
+		const published = (await call("ada", "POST", `/api/artifacts/${id}/publish`, { public: true })).json;
 		expect(published).toMatchObject({ author: "ada", version: 3, public: true, linkable: true });
 		expect((await call("bob", "GET", "/api/published-artifacts?q=tips")).json.artifacts).toMatchObject([{ id: published.id, uses: 0 }]);
 		const copy = (await call("bob", "POST", `/api/published-artifacts/${published.id}/use`)).json;

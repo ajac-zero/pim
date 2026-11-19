@@ -31,7 +31,7 @@ function rig(options: { computer?: boolean; app?: (notice: { kind: string; data:
 	const tools = canvasTools({ ownerId: OWNER, read, relay: async () => bus }) as unknown as { name: string; run: (app: never, call: never, args: never) => Promise<{ content: { text: string }[]; isError?: boolean }> }[];
 	const use = async (name: string, args: object, chat: string | null = CHAT) => {
 		const result = await tools.find((t) => t.name === name)!.run(app, { chat, p: { kind: "agent", ownerId: OWNER, agentId: "pim" } } as never, args as never);
-		return { text: result.content[0]!.text, isError: result.isError === true };
+		return { text: result.output[0]!.text, isError: result.isError === true };
 	};
 	return { use, published, calls };
 }

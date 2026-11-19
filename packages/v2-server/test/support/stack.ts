@@ -92,3 +92,13 @@ export async function createStack(): Promise<Stack> {
 		},
 	};
 }
+
+/**
+ * Whether the agent sent `message` with `send_to_user` and the call has its answer. A successful send finishes the turn, so nothing follows it: a test waits for that, not for a
+ * second model request. `transcript` is a chat's entries, or their JSON.
+ */
+export function sentAndAnswered(transcript: string | unknown[], message: string): boolean {
+	const entries = ((typeof transcript === "string" ? JSON.parse(transcript) : transcript) as { model?: any[] }[]).flatMap((e) => e.model ?? []);
+	const call = entries.flatMap((m) => (m.role === "assistant" && Array.isArray(m.content) ? m.content : [])).find((c: any) => c.type === "toolCall" && c.name === "send_to_user" && c.arguments?.message === message);
+	return call !== undefined && entries.some((m) => m.role === "toolResult" && m.toolCallId === call.id);
+}

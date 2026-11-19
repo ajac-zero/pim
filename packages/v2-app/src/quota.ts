@@ -71,14 +71,15 @@ export class Quota {
 	async history(tx: Tx, days = 30): Promise<DayUsage[]> {
 		const calls = (await tx.query(
 			`SELECT to_char(at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day, count(*)::int AS requests,
-			        coalesce(sum(input_tokens + output_tokens) FILTER (WHERE coalesce(provider, '') NOT LIKE 'own:%' AND coalesce(provider, '') <> 'chatgpt'), 0)::bigint AS tokens,
-			        coalesce(sum(input_tokens + output_tokens) FILTER (WHERE provider LIKE 'own:%' OR provider = 'chatgpt'), 0)::bigint AS plan
+			        coalesce(sum(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) FILTER (WHERE coalesce(provider, '') NOT LIKE 'own:%' AND coalesce(provider, '') <> 'chatgpt'), 0)::bigint AS tokens,
+			        coalesce(sum(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) FILTER (WHERE provider LIKE 'own:%' OR provider = 'chatgpt'), 0)::bigint AS plan
 			 FROM pim_app.model_calls WHERE at >= (now() AT TIME ZONE 'UTC')::date - $1::int + 1 GROUP BY 1`, [days])).rows;
-		const counted = (await tx.query("SELECT to_char(day, 'YYYY-MM-DD') AS day, runs, tool_calls FROM pim_app.usage_days WHERE day >= (now() AT TIME ZONE 'UTC')::date - $1::int + 1", [days])).rows;
+		const counted = (await tx.query("SELECT to_char(day, 'YYYY-MM-DD') AS day, runs, tool_calls, model_requests FROM pim_app.usage_days WHERE day >= (now() AT TIME ZONE 'UTC')::date - $1::int + 1", [days])).rows;
 		const byDay = new Map<string, DayUsage>();
 		const at = (day: string) => byDay.get(day) ?? (byDay.set(day, { day, tokens: 0, planTokens: 0, modelRequests: 0, runs: 0, toolCalls: 0 }), byDay.get(day)!);
 		for (const r of calls) Object.assign(at(r.day), { tokens: Number(r.tokens), planTokens: Number(r.plan), modelRequests: r.requests });
-		for (const r of counted) Object.assign(at(r.day), { runs: r.runs, toolCalls: r.tool_calls });
+		// A request is counted when it is sent, so one that failed before it used a token is a request too.
+		for (const r of counted) Object.assign(at(r.day), { runs: r.runs, toolCalls: r.tool_calls, modelRequests: Math.max(at(r.day).modelRequests, r.model_requests) });
 		return [...byDay.values()].sort((a, b) => (a.day < b.day ? -1 : 1));
 	}
 

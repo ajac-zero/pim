@@ -50,7 +50,8 @@ real("the default agent host", () => {
 	};
 	const toolUse = (...calls: ReturnType<typeof fauxToolCall>[]) => fauxAssistantMessage(calls, { stopReason: "toolUse" });
 	/** A response that notes the prompt it was asked with. */
-	const seen = (message: ReturnType<typeof fauxAssistantMessage>) => (ctx: { systemPrompt?: string }) => (prompts.push(ctx.systemPrompt ?? ""), message);
+	const efforts: unknown[] = [];
+	const seen = (message: ReturnType<typeof fauxAssistantMessage>) => (ctx: { systemPrompt?: string }, options?: { reasoning?: unknown }) => (prompts.push(ctx.systemPrompt ?? ""), efforts.push(options?.reasoning), message);
 
 	const say = async (words: string, ...script: unknown[]) => {
 		// Every turn ends the way an agent must: by sending its answer.
@@ -132,6 +133,8 @@ real("the default agent host", () => {
 		// The next turn's prompt carries what the agent knows: who it is, its goals, its memory.
 		await say("what do you know?", seen(toolUse(fauxToolCall("send_to_user", { message: "I know." }))) as never);
 		expect(prompts).toHaveLength(1);
+		// Every chat runs at a low reasoning effort, as in v1.
+		expect(efforts).toEqual(["low"]);
 		const shown = await transcript();
 		expect(shown).toContain("<agent>");
 		// Every agent is told that only send_to_user reaches the person; without it models answer in plain text the chat never shows.
@@ -144,6 +147,11 @@ real("the default agent host", () => {
 		expect(calls.length).toBeGreaterThanOrEqual(5);
 		expect(calls[0]).toMatchObject({ provider: "faux", model: "m" });
 		expect(Number(calls[0].input_tokens)).toBeGreaterThan(0);
+		// A chat's calls are attributed to the chat, which is what its cost and activity read.
+		expect(new Set((await rows("SELECT public_chat_id, run_kind FROM pim_app.model_calls WHERE run_kind = 'chat'")).map((r) => r.public_chat_id))).toEqual(new Set([chatId]));
+		const priced = (await web.call("GET", `/api/sessions/${chatId}/cost`)).json;
+		expect(priced.models).toEqual([expect.objectContaining({ provider: "faux", model: "m" })]);
+		expect((await web.call("GET", `/api/sessions/${chatId}/activity`)).json.steps.length).toBeGreaterThanOrEqual(5);
 	}, 120_000);
 
 	it("answers note_edit and note_show with the note's card, and shows a note without changing it", async () => {

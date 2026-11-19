@@ -25,6 +25,18 @@ describe("the agent host's model catalog", () => {
 		expect(models.getModel("pv_a", "m")?.baseUrl).toBe("http://172.18.0.1:9/v1");
 	});
 
+	it("prices a custom endpoint's models by what the person set, else by the price table, and gives an unknown model room to think", async () => {
+		const provider = compatibleProvider("own", "Mine", "http://127.0.0.1:1/v1", [{ id: "local-llm", contextWindow: 64_000 }, { id: "anthropic/claude-sonnet-5-5" }, { id: "paid", cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 } }, { id: "huge", contextWindow: 1_000_000, maxTokens: 4_000 }], () => "k");
+		const model = (id: string) => (provider as any).getModels().find((m: any) => m.id === id);
+		// An unknown model is free to the ledger, and its longest answer is a quarter of its window (v1), not 8192.
+		expect(model("local-llm")).toMatchObject({ cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 64_000, maxTokens: 16_000 });
+		expect(model("huge")).toMatchObject({ maxTokens: 4_000 });
+		// One the price table knows, under its gateway prefix, is priced; the person's own price beats the table.
+		expect(model("anthropic/claude-sonnet-5-5").cost).toEqual({ input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 });
+		expect(model("paid").cost).toEqual({ input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 });
+		expect(compatibleProvider("own", "Mine", "http://x/v1", [{ id: "unlisted" }], () => "k").getModels()[0]).toMatchObject({ contextWindow: 128_000, maxTokens: 32_000 });
+	});
+
 	it("sends a failed tool's result to a gateway's non-Claude model as text, and to Claude as an error", async () => {
 		const bodies: any[] = [];
 		const real = globalThis.fetch;

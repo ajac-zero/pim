@@ -14,7 +14,7 @@
  * an owner changes is seen by the partitions opened after the change (an idle partition is released after a short while, by default 30 seconds).
  */
 import { randomUUID } from "node:crypto";
-import { createModels, type Models, type MutableModels, type Provider } from "@earendil-works/pi-ai";
+import { createAssistantMessageEventStream, createModels, type Models, type MutableModels, type Provider } from "@earendil-works/pi-ai";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { anthropicMessagesApi } from "@earendil-works/pi-ai/api/anthropic-messages.lazy";
 import { createProvider } from "@earendil-works/pi-ai/models";
@@ -23,6 +23,7 @@ import { googleProvider } from "@earendil-works/pi-ai/providers/google";
 import { createRegistry, defineExtension, GenerationTask, hook, section, type HarnessOptions } from "@earendil-works/pi-durable";
 import { deliveryOwed, DELIVERY_REMINDER, enforceDelivery, LENGTH_REMINDER, ROOM_POST } from "@pim/shared/transcript";
 import type { App } from "@pim/v2-app/app";
+import { deploymentLimits, QUOTA_MESSAGE } from "@pim/v2-app/quota";
 import type { RelayBus } from "@pim/v2-app/relay";
 import { openString, type KeyringCrypto } from "@pim/v2-app/crypto";
 import type { Db as RuntimeDb } from "@pim/v2-runtime/db";
@@ -36,7 +37,10 @@ import { currentOpenaiProvider } from "./openai-catalog.ts";
 import { chatgptCredentialStore, chatgptProvider, type ChatGPTRunnerOptions } from "./chatgpt-auth.ts";
 import type { ForgeParts } from "./forge-assembly.ts";
 import { mentionedAgents } from "./rooms.ts";
-import { createFailover } from "./provider-failover.ts";
+import { agentsSection, ASSISTANT_INSTRUCTIONS, delegatesSection, identity, majordomoRole, MAX_TASK_DEPTH, startedBySection, type Roster } from "./agent-prompts.ts";
+import { createFailover, failureMessage } from "./provider-failover.ts";
+import { priceOf } from "./model-prices.ts";
+import { fallbackMaxTokens } from "@pim/v2-app/web-providers";
 
 type Env = Record<string, string | undefined>;
 type ModelRef = { provider: string; id: string };
@@ -105,28 +109,47 @@ const asModelRef = (v: unknown): ModelRef | null => {
 };
 
 /** A pi-ai provider for an OpenAI-compatible endpoint: a gateway, a local server, or an owner's own. A server without a key is sent a placeholder. */
-export function compatibleProvider(id: string, name: string, baseUrl: string, models: { id: string; name?: string; contextWindow?: number; maxTokens?: number; reasoning?: boolean; images?: boolean }[], key: () => string | undefined, api: "openai-completions" | "anthropic-messages" = "openai-completions"): Provider {
+export function compatibleProvider(id: string, name: string, baseUrl: string, models: ConfiguredModel[], key: () => string | undefined, api: "openai-completions" | "anthropic-messages" = "openai-completions"): Provider {
 	if (api === "anthropic-messages") return messagesProvider(id, name, baseUrl, models, key);
 	return createProvider({
 		id,
 		name,
 		baseUrl,
 		auth: { apiKey: { name: `${name} key`, resolve: async () => ({ auth: { apiKey: key() ?? "none" } }) } },
-		models: models.map((m) => ({
-			id: m.id,
-			name: m.name ?? m.id,
-			api: "openai-completions",
-			provider: id,
-			baseUrl,
-			input: m.images ? ["text", "image"] : ["text"],
-			reasoning: m.reasoning ?? false,
-			contextWindow: m.contextWindow ?? 128_000,
-			maxTokens: m.maxTokens ?? 8_192,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			compat: { supportsDeveloperRole: false },
-		})),
+		models: models.map((m) => {
+			const shape = described(m, 128_000);
+			return { id: m.id, name: m.name ?? m.id, api: "openai-completions", provider: id, baseUrl, ...shape, compat: { supportsDeveloperRole: false } };
+		}),
 		api: { "openai-completions": openAICompletionsApi() },
 	} as never) as Provider;
+}
+
+/** A model of an endpoint as its provider row lists it: what a server said of it, and what the person set (`overrides`, with the prices per million tokens in `cost`). */
+type ConfiguredModel = { id: string; name?: string; contextWindow?: number; maxTokens?: number; reasoning?: boolean; images?: boolean; cost?: Partial<Price> };
+type Price = { input: number; output: number; cacheRead: number; cacheWrite: number };
+
+let knownById: Map<string, any> | undefined;
+/** pi-ai's catalog by model id, from the first provider that has each: what a custom endpoint's model is when it serves one the catalog knows. */
+const knownModel = (id: string) => (knownById ??= new Map([anthropicProvider(), currentOpenaiProvider(), googleProvider()].flatMap((p) => (p as unknown as Provider).getModels().map((m: any) => [m.id, m] as const)).reverse())).get(id);
+
+/**
+ * The limits and prices of a custom endpoint's model, as v1 settled them: what the person set, then what the server listed, then what pi-ai's catalog knows of that id, then a default;
+ * and the price the person set, else the price table's (`./model-prices.ts`), else the catalog's, else nothing, so the calls it serves are in the ledger at what they cost. An unknown model's
+ * longest answer is a quarter of its context window (`fallbackMaxTokens`), not 8192, which a reasoning model could spend all thinking.
+ */
+function described(m: ConfiguredModel, defaultWindow: number) {
+	const known = knownModel(m.id);
+	const contextWindow = m.contextWindow ?? known?.contextWindow ?? defaultWindow;
+	const maxTokens = m.maxTokens ?? known?.maxTokens ?? fallbackMaxTokens(contextWindow);
+	const priced = { ...(priceOf(m.id) ?? known?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }), ...m.cost };
+	return {
+		input: (m.images ?? known?.input?.includes("image")) ? ["text", "image"] : ["text"],
+		reasoning: m.reasoning ?? known?.reasoning ?? false,
+		contextWindow,
+		// An answer is never the whole context: a limit that large leaves no room for the input, so half is kept.
+		maxTokens: maxTokens < contextWindow ? maxTokens : Math.floor(contextWindow / 2),
+		cost: { input: priced.input, output: priced.output, cacheRead: priced.cacheRead, cacheWrite: priced.cacheWrite },
+	};
 }
 
 /**
@@ -134,7 +157,7 @@ export function compatibleProvider(id: string, name: string, baseUrl: string, mo
  * may want the key as a bearer token rather than `x-api-key`, so it gets both. A model pi-ai knows by its id takes that model's request shape (adaptive
  * thinking and the like), without the flags that turn on Anthropic's pre-release features, which a gateway cannot be known to take.
  */
-function messagesProvider(id: string, name: string, baseUrl: string, models: { id: string; name?: string; contextWindow?: number; maxTokens?: number; reasoning?: boolean; images?: boolean }[], key: () => string | undefined): Provider {
+function messagesProvider(id: string, name: string, baseUrl: string, models: ConfiguredModel[], key: () => string | undefined): Provider {
 	const known = new Map((anthropicProvider() as unknown as Provider).getModels().map((m: any) => [m.id, m]));
 	const configured = createProvider({
 		id,
@@ -150,11 +173,7 @@ function messagesProvider(id: string, name: string, baseUrl: string, models: { i
 				api: "anthropic-messages",
 				provider: id,
 				baseUrl,
-				input: m.images ? ["text", "image"] : ["text"],
-				reasoning: m.reasoning ?? false,
-				contextWindow: m.contextWindow ?? 200_000,
-				maxTokens: m.maxTokens ?? 8_192,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				...described(m, 200_000),
 				...(catalogued ? { compat, ...(catalogued.thinkingLevelMap ? { thinkingLevelMap: catalogued.thinkingLevelMap } : {}) } : {}),
 			};
 		}),
@@ -204,22 +223,17 @@ function withoutThinkingMidToolRound(context: { messages: any[] }, options: any)
 	return rest;
 }
 
-/** Counts every model call of an owner into the ledger. */
+/**
+ * Counts the model calls of an owner that are not a chat's own requests into the ledger: a compaction's summary. A chat's requests are recorded when each settles, with the chat and
+ * the agent it ran as (`ledgerHook`), which the stream does not know.
+ */
 function meter(models: Models, record: (message: any, model: any) => void): Models {
-	const STREAMS = new Set(["stream", "streamSimple"]);
 	const CALLS = new Set(["complete", "completeSimple"]);
 	return new Proxy(models, {
 		get(target, property, receiver) {
 			const value = Reflect.get(target, property, receiver) as unknown;
 			if (typeof value !== "function") return value;
 			const call = (value as (...args: unknown[]) => unknown).bind(target);
-			if (typeof property === "string" && STREAMS.has(property)) {
-				return (model: unknown, ...rest: unknown[]) => {
-					const stream = call(model, ...rest) as { result(): Promise<unknown> };
-					void stream.result().then((message) => record(message, model), () => {});
-					return stream;
-				};
-			}
 			if (typeof property === "string" && CALLS.has(property)) {
 				return async (model: unknown, ...rest: unknown[]) => {
 					const message = await call(model, ...rest);
@@ -268,6 +282,8 @@ export function createAgentHost(options: AgentHostOptions) {
 			},
 		},
 	});
+	/** The conversations that are chats of tasks, as far as this process has seen them run: a model that fails for good ends such a run instead of holding it. */
+	const taskConversations = new Set<string>();
 	const chatgptOptions: ChatGPTRunnerOptions = options.chatgpt ?? {};
 	/** The reads of one request's sections share one query; the next request reads again, so what an agent just saved is in its next prompt. */
 	const contexts = new Map<string, Promise<RunnerContext>>();
@@ -279,6 +295,18 @@ export function createAgentHost(options: AgentHostOptions) {
 			held = db.read<{ c: RunnerContext }>(ownerId, "SELECT pim_app.runner_context($1, $2) AS c", [ownerId, chat]).then((r) => r.rows[0]!.c);
 			contexts.set(key, held);
 			void held.then(() => undefined, () => undefined).then(() => contexts.delete(key));
+		}
+		return held;
+	};
+	/** The agents of the person and whom this chat's agent may hand a task to (migration 0690), read once for the sections of one request. */
+	const rosters = new Map<string, Promise<Roster>>();
+	const readRoster = (ownerId: string, chat: string | null): Promise<Roster> => {
+		const key = `${ownerId}\u0000${chat ?? ""}`;
+		let held = rosters.get(key);
+		if (!held) {
+			held = db.read<{ r: Roster }>(ownerId, "SELECT pim_app.runner_agents($1, $2, $3) AS r", [ownerId, chat, MAX_TASK_DEPTH]).then((r) => r.rows[0]!.r);
+			rosters.set(key, held);
+			void held.then(() => undefined, () => undefined).then(() => rosters.delete(key));
 		}
 		return held;
 	};
@@ -368,6 +396,8 @@ export function createAgentHost(options: AgentHostOptions) {
 		hook(GenerationTask, {
 			async beforeRequest({ messages }: { messages: any[] }, api: any, context: any) {
 				const chat = await publicChatId(ownerId, api.conversationId);
+				// A task another agent handed this one is not held for a person's Try again when its model fails for good: it ends, and the agent that asked is told it did not finish.
+				if (chat && (await readRoster(ownerId, chat).catch(() => undefined))?.startedBy) taskConversations.add(`${ownerId}\u0000${api.conversationId}`);
 				const room = chat ? (await db.read<{ r: { role: "host" | "seat"; host: { id: string; name: string } | null; members: { id: string; name: string }[] } | null }>(ownerId, "SELECT pim_app.runner_room($1, $2) AS r", [ownerId, chat]).catch(() => ({ rows: [] as never[] }))).rows[0]?.r : undefined;
 				const self = room ? (room.role === "host" ? (room.host?.id ?? "host") : (await readContext(ownerId, chat).catch(() => undefined))?.agent?.id) : undefined;
 				const everyone = room ? [room.host ?? { id: "host", name: "Pim" }, ...room.members] : [];
@@ -392,16 +422,62 @@ export function createAgentHost(options: AgentHostOptions) {
 			},
 		} as never);
 
+	/** One model call into the owner's ledger, with what it was for: its tokens by tier, its price, the chat and the agent it ran as. A call that used nothing is not a row. */
+	const recordCall = async (ownerId: string, kind: "chat" | "background", chat: string | null, agent: string | null, id: string, message: any, model: any): Promise<void> => {
+		const usage = message?.usage;
+		if (!usage || !(usage.input > 0 || usage.output > 0 || usage.cacheRead > 0 || usage.cacheWrite > 0)) return;
+		const whole = (n: unknown) => Math.round(typeof n === "number" && Number.isFinite(n) ? n : 0);
+		await db
+			.read(ownerId, "SELECT pim_app.record_model_call($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)", [ownerId, id, kind, chat, message?.provider ?? model?.provider ?? null, message?.model ?? model?.id ?? null, whole(usage.input), whole(usage.output), whole((usage.cost?.total ?? 0) * 1_000_000), whole(usage.cacheRead), whole(usage.cacheWrite), agent])
+			.catch(() => {});
+	};
+
+	/** Each model request of a chat is recorded when it settles, with the chat and the agent it ran as; the id is the request's own, so a replayed hook records it once. */
+	const ledgerHook = (ownerId: string) =>
+		hook(GenerationTask, {
+			async afterResponse(message: any, api: any) {
+				const chat = await publicChatId(ownerId, api.conversationId).catch(() => null);
+				const agent = chat ? ((await readContext(ownerId, chat).catch(() => undefined))?.agent?.id ?? null) : null;
+				await recordCall(ownerId, "chat", chat, agent, `mc_c${api.conversationId}_t${String(api.taskId)}_${message?.timestamp ?? ""}`, message, undefined);
+			},
+		} as never);
+
+	/**
+	 * Refuses a model request once a daily limit of the space is used up, as v1 did (`UsageMeter.meter`): requests are counted when sent, so that limit is exact, and tokens are known
+	 * only when a request ends, so requests already under way can take the day past its token limit and the next is refused. The refusal is the request's own error, with the space's
+	 * usual message, so the run is held for a person's Try again after midnight UTC.
+	 */
+	const limits = deploymentLimits(env);
+	function limited(models: Models, ownerId: string): Models {
+		return new Proxy(models, {
+			get(target, property, receiver) {
+				const value = Reflect.get(target, property, receiver) as unknown;
+				if (typeof value !== "function") return value;
+				const call = (value as (...args: unknown[]) => unknown).bind(target);
+				if (property !== "stream" && property !== "streamSimple") return call;
+				return (model: any, ...rest: any[]) => {
+					const out = createAssistantMessageEventStream();
+					void (async () => {
+						const refusal = await db.read<{ r: string | null }>(ownerId, "SELECT pim_app.runner_reserve_model_request($1, $2, $3, $4) AS r", [ownerId, String(model.provider), limits.dailyTokens, limits.dailyModelRequests]).then((r) => r.rows[0]?.r ?? null, () => null);
+						if (refusal !== null) {
+							console.warn(JSON.stringify({ event: "pim.limit", limit: "model", provider: model.provider, reason: refusal }));
+							out.push({ type: "error", reason: "error", error: failureMessage(model, `${QUOTA_MESSAGE} ${refusal}`, "error", now()) } as never);
+							return;
+						}
+						const events = call(model, ...rest) as AsyncIterable<unknown> & { result(): Promise<unknown> };
+						for await (const event of events) out.push(event as never);
+						out.end((await events.result()) as never);
+					})().catch((error) => out.push({ type: "error", reason: "error", error: failureMessage(model, error instanceof Error ? error.message : String(error), "error", now()) } as never));
+					return out;
+				};
+			},
+		});
+	}
+
 	const harnessOptions = async (partition: PartitionContext): Promise<HarnessOptions> => {
 		const ownerId = partition.ownerId;
 		const models = await refreshCatalog(ownerId);
-		const metered = meter(failover.wrap(models, ownerId), (message, model) => {
-			const usage = message?.usage;
-			if (!usage || !(usage.input > 0 || usage.output > 0)) return;
-			void db
-				.read(ownerId, "SELECT pim_app.record_model_call($1, $2, 'chat', NULL, $3, $4, $5, $6, $7)", [ownerId, `mc_${randomUUID()}`, message?.provider ?? model?.provider ?? null, message?.model ?? model?.id ?? null, Math.round(usage.input ?? 0), Math.round(usage.output ?? 0), Math.round((usage.cost?.total ?? 0) * 1_000_000)])
-				.catch(() => {});
-		});
+		const metered = meter(limited(failover.wrap(models, ownerId), ownerId), (message, model) => void recordCall(ownerId, "background", null, null, `mc_${randomUUID()}`, message, model));
 		const registry = createRegistry();
 		const deps: ToolDeps = { ownerId, partitionId: partition.partitionId, runtime: db, app: options.app, forge: options.forge, relay: options.relay, fetch: options.fetch ?? fetch, now, toolTimeoutMs: options.stallMs?.tool, crypto: options.crypto, allowPrivateConnectors: env.PIM_CONNECTOR_ALLOW_PRIVATE === "1", images: imageSources(ownerId), chatOf: (conversationId) => publicChatId(ownerId, conversationId) };
 		const ctx = (conversationId: number | string) => publicChatId(ownerId, conversationId).then((chat) => readContext(ownerId, chat));
@@ -409,8 +485,20 @@ export function createAgentHost(options: AgentHostOptions) {
 			section("user_time_zone", () => timeZoneOf(db, ownerId)),
 			section("agent", async (input) => {
 				const c = await ctx(input.conversationId);
+				const chat = await publicChatId(ownerId, input.conversationId);
+				const roster = await readRoster(ownerId, chat).catch(() => undefined);
+				const me = roster?.agents.find((a) => a.id === c.agent?.id);
 				const who = c.agent ? `You are ${c.agent.name}, an agent of ${c.username ?? "this person"} in Pim.` : `You are Pim, ${c.username ? `${c.username}'s` : "a person's"} assistant.`;
-				return [AGENT_PREAMBLE, who, c.agent?.instructions].filter(Boolean).join("\n\n");
+				const own = c.agent?.instructions ? `Your instructions, which come before your general habits wherever the two differ:\n${c.agent.instructions}` : undefined;
+				return [AGENT_PREAMBLE, who, me ? identity(me) : undefined, c.agent?.majordomo ? majordomoRole(c.agent.name) : undefined, ASSISTANT_INSTRUCTIONS, own].filter(Boolean).join("\n\n");
+			}),
+			section("your_agents", async (input) => {
+				const roster = await readRoster(ownerId, await publicChatId(ownerId, input.conversationId)).catch(() => undefined);
+				return roster && roster.agents.length > 0 ? agentsSection(roster.self, roster) : undefined;
+			}),
+			section("started_by", async (input) => {
+				const roster = await readRoster(ownerId, await publicChatId(ownerId, input.conversationId)).catch(() => undefined);
+				return roster?.startedBy ? startedBySection(roster.startedBy) : undefined;
 			}),
 			section("your_skills", async (input) => {
 				const c = await ctx(input.conversationId);
@@ -433,20 +521,20 @@ export function createAgentHost(options: AgentHostOptions) {
 				if (!room) return undefined;
 				const names = (room.role === "host" ? room.members : [room.host ?? { id: "", name: "Pim" }, ...room.members]).map((m) => m.name);
 				const turns = room.mode === "open" ? "Everything the person says wakes every agent in the room; each decides whether it has something to add." : "The host answers what the person says to no one in particular; an agent answers when it is mentioned as @Name.";
-				return `This is a group chat${room.role === "seat" ? " and you are one of its agents, not its host" : " and you are its host"}. ${room.role === "host" ? "Also in it" : "Others in it"}: ${names.join(", ") || "no one else yet"}. ${turns} What another agent says reaches you as a message that starts "[From Name]"; what you send with send_to_user is shown in the chat as yours, under your name. Mention an agent by @Name to bring its attention; do not repeat what others have said.`;
+				return `This is a group chat${room.role === "seat" ? " and you are one of its agents, not its host" : " and you are its host"}. ${room.role === "host" ? "Also in it" : "Others in it"}: ${names.join(", ") || "no one else yet"}. ${turns} What another agent says reaches you as a message that starts "[From Name]"; what you send with send_to_user is shown in the chat as yours, under your name. Mention an agent by @Name to bring its attention; do not repeat what others have said. ${room.role === "host" ? "When an agent you or the person brought in has done what it was here for, take it out of the chat with `remove_from_chat`: it hears nothing more, and can be brought in again later." : "You joined knowing nothing of what was said here before; when what you are asked refers to it, read it with `chat_history`."}`;
 			}),
 			section("delegates", async (input) => {
-				const c = await ctx(input.conversationId);
-				return c.contacts.length === 0 ? undefined : `Agents you can hand work to with delegate:\n${c.contacts.map((a) => `- ${a.id}: ${a.name}${a.about ? ` — ${a.about}` : ""}`).join("\n")}`;
+				const roster = await readRoster(ownerId, await publicChatId(ownerId, input.conversationId)).catch(() => undefined);
+				return roster && roster.delegates.length > 0 ? delegatesSection(roster) : undefined;
 			}),
 		]));
 		// Only what send_to_user sends reaches the person, so a turn that ends in plain text is sent back for delivery, and after two reminders it fails (v1's messaging extension).
-		registry.install(defineExtension({ name: "delivery", hooks: [deliveryHook(ownerId)] }));
+		registry.install(defineExtension({ name: "delivery", hooks: [deliveryHook(ownerId), ledgerHook(ownerId)] }));
 		// The admin's majordomo may ask the host daemon for operations, each after a person approves it (`./hostops/`).
 		const hostops = await hostopsExtension({ ownerId, partitionId: partition.partitionId, app: options.app, chatOf: deps.chatOf });
 		if (hostops) registry.install(hostops);
 		// A request that failed for good, with nothing left to retry or fail over to, holds the run where it stopped: the person's Try again on the error card asks the model again (`POST /api/sessions/:id/retry`), so they need not say it twice.
-		return { models: metered, registry, settings: { retry: { suspend: () => true } } } as HarnessOptions;
+		return { models: metered, registry, settings: { retry: { suspend: (_message: unknown, conversationId: unknown) => !taskConversations.has(`${ownerId}\u0000${conversationId}`) } } } as HarnessOptions;
 	};
 
 	/** The model the owner chose in Settings for agents with none of their own (migration 0611). */
@@ -455,13 +543,14 @@ export function createAgentHost(options: AgentHostOptions) {
 	const homeRoot: NonNullable<RunnerOptions["homeRoot"]> = async (ownerId) => {
 		const c = await readContext(ownerId, null).catch(() => undefined);
 		const { explicit: _explicit, ...model } = await choose(ownerId, [await chosenModel(ownerId), ...(c?.fallbacks ?? []).map(asModelRef)]);
-		return { agent: { model } };
+		return { agent: { model, thinkingLevel: "low" } };
 	};
 	const chatAgent: NonNullable<RunnerOptions["chatAgent"]> = async (ownerId, chat) => {
 		const c = await readContext(ownerId, chat ?? null).catch(() => undefined);
 		const own = c?.agent ? [asModelRef(c.chat_model), asModelRef(c.agent.config.model), ...((c.agent.config.fallbacks ?? []) as unknown[]).map(asModelRef)] : [];
 		const { explicit, ...model } = await choose(ownerId, [...(c?.agent ? [] : [asModelRef(c?.chat_model)]), ...own, await chosenModel(ownerId), ...(c?.fallbacks ?? []).map(asModelRef)]);
-		return { model, explicit };
+		// Every chat thinks at a low effort, as in v1: a reasoning model reasons a little before it answers, and the harness's own default is not to.
+		return { model, thinkingLevel: "low", explicit };
 	};
 
 	/** One model call as an owner's own models, for what is not a chat turn (an approval review): the same catalog, failover and ledger, no tools. */
@@ -489,9 +578,7 @@ export function createAgentHost(options: AgentHostOptions) {
 		if (!model) return undefined;
 		const answer = await models.completeSimple(model as never, { systemPrompt: system, messages: [{ role: "user", content: prompt, timestamp: now() }] } as never, { maxTokens } as never);
 		const usage = (answer as any)?.usage;
-		if (usage && (usage.input > 0 || usage.output > 0)) {
-			await db.read(ownerId, "SELECT pim_app.record_model_call($1, $2, 'background', NULL, $3, $4, $5, $6, $7)", [ownerId, `mc_${randomUUID()}`, model.provider, model.id, Math.round(usage.input ?? 0), Math.round(usage.output ?? 0), Math.round((usage.cost?.total ?? 0) * 1_000_000)]).catch(() => {});
-		}
+		await recordCall(ownerId, "background", null, null, `mc_${randomUUID()}`, answer, model);
 		if ((answer as any)?.stopReason === "error") throw new Error(String((answer as any).errorMessage ?? "The model failed"));
 		return ((answer as any).content as { type: string; text?: string }[]).flatMap((c) => (c.type === "text" ? [c.text ?? ""] : [])).join("").trim();
 	}

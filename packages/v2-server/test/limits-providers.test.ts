@@ -10,6 +10,7 @@ import { createGate } from "@pim/v2-app/gate";
 import { MemoryObjectStore } from "@pim/v2-app/objects";
 import { adminCompatRoutes } from "../src/compat/admin.ts";
 import { modelRoutes } from "../src/compat/model.ts";
+import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 import { createAgentHost } from "../src/agent-host.ts";
 import { gateBefore } from "../src/limits.ts";
 import { createStack, type Stack } from "./support/stack.ts";
@@ -136,5 +137,31 @@ describe("limits and shared providers", () => {
 		// Taking it away takes it from everyone's catalog.
 		expect((await call(gate, "ada", "DELETE", `/api/admin/providers/${id}`)).json).toEqual({ deleted: true });
 		expect((await call(gate, "bob", "GET", "/api/model")).json.providers).toEqual([]);
+	});
+	it("refuses a model request once the day's requests or tokens are used up, counting each request as it is sent, and never an admin's", async () => {
+		const faux = fauxProvider({ provider: "faux", models: [{ id: "m" }] });
+		const host = createAgentHost({ db: stack.runtime, env: { PIM_LIMIT_DAILY_MODEL_REQUESTS: "2", PIM_LIMIT_DAILY_TOKENS: "100" }, crypto, providers: () => [faux.provider] });
+		const request = async (who: string) => {
+			const partition = (await stack.admin.query("SELECT partition_id FROM pim_app.partitions WHERE owner_id = $1 AND home", [people[who]!.ownerId])).rows[0].partition_id;
+			const options = await host.harnessOptions({ ownerId: people[who]!.ownerId, partitionId: partition, home: true, lease: {} as never });
+			const models = options.models as any;
+			const model = (await models.getAvailable()).find((m: any) => m.provider === "faux");
+			faux.setResponses(Array.from({ length: 10 }, () => fauxAssistantMessage("hi")) as never);
+			const message = await models.streamSimple(model, { messages: [{ role: "user", content: "hi", timestamp: Date.now() }] }, {}).result();
+			return message.stopReason === "error" ? message.errorMessage : "answered";
+		};
+		// Three requests at once: two take the allowance and one is refused, whichever it is.
+		const answers = await Promise.all([request("bob"), request("bob"), request("bob")]);
+		expect(answers.filter((a) => a === "answered")).toHaveLength(2);
+		expect(answers.find((a) => a !== "answered")).toBe("Space usage quota exceeded: 2 model requests a day. It resets at midnight UTC.");
+		// Tokens are known once a request ends: the day's 100 are used, so the next request is refused. A plan's tokens are not the deployment's.
+		const cy = await app.identity.register({ username: "cy" });
+		people.cy = { ownerId: cy.ownerId, token: "" };
+		await app.usage.record(cy.ownerId, { id: "plan", runKind: "chat", provider: "chatgpt", model: "gpt", inputTokens: 5000, outputTokens: 0, costMicroUsd: 0 });
+		expect(await request("cy")).toBe("answered");
+		await app.usage.record(cy.ownerId, { id: "paid", runKind: "chat", provider: "faux", model: "m", inputTokens: 60, outputTokens: 30, cacheReadTokens: 20, costMicroUsd: 0 });
+		expect(await request("cy")).toBe("Space usage quota exceeded: 100 tokens a day. It resets at midnight UTC.");
+		// An admin has no limits.
+		expect(await Promise.all([request("ada"), request("ada"), request("ada")])).toEqual(["answered", "answered", "answered"]);
 	});
 });

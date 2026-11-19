@@ -31,7 +31,7 @@ export const DEFAULT_STREAM_STALL_MS = 120_000;
 
 const UNSHOWN = new Set(["start", "thinking_start", "thinking_delta", "thinking_end"]);
 
-const failureMessage = (model: any, text: string, stopReason: "error" | "aborted", at: number): AssistantMessage =>
+export const failureMessage = (model: any, text: string, stopReason: "error" | "aborted", at: number): AssistantMessage =>
 	({ role: "assistant", content: [], api: model.api, provider: model.provider, model: model.id, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason, errorMessage: text, timestamp: at }) as AssistantMessage;
 
 /** Where cooldowns are shared between Runners: an owner's models that are cooling, as `refKey` to the time (ms) they end, and one more recorded. */

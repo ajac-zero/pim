@@ -11,6 +11,12 @@ export const isWebProviderInput = (body: Record<string, any>) => ["builtin", "ur
 
 type ListedModel = { id: string; name?: string; contextWindow?: number; maxTokens?: number; reasoning?: boolean; images?: boolean };
 
+/**
+ * The longest answer of a model with no metadata: a quarter of its context window, at most 32768 (v1's `src/providers.ts`). Reasoning tokens count in it, and 8192 let a reasoning model
+ * spend it all thinking, with no answer or tool call left. A heuristic, not a limit any model supports; a person can set the real one as the model's `maxTokens`.
+ */
+export const fallbackMaxTokens = (contextWindow: number) => Math.min(32_768, Math.floor(contextWindow / 4));
+
 async function listed(url: string, key: string | undefined, fetcher: typeof fetch): Promise<ListedModel[]> {
 	try {
 		const response = await fetcher(`${url.replace(/\/+$/, "")}/models`, { headers: key ? { authorization: `Bearer ${key}` } : {}, signal: AbortSignal.timeout(10_000) });
@@ -49,7 +55,10 @@ export async function toServiceInput(body: Record<string, any>, existing?: Provi
 /** What the card shows of a provider: never its key. */
 export function toWebProvider(p: Provider) {
 	const c = p.config as Record<string, any>;
-	const models = ((c.models ?? []) as ListedModel[]).map((m) => ({ id: m.id, name: m.name ?? m.id, contextWindow: m.contextWindow ?? 128_000, maxTokens: m.maxTokens ?? 8_192, images: m.images === true, reasoning: m.reasoning === true }));
+	const models = ((c.models ?? []) as ListedModel[]).map((m) => {
+		const contextWindow = m.contextWindow ?? 128_000;
+		return { id: m.id, name: m.name ?? m.id, contextWindow, maxTokens: m.maxTokens ?? fallbackMaxTokens(contextWindow), maxTokensSource: c.overrides?.[m.id]?.maxTokens ? "override" : m.maxTokens ? "listing" : "estimated", images: m.images === true, reasoning: m.reasoning === true };
+	});
 	return {
 		id: p.id,
 		...(c.builtin ? { builtin: c.builtin } : {}),

@@ -458,8 +458,13 @@ const inputCommand: CommandHandler = async (resident, command, context) => {
 		try {
 			const chosen = await resident.runner.chatAgent(resident.ownerId, command.publicChatId);
 			const wanted = chosen.explicit === false ? undefined : chosen.model;
-			const current = (await conversation.agent(context)).model;
-			if (wanted != null && (wanted.provider !== current?.provider || wanted.modelId !== current?.modelId)) await conversation.configure({ model: wanted }, context);
+			const current = await conversation.agent(context);
+			const change = {
+				...(wanted != null && (wanted.provider !== current.model?.provider || wanted.modelId !== current.model?.modelId) ? { model: wanted } : {}),
+				// The reasoning effort the application chose, for a chat that was made before it chose one as for a new one.
+				...(chosen.thinkingLevel !== undefined && chosen.thinkingLevel !== current.thinkingLevel ? { thinkingLevel: chosen.thinkingLevel } : {}),
+			};
+			if (Object.keys(change).length > 0) await conversation.configure(change, context);
 		} catch (error) {
 			resident.runner.report(error);
 		}

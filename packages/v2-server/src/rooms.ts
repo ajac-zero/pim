@@ -61,6 +61,7 @@ async function hearInRoom(tx: Tx, ownerId: string, chatId: string, commandId: st
 /** Makes a deployment's Gate give a room's seats what the person says. */
 export function installRooms(app: App): void {
 	app.conversations.onUserMessage = hearInRoom;
+	app.conversations.seatsOf = async (tx, chatId) => (await tx.query("SELECT seat_chat_id FROM pim_app.room_members WHERE public_chat_id = $1 AND seat_chat_id IS NOT NULL", [chatId])).rows.map((r) => r.seat_chat_id as string);
 }
 
 /** Brings an agent into a chat's room: it gets a seat. The chat becomes a room (mentions mode) with its first member. */

@@ -120,8 +120,10 @@ export function sessionRoutes(env: Record<string, string | undefined> = process.
 			const p = await principal();
 			await app.identity.authz.enforce(p, "api:write");
 			const id = chatId(params[0]!);
-			const n = await app.db.owner(p.ownerId, async (tx) => (await tx.query("UPDATE pim_app.conversations SET deleted_at = now() WHERE public_chat_id = $1 AND deleted_at IS NULL", [id])).rowCount);
-			if (!n) throw new NotFoundError("No such chat");
+			await sessionView(app, p, id);
+			// A watch of the chat is forgotten here too, so it is not renewed; its connector stops sending when the grant runs out, and what it sends meanwhile is refused.
+			await app.db.owner(p.ownerId, (tx) => tx.query("DELETE FROM pim_app.watch_subscriptions WHERE trigger_id IN (SELECT id FROM pim_app.triggers WHERE spec->'destination'->>'type' = 'existing_chat' AND spec->'destination'->>'chatId' = $1)", [id]));
+			await app.conversations.remove(p, id);
 			return ok({ deleted: true });
 		}),
 

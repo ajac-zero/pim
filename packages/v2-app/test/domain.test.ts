@@ -88,6 +88,64 @@ describe("command admission", () => {
 	});
 });
 
+describe("withdrawing what hangs on a chat", () => {
+	const agent = (): Principal => ({ kind: "agent", ownerId: OwnerId.parse(owner()), agentId: "dev" });
+	const waitOn = async (chat: string, taskId: number) => {
+		await f.app.identity.authz.grantCoding(f.admin.principal, { ownerId: owner(), permissions: ["coding:push"], repositories: ["github.com/acme/*"] });
+		const filed = await f.app.approvals.gate(agent(), { action: "coding:push", resource: { repository: "github.com/acme/app" }, chatId: chat, args: { taskId } });
+		if (filed.outcome !== "waiting") throw new Error("expected a waiting approval");
+		return filed.approvalId;
+	};
+	const rows = (sql: string, ...params: unknown[]) => f.db.owner(owner(), async (tx) => (await tx.query(sql, params)).rows);
+
+	it("denies what a stopped chat waits on, and lets the parked call know before the run is aborted", async () => {
+		const chat = await f.app.conversations.create(u.principal, {});
+		const approval = await waitOn(chat, 7);
+		await f.app.conversations.admit(u.principal, { commandId: "stop-1", kind: "abort", chatId: chat });
+		expect(await f.app.approvals.state(owner(), approval)).toBe("denied");
+		expect((await rows("SELECT args->>'note' AS note FROM pim_app.approvals WHERE id = $1", approval))[0]!.note).toBe("Its chat was stopped.");
+		// The denial reaches the parked call under the approval's own command id, ahead of the abort.
+		expect((await f.app.conversations.claim(owner(), "r", 10)).filter((c) => c.publicChatId === chat).map((c) => [c.commandId, c.kind, c.payload.approved])).toEqual([[`approval:${approval}`, "approval_decision", false], ["stop-1", "abort", undefined]]);
+	});
+
+	it("ends with a deleted chat its run, approvals, tasks, schedules and watches that deliver to it, and keeps the ones that start new chats", async () => {
+		const chat = await f.app.conversations.create(u.principal, {});
+		await f.app.conversations.admit(u.principal, { commandId: "unread", kind: "user_message", chatId: chat, payload: { text: "hello" } });
+		const approval = await waitOn(chat, 9);
+		const task = await f.app.conversations.admit(u.principal, { commandId: "del-task", kind: "delegate", chatId: chat, payload: { title: "research" } });
+		const taskApproval = await waitOn(task.chatId!, 3);
+		const here = await f.app.schedules.create(u.principal, { kind: "cron", spec: "0 * * * *", prompt: "here", target: "same_chat", chatId: chat });
+		const elsewhere = await f.app.schedules.create(u.principal, { kind: "cron", spec: "0 * * * *", prompt: "new", target: "new_chat" });
+		const spec = (destination: unknown) => ({ version: 1, owningAgentId: "dev", originChatId: chat, label: "On event", instruction: "handle it", source: { kind: "time", schedule: "cron", expression: "0 * * * *", timeZone: "UTC" }, condition: null, destination, delivery: {}, authorizationRef: null });
+		const bound = await f.app.triggers.create(u.principal, { spec: spec({ type: "existing_chat", chatId: chat }) });
+		const free = await f.app.triggers.create(u.principal, { spec: spec({ type: "new_chat" }) });
+
+		await f.app.conversations.remove(u.principal, chat);
+
+		await expect(f.app.conversations.get(owner(), chat)).rejects.toMatchObject({ status: 404 });
+		expect(await f.app.approvals.state(owner(), approval)).toBe("denied");
+		expect(await f.app.approvals.state(owner(), taskApproval)).toBe("denied");
+		expect((await f.app.conversations.task(owner(), task.result!.taskId as string)).status).toBe("canceled");
+		expect((await rows("SELECT id FROM pim_app.schedules")).map((r) => r.id)).toEqual(expect.arrayContaining([elsewhere]));
+		expect((await rows("SELECT id FROM pim_app.schedules")).map((r) => r.id)).not.toContain(here);
+		expect((await rows("SELECT id, lifecycle FROM pim_app.triggers WHERE id = ANY($1)", [bound.id, free.id])).map((r) => [r.id === bound.id, r.lifecycle]).sort()).toEqual([[false, "draft"], [true, "deleted"]]);
+		// Messages not read yet are dropped, and the run in the chat and in its task's chat is aborted.
+		const sent = (await f.app.conversations.claim(owner(), "r2", 50)).filter((c) => [chat, task.chatId].includes(c.publicChatId));
+		expect(sent.map((c) => c.commandId)).not.toContain("unread");
+		expect(sent.filter((c) => c.kind === "abort").map((c) => c.publicChatId).sort()).toEqual([chat, task.chatId].sort());
+		expect((await f.app.conversations.pending(owner(), chat)).find((c) => c.commandId === "unread")?.state).toBe("rejected");
+	});
+
+	it("stops a canceled task's chat and tells its requester once", async () => {
+		const chat = await f.app.conversations.create(u.principal, {});
+		const task = await f.app.conversations.admit(u.principal, { commandId: "cancel-task", kind: "delegate", chatId: chat, payload: { title: "research" } });
+		const approval = await waitOn(task.chatId!, 5);
+		await f.app.conversations.updateTask(u.principal, task.result!.taskId as string, "canceled");
+		expect(await f.app.approvals.state(owner(), approval)).toBe("denied");
+		expect((await f.app.conversations.pending(owner(), task.chatId!)).map((c) => c.kind)).toContain("abort");
+	});
+});
+
 describe("memories, skills and goals", () => {
 	it("recalls by regex within scopes, zooms into blocks, forgets and moves", async () => {
 		const a = await f.app.memories.remember(u.principal, "agent-1", "Coffee", "likes oat milk\nno sugar\nstrong");

@@ -38,6 +38,8 @@ export class Conversations {
 	 * It answers whether the chat's own agent is woken by the message; when not, the message is only written into its conversation.
 	 */
 	onUserMessage: ((tx: Tx, ownerId: string, chatId: string, commandId: string, payload: Record<string, unknown>) => Promise<{ host: boolean }>) | undefined;
+	/** The other chats that work with a chat and stop with it: the seats of a group chat's other agents. Installed by a deployment that has rooms. */
+	seatsOf: ((tx: Tx, chatId: string) => Promise<string[]>) | undefined;
 	constructor(private readonly db: Db) {
 		this.authz = new Authorizer(db);
 	}
@@ -82,6 +84,10 @@ export class Conversations {
 			if (input.kind === "fork") {
 				chatId = await fork(tx, p.ownerId, chatId!, uuidFrom(`${p.ownerId}\nfork\n${input.commandId}`), payload.title as string | undefined);
 				result = { forkedChatId: chatId };
+			} else if (input.kind === "abort") {
+				// Stopping a chat stops every agent at work in it, and what they waited on from the person is withdrawn with them: no request is left that nothing can wake.
+				for (const seat of (await this.seatsOf?.(tx, chatId!)) ?? []) await stopChat(tx, p.ownerId, seat, `abort:${input.commandId}:${seat}`.slice(0, 128), "Its chat was stopped.");
+				await denyWaiting(tx, p.ownerId, chatId!, "Its chat was stopped.");
 			} else if (input.kind === "unarchive") {
 				await resume(tx, chatId!);
 			} else if (input.kind === "user_message" && chatId) {
@@ -221,23 +227,53 @@ export class Conversations {
 
 	// ---- delegation tasks ----
 
-	/** Moves a task along working | auth-required | completed | failed | canceled and delivers one "[Task update]" per state to the starting chat, however often it is called. */
+	/**
+	 * Moves a task along working | auth-required | completed | failed | canceled and delivers one "[Task update]" per state to the starting chat, however often it is called.
+	 * Canceling a task also stops its chat: the turn it is running is aborted and what it waits on from the person is denied.
+	 */
 	async updateTask(p: Principal, taskId: string, status: string, result?: string): Promise<{ delivered: boolean }> {
 		await this.authz.enforce(p, "api:write");
-		return this.db.owner(p.ownerId, async (tx) => {
-			const { rows } = await tx.query("SELECT status, started_by, task_chat FROM pim_app.tasks WHERE task_id = $1 FOR UPDATE", [taskId]);
-			const task = rows[0];
-			if (!task) throw new NotFoundError("No such task");
-			if (task.status !== status && !TASK_NEXT[task.status]?.includes(status)) throw new ConflictError(`A ${task.status} task cannot become ${status}`, "bad_task_transition");
-			await tx.query("UPDATE pim_app.tasks SET status = $2, result = coalesce($3, result), updated_at = now() WHERE task_id = $1", [taskId, status, result ?? null]);
-			const commandId = `task:${taskId}:${status}`;
-			const first = await tx.query("INSERT INTO pim_app.task_update_deliveries (task_id, owner_id, status, command_id) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING", [taskId, p.ownerId, status, commandId]);
-			if (!first.rowCount) return { delivered: false };
-			await tx.query("INSERT INTO pim_app.accepted_commands (owner_id, command_id, kind, public_chat_id, pi_request_id, payload) VALUES ($1, $2, 'user_message', $3, $4, $5)", [
-				p.ownerId, commandId, task.started_by, requestId(p.ownerId, commandId), JSON.stringify({ text: `[Task update] ${taskId} is ${status}${result ? `: ${result}` : ""}`, taskId, status }),
-			]);
-			await tx.query("INSERT INTO pim_app.command_inbox (owner_id, command_id) VALUES ($1, $2)", [p.ownerId, commandId]);
-			return { delivered: true };
+		return this.db.owner(p.ownerId, (tx) => moveTask(tx, p.ownerId, taskId, status, result));
+	}
+
+	/**
+	 * Deletes a chat and withdraws what hangs on it, so nothing keeps working in a chat the person can no longer see: its turn is aborted and what it waits on from the person is
+	 * denied, in every seat of its room too; the tasks it handed out, and the tasks those handed out, are canceled and their chats stopped; if it is a task's chat, that task is canceled
+	 * and its requester hears so; messages not yet read are dropped; and the scheduled tasks, triggers and watches that deliver to it end with it, while those that start new chats go on.
+	 */
+	async remove(p: Principal, chatId: string): Promise<void> {
+		await this.authz.enforce(p, "api:write");
+		await this.db.owner(p.ownerId, async (tx) => {
+			await requireChat(tx, chatId);
+			const chats = [chatId, ...((await this.seatsOf?.(tx, chatId)) ?? [])];
+			await tx.query("DELETE FROM pim_app.command_inbox i USING pim_app.accepted_commands c WHERE c.owner_id = i.owner_id AND c.command_id = i.command_id AND c.public_chat_id = ANY($1::uuid[]) AND c.state = 'inbox_accepted' AND c.kind <> 'abort'", [chats]);
+			await tx.query("UPDATE pim_app.accepted_commands SET state = 'rejected' WHERE public_chat_id = ANY($1::uuid[]) AND state = 'inbox_accepted' AND kind <> 'abort' AND command_id NOT IN (SELECT command_id FROM pim_app.command_inbox)", [chats]);
+			// A task's chat is canceled before its run is stopped, so that the run ending does not fail the task first: its requester hears it was canceled.
+			const own = (await tx.query("SELECT task_id FROM pim_app.tasks WHERE task_chat = $1 AND status IN ('working', 'auth-required')", [chatId])).rows[0];
+			if (own) await moveTask(tx, p.ownerId, own.task_id, "canceled", "The person deleted its chat.");
+			const handed = await tx.query(
+				`WITH RECURSIVE handed(task_id, task_chat, status) AS (
+				   SELECT task_id, task_chat, status FROM pim_app.tasks WHERE started_by = ANY($1::uuid[])
+				   UNION SELECT t.task_id, t.task_chat, t.status FROM pim_app.tasks t JOIN handed h ON t.started_by = h.task_chat)
+				 SELECT task_id, task_chat, status FROM handed`,
+				[chats],
+			);
+			for (const t of handed.rows) {
+				if (t.status === "working" || t.status === "auth-required") await tx.query("UPDATE pim_app.tasks SET status = 'canceled', result = 'Its chat was deleted.', updated_at = now() WHERE task_id = $1", [t.task_id]);
+				if (t.task_chat && (t.status === "working" || t.status === "auth-required")) await stopChat(tx, p.ownerId, t.task_chat, `abort:task:${t.task_id}`, "Its chat was deleted.");
+			}
+			await denyWaiting(tx, p.ownerId, chatId, "Its chat was deleted.");
+			await enqueue(tx, p.ownerId, `abort:delete:${chatId}`, "abort", chatId, {});
+			for (const seat of chats.slice(1)) await stopChat(tx, p.ownerId, seat, `abort:delete:${seat}`, "Its chat was deleted.");
+			await tx.query("DELETE FROM pim_app.schedules WHERE chat_id = ANY($1::uuid[])", [chats]);
+			const gone = (await tx.query("SELECT id FROM pim_app.triggers WHERE lifecycle <> 'deleted' AND spec->'destination'->>'type' = 'existing_chat' AND spec->'destination'->>'chatId' = ANY($1::text[])", [chats])).rows.map((r) => r.id as string);
+			if (gone.length) {
+				await tx.query("DELETE FROM pim_app.trigger_runs WHERE trigger_id = ANY($1::text[])", [gone]);
+				await tx.query("DELETE FROM pim_app.trigger_computer_grants WHERE trigger_id = ANY($1::text[])", [gone]);
+				await tx.query("UPDATE pim_app.triggers SET lifecycle = 'deleted', enabled = false, updated_at = now() WHERE id = ANY($1::text[])", [gone]);
+			}
+			await tx.query("DELETE FROM pim_app.room_members WHERE public_chat_id = ANY($1::uuid[])", [chats]);
+			await tx.query("UPDATE pim_app.conversations SET deleted_at = now() WHERE public_chat_id = ANY($1::uuid[]) AND deleted_at IS NULL", [chats]);
 		});
 	}
 
@@ -319,4 +355,46 @@ async function delegateTask(tx: Tx, p: Principal, fromChat: string, commandId: s
 	// The effective principal that asked is recorded: what runs the task is bounded by it, however many agents delegate onward.
 	await tx.query("INSERT INTO pim_app.tasks (task_id, owner_id, started_by, task_chat, origin_principal, title) VALUES ($1, $2, $3, $4, $5, $6)", [taskId, p.ownerId, fromChat, taskChat, JSON.stringify(effectivePrincipal(p)), title]);
 	return { taskId, taskChatId: taskChat };
+}
+
+/** Accepts a command for a chat into the same transaction, for the Runner to work in its turn. A command id that was accepted already is not accepted again. */
+async function enqueue(tx: Tx, ownerId: string, commandId: string, kind: CommandKind, chatId: string, payload: Record<string, unknown>): Promise<void> {
+	const first = await tx.query("INSERT INTO pim_app.accepted_commands (owner_id, command_id, kind, public_chat_id, pi_request_id, payload) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (owner_id, command_id) DO NOTHING RETURNING command_id", [ownerId, commandId, kind, chatId, requestId(ownerId, commandId), JSON.stringify(payload)]);
+	if (first.rowCount) await tx.query("INSERT INTO pim_app.command_inbox (owner_id, command_id, partition_id) VALUES ($1, $2, (SELECT partition_id FROM pim_app.conversations WHERE public_chat_id = $3))", [ownerId, commandId, chatId]);
+}
+
+/**
+ * Denies what a chat's agent waits on from the person, with the reason as the person's note, and lets each parked call know, so the call ends and nothing is left that no one can answer.
+ * What Forge keeps for a coding thread, and a guest's call that asked the host, are not the chat's to withdraw.
+ */
+async function denyWaiting(tx: Tx, ownerId: string, chatId: string, why: string): Promise<void> {
+	const denied = await tx.query(
+		`UPDATE pim_app.approvals SET state = 'denied', decided_by = 'chat', decided_at = now(), args = args || $2::jsonb
+		 WHERE public_chat_id = $1 AND state = 'waiting' AND NOT (args ? 'forgeApproval') AND NOT (args ? 'guestOwner') RETURNING id, args`,
+		[chatId, JSON.stringify({ note: why })],
+	);
+	for (const a of denied.rows) if (a.args.taskId !== undefined) await enqueue(tx, ownerId, `approval:${a.id}`, "approval_decision", chatId, { taskId: a.args.taskId, approved: false, approvalId: a.id });
+}
+
+/** Stops a chat other than the one a command is for: what it waited on is denied, and its running turn is aborted. */
+async function stopChat(tx: Tx, ownerId: string, chatId: string, commandId: string, why: string): Promise<void> {
+	await denyWaiting(tx, ownerId, chatId, why);
+	await enqueue(tx, ownerId, commandId, "abort", chatId, {});
+}
+
+/** The body of `updateTask`, in the caller's transaction. */
+async function moveTask(tx: Tx, ownerId: string, taskId: string, status: string, result?: string): Promise<{ delivered: boolean }> {
+	const { rows } = await tx.query("SELECT status, started_by, task_chat FROM pim_app.tasks WHERE task_id = $1 FOR UPDATE", [taskId]);
+	const task = rows[0];
+	if (!task) throw new NotFoundError("No such task");
+	if (task.status !== status && !TASK_NEXT[task.status]?.includes(status)) throw new ConflictError(`A ${task.status} task cannot become ${status}`, "bad_task_transition");
+	await tx.query("UPDATE pim_app.tasks SET status = $2, result = coalesce($3, result), updated_at = now() WHERE task_id = $1", [taskId, status, result ?? null]);
+	if (status === "canceled" && task.status !== "canceled" && task.task_chat) await stopChat(tx, ownerId, task.task_chat, `abort:task:${taskId}`, "Its task was canceled.");
+	const commandId = `task:${taskId}:${status}`;
+	const first = await tx.query("INSERT INTO pim_app.task_update_deliveries (task_id, owner_id, status, command_id) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING", [taskId, ownerId, status, commandId]);
+	if (!first.rowCount) return { delivered: false };
+	// A chat that was deleted hears of nothing, and is not woken to.
+	if (!(await tx.query("SELECT 1 FROM pim_app.conversations WHERE public_chat_id = $1 AND deleted_at IS NULL", [task.started_by])).rowCount) return { delivered: false };
+	await enqueue(tx, ownerId, commandId, "user_message", task.started_by, { text: `[Task update] ${taskId} is ${status}${result ? `: ${result}` : ""}`, taskId, status });
+	return { delivered: true };
 }

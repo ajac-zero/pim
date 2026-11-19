@@ -28,7 +28,7 @@ function rig(options: { computer?: boolean; app?: (notice: { kind: string; data:
 	} as unknown as RelayBus;
 	const app = { notices, identity: { authz: { enforce: async () => undefined } } } as never;
 	const read = (_name: string, _description: string, _parameters: unknown, run: (app: never, call: never, args: never) => Promise<unknown>) => ({ name: _name, run }) as never;
-	const tools = canvasTools({ ownerId: OWNER, read, relay: async () => bus }) as unknown as { name: string; run: (app: never, call: never, args: never) => Promise<{ content: { text: string }[]; isError?: boolean }> }[];
+	const tools = canvasTools({ ownerId: OWNER, read, relay: async () => bus }) as unknown as { name: string; run: (app: never, call: never, args: never) => Promise<{ output: { text: string }[]; isError?: boolean }> }[];
 	const use = async (name: string, args: object, chat: string | null = CHAT) => {
 		const result = await tools.find((t) => t.name === name)!.run(app, { chat, p: { kind: "agent", ownerId: OWNER, agentId: "pim" } } as never, args as never);
 		return { text: result.output[0]!.text, isError: result.isError === true };

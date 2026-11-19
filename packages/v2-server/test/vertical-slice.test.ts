@@ -219,7 +219,9 @@ real("the vertical slice", () => {
 		const shared = await anonymous.call("GET", `/api/shared/${ownerId}/${link.id}`);
 		expect(shared.status).toBe(200);
 		expect(shared.json.messages.length).toBe(link.messages);
-		expect(shared.json.messages.some((m: { role: string; text: string }) => m.role === "agent" && m.text.includes("All done"))).toBe(true);
+		// What the person said is in it; what the agent wrote as working notes, without sending it to them, is not.
+		expect(shared.json.messages.some((m: { role: string; text: string }) => m.role === "user" && m.text.includes("please do the thing"))).toBe(true);
+		expect(JSON.stringify(shared.json)).not.toContain("All done, with your approval");
 		expect(JSON.stringify(shared.json)).not.toMatch(/tool-call|tool-result|thinking|"parts"/);
 	}, 60_000);
 

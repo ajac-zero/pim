@@ -9,13 +9,14 @@
 import { fromPerson, isDeliveryReminder, withoutFileChanges } from "@pim/shared/transcript";
 import { checkUiState } from "@pim/ui-lang";
 import { uiProgramsOf } from "../reply-blocks.ts";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { App } from "@pim/v2-app/app";
 import { addRoomMember, removeRoomMember, roomViews } from "../rooms.ts";
 import { BadRequestError, CapabilityUnavailableError, ConflictError, NotFoundError } from "@pim/v2-app/errors";
 import { ok, type Route, route } from "@pim/v2-app/http";
 import type { Principal } from "@pim/v2-contracts/identity";
 import { transcriptPage } from "@pim/v2-live/projections/snapshots";
+import { chatActivity } from "./activity.ts";
 import { chatConversation, IMPROVE_PROMPT, runUtility, SUGGEST_PROMPTS, suggestionsIn, nameOneUntitled, SUMMARIZE_CHAT, titleChat } from "./utility.ts";
 
 const ms = (value: Date | string | null | undefined): number | null => (value ? new Date(value).getTime() : null);
@@ -125,6 +126,14 @@ const FAMILY = `WITH RECURSIVE family(chat) AS (
 		SELECT c.public_chat_id AS chat FROM pim_app.conversations c WHERE c.room_of = f.chat
 		UNION ALL SELECT t.task_chat FROM pim_app.tasks t WHERE t.started_by = f.chat AND t.task_chat IS NOT NULL) next)`;
 
+/** What a chat with nothing said in it offers to start with, before any model has read anything: Pim's own, in the person's language (English when it has no others), as in v1. */
+const STARTERS: Record<string, string[]> = { en: ["What can you do?", "Plan my week"], es: ["¿Qué puedes hacer?", "Planea mi semana"] };
+const SUGGESTION_CHAT_CHARS = 2_000;
+const SUGGESTION_MEMORY_CHARS = 3_000;
+/** The suggestions last written for each chat and what they were written from, so a chat nobody continues costs no model call; and the ones being written now, which a second ask shares. */
+const suggested = new Map<string, { of: string; items: string[] }>();
+const suggesting = new Map<string, { of: string; promise: Promise<string[]> }>();
+
 /** How long each chat's conversation was when its summary was last written, so a summary is written again only when more has been said. */
 const summarized = new Map<string, number>();
 
@@ -158,13 +167,9 @@ export function sessionRoutes(env: Record<string, string | undefined> = process.
 			const p = await principal();
 			await app.identity.authz.enforce(p, "api:read");
 			const id = chatId(params[0]!);
-			const chat = await sessionView(app, p, id);
-			const calls = await app.db.owner(p.ownerId, async (tx) => (await tx.query("SELECT provider, model, at FROM pim_app.model_calls WHERE public_chat_id = $1 ORDER BY at DESC LIMIT 50", [id])).rows);
-			return ok({
-				running: chat.busy, lastActivityAt: chat.updatedAt ?? 0, current: [],
-				steps: calls.reverse().map((c) => ({ kind: "model", at: ms(c.at), ms: null, model: [c.provider, c.model].filter(Boolean).join("/"), stop: "stop", error: null })),
-				stalls: [],
-			});
+			await sessionView(app, p, id);
+			// The chat's latest turn, step by step: how long each model call and tool call took, what is running now, and what has gone quiet.
+			return ok(await chatActivity(app, p.ownerId, id));
 		}),
 		route("GET", "/api/sessions/:id/cost", async ({ app, principal, params }) => {
 			const p = await principal();
@@ -197,15 +202,42 @@ export function sessionRoutes(env: Record<string, string | undefined> = process.
 			await app.db.owner(p.ownerId, (tx) => tx.query("UPDATE pim_app.conversations SET summary = $2 WHERE public_chat_id = $1", [id, written]));
 			return ok({ summary: written });
 		}),
-		// With no utility model there are no suggestions, and a title or an improved prompt cannot be made.
+		// An empty chat offers Pim's starters. Once something is said, the utility model writes suggestions from the agent, what it remembers and this chat, and again only when that changed;
+		// with no model, or when it fails, the last ones stay (none if there were none), as in v1.
 		route("GET", "/api/sessions/:id/suggestions", async ({ app, principal, params, url }) => {
 			const p = await principal();
 			const id = chatId(params[0]!);
-			await sessionView(app, p, id);
-			const conversation = await chatConversation(app, p, id);
-			if (conversation === "") return ok({ suggestions: [] });
-			const answer = await runUtility(app, env, p, SUGGEST_PROMPTS, `${conversation}\n\nLanguage: ${url.searchParams.get("locale") ?? "en"}`).catch(() => null);
-			return ok({ suggestions: answer === null ? [] : suggestionsIn(answer) });
+			const view = await sessionView(app, p, id);
+			const locale = url.searchParams.get("locale") ?? "en";
+			const conversation = await chatConversation(app, p, id, SUGGESTION_CHAT_CHARS);
+			if (conversation === "") return ok({ suggestions: STARTERS[locale.split("-")[0]!.toLowerCase()] ?? STARTERS.en });
+			const agent = await app.db.owner(p.ownerId, async (tx) => (await tx.query("SELECT id, name, description FROM pim_app.agents WHERE deleted_at IS NULL AND id = coalesce($1, pim_app.majordomo_id())", [view.agent?.id ?? null])).rows[0]);
+			const reads = agent ? (await app.agents.memoryOf(p, agent.id as string)).reads : ["everyone"];
+			const remembered = (await app.memories.list(p, reads).catch(() => [])).map((m) => `- ${m.title}: ${m.body.replace(/\s+/g, " ").slice(0, 200)}`).join("\n");
+			const input = [
+				agent ? `Assistant: ${agent.name}${agent.description ? `, ${agent.description}` : ""}` : "",
+				`Language: ${locale}`,
+				remembered === "" ? "" : `What it remembers about the person:\n${remembered.length > SUGGESTION_MEMORY_CHARS ? `…${remembered.slice(-SUGGESTION_MEMORY_CHARS)}` : remembered}`,
+				`The chat:\n\n${conversation}`,
+			].filter((part) => part !== "").join("\n\n");
+			const key = `${p.ownerId}/${id}`;
+			const of = createHash("sha256").update(input).digest("hex");
+			const kept = suggested.get(key);
+			if (kept?.of === of) return ok({ suggestions: kept.items });
+			let writing = suggesting.get(key);
+			if (!writing || writing.of !== of) {
+				const promise = runUtility(app, env, p, SUGGEST_PROMPTS, input).then((answer) => {
+					if (answer === null) throw new Error("no utility model");
+					const items = suggestionsIn(answer);
+					suggested.set(key, { of, items });
+					return items;
+				});
+				writing = { of, promise };
+				suggesting.set(key, writing);
+				const done = () => void (suggesting.get(key)?.promise === promise && suggesting.delete(key));
+				void promise.then(done, done);
+			}
+			return ok({ suggestions: await writing.promise.catch(() => kept?.items ?? []) });
 		}),
 		route("POST", "/api/sessions/:id/title", async ({ app, principal, params }) => {
 			const p = await principal();

@@ -224,7 +224,8 @@ describe("chats and the account", () => {
 		await app.usage.record(owner, { id: "cc2", runKind: "chat", chatId: chat, provider: "gateway", model: "m", inputTokens: 10, outputTokens: 20, costMicroUsd: 3_000 });
 		const costed = (await call(ada, "GET", `/api/sessions/${chat}/cost`)).body;
 		expect(costed).toEqual({ total: 0.015, models: [{ provider: "gateway", model: "m", input: 1010, output: 220, cacheRead: 800, cacheWrite: 50, cost: 0.015 }] });
-		expect((await call(ada, "GET", `/api/sessions/${chat}/activity`)).body.steps.map((s: any) => [s.kind, s.model])).toEqual([["model", "gateway/m"], ["model", "gateway/m"]]);
+		// A chat's activity is its latest turn, read from its transcript: calls the ledger has and the transcript has not are no steps of it.
+		expect((await call(ada, "GET", `/api/sessions/${chat}/activity`)).body).toMatchObject({ running: false, steps: [], current: [], stalls: [] });
 		await stack.admin.query("DELETE FROM pim_app.model_calls WHERE id IN ('cc1', 'cc2')");
 		expect((await call(ada, "DELETE", `/api/sessions/${chat}`)).body).toEqual({ deleted: true });
 		expect((await call(ada, "GET", `/api/sessions/${chat}/summary`)).status).toBe(404);
@@ -399,11 +400,70 @@ describe("diagnostics", () => {
 		expect(text).not.toMatch(/hooks\.example|ada@example|abcdefghijklmnop|hunter2/);
 		expect(triggers.failures[0].detail.apiKey).toBe("[redacted]");
 		expect((await call(ada, "GET", "/api/admin/diagnostics")).body.counts).toMatchObject({ chats: expect.any(Number), waiting_approvals: 0 });
-		expect((await call(ada, "GET", "/api/admin/diagnostics?kind=provider_cooldowns")).body).toMatchObject({ available: false });
+		expect((await call(ada, "GET", "/api/admin/diagnostics?kind=provider_cooldowns")).body).toMatchObject({ count: 0, items: [] });
 		expect((await call(ada, "GET", "/api/admin/diagnostics?kind=nope")).status).toBe(400);
 		expect((await call(ada, "GET", "/api/admin/diagnostics?since=soon")).status).toBe(400);
 		expect((await call(bob, "GET", "/api/admin/diagnostics")).status).toBe(403);
 		expect((await call(ada, "GET", "/api/admin/health")).body.deployment).toMatchObject({ publicUrlSet: true, approvalPolicy: "majordomo" });
+	});
+});
+
+describe("a chat's activity and the diagnostics of how its turns went", () => {
+	it("shows the latest turn step by step with durations, what is running now and what has gone quiet, and reads the ledger's failures, the event log and the cooldowns", async () => {
+		const owner = await ownerOf(ada);
+		const chat = (await call(ada, "POST", "/api/sessions", { agentId: agent, title: "Slow" })).body.id as string;
+		const at = Date.now();
+		const seed = (n: number, message: unknown) => stack.admin.query("INSERT INTO pim_projection.chat_transcript_projection (owner_id, stream_kind, chat_id, entry_id, position, message, partition_id, commit_seq, projection_version) VALUES ($1,'chat',$2,$3,$4,$5,'00000000-0000-0000-0000-000000000001',$4,1)", [owner, chat, `e${n}`, n, JSON.stringify({ id: `e${n}`, ...(message as object) })]);
+		// A turn that began 20 minutes ago: the model answered in 3 s with two tool calls; one ran for 4 s and ended, the other has been running since and waits for nothing.
+		const started = at - 20 * 60_000;
+		await seed(1, { role: "user", timestamp: started, parts: [{ type: "text", text: "Run the long job" }] });
+		await seed(2, { role: "assistant", timestamp: started + 1_000, stopReason: "toolUse", parts: [{ type: "tool-call", id: "call-a", name: "http_request", arguments: { url: "https://example.test/a?token=abc", timeout: 30 } }, { type: "tool-call", id: "call-b", name: "shell", arguments: { command: "make all", timeout: 3600 } }] });
+		await seed(3, { role: "tool", timestamp: started + 8_000, parts: [{ type: "tool-result", id: "call-a", name: "http_request", content: [{ type: "text", text: "ok" }], error: false }] });
+		await stack.admin.query("INSERT INTO pim_projection.sidebar_session_projection (owner_id, chat_id, title, busy, unread, stalled, updated_at, partition_id, commit_seq, projection_version) VALUES ($1,$2,'Slow',true,false,false,$3,'00000000-0000-0000-0000-000000000001',1,1)", [owner, chat, at]);
+		// What the ledger knows of the model call (its id ends with the answer's time), a call that failed over to it, and a failed one with the provider's words.
+		const call1 = (id: string, extra: Record<string, unknown>) => stack.admin.query("SELECT pim_app.record_model_call($1, $2, 'chat', $3, 'gw', 'm1', 10, 5, 0, 0, 0, NULL, $4::jsonb)", [owner, id, chat, JSON.stringify(extra)]);
+		await call1(`mc_c1_t1_${started + 1_000}`, { stopReason: "toolUse", latencyMs: 3_000, turnIndex: 1, toolCount: 4, promptBytes: 2_000, runKind: "chat" });
+		await call1(`mc_c1_t1_${started + 1_000}_f0`, { stopReason: "error", latencyMs: 125_000, error: "529 overloaded at https://gw.example.test/v1/messages for ada@example.test with max_tokens", request: { phases: { headersMs: 125_000, httpAttempts: 1 } }, runKind: "chat" });
+		// They happened when the turn did.
+		await stack.admin.query("UPDATE pim_app.model_calls SET at = to_timestamp(($2::bigint + latency_ms) / 1000.0) WHERE owner_id = $1 AND public_chat_id = $3", [owner, started + 1_000, chat]);
+		await app.db.owner(owner, (tx) => tx.query("SELECT pim_app.record_diagnostic_event($1, 'model_call_failed', $2)", [owner, JSON.stringify({ provider: "gw", model: "m1", error: "529 overloaded" })]));
+		await stack.admin.query("INSERT INTO pim_runtime.provider_cooldowns (owner_id, ref, until, reason) VALUES ($1, 'gw/m1', now() + interval '1 minute', 'overloaded')", [owner]);
+
+		const activity = (await call(ada, "GET", `/api/sessions/${chat}/activity`)).body;
+		expect(activity).toMatchObject({ running: true });
+		const tools = activity.steps.filter((step: any) => step.kind === "tool");
+		// The call that ended took what the result's time says after the answer (3 s of it the model's); the one that did not is running now, with its declared timeout in ms.
+		expect(tools[0]).toMatchObject({ id: "call-a", name: "http_request", ms: 4_000, timeoutMs: 30_000, error: false });
+		expect(tools[0].summary).not.toContain("abc");
+		expect(tools[1]).toMatchObject({ id: "call-b", ms: null, timeoutMs: 3_600_000, summary: expect.stringContaining("make all") });
+		expect(activity.steps.find((step: any) => step.kind === "model" && step.error === null)).toMatchObject({ ms: 3_000, model: "gw/m1", stop: "toolUse" });
+		expect(activity.steps.find((step: any) => step.kind === "model" && step.error)).toMatchObject({ ms: 125_000, stop: "error" });
+		expect(activity.current).toMatchObject([{ id: "call-b", name: "shell", timeoutMs: 3_600_000 }]);
+		// Quiet inside its own declared timeout, so shown but never woken for.
+		expect(activity.stalls).toMatchObject([{ reason: "no output for five minutes", actionable: false }]);
+
+		// A person's approval the call waits on is not a command that has gone quiet.
+		await stack.admin.query("INSERT INTO pim_app.approvals (id, owner_id, public_chat_id, tool, args, state) VALUES ('ap1', $1, $2, 'shell', $3, 'waiting')", [owner, chat, JSON.stringify({ callId: "call-b" })]);
+		expect((await call(ada, "GET", `/api/sessions/${chat}/activity`)).body).toMatchObject({ current: [], stalls: [] });
+		await stack.admin.query("DELETE FROM pim_app.approvals WHERE id = 'ap1'");
+
+		const turns = (await call(ada, "GET", `/api/admin/diagnostics?kind=turns&chat=${chat}`)).body;
+		expect(turns.items[0]).toMatchObject({ in_progress: true, model_calls: 2, tool_calls: 2, model_ms: 128_000 });
+		expect(turns.items[0].steps.map((step: any) => step.step)).toEqual(["model", "model", "tool", "tool"]);
+		const working = (await call(ada, "GET", "/api/admin/diagnostics?kind=runs")).body.chats.find((c: any) => c.chat === chat);
+		expect(working).toMatchObject({ waiting_on: expect.stringContaining("shell"), working_minutes: 20, stalls: [{ reason: "no output for five minutes" }] });
+		expect((await call(ada, "GET", "/api/admin/diagnostics?kind=turns")).body.items).toMatchObject([{ chat, in_progress: true }]);
+
+		const calls = (await call(ada, "GET", "/api/admin/diagnostics?kind=model_calls")).body;
+		expect(calls.totals).toMatchObject({ errors: 1 });
+		expect(calls.totals.calls).toBeGreaterThanOrEqual(2);
+		const failure = calls.failures.find((f: any) => f.stop_reason === "error");
+		expect(failure).toMatchObject({ why: "stopped with error", provider: "gw", model: "m1", latency_ms: 125_000, request: { phases: { headersMs: 125_000 } } });
+		// The provider's words keep their ids and their words, but not an address or an email.
+		expect(failure.error).toBe("529 overloaded at [address]/v1/messages for [email] with max_tokens");
+		expect((await call(ada, "GET", "/api/admin/diagnostics?kind=events")).body.items).toMatchObject([{ kind: "model_call_failed", detail: { provider: "gw" }, error: "529 overloaded" }]);
+		expect((await call(ada, "GET", "/api/admin/diagnostics?kind=provider_cooldowns")).body.items).toMatchObject([{ model: "gw/m1", active: true, reason: "overloaded" }]);
+		await stack.admin.query("DELETE FROM pim_runtime.provider_cooldowns WHERE owner_id = $1", [owner]);
 	});
 });
 
@@ -427,7 +487,9 @@ describe("the utility model", () => {
 
 	it("is off until one is chosen: no suggestions, no title, no improved prompt", async () => {
 		const chat = (await call(ada, "POST", "/api/sessions", { agentId: agent })).body.id as string;
-		expect((await call(ada, "GET", `/api/sessions/${chat}/suggestions`)).body).toEqual({ suggestions: [] });
+		// An empty chat offers Pim's own starters, with no model, in the person's language.
+		expect((await call(ada, "GET", `/api/sessions/${chat}/suggestions`)).body).toEqual({ suggestions: ["What can you do?", "Plan my week"] });
+		expect((await call(ada, "GET", `/api/sessions/${chat}/suggestions?locale=es`)).body).toEqual({ suggestions: ["¿Qué puedes hacer?", "Planea mi semana"] });
 		expect((await call(ada, "POST", `/api/sessions/${chat}/title`)).status).toBe(501);
 		expect((await call(ada, "POST", "/api/prompts/improve", { text: "plan" })).status).toBe(501);
 		expect((await call(ada, "GET", `/api/sessions/${chat}/summary`)).body).toEqual({ summary: null });
@@ -446,7 +508,16 @@ describe("the utility model", () => {
 		expect(asked.at(-1)).toMatchObject({ model: "u2", stream: false });
 		expect(JSON.stringify(asked.at(-1).messages[1].content)).toBe('"Person: Help me plan my garden\\n\\nAssistant: Start with the beds by the fence."');
 		expect((await call(ada, "POST", "/api/prompts/improve", { text: "plan" })).body).toEqual({ text: "Plan my week in detail" });
-		expect((await call(ada, "GET", `/api/sessions/${chat}/suggestions?locale=en`)).body).toEqual({ suggestions: ["Plan my week", "Water the garden"] });
+		const suggestions = () => call(ada, "GET", `/api/sessions/${chat}/suggestions?locale=en`);
+		const asks = asked.length;
+		expect((await suggestions()).body).toEqual({ suggestions: ["Plan my week", "Water the garden"] });
+		// The model read the agent, what it remembers and this chat; asked again with nothing changed, it is not asked again.
+		const read = JSON.stringify(asked.at(-1).messages[1].content);
+		expect(asked).toHaveLength(asks + 1);
+		expect(read).toContain("Assistant: ");
+		expect(read).toContain("The chat:");
+		expect((await suggestions()).body).toEqual({ suggestions: ["Plan my week", "Water the garden"] });
+		expect(asked).toHaveLength(asks + 1);
 		expect((await call(ada, "GET", `/api/sessions/${chat}/summary`)).body).toEqual({ summary: "- They planned a garden" });
 		// Asked again with nothing more said, the summary is not written again; another person's chat is not reachable.
 		const before = asked.length;

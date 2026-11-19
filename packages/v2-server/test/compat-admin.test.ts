@@ -136,6 +136,22 @@ describe("the web app's apps, gallery and admin routes", () => {
 		expect((await call("ada", "POST", "/api/admin/accounts/ada/suspend", {})).json).toMatchObject({ error: "last_admin" });
 		const invite = (await call("ada", "POST", "/api/admin/invites", { count: 2 })).json;
 		expect(invite.links).toHaveLength(2);
+		// The administration is for the admin signed in to the app: not an API token, whatever it may otherwise do.
+		const session = (await app.identity.authenticate(people.ada!.token))!;
+		const apiToken = (await app.identity.createToken(session, { name: "ci", scopes: ["*"] })).token;
+		const viaToken = await fetch(`${base}/api/admin/accounts`, { headers: { authorization: `Bearer ${apiToken}` } });
+		expect(viaToken.status).toBe(403);
+		expect(await viaToken.json()).toMatchObject({ error: "session-only" });
+		expect((await fetch(`${base}/api/account`, { headers: { authorization: `Bearer ${apiToken}` } })).status).toBe(200);
+	});
+
+	it("lets the admin take a published agent down, for everyone", async () => {
+		const agent = (await call("bob", "POST", "/api/agents", { name: "Pitch", instructions: "sell" })).json;
+		const published = (await call("bob", "POST", `/api/agents/${agent.id}/publish`, {})).json;
+		expect((await call("bob", "DELETE", `/api/admin/templates/${published.id}`)).status).toBe(403);
+		expect((await call("ada", "DELETE", `/api/admin/templates/${published.id}`)).json).toEqual({ deleted: true });
+		expect((await call("ada", "GET", "/api/templates")).json.templates.some((t: { id: string }) => t.id === published.id)).toBe(false);
+		expect((await call("ada", "DELETE", `/api/admin/templates/${published.id}`)).status).toBe(404);
 	});
 
 	it("keeps the connector directory in the instance's settings, and answers compute and the computer host as not set up", async () => {

@@ -268,6 +268,14 @@ export class Sharing {
 		await this.db.owner(p.ownerId, (tx) => tx.query("DELETE FROM pim_app.templates WHERE owner_id = $1 AND agent_id = $2", [p.ownerId, agentId]));
 	}
 
+	/** An operator takes a published template down, whoever published it. */
+	async removeTemplate(admin: Principal, id: string): Promise<void> {
+		await this.authz.enforce(admin, "admin:templates");
+		const found = await this.db.owner(admin.ownerId, async (tx) => (await tx.query("SELECT owner_id FROM pim_app.templates WHERE id = $1", [id])).rows[0]);
+		if (!found) throw new NotFoundError("No such template");
+		await this.db.owner(found.owner_id, (tx) => tx.query("DELETE FROM pim_app.templates WHERE id = $1 AND owner_id = $2", [id, found.owner_id]));
+	}
+
 	/** The gallery: every published template, except those whose author was deleted. */
 	async templates(p: Principal) {
 		await this.authz.enforce(p, "api:read");

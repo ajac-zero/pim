@@ -15,6 +15,7 @@ import { fromAnotherSite, ok, route, sessionCookieName, setCookie, type Route } 
 import { newId } from "@pim/v2-app/ids";
 import { LOCALES } from "@pim/shared/locales";
 import { clientAddress } from "../limits.ts";
+import { installedExtensions } from "../agent-widgets.ts";
 import { PimThemes } from "@pim/shared/themes";
 import { pimThemes } from "@pim/shared/theme-data/index";
 import { INTRODUCTION } from "@pim/shared/transcript";
@@ -223,8 +224,12 @@ export const bootRoutes: Route[] = [
 	}),
 	route("GET", "/api/themes", async () => ok(themes.list(), 200, { "cache-control": "no-cache" })),
 	route("GET", "/api/themes.css", async () => ({ status: 200, raw: themes.stylesheet(), headers: { "content-type": "text/css; charset=utf-8", "cache-control": "no-cache" } })),
-	// Extensions with widgets are not ported to v2; the app draws without them.
-	route("GET", "/api/extensions", async ({ principal }) => (await principal(), ok({ extensions: [], logo: null }))),
+	// Pim's own extensions with their widgets, and the deployment's logo (`PIM_LOGO`, an https or data: image address, where v1 had `logo` in pim.config.ts).
+	route("GET", "/api/extensions", async ({ principal }) => {
+		await principal();
+		const logo = process.env.PIM_LOGO?.trim();
+		return ok({ extensions: installedExtensions(), logo: logo && /^(https:\/\/|data:image\/)/.test(logo) ? logo : null });
+	}),
 	route("GET", "/api/majordomo", async ({ app, principal }) => ok(await majordomoState(app, await principal()))),
 	route("PUT", "/api/majordomo/preferences", async ({ app, principal, json }) => {
 		const p = await principal();

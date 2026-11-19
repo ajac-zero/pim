@@ -444,6 +444,17 @@ describe("circles, sharing and people", () => {
 		expect(((await (await u.http(`/api/sessions/${chat}/link`, { method: "PUT" })).json()) as any).link.id).toBe("oldlink");
 	});
 
+	it("lets an operator take a published agent down, and no one else", async () => {
+		const author = await mk("takedown");
+		const agent = await app.agents.create(author.principal, { name: "Spammy", instructions: "advertise" });
+		const { id } = await app.sharing.publishTemplate(author.principal, agent.id, "Spammy kit");
+		await expect(app.sharing.removeTemplate(author.principal, id)).rejects.toMatchObject({ reason: "admin-only" });
+		expect((await app.sharing.templates(admin.principal)).some((t) => t.id === id)).toBe(true);
+		await app.sharing.removeTemplate(admin.principal, id);
+		expect((await app.sharing.templates(admin.principal)).some((t) => t.id === id)).toBe(false);
+		await expect(app.sharing.removeTemplate(admin.principal, id)).rejects.toMatchObject({ status: 404 });
+	});
+
 	it("shows a published profile with its templates and bots, visits a bot in the host's space, and hides what is unpublished or deleted", async () => {
 		const host = await mk("hosty");
 		const visitor = await mk("visitory");

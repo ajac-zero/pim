@@ -42,6 +42,15 @@ export const WIDGETS: Record<string, { title: Text; empty: Text; description: st
 	},
 };
 
+/** Pim's own extensions, the ones that bring the widgets above, as `GET /api/extensions` lists them. */
+const OWN_EXTENSIONS: Record<string, { name: string; description: string }> = {
+	"pim.goals": { name: "Goals", description: "Goals with step-by-step plans that Pim keeps moving." },
+	"pim.schedule": { name: "Schedules", description: "Work Pim does later, once or on a schedule." },
+	"pim.memory": { name: "Memory", description: "What Pim remembers about you, in every chat." },
+};
+export const installedExtensions = () =>
+	Object.entries(OWN_EXTENSIONS).map(([id, e]) => ({ id, ...e, widgets: widgetRefs().filter((ref) => ref.startsWith(`${id}/`)) }));
+
 /** The widgets a chat can show, for the tool's description and its refusals. */
 export const widgetRefs = () => Object.keys(WIDGETS);
 

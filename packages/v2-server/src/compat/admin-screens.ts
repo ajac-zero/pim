@@ -68,11 +68,15 @@ export function screenRoutes(env: Env): Route[] {
 		}),
 		route("POST", "/api/admin/invites", async ({ app, principal, origin, json }) => {
 			const p = await principal();
-			const count = Math.min(Math.max(Number((await json()).count ?? 1) || 1, 1), 20);
+			const body = await json();
+			const count = Math.min(Math.max(Number(body.count ?? 1) || 1, 1), 100);
 			const links: string[] = [];
-			for (let i = 0; i < count; i++) links.push(`${origin}/#invite=${await app.identity.createInvite(p)}`);
+			for (let i = 0; i < count; i++) links.push(`${origin}/#invite=${await app.identity.createInvite(p, typeof body.note === "string" ? body.note.slice(0, 200) : "")}`);
 			return ok({ links }, 201);
 		}),
+
+		// The operator takes a published agent down from the gallery, whoever published it.
+		route("DELETE", "/api/admin/templates/:id", async ({ app, principal, params }) => (await app.sharing.removeTemplate(await principal(), params[0]!), ok({ deleted: true }))),
 
 		// ---- the default agent: a template the admin marks for everyone who joins ----
 		route("GET", "/api/admin/default-agent", async ({ app, principal }) => (await admin(app, await principal(), "admin:templates"), ok({ agent: await defaultAgentOf(app) }))),
@@ -94,7 +98,7 @@ export function screenRoutes(env: Env): Route[] {
 			await admin(app, await principal(), "admin:settings");
 			const open = (await app.db.anonymous(async (tx) => (await tx.query("SELECT value FROM pim_app.instance_settings WHERE key = 'registration_open'")).rows[0]))?.value === true;
 			const limits = deploymentLimits(env);
-			const settings = { registration: open ? "open" : "invite", maxAccounts: null, registrationsPerAddress: 5, approvalPolicy: env.PIM_APPROVAL_POLICY === "auto" || env.PIM_APPROVAL_POLICY === "majordomo" ? env.PIM_APPROVAL_POLICY : "explicit", timeZone: env.PIM_TIME_ZONE ?? env.TZ ?? "UTC", model: env.PIM_DEFAULT_MODEL ?? "", models: gatewayModels(env), utilityModel: null, memoryModel: null, memoryLines: 0, imageModel: null, limits, publicUrl: env.PIM_PUBLIC_URL ?? origin, contentOrigin: appsOrigin ?? env.PIM_CONTENT_ORIGIN ?? null, emailFrom: null };
+			const settings = { registration: open ? "open" : "invite", maxAccounts: null, registrationsPerAddress: 5, approvalPolicy: env.PIM_APPROVAL_POLICY === "auto" || env.PIM_APPROVAL_POLICY === "explicit" ? env.PIM_APPROVAL_POLICY : "majordomo", timeZone: env.PIM_TIME_ZONE ?? env.TZ ?? "UTC", model: env.PIM_DEFAULT_MODEL ?? "", models: gatewayModels(env), utilityModel: null, memoryModel: null, memoryLines: 0, imageModel: null, limits, publicUrl: env.PIM_PUBLIC_URL ?? origin, contentOrigin: appsOrigin ?? env.PIM_CONTENT_ORIGIN ?? null, emailFrom: null };
 			const secrets = PROVIDER_IDS.flatMap((id) => providerSecrets(id));
 			const variables = [...PLAIN_VARIABLES.map((name) => ({ name, value: env[name]?.trim() || null, problem: null })), ...secrets.map((name) => ({ name, value: env[name]?.trim() ? "(set)" : null, problem: null }))];
 			return ok({ settings, variables });

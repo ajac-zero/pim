@@ -112,15 +112,21 @@ export class Agents {
 	}
 
 	/**
-	 * Where an agent writes its memories and what it reads. A chat with no agent is answered by the person's majordomo, as the Runner's context
-	 * names it; with none, only `everyone` is shared.
+	 * Where an agent writes its memories and what it reads. A chat with no agent is answered by the person's majordomo (`pim_app.majordomo_id()`); with none, only
+	 * `everyone` is shared. The majordomo reads every scope there is, as in v1, and still writes to its own.
 	 */
 	async memoryOf(p: Principal, agentId: string | null): Promise<{ own: string; reads: string[] }> {
 		await this.authz.enforce(p, "api:read");
-		const row = await this.db.owner(p.ownerId, async (tx) => (await tx.query("SELECT * FROM pim_app.agents WHERE deleted_at IS NULL AND id = coalesce($1, (SELECT value #>> '{}' FROM pim_app.owner_settings WHERE key = 'majordomo'))", [agentId])).rows[0]);
-		if (!row) return { own: "everyone", reads: ["everyone"] };
-		const agent = rowToAgent(row);
-		return { own: agent.memoryScope, reads: readScopes(agent) };
+		return this.db.owner(p.ownerId, async (tx) => {
+			const row = (await tx.query("SELECT *, id = pim_app.majordomo_id() AS majordomo FROM pim_app.agents WHERE deleted_at IS NULL AND id = coalesce($1, pim_app.majordomo_id())", [agentId])).rows[0];
+			if (!row) return { own: "everyone", reads: ["everyone"] };
+			const agent = rowToAgent(row);
+			if (!row.majordomo) return { own: agent.memoryScope, reads: readScopes(agent) };
+			const every = (await tx.query("SELECT config->>'memoryScope' AS own, a.id FROM pim_app.agents a WHERE deleted_at IS NULL")).rows.map((r) => (r.own ?? `agent-${r.id}`) as string);
+			const named = (await tx.query("SELECT key FROM pim_app.memory_scopes")).rows.map((r) => r.key as string);
+			const kept = (await tx.query("SELECT DISTINCT scope FROM pim_app.memories WHERE deleted_at IS NULL")).rows.map((r) => r.scope as string);
+			return { own: agent.memoryScope, reads: [...new Set([...readScopes(agent), ...every, ...named, ...kept])] };
+		});
 	}
 
 	async get(p: Principal, id: string): Promise<Agent> {

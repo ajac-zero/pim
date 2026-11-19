@@ -3,7 +3,7 @@
  * V2 keeps a title and a body, so a line is read back as "title: body" and written as a title with the same line as its body.
  *
  * A scope is a key: `private` (what only the person and their majordomo read), `everyone`, `agent-<id>` (one agent's own), or one the person named
- * (`scope-…`, kept in `pim_app.memory_scopes`). An agent reads `everyone`, its own and the named scopes it was given (its `memoryScopes`).
+ * (`scope-…`, kept in `pim_app.memory_scopes`). An agent reads `everyone`, its own and the named scopes it was given (its `memoryScopes`); the majordomo reads every scope.
  */
 import { BadRequestError, NotFoundError } from "@pim/v2-app/errors";
 import { ok, type Route, route } from "@pim/v2-app/http";
@@ -24,14 +24,17 @@ async function scopes(app: App, p: Principal): Promise<ScopeInfo[]> {
 		const named = (await tx.query("SELECT key, name FROM pim_app.memory_scopes ORDER BY created_at")).rows;
 		// An agent's own scope is shared by the agents that keep it (copies of one agent do); `private` is the majordomo's.
 		const owners = Map.groupBy(agents, (a) => a.own);
+		const boss = (await tx.query("SELECT pim_app.majordomo_id() AS id")).rows[0]?.id as string | null;
+		// The majordomo reads every scope, as in v1; the others read their own, `everyone` and the named scopes they were given.
+		const withBoss = (ids: string[]) => (boss && !ids.includes(boss) ? [boss, ...ids] : ids);
 		const out: ScopeInfo[] = [
-			{ key: "private", kind: "private", name: null, agents: (owners.get("private") ?? []).map((a) => a.id), readers: (owners.get("private") ?? []).map((a) => a.id), count: counts.get("private") ?? 0 },
+			{ key: "private", kind: "private", name: null, agents: (owners.get("private") ?? []).map((a) => a.id), readers: withBoss((owners.get("private") ?? []).map((a) => a.id)), count: counts.get("private") ?? 0 },
 			{ key: "everyone", kind: "everyone", name: null, agents: [], readers: agents.map((a) => a.id), count: counts.get("everyone") ?? 0 },
-			...[...owners].filter(([key]) => key !== "private").map(([key, copies]): ScopeInfo => ({ key, kind: "agent", name: copies.map((a) => a.name).join(", "), agents: copies.map((a) => a.id), readers: copies.map((a) => a.id), count: counts.get(key) ?? 0 })),
-			...named.map((r): ScopeInfo => ({ key: r.key, kind: "named", name: r.name, agents: [], readers: agents.filter((a) => a.named.includes(r.key)).map((a) => a.id), count: counts.get(r.key) ?? 0 })),
+			...[...owners].filter(([key]) => key !== "private").map(([key, copies]): ScopeInfo => ({ key, kind: "agent", name: copies.map((a) => a.name).join(", "), agents: copies.map((a) => a.id), readers: withBoss(copies.map((a) => a.id)), count: counts.get(key) ?? 0 })),
+			...named.map((r): ScopeInfo => ({ key: r.key, kind: "named", name: r.name, agents: [], readers: withBoss(agents.filter((a) => a.named.includes(r.key)).map((a) => a.id)), count: counts.get(r.key) ?? 0 })),
 		];
 		const known = new Set(out.map((s) => s.key));
-		for (const [key, count] of counts) if (!known.has(key)) out.push({ key, kind: "former", name: null, agents: [], readers: [], count });
+		for (const [key, count] of counts) if (!known.has(key)) out.push({ key, kind: "former", name: null, agents: [], readers: withBoss([]), count });
 		return out;
 	});
 }

@@ -3,7 +3,7 @@
 -- It is safe to run again. It names the three scopes the person made in v1 and sets what each agent reads, as v1 had it:
 --   Groves (p_3479450c020b, the majordomo) keeps its own scope under the name `private`; every other agent keeps `agent-<id>`;
 --   Radia and Linus read Infrastructure, Richard and Wendy read Career, Jens reads Minecraft; the others read no named scope.
--- Every agent also reads `everyone`. The code that reads these settings (migration 0697) must be deployed for them to take effect.
+-- Every agent also reads `everyone`, and Groves, the majordomo, reads every scope (migration 0698). The code that reads these settings (migration 0697) must be deployed for them to take effect.
 -- It does not move any memory: for Groves's memories written since the cutover, see repair-memory-scopes-move-groves.sql.
 BEGIN;
 

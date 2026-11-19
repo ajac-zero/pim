@@ -118,25 +118,30 @@ describe("memory scopes of agents", () => {
 		// A migrated majordomo keeps its own scope under another name, as v1's was `private`.
 		await stack.admin.query("UPDATE pim_app.agents SET config = config || '{\"memoryScope\": \"private\"}' WHERE id = $1", [majordomo]);
 		for (const [scope, title] of [[career, "Resume"], ["private", "Diary"], ["everyone", "Name"], [`agent-${plain}`, "Plain's"], [`agent-${reader}`, "Reader's"]]) await app.memories.remember(as(reader), scope!, title!, title!);
-		const recalled = async (id: string) => (await app.memories.recall(as(id), (await app.agents.memoryOf(as(id), id)).reads, ".")).map((m) => m.title).sort();
+		const titles = new Set(["Resume", "Diary", "Name", "Plain's", "Reader's"]);
+		const recalled = async (id: string) => (await app.memories.recall(as(id), (await app.agents.memoryOf(as(id), id)).reads, ".", 100)).map((m) => m.title).filter((t) => titles.has(t)).sort();
 		expect(await recalled(reader)).toEqual(["Name", "Reader's", "Resume"]);
 		expect(await recalled(plain)).toEqual(["Name", "Plain's"]);
-		expect(await recalled(majordomo)).toEqual(["Diary", "Name"]);
+		// The majordomo is the agent the person named, or else the one v1 marked as the default; it reads every scope and writes to its own.
+		await stack.admin.query("UPDATE pim_app.agents SET config = config || '{\"legacy\": {\"isDefault\": true}}' WHERE id = $1", [majordomo]);
+		expect(await recalled(majordomo)).toEqual(["Diary", "Name", "Plain's", "Reader's", "Resume"]);
 		expect((await app.agents.memoryOf(as(majordomo), majordomo)).own).toBe("private");
 		// A chat with no agent is answered by the majordomo, so it reads and writes as the majordomo does.
-		await stack.admin.query("INSERT INTO pim_app.owner_settings (owner_id, key, value) VALUES ($1, 'majordomo', $2) ON CONFLICT (owner_id, key) DO UPDATE SET value = $2", [owner, JSON.stringify(majordomo)]);
 		expect((await app.agents.memoryOf(as("pim"), null)).own).toBe("private");
 		// What the Runner shows an agent in its prompt follows the same scopes.
-		const context = async (id: string) => {
-			await stack.admin.query("UPDATE pim_app.owner_settings SET value = $2 WHERE owner_id = $1 AND key = 'majordomo'", [owner, JSON.stringify(id)]);
-			return ((await stack.admin.query("SELECT pim_app.runner_context($1, NULL) AS c", [owner])).rows[0].c.memories as { title: string }[]).map((m) => m.title).sort();
+		const context = async (id: string | null) => {
+			const chat = id ? (await call(ada, "POST", "/api/sessions", { agentId: id, title: "Scopes" })).body.id : null;
+			const c = (await stack.admin.query("SELECT pim_app.runner_context($1, $2) AS c", [owner, chat])).rows[0].c;
+			return { majordomo: c.agent.majordomo as boolean, titles: (c.memories as { title: string }[]).map((m) => m.title).filter((t) => titles.has(t)).sort() };
 		};
-		expect(await context(reader)).toEqual(["Name", "Reader's", "Resume"]);
-		expect(await context(majordomo)).toEqual(["Diary", "Name"]);
+		expect(await context(reader)).toEqual({ majordomo: false, titles: ["Name", "Reader's", "Resume"] });
+		expect(await context(majordomo)).toEqual({ majordomo: true, titles: ["Diary", "Name", "Plain's", "Reader's", "Resume"] });
+		expect(await context(null)).toMatchObject({ majordomo: true });
 		// The memory screen lists who reads each scope, and deleting a named scope stops every agent reading it.
 		const list = (await call(ada, "GET", "/api/memory")).body.scopes as { key: string; readers: string[] }[];
-		expect(list.find((s) => s.key === career)!.readers).toEqual([reader]);
+		expect(list.find((s) => s.key === career)!.readers.sort()).toEqual([majordomo, reader].sort());
 		expect(list.find((s) => s.key === "private")!.readers).toEqual([majordomo]);
+		expect(list.find((s) => s.key === `agent-${plain}`)!.readers.sort()).toEqual([majordomo, plain].sort());
 		expect((await call(ada, "DELETE", `/api/memory/scopes/${career}`)).status).toBe(200);
 		expect((await call(ada, "GET", `/api/agents/${reader}`)).body.memoryScopes).toEqual([]);
 	});

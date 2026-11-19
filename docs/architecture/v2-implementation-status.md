@@ -93,7 +93,7 @@ The Gate serves the v1 web app and answers its routes (`packages/v2-server/src/c
 - Connector skills over MCP, widgets from connector tool results, and the live coding stream's partial text and running-command output (the stream follows the conversation a message at a time).
 - The utility model reaches a ChatGPT-plan model with the plan's token (`compat/utility.ts`); an app's `pim.ask` does not, and neither's calls are metered.
 - Live pushes of room changes.
-- Coding environment snapshots and rebuild; harnesses pointed at the model gateway.
+- Coding environment snapshots and rebuild; harnesses pointed at the model gateway; a pi coding thread runs on the deployment's models (`PIM_CODING_DEFAULT_MODEL`, the Anthropic and OpenAI keys, the AI gateway), not on the person's own providers or ChatGPT plan: Forge's database role cannot read them.
 - Process and file computer triggers, trigger health and checkpoints; a real desktop in the computer container.
 - Storage and app limits are shown, not enforced; there is no v2 event log for diagnostics.
 

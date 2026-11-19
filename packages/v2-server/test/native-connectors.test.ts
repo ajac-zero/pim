@@ -196,9 +196,9 @@ real("native and OAuth connectors", () => {
 		origin = `http://127.0.0.1:${d.gatePort}`;
 		process.env.PIM_PUBLIC_URL = origin;
 		chatId = (await web.call("POST", "/api/sessions", { title: "Work" })).json.id;
-		// The majordomo answers this chat, and works with the connectors these tests connect (a server connected by its address is listed by its name).
+		// The majordomo answers this chat, and works with the directory's connectors these tests connect.
 		const majordomo = (await web.call("GET", "/api/majordomo")).json.agent.id as string;
-		expect((await web.call("PUT", `/api/agents/${majordomo}`, { apps: ["google/gmail", "google/drive", "spotify/spotify", "Lookup"] })).status).toBe(200);
+		expect((await web.call("PUT", `/api/agents/${majordomo}`, { apps: ["google/gmail", "google/drive", "spotify/spotify"] })).status).toBe(200);
 		runner = await start(d, "runner", { pollMs: 40, providers: () => [faux.provider] }, { PIM_DEFAULT_MODEL: "faux/m", PIM_APP_DATABASE_URL: stack.url("gate"), ...keys });
 	}, 180_000);
 	afterAll(async () => {
@@ -314,6 +314,9 @@ real("native and OAuth connectors", () => {
 	it("signs in to a remote MCP server by itself: discovery, registration, PKCE, and a tool call with the token", async () => {
 		const started = (await web.call("POST", "/api/mcp", { url: `${standOrigin}/mcp`, name: "Lookup" })).json;
 		expect(started, JSON.stringify(started)).toMatchObject({ state: "authenticating" });
+		// A server connected by its address is not in the directory: the majordomo lists it by its connection.
+		const major = (await web.call("GET", "/api/majordomo")).json.agent as { id: string; apps: string[] };
+		expect((await web.call("PUT", `/api/agents/${major.id}`, { apps: [...major.apps, started.id] })).status).toBe(200);
 		const url = new URL(started.authUrl);
 		expect(url.pathname).toBe("/mcpas/authorize");
 		const registered = [...stand.clients.entries()].at(-1)!;
@@ -534,7 +537,7 @@ real("native and OAuth connectors", () => {
 		// The link is the real one: signing in at it connects the connector.
 		stand.grant.drive = "https://www.googleapis.com/auth/drive.file";
 		expect((await signIn(link!)).json).toContain("Google Drive is connected");
-		expect(find(/Spotify/)).toMatch(/^Spotify is already connected/);
+		expect(find(/^Spotify is already/)).toMatch(/^Spotify is already connected/);
 		expect(find(/nonesuch/)).toMatch(/offers no connector nonesuch/);
 		expect(find(/google\/gmail/)).toMatch(/^This agent doesn't work with google\/gmail; its connectors are Google Drive, Spotify\. /);
 
@@ -554,12 +557,12 @@ real("native and OAuth connectors", () => {
 		expect((await resultsIn(helperChat, "add_custom_connector"))[0]).toBe("Only the person's majordomo does that.");
 		// A server this Pim has a connector for already is that connector, not a second one.
 		await turn(bossChat, [fauxToolCall("add_custom_connector", { name: "Same server", url: `${standOrigin}/mcp` })], { tool: "connector:add", approve: true });
-		expect((await resultsIn(bossChat, "add_custom_connector"))[0]).toMatch(/^Lookup two is one of this Pim's connectors \[id: custom\/lookup-two-\w+\], and one of yours\./);
+		expect((await resultsIn(bossChat, "add_custom_connector"))[0]).toMatch(/^Lookup two is one of this Pim's connectors \[id: custom\/lookup-two\], and one of yours\./);
 		await turn(bossChat, [fauxToolCall("add_custom_connector", { name: "Mine", url: `${standOrigin}/other-mcp` })], { tool: "connector:add", approve: true });
 		const added = (await d.stack.admin.query("SELECT value FROM pim_app.instance_settings WHERE key = 'custom_apps'")).rows[0].value as { id: string; name: string; url: string }[];
 		expect(added.filter((c) => c.name === "Same server")).toEqual([]);
 		expect(added.find((c) => c.name === "Mine")).toMatchObject({ url: `${standOrigin}/other-mcp` });
 		expect((await resultsIn(bossChat, "add_custom_connector"))[1]).toMatch(/^Mine is one of this Pim's connectors \[id: custom\/mine-[0-9a-f]+\], and one of yours\./);
-		expect((await appsOf(boss)).map((ref) => ref.replace(/-\w+$/, ""))).toEqual(["custom/lookup-two", "custom/mine"]);
+		expect((await appsOf(boss)).map((ref) => ref.replace(/-[0-9a-f]{6}$/, ""))).toEqual(["custom/lookup-two", "custom/mine"]);
 	}, 240_000);
 });

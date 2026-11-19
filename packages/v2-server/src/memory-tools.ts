@@ -86,7 +86,8 @@ export function memoryTools(deps: { ownerId: string; runtime: RuntimeDb; read: D
 			if (known) return text(`The scope "${known.name}" is there already, as ${known.key}.`);
 			return text(`Made the scope "${name}", as ${await app.memories.createScope(call.p, name)}. Only you read it until it is shared.`);
 		}),
-		write("share_memory_scope", "Let another of the person's agents read one of their named memory scopes, by its key, or with stop no longer read it, when the agent needs what it holds for its work or the person asks. Use the agent's id from your_agents. The person is asked first. An agent always reads its own scope and everyone.", Type.Object({ scope: S({ description: "A named scope's key, as create_memory_scope gave it." }), agent: S({ description: "The agent's id from your_agents." }), stop: O(Type.Boolean({ description: "True to stop it reading the scope." })) }), async (app, call, a) => {
+		// Parked for the person's approval, and run again when they decide, so a tool that may be run again.
+		read("share_memory_scope", "Let another of the person's agents read one of their named memory scopes, by its key, or with stop no longer read it, when the agent needs what it holds for its work or the person asks. Use the agent's id from your_agents. The person is asked first. An agent always reads its own scope and everyone.", Type.Object({ scope: S({ description: "A named scope's key, as create_memory_scope gave it." }), agent: S({ description: "The agent's id from your_agents." }), stop: O(Type.Boolean({ description: "True to stop it reading the scope." })) }), async (app, call, a) => {
 			const refused = await majordomoOnly(call);
 			if (refused) return refused;
 			const scope = (await app.db.owner(ownerId, async (tx) => (await tx.query("SELECT key, name FROM pim_app.memory_scopes WHERE key = $1", [a.scope])).rows[0])) as { key: string; name: string } | undefined;

@@ -1,13 +1,14 @@
 import * as Y from "yjs";
 import { Authorizer, principalId } from "./authz.ts";
 import type { Db, Tx } from "./db.ts";
-import { ConflictError, NotFoundError } from "./errors.ts";
+import { BadRequestError, ConflictError, NotFoundError } from "./errors.ts";
 import { newId } from "./ids.ts";
 import type { Principal } from "@pim/v2-contracts/identity";
 import type { ObjectStore } from "@pim/v2-contracts/platform";
 
 /** The text inside a note's document, named as the Worker's notes name it so imported documents open unchanged. */
 const TEXT = "markdown";
+const MAX_TITLE = 200;
 export const LEASE_MS = 15_000;
 /** After this many logged updates a snapshot is written to the object store and the log before it is dropped. */
 export const COMPACT_AFTER = 200;
@@ -148,6 +149,16 @@ export class Canvas {
 			(await tx.query("SELECT version, text, source, restored_from, created_at FROM pim_app.note_versions WHERE note_id = $1 ORDER BY version DESC", [noteId])).rows.map((r) => ({ version: Number(r.version), text: r.text, source: r.source, restoredFrom: r.restored_from ?? null, createdAt: r.created_at })));
 	}
 
+	/** One kept version of a note (the latest by default) with the latest's number, for an agent that reads an older one. What was typed since is kept first. */
+	async kept(ownerId: string, noteId: string, version?: number): Promise<KeptVersion & { latest: number; title: string }> {
+		const latest = await this.keep(ownerId, noteId, "person");
+		return this.db.owner(ownerId, async (tx) => {
+			const r = (await tx.query("SELECT n.title, v.version, v.text, v.source, v.restored_from, v.created_at FROM pim_app.notes n JOIN pim_app.note_versions v ON v.note_id = n.note_id WHERE n.note_id = $1 AND n.deleted_at IS NULL AND v.version = $2", [noteId, version ?? latest])).rows[0];
+			if (!r) throw new NotFoundError(`No version ${version} of note ${noteId}.`);
+			return { latest, title: r.title as string, version: Number(r.version), text: r.text as string, source: r.source as KeptSource, restoredFrom: r.restored_from ?? null, createdAt: r.created_at as Date };
+		});
+	}
+
 	/** The state a live editor's Yjs provider starts from. */
 	async state(ownerId: string, noteId: string): Promise<{ update: Uint8Array; version: number }> {
 		return this.db.owner(ownerId, async (tx) => {
@@ -178,6 +189,61 @@ export class Canvas {
 				return [at, find.length, replace];
 			});
 			return { version: await this.keep(p.ownerId, noteId, "agent") };
+		});
+	}
+
+	/**
+	 * note_edit as v1 had it: `edits` (find and replace pairs, each `find` appearing once, applied in order and all or none) or `append` (a line added at the end) change the live
+	 * text as it is when they land, so what the person typed meanwhile stays; `content` replaces it whole and needs `baseVersion` to be the latest kept version; `title` renames.
+	 * What the person had is kept as a version first and the result as the agent's. `changed` is false when nothing differs from the latest version.
+	 */
+	async change(p: Principal, noteId: string, change: { edits?: { find: string; replace: string }[]; append?: string; content?: string; title?: string; baseVersion?: number }): Promise<{ version: number; changed: boolean }> {
+		await this.authz.enforce(p, "api:write");
+		if (change.content !== undefined && (change.edits !== undefined || change.append !== undefined)) throw new BadRequestError("Send content alone, or edits and append.");
+		if (change.edits === undefined && change.append === undefined && change.content === undefined && change.title === undefined) throw new BadRequestError("Send edits, append, content or title: something to change.");
+		const title = change.title === undefined ? undefined : change.title.trim().replace(/\s+/g, " ");
+		if (title !== undefined && (!title || title.length > MAX_TITLE)) throw new BadRequestError(`title must be 1 to ${MAX_TITLE} characters`);
+		return this.#withLease(p.ownerId, noteId, async (lease) => {
+			const latest = await this.keep(p.ownerId, noteId, "person");
+			if (change.content !== undefined) {
+				if (change.baseVersion === undefined) throw new BadRequestError("Give base_version, the version you read, to replace the whole text.");
+				if (change.baseVersion !== latest) throw new ConflictError(`Version ${change.baseVersion} is not the latest: version ${latest} is. Read it, then edit that.`, "stale_version");
+			}
+			if (change.edits !== undefined || change.append !== undefined || change.content !== undefined) {
+				const { doc } = await this.db.owner(p.ownerId, (tx) => this.#load(tx, noteId));
+				const text = doc.getText(TEXT);
+				const before = text.toString();
+				let after = change.content ?? before;
+				for (const [i, { find, replace }] of (change.edits ?? []).entries()) {
+					const first = after.indexOf(find);
+					if (!find) throw new BadRequestError(`Edit ${i + 1}: find must not be empty`);
+					if (first < 0) throw new ConflictError(`Edit ${i + 1}: its find text is not in the note. Read it again and copy the text exactly.`, "text_not_found");
+					if (after.indexOf(find, first + 1) >= 0) throw new ConflictError(`Edit ${i + 1}: its find text appears more than once. Include more of the surrounding text so it matches once.`, "text_ambiguous");
+					after = after.slice(0, first) + replace + after.slice(first + find.length);
+				}
+				if (change.append !== undefined) after = after === "" || after.endsWith("\n") ? after + change.append : `${after}\n${change.append}`;
+				if (after !== before) {
+					let captured: Uint8Array | null = null;
+					doc.on("update", (u: Uint8Array) => (captured = u));
+					doc.transact(() => splice(text, before, after));
+					if (captured) await this.append(p.ownerId, lease, captured, `agent:${principalId(p)}`);
+				}
+			}
+			if (title !== undefined) await this.db.owner(p.ownerId, (tx) => tx.query("UPDATE pim_app.notes SET title = $2 WHERE note_id = $1", [noteId, title]));
+			const version = await this.keep(p.ownerId, noteId, "agent");
+			return { version, changed: version !== latest || title !== undefined };
+		});
+	}
+
+	/** The person's notes, most recently changed first, with the latest kept version's size; `words` must all appear in the title. */
+	async list(p: Principal, words: string[] = [], limit = 200): Promise<{ total: number; notes: { id: string; title: string; version: number; size: number; changedAt: Date }[] }> {
+		await this.authz.enforce(p, "api:read");
+		return this.db.owner(p.ownerId, async (tx) => {
+			const like = words.map((w) => `%${w.replace(/[\\%_]/g, "\\$&")}%`);
+			const where = "n.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM unnest($1::text[]) w WHERE n.title NOT ILIKE w)";
+			const total = Number((await tx.query(`SELECT count(*) AS n FROM pim_app.notes n WHERE ${where}`, [like])).rows[0].n);
+			const rows = (await tx.query(`SELECT n.note_id, n.title, n.kept_version, coalesce(octet_length(v.text), 0) AS size, coalesce(v.created_at, n.created_at) AS changed_at FROM pim_app.notes n LEFT JOIN pim_app.note_versions v ON v.note_id = n.note_id AND v.version = n.kept_version WHERE ${where} ORDER BY changed_at DESC LIMIT $2`, [like, limit])).rows;
+			return { total, notes: rows.map((r) => ({ id: r.note_id as string, title: r.title as string, version: Number(r.kept_version), size: Number(r.size), changedAt: r.changed_at as Date })) };
 		});
 	}
 
@@ -221,3 +287,20 @@ export class Canvas {
 		});
 	}
 }
+
+/** Makes `text` say `after`, changing only what differs between them at each end, so a person's cursor elsewhere stays where it was. */
+function splice(text: Y.Text, before: string, after: string): void {
+	let start = 0;
+	const shortest = Math.min(before.length, after.length);
+	while (start < shortest && before[start] === after[start]) start++;
+	// Never between the halves of a surrogate pair.
+	if (start > 0 && isHigh(before.charCodeAt(start - 1))) start--;
+	let end = 0;
+	while (end < shortest - start && before[before.length - 1 - end] === after[after.length - 1 - end]) end++;
+	if (end > 0 && isLow(before.charCodeAt(before.length - end))) end--;
+	if (before.length - start - end > 0) text.delete(start, before.length - start - end);
+	const inserted = after.slice(start, after.length - end);
+	if (inserted !== "") text.insert(start, inserted);
+}
+const isHigh = (code: number) => code >= 0xd800 && code <= 0xdbff;
+const isLow = (code: number) => code >= 0xdc00 && code <= 0xdfff;

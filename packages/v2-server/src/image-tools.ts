@@ -18,6 +18,7 @@ import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ToolRegistration } from "@earendil-works/pi-durable";
 import type { App } from "@pim/v2-app/app";
 import { openString, type KeyringCrypto } from "@pim/v2-app/crypto";
+import { acquireRemote, type RelayBus } from "@pim/v2-app/relay";
 import { sniffImage } from "@pim/v2-app/objects";
 import { OwnerId, PartitionId, type Principal } from "@pim/v2-contracts/identity";
 import type { Db as RuntimeDb } from "@pim/v2-runtime/db";
@@ -88,6 +89,8 @@ export type ImageToolDeps = {
 	runtime: RuntimeDb;
 	app: App | undefined;
 	images: ImageSources;
+	/** The Relay's bus, made when first needed: with a computer paired, the image is written onto it too, where the person's files are. */
+	relay?: (() => Promise<RelayBus>) | undefined;
 	fetch: typeof fetch;
 	now: () => number;
 	chatOf(conversationId: number | string): Promise<string | null>;
@@ -120,6 +123,21 @@ export function imageTools(deps: ImageToolDeps, kit: ImageToolKit): ToolRegistra
 		const model = rest.join("/");
 		if (!endpoint || model === "") return undefined;
 		return { id: `${provider}/${model}`, draw: (prompt, shape, signal) => generateOnEndpoint(deps.fetch, endpoint, model, prompt, shape, signal) };
+	}
+
+	/** Writes the image onto the person's computer when one is connected and this agent may use it; false when there is none or it could not be written. */
+	async function saveOnComputer(app: App, p: Principal, path: string, bytes: Uint8Array): Promise<boolean> {
+		try {
+			const bus = deps.relay ? await deps.relay() : null;
+			if (!bus) return false;
+			await app.identity.authz.enforce(p, "computer:use");
+			const computer = await acquireRemote(bus, deps.ownerId, "file_write");
+			await computer.call("mkdir", { path: posix.dirname(path), recursive: true });
+			await computer.call("write", { path, data: Buffer.from(bytes).toString("base64") });
+			return true;
+		} catch {
+			return false;
+		}
 	}
 
 	const generate = defineTool({
@@ -155,7 +173,9 @@ export function imageTools(deps: ImageToolDeps, kit: ImageToolKit): ToolRegistra
 					const named = args.path !== undefined ? args.path : `${FILES_ROOT}/images/${stamp}`;
 					const path = /\.(png|jpe?g|webp|gif)$/i.test(named) ? named : `${named}.${EXTENSIONS[type]}`;
 					await app.objects.put(p, { bytes, contentType: type, purpose: "file", key: `${deps.ownerId}/files${path}` });
-					const summary = JSON.stringify({ image: { path, model: who.id, type, bytes: bytes.length }, note: "The person sees it in the chat now, and in Files." });
+					// With a computer paired, the person's files are on it, as in v1: the image is written there too, for the agent to file_read or use in a shell. The chat shows the stored copy either way.
+					const onComputer = await saveOnComputer(app, p, path, bytes);
+					const summary = JSON.stringify({ image: { path, model: who.id, type, bytes: bytes.length }, note: `The person sees it in the chat now, and in Files.${onComputer ? " To look at it yourself, file_read it." : ""}` });
 					await kit.ops.transition(deps.ownerId, operationId, "completed", { summary, path });
 					await deps.runtime.read(deps.ownerId, "SELECT pim_app.record_model_call($1, $2, 'chat', NULL, $3, $4, 0, 0, 0)", [deps.ownerId, `mc_img_${operationId}`.slice(0, 120), "images", who.id]).catch(() => undefined);
 					return text(summary);

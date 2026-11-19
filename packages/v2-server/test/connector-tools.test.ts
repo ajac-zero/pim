@@ -13,15 +13,17 @@ import type { Process } from "../src/main.ts";
 import { readTranscript, waitFor } from "../../v2-runtime/test/support/rig.ts";
 import { Client } from "./support/client.ts";
 import { type Deployment, base, start, startS3 } from "./support/processes.ts";
-import { createStack, describeWith, freePort, hasNats, startNats } from "./support/stack.ts";
+import { createStack, describeWith, freePort, hasNats, startNats, sentAndAnswered } from "./support/stack.ts";
 
 const real = describeWith(hasNats());
 const TOKEN = "mcp-secret-token";
+/** A real 1x1 PNG, which a connector's screenshot tool returns. */
+const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
 
 /** A minimal MCP server: initialize with a session, tools/list, tools/call (one answered as an event stream). It records every tools/call. */
 function fakeMcp() {
 	const calls: { name: string; arguments: unknown; authorization: string | undefined }[] = [];
-	const tools = [
+	const tools: { name: string; description: string; inputSchema: Record<string, unknown>; annotations?: Record<string, unknown> }[] = [
 		{ name: "search", description: "Search tickets", inputSchema: { type: "object", properties: { q: { type: "string" } } }, annotations: { readOnlyHint: true } },
 		{ name: "create_ticket", description: "Open a ticket", inputSchema: { type: "object", properties: { title: { type: "string" } }, required: ["title"] } },
 		{ name: "delete_all", description: "Delete every ticket", inputSchema: { type: "object", properties: {} }, annotations: { destructiveHint: true } },
@@ -43,12 +45,13 @@ function fakeMcp() {
 			if (m.method === "tools/list") return reply({ tools });
 			if (m.method === "tools/call") {
 				calls.push({ name: m.params.name, arguments: m.params.arguments, authorization: req.headers.authorization });
+				if (m.params.name === "shot") return reply({ content: [{ type: "text", text: "here it is" }, { type: "image", data: PNG, mimeType: "image/png" }] });
 				return reply({ content: [{ type: "text", text: `${m.params.name} ok ${JSON.stringify(m.params.arguments)}` }] }, m.params.name === "create_ticket");
 			}
 			res.writeHead(404).end();
 		});
 	});
-	return { server, calls };
+	return { server, calls, tools };
 }
 
 real("connector tools", () => {
@@ -75,10 +78,10 @@ real("connector tools", () => {
 	const send = async (words: string, park: boolean, ...script: unknown[]) => {
 		faux.setResponses([...script, toolUse(fauxToolCall("send_to_user", { message: `done ${++n}` })), fauxAssistantMessage(`ended ${n}`)] as never);
 		expect((await web.call("POST", `/api/sessions/${chatId}/messages`, { commandId: `m-${n}`, text: words })).status).toBe(202);
-		if (!park) await waitFor(`the turn "${words}" to end`, async () => ((await transcript()).includes(`ended ${n}`) ? true : undefined), 60_000);
+		if (!park) await waitFor(`the turn "${words}" to end`, async () => (sentAndAnswered(await transcript(), `done ${n}`) ? true : undefined), 60_000);
 	};
 	const waiting = () => waitFor("an approval to be filed", async () => (await d.stack.admin.query("SELECT id, tool, args FROM pim_app.approvals WHERE state = 'waiting'")).rows[0], 60_000);
-	const finish = () => waitFor("the turn to end", async () => ((await transcript()).includes(`ended ${n}`) ? true : undefined), 60_000);
+	const finish = () => waitFor("the turn to end", async () => (sentAndAnswered(await transcript(), `done ${n}`) ? true : undefined), 60_000);
 	const callNames = () => mcp.calls.map((c) => c.name);
 
 	beforeAll(async () => {
@@ -148,7 +151,7 @@ real("connector tools", () => {
 	}, 120_000);
 
 	it("does not call a tool whose approval was denied", async () => {
-		await send("open another", true, toolUse(fauxToolCall("connector_call", { connector, tool: "create_ticket", arguments: { title: "Nope" } })), toolUse(fauxToolCall("send_to_user", { message: "ok" })));
+		await send("open another", true, toolUse(fauxToolCall("connector_call", { connector, tool: "create_ticket", arguments: { title: "Nope" } })));
 		const approval = await waiting();
 		expect((await web.call("POST", `/api/approvals/${approval.id}/deny`, {})).status).toBe(200);
 		await finish();
@@ -238,6 +241,42 @@ real("connector tools", () => {
 		expect((await web.call("DELETE", `/api/mcp/${bare.id}`)).json).toEqual({ deleted: true });
 		expect((await web.call("GET", "/api/connections")).json).toEqual({ connections: [] });
 	});
+
+	it("checks a call's arguments before anyone is asked, finds tools past the first page, and shows a tool's picture to the model", async () => {
+		// The server grows: a tool that answers with a picture, and seventy more.
+		const bulk = Array.from({ length: 70 }, (_, i) => `bulk_${String(i).padStart(2, "0")}`);
+		mcp.tools.push({ name: "shot", description: "Take a screenshot", inputSchema: { type: "object", properties: {} }, annotations: { readOnlyHint: true } }, ...bulk.map((name) => ({ name, description: "Bulk tool", inputSchema: { type: "object", properties: {} }, annotations: { readOnlyHint: true } })));
+		// A second connection to it (the Runner keeps each connection's tool list for half a minute), with all of them switched on.
+		const url = (await d.stack.admin.query("SELECT url FROM pim_app.connectors WHERE id = $1", [connector])).rows[0].url;
+		const gallery = (await web.call("POST", "/api/connectors", { kind: "custom_mcp", name: "Gallery", url, credential: TOKEN })).json.connector.id as string;
+		expect((await web.call("POST", `/api/connectors/${gallery}/discover`)).json.discovered).toBe(74);
+		expect((await web.call("PUT", `/api/connectors/${gallery}/tools`, { tools: ["shot", ...bulk] })).status).toBe(200);
+		const filed = (await d.stack.admin.query("SELECT count(*)::int AS n FROM pim_app.approvals")).rows[0].n as number;
+		const before = mcp.calls.length;
+		await send("try these", false,
+			toolUse(fauxToolCall("connector_call", { connector, tool: "create_ticket", arguments: {} })),
+			toolUse(fauxToolCall("connector_call", { connector: gallery, tool: "shot" })),
+			toolUse(fauxToolCall("connector_tools", { query: "bulk", offset: 10, limit: 5 })),
+			toolUse(fauxToolCall("connector_tools", { connector: gallery, query: "printer" })),
+		);
+		// A call the tool would refuse is refused here, with what the tool takes, and nothing is called or asked.
+		const answers = await results("connector_call");
+		expect(answers.at(-2)).toMatch(/Validation failed[\s\S]*title[\s\S]*The tool takes: \{.*"required":\["title"\]/);
+		expect(mcp.calls.slice(before).map((c) => c.name)).toEqual(["shot"]);
+		expect((await d.stack.admin.query("SELECT count(*)::int AS n FROM pim_app.approvals")).rows[0].n).toBe(filed);
+		// A tool's picture reaches the model as an image, not as "[image image/png]".
+		const model = (JSON.parse(await transcript()) as { model?: { role: string; toolName?: string; content: { type: string; data?: string; text?: string }[] }[] }[]).flatMap((e) => e.model ?? []);
+		const shot = model.filter((m) => m.role === "toolResult" && m.toolName === "connector_call").at(-1)!;
+		expect(shot.content).toEqual([{ type: "text", text: "here it is" }, { type: "image", data: PNG, mimeType: "image/png" }]);
+		// The tools past the first page are listed on request, and a search that finds nothing says how many there are.
+		const page = JSON.parse((await results("connector_tools")).at(-2)!);
+		expect(page).toMatchObject({ total: 70, from: 10, next: "offset 15 of 70" });
+		expect(page.tools.map((t: { tool: string }) => t.tool)).toEqual(bulk.slice(10, 15));
+		expect((await results("connector_tools")).at(-1)).toMatch(/^None of the 73 tools matches/);
+		// The prompt lists the first sixty and says how many more there are.
+		await send("and now?", false);
+		expect(await transcript()).toMatch(/and 13 more tools: find them with connector_tools/);
+	}, 120_000);
 });
 
 describe("finding a server's token endpoint", () => {

@@ -16,7 +16,9 @@ Notes are the person's documents in Pim: plans, lists, drafts, research, meeting
 
 ## Changing a note
 - Read it with note_read right before you change it: the person may have changed it since you last looked.
-- Change it with note_edit: a find and a replace, the find copied exactly from what you read and long enough to appear once, with base_version the version you read. It lands where the text is now, so what the person typed elsewhere stays; if the note changed since, nothing is changed and you read it again.
+- Change it with edits: find-and-replace pairs, each find copied exactly from what you read and long enough to appear once. They land where the text is now, so what the person typed elsewhere stays; if one no longer matches, nothing is changed and you read the note again.
+- Add to the end with append, and rename with title.
+- Give content, the whole text, only when the person asked you to rewrite the note, with base_version the version you read. It's refused if the note changed since, so their typing is never lost unseen.
 - Keep the person's words: don't reformat, reorder or tidy what they wrote unless they ask.
 
 ## Writing in one

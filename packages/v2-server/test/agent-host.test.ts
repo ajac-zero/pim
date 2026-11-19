@@ -483,12 +483,14 @@ real("the default agent host", () => {
 		void forgeDb;
 	}, 120_000);
 	it("manages agents, skills, schedules and triggers", async () => {
-		await say("set things up", toolUse(fauxToolCall("create_agent", { name: "Poet", description: "Writes verse", instructions: "Answer in verse." }), fauxToolCall("write_skill", { name: "haiku", description: "Write haiku", body: "Five, seven, five.", files: { "ref.md": "# ref" } })));
+		await say("set things up", toolUse(fauxToolCall("create_agent", { name: "Poet", description: "Writes verse", instructions: "Answer in verse." })));
+		// (Saving a skill is a person's to approve; the next test does that. This one reads one back.)
+		await app.agents.createSkill({ kind: "agent", ownerId: ownerId as never, agentId: "pim" }, { name: "haiku", description: "Write haiku", body: "Five, seven, five.", files: { "ref.md": "# ref" } });
 const agentId = (await d.stack.admin.query("SELECT id FROM pim_app.agents WHERE name = 'Poet'")).rows[0].id as string;
-		const trigger = { version: 1, owningAgentId: agentId, originChatId: "api", label: "Hourly", instruction: "check in", source: { kind: "time", schedule: "cron", expression: "0 * * * *", timeZone: "UTC" }, condition: null, destination: { type: "new_chat" }, delivery: {}, authorizationRef: null };
+		const trigger = { label: "Hourly", instruction: "check in", source: { kind: "time", schedule: "cron", expression: "0 * * * *", timeZone: "UTC" }, agentId, newChat: true };
 		await say(
 			"more",
-			toolUse(fauxToolCall("read_skill", { name: "haiku" }), fauxToolCall("read_skill_file", { name: "haiku", path: "ref.md" }), fauxToolCall("schedule_task", { instruction: "Stretch", label: "Stretching", delay_seconds: 3600 }), fauxToolCall("create_trigger", { spec: trigger })),
+			toolUse(fauxToolCall("read_skill", { name: "haiku" }), fauxToolCall("read_skill_file", { name: "haiku", path: "ref.md" }), fauxToolCall("schedule_task", { instruction: "Stretch", label: "Stretching", delay_seconds: 3600 }), fauxToolCall("create_trigger", trigger)),
 			toolUse(fauxToolCall("list_scheduled_tasks", {}), fauxToolCall("list_triggers", {}), fauxToolCall("update_agent", { id: agentId, name: "Bard" })),
 		);
 		expect((await results("read_skill")).at(-1)).toContain("Five, seven, five.");
@@ -761,35 +763,35 @@ const agentId = (await d.stack.admin.query("SELECT id FROM pim_app.agents WHERE 
 		expect((await web.call("PUT", "/api/settings", { approvalPolicy: "explicit" })).status).toBe(200);
 		const scribe = await newAgent("Scribe", "Writes things down");
 		const chat = (await web.call("POST", "/api/sessions", { title: "Scribe", agentId: scribe })).json.id as string;
-		const skill = async () => (await d.stack.admin.query("SELECT version, body FROM pim_app.skills WHERE name = 'haiku'")).rows[0] as { version: number; body: string } | undefined;
+		const skill = async () => (await d.stack.admin.query("SELECT version, body FROM pim_app.skills WHERE name = 'sonnet'")).rows[0] as { version: number; body: string } | undefined;
 		const listed = async () => (await d.stack.admin.query("SELECT config->'skills' AS skills FROM pim_app.agents WHERE id = $1", [scribe])).rows[0].skills as string[] | null;
 
 		// Nothing is saved until the person says yes, and what they are asked names the agent and the skill.
-		await turnWith(chat, [fauxToolCall("write_skill", { name: "haiku", description: "Write haiku", body: "Five, seven, five.", files: { "ref.md": "# ref" } })], {
+		await turnWith(chat, [fauxToolCall("write_skill", { name: "sonnet", description: "Write sonnets", body: "Five, seven, five.", files: { "ref.md": "# ref" } })], {
 			action: "skill:write", approve: true,
 			during: async (filed) => {
-				expect(filed.args).toMatchObject({ name: "haiku", agent: scribe, summary: "Scribe saves a new skill: haiku" });
+				expect(filed.args).toMatchObject({ name: "sonnet", agent: scribe, summary: "Scribe saves a new skill: sonnet" });
 				expect(await skill()).toBeUndefined();
 			},
 		});
 		expect(await skill()).toMatchObject({ version: 1, body: "Five, seven, five." });
 		// The skill is on the agent's own list, which is what its prompt shows it.
-		expect(await listed()).toEqual(["haiku"]);
+		expect(await listed()).toEqual(["sonnet"]);
 		await turnWith(chat, [fauxToolCall("current_time", {})]);
-		expect(await transcriptOf(chat)).toMatch(/<your_skills>[\s\S]*haiku: Write haiku/);
+		expect(await transcriptOf(chat)).toMatch(/<your_skills>[\s\S]*sonnet: Write sonnets/);
 
 		// A rewrite names the version it read; one that does not, or read an old one, is refused before anyone is asked.
-		await turnWith(chat, [fauxToolCall("write_skill", { name: "haiku", body: "No version." }), fauxToolCall("write_skill", { name: "haiku", body: "Old.", base_version: 9 }), fauxToolCall("write_skill", { name: "limerick", body: "x", base_version: 1 }), fauxToolCall("read_skill", { name: "haiku" })]);
+		await turnWith(chat, [fauxToolCall("write_skill", { name: "sonnet", body: "No version." }), fauxToolCall("write_skill", { name: "sonnet", body: "Old.", base_version: 9 }), fauxToolCall("write_skill", { name: "limerick", body: "x", base_version: 1 }), fauxToolCall("read_skill", { name: "sonnet" })]);
 		const answers = await resultsIn(chat, "write_skill");
-		expect(answers.slice(-3)).toEqual(["A skill named haiku exists already: read it, then give its version as base_version to rewrite it", "haiku is at version 1 now, not 9: read it again before rewriting it", "No skill named limerick"]);
-		expect((await resultsIn(chat, "read_skill")).at(-1)).toMatch(/^Skill haiku, version 1:\nFive, seven, five\./);
+		expect(answers.slice(-3)).toEqual(["A skill named sonnet exists already: read it, then give its version as base_version to rewrite it", "sonnet is at version 1 now, not 9: read it again before rewriting it", "No skill named limerick"]);
+		expect((await resultsIn(chat, "read_skill")).at(-1)).toMatch(/^Skill sonnet, version 1:\nFive, seven, five\./);
 		expect(await skill()).toMatchObject({ version: 1 });
 		// A refusal leaves the skill as it was; a yes makes the next version.
-		await turnWith(chat, [fauxToolCall("write_skill", { name: "haiku", body: "Refused.", base_version: 1 })], { action: "skill:write", approve: false });
+		await turnWith(chat, [fauxToolCall("write_skill", { name: "sonnet", body: "Refused.", base_version: 1 })], { action: "skill:write", approve: false });
 		expect((await resultsIn(chat, "write_skill")).at(-1)).toMatch(/did not approve/);
 		expect(await skill()).toMatchObject({ version: 1, body: "Five, seven, five." });
-		await turnWith(chat, [fauxToolCall("write_skill", { name: "haiku", body: "Approved.", base_version: 1 })], { action: "skill:write", approve: true });
-		expect((await resultsIn(chat, "write_skill")).at(-1)).toMatch(/^Saved the skill haiku, version 2, one of Scribe's skills/);
+		await turnWith(chat, [fauxToolCall("write_skill", { name: "sonnet", body: "Approved.", base_version: 1 })], { action: "skill:write", approve: true });
+		expect((await resultsIn(chat, "write_skill")).at(-1)).toMatch(/^Saved the skill sonnet, version 2, one of Scribe's skills/);
 		expect(await skill()).toMatchObject({ version: 2, body: "Approved." });
 	}, 240_000);
 
@@ -798,6 +800,7 @@ const agentId = (await d.stack.admin.query("SELECT id FROM pim_app.agents WHERE 
 		const mine = await newAgent("Rememberer", "Remembers");
 		const chat = (await web.call("POST", "/api/sessions", { title: "Memory", agentId: mine })).json.id as string;
 		const secret = await app.memories.remember({ kind: "agent", ownerId: ownerId as never, agentId: "pim" }, `agent-${other}`, "Keeper's secret", "hidden");
+		// The calls of one turn run side by side, so each answer is found by what it says, and what depends on another call waits for the next turn.
 		await turnWith(chat, [
 			fauxToolCall("note", { title: "x".repeat(281), body: "too long a title" }),
 			fauxToolCall("note", { title: "two\nlines", body: "b" }),
@@ -805,21 +808,26 @@ const agentId = (await d.stack.admin.query("SELECT id FROM pim_app.agents WHERE 
 			fauxToolCall("note", { title: "Tea one", body: "t" }),
 			fauxToolCall("note", { title: "Tea two", body: "t" }),
 			fauxToolCall("note", { title: "Tea three", body: "t" }),
+		]);
+		const noted = await resultsIn(chat, "note");
+		expect(noted).toContain("Too long: the title is 281 bytes, the limit is 280. Compress it, and put the rest in the text.");
+		expect(noted).toContain("A memory's title is one line: merge it, or note each part separately.");
+		expect(noted.filter((r) => r.startsWith("You can't keep memories in agent-"))).toHaveLength(1);
+		expect(noted.filter((r) => /^Saved as m_\w+ in agent-/.test(r))).toHaveLength(3);
+		await turnWith(chat, [
 			fauxToolCall("recall", { pattern: "Tea", limit: 2 }),
 			fauxToolCall("recall", { pattern: "(" }),
 			fauxToolCall("recall", { pattern: ".", scope: `agent-${other}` }),
+			fauxToolCall("recall", { pattern: "Tea" }),
 			fauxToolCall("forget", { id: secret }),
 			fauxToolCall("zoom", { id: secret }),
 			fauxToolCall("move_memory", { id: secret, scope: "everyone" }),
-			fauxToolCall("recall", { pattern: "Tea" }),
 		]);
-		expect((await resultsIn(chat, "note")).slice(0, 3)).toEqual([`Too long: the title is 281 bytes, the limit is 280. Compress it, and put the rest in the text.`, "A memory's title is one line: merge it, or note each part separately.", expect.stringMatching(/^You can't keep memories in agent-\w+: use one of agent-\w+, everyone\.$/)]);
-		expect((await resultsIn(chat, "note")).slice(3)).toEqual([expect.stringMatching(/^Saved as m_\w+ in agent-/), expect.stringMatching(/^Saved as/), expect.stringMatching(/^Saved as/)]);
 		const recalls = await resultsIn(chat, "recall");
-		expect(recalls[0]).toMatch(/Tea three[\s\S]*Newest 2 of 3 matches\. Narrow the pattern\.$/);
-		expect(recalls[1]).toMatch(/^Invalid pattern: /);
-		expect(recalls[2]).toBe(`You don't read the scope agent-${other}.`);
-		expect(recalls[3]).toMatch(/3 matches\.$/);
+		expect(recalls.find((r) => r.includes("Newest 2 of 3"))).toMatch(/^(\[m_\w+\] \(agent-\w+\) Tea \w+\n){2}Newest 2 of 3 matches\. Narrow the pattern\.$/);
+		expect(recalls.find((r) => r.startsWith("Invalid pattern: "))).toBeDefined();
+		expect(recalls).toContain(`You don't read the scope agent-${other}.`);
+		expect(recalls.find((r) => r.endsWith("\n3 matches."))).toMatch(/Tea one[\s\S]*Tea two|Tea two[\s\S]*Tea one/);
 		// Another agent's private memory is neither read, forgotten nor moved.
 		for (const tool of ["forget", "zoom", "move_memory"]) expect((await resultsIn(chat, tool))[0]).toBe(`There is no memory ${secret}.`);
 		expect((await d.stack.admin.query("SELECT scope, deleted_at FROM pim_app.memories WHERE id = $1", [secret])).rows[0]).toEqual({ scope: `agent-${other}`, deleted_at: null });
@@ -839,21 +847,16 @@ const agentId = (await d.stack.admin.query("SELECT id FROM pim_app.agents WHERE 
 	}, 300_000);
 
 	it("reads, edits and lists notes as v1 did: versions and offsets, all-or-nothing edits, append, rename, and a whole rewrite only from the latest version", async () => {
-		const agent = { kind: "agent", ownerId: ownerId as never, agentId: "pim" } as const;
-		const id = await app.canvas.create(agent, "Plan", "alpha beta gamma", "agent");
 		const chat = (await web.call("POST", "/api/sessions", { title: "Notes" })).json.id as string;
-		await turnWith(chat, [
-			fauxToolCall("note_read", { id }),
-			fauxToolCall("note_edit", { id, edits: [{ find: "alpha", replace: "ALPHA" }, { find: "gamma", replace: "GAMMA" }], append: undefined, title: "Renamed plan" }),
-			fauxToolCall("note_edit", { id, edits: [{ find: "ALPHA", replace: "x" }, { find: "missing", replace: "y" }] }),
-			fauxToolCall("note_edit", { id, append: "- delta" }),
-			fauxToolCall("note_edit", { id, content: "stale rewrite", base_version: 1 }),
-			fauxToolCall("note_read", { id, version: 1 }),
-			fauxToolCall("note_read", { id, offset: 6 }),
-			fauxToolCall("note_read", { id, version: 99 }),
-			fauxToolCall("note_list", { query: "renamed" }),
-			fauxToolCall("note_list", { query: "nothing like it" }),
-		]);
+		await turnWith(chat, [fauxToolCall("note_create", { title: "Plan", text: "alpha beta gamma" })]);
+		const id = (await d.stack.admin.query("SELECT note_id FROM pim_app.notes WHERE title = 'Plan'")).rows[0].note_id as string;
+		await turnWith(chat, [fauxToolCall("note_read", { id })]);
+		// The calls that change the note run one turn at a time: the note has one writer at once.
+		await turnWith(chat, [fauxToolCall("note_edit", { id, edits: [{ find: "alpha", replace: "ALPHA" }, { find: "gamma", replace: "GAMMA" }], title: "Renamed plan" })]);
+		await turnWith(chat, [fauxToolCall("note_edit", { id, edits: [{ find: "ALPHA", replace: "x" }, { find: "missing", replace: "y" }] })]);
+		await turnWith(chat, [fauxToolCall("note_edit", { id, append: "- delta" })]);
+		await turnWith(chat, [fauxToolCall("note_edit", { id, content: "stale rewrite", base_version: 1 })]);
+		await turnWith(chat, [fauxToolCall("note_read", { id, version: 1 }), fauxToolCall("note_read", { id, offset: 6 }), fauxToolCall("note_read", { id, version: 99 }), fauxToolCall("note_list", { query: "renamed" }), fauxToolCall("note_list", { query: "nothing like it" })]);
 		const edits = await resultsIn(chat, "note_edit");
 		expect(JSON.parse(edits[0]!)).toMatchObject({ artifact: { id, title: "Renamed plan", kind: "markdown" }, note: expect.stringMatching(/^Made version 2;/) });
 		// One edit that does not match changes nothing at all.
@@ -862,33 +865,32 @@ const agentId = (await d.stack.admin.query("SELECT id FROM pim_app.agents WHERE 
 		expect(edits[3]).toMatch(/^Version 1 is not the latest: version 3 is\./);
 		expect((await app.canvas.read(ownerId, id)).text).toBe("ALPHA beta GAMMA\n- delta");
 		const reads = await resultsIn(chat, "note_read");
+		const read = (re: RegExp) => reads.find((r) => re.test(r));
 		expect(reads[0]).toBe(`Note ${id} "Plan", version 1 of 1, 16 characters:\nalpha beta gamma`);
-		expect(reads[1]).toMatch(new RegExp(`^Note ${id} "Renamed plan", version 1 of 3 \\(the person's\\)?`));
-		expect(reads[1]).toContain("alpha beta gamma");
-		expect(reads[2]).toBe(`Note ${id} "Renamed plan", version 3 of 3, 24 characters, from 6:\nbeta GAMMA\n- delta`);
-		expect(reads[3]).toBe(`No version 99 of note ${id}.`);
-		expect((await resultsIn(chat, "note_list"))[0]).toBe(`- Renamed plan (id ${id}, version 3, 24 bytes)`);
-		expect((await resultsIn(chat, "note_list"))[1]).toBe("No note's title has nothing and like and it.");
-	}, 180_000);
+		expect(read(/version 1 of 3/)).toBe(`Note ${id} "Renamed plan", version 1 of 3, 16 characters:\nalpha beta gamma`);
+		expect(read(/from 6/)).toBe(`Note ${id} "Renamed plan", version 3 of 3, 24 characters, from 6:\nbeta GAMMA\n- delta`);
+		expect(read(/^No version 99/)).toBe(`No version 99 of note ${id}.`);
+		expect(await resultsIn(chat, "note_list")).toEqual(expect.arrayContaining([`- Renamed plan (id ${id}, version 3, 24 bytes)`, "No note's title has nothing and like and it."]));
+	}, 240_000);
 
 	it("tracks goals as v1 did: a plan of at least one step, several steps done at once by number, steps added, a progress note, and a list by status", async () => {
 		const chat = (await web.call("POST", "/api/sessions", { title: "Goals" })).json.id as string;
 		await turnWith(chat, [fauxToolCall("create_goal", { title: "Read a book", steps: [] }), fauxToolCall("create_goal", { title: "Read a book", steps: ["Pick it", "Read half", "Finish it"] })]);
-		expect((await resultsIn(chat, "create_goal"))[1]).toMatch(/^Goal created\.\n- Read a book \(id g_\w+, 0\/3 steps done\)\n  1\. \[ \] Pick it\n  2\. \[ \] Read half\n  3\. \[ \] Finish it$/);
+		const created = await resultsIn(chat, "create_goal");
+		expect(created.find((r) => r.includes("Validation failed"))).toContain("steps");
+		expect(created.find((r) => r.startsWith("Goal created."))).toMatch(/^Goal created\.\n- Read a book \(id g_\w+, 0\/3 steps done\)\n  1\. \[ \] Pick it\n  2\. \[ \] Read half\n  3\. \[ \] Finish it$/);
 		const goal = (await d.stack.admin.query("SELECT id FROM pim_app.goals WHERE title = 'Read a book'")).rows[0].id as string;
-		await turnWith(chat, [
-			fauxToolCall("update_goal", { id: goal, complete_steps: [1, 3], add_steps: ["Review it"], note: "Halfway there" }),
-			fauxToolCall("update_goal", { id: goal, complete_steps: [9] }),
-			fauxToolCall("update_goal", { id: goal, status: "paused" }),
-			fauxToolCall("list_goals", { status: "paused" }),
-			fauxToolCall("list_goals", { status: "active" }),
-		]);
+		await turnWith(chat, [fauxToolCall("update_goal", { id: goal, complete_steps: [1, 3], add_steps: ["Review it"], note: "Halfway there" })]);
+		await turnWith(chat, [fauxToolCall("update_goal", { id: goal, complete_steps: [9] })]);
+		await turnWith(chat, [fauxToolCall("update_goal", { id: goal, status: "paused" })]);
+		await turnWith(chat, [fauxToolCall("list_goals", { status: "paused" }), fauxToolCall("list_goals", { status: "active" })]);
 		const updates = await resultsIn(chat, "update_goal");
 		expect(updates[0]).toBe(`Goal updated.\n- Read a book (id ${goal}, 2/4 steps done)\n  1. [x] Pick it\n  2. [ ] Read half\n  3. [x] Finish it\n  4. [ ] Review it\n  Latest note: Halfway there`);
 		expect(updates[1]).toBe(`Goal ${goal} has 4 steps; there is no step 9.`);
 		const lists = await resultsIn(chat, "list_goals");
-		expect(JSON.parse(lists[0]!)).toMatchObject([{ id: goal, status: "paused", notes: [{ text: "Halfway there" }], steps: [{ number: 1, done: true }, { number: 2, done: false }, { number: 3, done: true }, { number: 4, done: false }] }]);
-		expect(JSON.parse(lists[1]!).map((g: { id: string }) => g.id)).not.toContain(goal);
+		const paused = JSON.parse(lists.find((r) => r.includes(goal))!);
+		expect(paused).toMatchObject([{ id: goal, status: "paused", notes: [{ text: "Halfway there" }], steps: [{ number: 1, done: true }, { number: 2, done: false }, { number: 3, done: true }, { number: 4, done: false }] }]);
+		expect(lists.filter((r) => r.includes(goal))).toHaveLength(1);
 		// An active goal's prompt section numbers its steps, which is what complete_steps takes, and shows its latest note.
 		await turnWith(chat, [fauxToolCall("update_goal", { id: goal, status: "active" })]);
 		await turnWith(chat, [fauxToolCall("current_time", {})]);
@@ -906,13 +908,76 @@ const agentId = (await d.stack.admin.query("SELECT id FROM pim_app.agents WHERE 
 			fauxToolCall("fetch_url", { url: "http://93.184.216.34/cat.png" }),
 			fauxToolCall("http_request", { method: "GET", url: "http://93.184.216.34/big" }),
 		]);
+		// The calls of a turn run side by side, so each answer is found by what it says.
 		const pages = await resultsIn(chat, "fetch_url");
+		const page = (re: RegExp) => pages.find((r) => re.test(r));
 		// The redirect is followed to the page, whose markup, script, style and drawing are gone; its preview image comes first, then the others.
-		expect(pages[0]).toBe("HTTP 200 http://93.184.216.34/article\n\nHello & welcome\nSome bold text\n\nImages:\n- http://93.184.216.34/preview.png\n- http://93.184.216.34/inline.png");
-		expect(pages[1]).toBe("That address is not on the public internet");
-		expect(pages[2]).toMatch(/^Too many redirects/);
-		expect(pages[3]).toBe(`HTTP 200 http://93.184.216.34/long\n\n${"x".repeat(20_000)}\n[... 5000 more characters]`);
-		expect(pages[4]).toBe("HTTP 200: image/png content is not readable as text.");
+		expect(page(/article/)).toBe("HTTP 200 http://93.184.216.34/article\n\nHello & welcome\nSome bold text\n\nImages:\n- http://93.184.216.34/preview.png\n- http://93.184.216.34/inline.png");
+		expect(page(/public internet/)).toBe("That address is not on the public internet");
+		expect(page(/^Too many redirects/)).toBeDefined();
+		expect(page(/long/)).toBe(`HTTP 200 http://93.184.216.34/long\n\n${"x".repeat(20_000)}\n[... 5000 more characters]`);
+		expect(page(/not readable as text/)).toBe("HTTP 200: image/png content is not readable as text.");
 		expect((await resultsIn(chat, "http_request"))[0]).toBe(`200 text/plain\n${"y".repeat(8_000)}\n[... 1000 more characters]`);
 	}, 180_000);
+	it("makes triggers from a typed draft, keeps an agent to its own, refuses a stale edit, and asks the person before a computer source runs", async () => {
+		const [ann, bob] = [await newAgent("Ann", "Works"), await newAgent("Bob", "Also works")];
+		const [annChat, bobChat] = [(await web.call("POST", "/api/sessions", { title: "Ann", agentId: ann })).json.id as string, (await web.call("POST", "/api/sessions", { title: "Bob", agentId: bob })).json.id as string];
+		let turns = 0;
+		const turn = async (chat: string, ...calls: ReturnType<typeof fauxToolCall>[]) => {
+			const mine = ++turns;
+			faux.setResponses([toolUse(...calls), toolUse(fauxToolCall("send_to_user", { message: `reply ${mine}` }))] as never);
+			expect((await message(chat, `turn ${mine}`)).status).toBe(202);
+			await waitFor(`turn ${mine}`, async () => (sentAndAnswered(await transcriptOf(chat), `reply ${mine}`) ? true : undefined), 90_000);
+		};
+		const last = async (chat: string, tool: string) => (await resultsIn(chat, tool)).at(-1)!;
+		const cron = { kind: "time", schedule: "cron", expression: "0 9 * * *", timeZone: "UTC" };
+
+		// What the model gives is a label, an instruction and a source; Pim fills in the rest: the owner, the chat it belongs to, where its work goes.
+		await turn(annChat, fauxToolCall("create_trigger", { label: "Morning", instruction: "Say good morning", source: cron }));
+		const made = JSON.parse(await last(annChat, "create_trigger"));
+		expect(made.trigger).toMatchObject({ lifecycle: "draft", label: "Morning", agentId: ann, origin: { type: "chat", chatId: annChat }, destination: { type: "existing_chat", chatId: annChat }, capability: { status: "available" } });
+		const id = made.trigger.id as string;
+		// Another agent's triggers are not its to see or change, and an agent cannot make one for another.
+		await turn(bobChat, fauxToolCall("get_trigger", { id }), fauxToolCall("pause_trigger", { id }), fauxToolCall("delete_trigger", { id }), fauxToolCall("list_triggers", {}), fauxToolCall("create_trigger", { label: "Not mine", instruction: "x", source: cron, agentId: ann }));
+		expect(await resultsIn(bobChat, "get_trigger")).toEqual([expect.stringContaining('"code":"not_found"')]);
+		expect(JSON.parse(await last(bobChat, "list_triggers"))).toEqual({ triggers: [], nextCursor: null });
+		expect(await last(bobChat, "create_trigger")).toContain("Only the majordomo makes triggers for other agents");
+		expect((await d.stack.admin.query("SELECT count(*)::int AS n FROM pim_app.triggers WHERE id = $1 AND lifecycle = 'draft'", [id])).rows[0].n).toBe(1);
+
+		// A replayed create makes nothing new; an edit made on a stale revision is refused with the current one.
+		await turn(annChat, fauxToolCall("update_trigger", { id, expectedRevision: made.trigger.revision - 1, label: "Stale" }), fauxToolCall("update_trigger", { id, expectedRevision: made.trigger.revision, label: "Morning!", newChat: true }));
+		const [stale, updated] = await resultsIn(annChat, "update_trigger");
+		expect(JSON.parse(stale!).error).toMatchObject({ status: 409, code: "revision_conflict" });
+		expect(JSON.parse(updated!).trigger).toMatchObject({ label: "Morning!", destination: { type: "new_chat" } });
+		await turn(annChat, fauxToolCall("resume_trigger", { id, expectedRevision: JSON.parse(updated!).trigger.revision }));
+		expect(JSON.parse(await last(annChat, "resume_trigger")).trigger.lifecycle).toBe("enabled");
+
+		// A source on the computer runs only as the person's own user: with no computer paired it is a draft that cannot start, and once one is, only their approval grants it.
+		const stream = { kind: "stream", command: "tail -f /var/log/syslog" };
+		await turn(annChat, fauxToolCall("list_trigger_sources", {}), fauxToolCall("create_trigger", { label: "Log", instruction: "Read the line", source: stream, newChat: true, enabled: true }));
+		expect(JSON.parse(await last(annChat, "list_trigger_sources")).sources.find((x: { kind: string }) => x.kind === "stream")).toMatchObject({ status: "draft_only", delivers: false, reason: "computer_not_paired" });
+		expect(await last(annChat, "create_trigger")).toContain("source_not_wired");
+		const logId = (await d.stack.admin.query("SELECT id FROM pim_app.triggers WHERE title = 'Log'")).rows[0].id as string;
+		expect((await web.call("POST", "/api/computer", {})).status).toBe(201);
+		await turn(annChat, fauxToolCall("list_trigger_sources", {}), fauxToolCall("trigger_computer_grant", { triggerId: logId }));
+		expect(JSON.parse((await resultsIn(annChat, "list_trigger_sources")).at(-1)!).sources.find((x: { kind: string }) => x.kind === "stream")).toMatchObject({ status: "available", delivers: true });
+		const approval = await waitFor("the grant to wait for the person", async () => (await d.stack.admin.query("SELECT id, args FROM pim_app.approvals WHERE tool = 'trigger:computer_grant' AND state = 'waiting'")).rows[0], 60_000);
+		expect(approval.args.summary).toContain("tail -f /var/log/syslog");
+		expect(approval.args.explicit).toBe(true);
+		expect((await d.stack.admin.query("SELECT count(*)::int AS n FROM pim_app.trigger_computer_grants WHERE trigger_id = $1", [logId])).rows[0].n).toBe(0);
+		expect((await web.call("POST", `/api/approvals/${approval.id}/decision`, { approve: true })).status).toBe(200);
+		await waitFor("the grant", async () => ((await d.stack.admin.query("SELECT 1 FROM pim_app.trigger_computer_grants WHERE trigger_id = $1 AND revoked_at IS NULL", [logId])).rowCount ? true : undefined), 60_000);
+		const view = (await web.call("GET", `/api/triggers/${logId}`)).json;
+		expect(view.grant.state).toBe("current");
+		await turn(annChat, fauxToolCall("resume_trigger", { id: logId, expectedRevision: view.revision }));
+		expect(JSON.parse(await last(annChat, "resume_trigger")).trigger).toMatchObject({ lifecycle: "enabled", grant: { state: "current" } });
+
+		// A retried create with the same Idempotency-Key gives the trigger the first one made; the same key for another request is refused.
+		const body = { agentId: ann, label: "Once", instruction: "x", destination: { type: "new_chat" }, source: cron };
+		const first = await web.call("POST", "/api/triggers", body, { "idempotency-key": "k-1" });
+		const again = await web.call("POST", "/api/triggers", body, { "idempotency-key": "k-1" });
+		expect([first.status, again.status, again.json.id === first.json.id]).toEqual([201, 200, true]);
+		expect((await web.call("POST", "/api/triggers", { ...body, label: "Other" }, { "idempotency-key": "k-1" })).status).toBe(409);
+		expect((await d.stack.admin.query("SELECT count(*)::int AS n FROM pim_app.triggers WHERE title = 'Once'")).rows[0].n).toBe(1);
+	}, 240_000);
 });

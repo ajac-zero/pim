@@ -125,6 +125,45 @@ describe("Canvas", () => {
 		expect((await canvas.read(u.account.ownerId, note)).text).toBe("ABC-typed");
 	});
 
+	it("changes a note as note_edit does: several edits all or none, an append on its own line, a rename, and a whole rewrite only from the latest kept version, with a person's typing kept", async () => {
+		const canvas = new Canvas(f.db, f.store);
+		const owner = u.account.ownerId;
+		const note = await canvas.create(u.principal, "Plan", "alpha beta gamma");
+		// The person types at the end meanwhile; the agent's edits land on the text as it is.
+		const editor = new Y.Doc();
+		Y.applyUpdate(editor, (await canvas.state(owner, note)).update);
+		const typed: Uint8Array[] = [];
+		editor.on("update", (up: Uint8Array) => typed.push(up));
+		editor.getText("markdown").insert(16, " (typed)");
+		await canvas.applyLive(owner, note, "ada", typed[0]!);
+		expect(await canvas.change(u.principal, note, { edits: [{ find: "alpha", replace: "ALPHA" }, { find: "gamma", replace: "GAMMA" }], title: "Renamed" })).toEqual({ version: 3, changed: true });
+		expect((await canvas.read(owner, note)).text).toBe("ALPHA beta GAMMA (typed)");
+		// One edit that does not match, or matches twice, changes nothing at all.
+		await expect(canvas.change(u.principal, note, { edits: [{ find: "ALPHA", replace: "x" }, { find: "missing", replace: "y" }] })).rejects.toMatchObject({ code: "text_not_found", message: expect.stringMatching(/^Edit 2:/) });
+		await expect(canvas.change(u.principal, note, { edits: [{ find: "A", replace: "x" }] })).rejects.toMatchObject({ code: "text_ambiguous" });
+		expect((await canvas.read(owner, note)).text).toBe("ALPHA beta GAMMA (typed)");
+		// An append goes on a line of its own; nothing to change leaves the version as it was.
+		expect(await canvas.change(u.principal, note, { append: "- delta" })).toEqual({ version: 4, changed: true });
+		expect((await canvas.read(owner, note)).text).toBe("ALPHA beta GAMMA (typed)\n- delta");
+		expect(await canvas.change(u.principal, note, { edits: [{ find: "ALPHA", replace: "ALPHA" }] })).toEqual({ version: 4, changed: false });
+		// A whole rewrite needs the version that is the latest kept one.
+		await expect(canvas.change(u.principal, note, { content: "new", baseVersion: 1 })).rejects.toMatchObject({ code: "stale_version", message: "Version 1 is not the latest: version 4 is. Read it, then edit that." });
+		await expect(canvas.change(u.principal, note, { content: "new" })).rejects.toMatchObject({ message: expect.stringMatching(/base_version/) });
+		await expect(canvas.change(u.principal, note, { content: "new", append: "x", baseVersion: 4 })).rejects.toMatchObject({ message: "Send content alone, or edits and append." });
+		expect(await canvas.change(u.principal, note, { content: "rewritten", baseVersion: 4 })).toEqual({ version: 5, changed: true });
+		expect((await canvas.read(owner, note)).text).toBe("rewritten");
+		// The versions say who made them, and an older one is read as it was.
+		expect(await canvas.kept(owner, note, 1)).toMatchObject({ version: 1, text: "alpha beta gamma", source: "person", latest: 5, title: "Renamed" });
+		await expect(canvas.kept(owner, note, 99)).rejects.toMatchObject({ status: 404 });
+		// Listed by title words, newest change first, with the latest version's size.
+		await canvas.create(u.principal, "Other renamed thing", "x");
+		const listed = await canvas.list(u.principal, ["renamed"]);
+		expect(listed.total).toBe(2);
+		expect(listed.notes.find((n) => n.id === note)).toMatchObject({ title: "Renamed", version: 5, size: 9 });
+		expect((await canvas.list(u.principal, ["renamed"], 1)).notes).toHaveLength(1);
+		expect((await canvas.list(u.principal, ["nothing"])).total).toBe(0);
+	});
+
 	it("keeps versions at pauses and around agent changes, not one per update", async () => {
 		const canvas = new Canvas(f.db, f.store);
 		const owner = u.account.ownerId;

@@ -11,11 +11,11 @@ import { connect as connectApp } from "@pim/v2-app/db";
 import { MemoryObjectStore } from "@pim/v2-app/objects";
 import type { Process } from "../src/main.ts";
 import { keyringFromProcessEnv } from "../src/roles.ts";
-import { renewDue } from "../src/watches.ts";
+import { reconcileWatches, renewDue } from "../src/watches.ts";
 import { readTranscript, waitFor } from "../../v2-runtime/test/support/rig.ts";
 import { Client } from "./support/client.ts";
 import { type Deployment, base, start, startS3 } from "./support/processes.ts";
-import { createStack, describeWith, freePort, hasNats, startNats } from "./support/stack.ts";
+import { createStack, describeWith, freePort, hasNats, startNats, sentAndAnswered } from "./support/stack.ts";
 
 const real = describeWith(hasNats());
 const b64 = (s: string) => Buffer.from(s).toString("base64url");
@@ -149,7 +149,7 @@ real("native and OAuth connectors", () => {
 	const send = async (words: string, ...script: unknown[]) => {
 		faux.setResponses([...script, toolUse(fauxToolCall("send_to_user", { message: `done ${++n}` })), fauxAssistantMessage(`ended ${n}`)] as never);
 		expect((await web.call("POST", `/api/sessions/${chatId}/messages`, { commandId: `m-${n}`, text: words })).status).toBe(202);
-		await waitFor(`the turn "${words}" to end`, async () => ((await transcript()).includes(`ended ${n}`) ? true : undefined), 60_000);
+		await waitFor(`the turn "${words}" to end`, async () => (sentAndAnswered(await transcript(), `done ${n}`) ? true : undefined), 60_000);
 	};
 	/** The person's browser: goes to the sign-in address, which sends it back to Pim with a code; Pim's own callback page is what it ends on. */
 	let lastReturn = "";
@@ -330,7 +330,7 @@ real("native and OAuth connectors", () => {
 		const mcpId = (await web.call("GET", "/api/mcp")).json.servers.find((x: { url: string }) => x.url === `${standOrigin}/mcp`).id as string;
 		faux.setResponses([toolUse(fauxToolCall("list_connector_events", {})), toolUse(fauxToolCall("watch_connector_event", { connector: mcpId, event: "ticket.created", arguments: { project: "P" }, instruction: "Summarise the ticket" })), toolUse(fauxToolCall("watch_connector_event", { connector: mcpId, event: "nothing", instruction: "x" })), toolUse(fauxToolCall("list_watches", {})), toolUse(fauxToolCall("send_to_user", { message: `done ${++n}` })), fauxAssistantMessage(`ended ${n}`)] as never);
 		expect((await web.call("POST", `/api/sessions/${chatId}/messages`, { commandId: `m-${n}`, text: "watch tickets" })).status).toBe(202);
-		await waitFor("the watch turn", async () => ((await transcript()).includes(`ended ${n}`) ? true : undefined), 60_000);
+		await waitFor("the watch turn", async () => (sentAndAnswered(await transcript(), `done ${n}`) ? true : undefined), 60_000);
 		const listed = (await results("list_connector_events"))[0]!;
 		expect(listed).toContain("ticket.created");
 		expect(listed).not.toContain("polled.only");
@@ -362,7 +362,7 @@ real("native and OAuth connectors", () => {
 		expect((await deliver(event, { sub: "someone-else" })).status).toBe(401);
 		faux.setResponses([toolUse(fauxToolCall("send_to_user", { message: `done ${++n}` })), fauxAssistantMessage(`ended ${n}`)] as never);
 		expect((await deliver(event)).status).toBe(204);
-		await waitFor("the event's turn", async () => ((await transcript()).includes(`ended ${n}`) ? true : undefined), 60_000);
+		await waitFor("the event's turn", async () => (sentAndAnswered(await transcript(), `done ${n}`) ? true : undefined), 60_000);
 		expect(await transcript()).toContain("[Connector event] ticket.created");
 		expect(await transcript()).toContain("Printer on fire");
 		// The same event retried is taken once.
@@ -384,11 +384,113 @@ real("native and OAuth connectors", () => {
 
 		faux.setResponses([toolUse(fauxToolCall("stop_watch", { id: watchId })), toolUse(fauxToolCall("stop_watch", { id: watchId })), toolUse(fauxToolCall("send_to_user", { message: `done ${++n}` })), fauxAssistantMessage(`ended ${n}`)] as never);
 		expect((await web.call("POST", `/api/sessions/${chatId}/messages`, { commandId: `m-${n}`, text: "stop watching" })).status).toBe(202);
-		await waitFor("the stop turn", async () => ((await transcript()).includes(`ended ${n}`) ? true : undefined), 60_000);
+		await waitFor("the stop turn", async () => (sentAndAnswered(await transcript(), `done ${n}`) ? true : undefined), 60_000);
 		expect((await results("stop_watch"))[0]).toBe("Stopped.");
 		expect((await results("stop_watch"))[1]).toContain("No watch with id");
 		expect(stand.unsubscribed).toEqual([{ name: "ticket.created", arguments: { project: "P" }, delivery: { url: sub.delivery.url } }]);
 		expect((await d.stack.admin.query("SELECT count(*)::int AS n FROM pim_app.watch_subscriptions")).rows[0].n).toBe(0);
 		expect((await d.stack.admin.query("SELECT lifecycle FROM pim_app.triggers WHERE id = $1", [watchId])).rows[0]?.lifecycle ?? "deleted").toBe("deleted");
+	}, 240_000);
+	it("subscribes a connector-event trigger however it was made, and unsubscribes it when it is paused or deleted, so nothing is renewed for a trigger that is gone", async () => {
+		const mcpId = (await web.call("GET", "/api/mcp")).json.servers.find((x: { url: string }) => x.url === `${standOrigin}/mcp`).id as string;
+		const agent = (await web.call("POST", "/api/agents", { name: "Watcher", description: "Watches", instructions: "Watch.", apps: [], contacts: [] })).json.id as string;
+		const crypto = keyringFromProcessEnv({ PIM_KEK_T1: process.env.PIM_KEK_T1_TEST!, PIM_KEK_CURRENT: "t1" })!;
+		const deps = { app, crypto, transport: { fetch, allowPrivate: true, check: async (u: string) => new URL(u) }, publicUrl: origin, now: Date.now };
+		const rows = async () => (await d.stack.admin.query("SELECT trigger_id, status FROM pim_app.watch_subscriptions")).rows;
+		const subscribedBefore = stand.subscribed.length;
+		const unsubscribedBefore = stand.unsubscribed.length;
+		// Made on the Triggers screen, not by watch_connector_event: nothing subscribes it until the maintenance pass matches subscriptions to triggers.
+		const made = await web.call("POST", "/api/triggers", { agentId: agent, label: "Tickets", instruction: "Look at the ticket", destination: { type: "new_chat" }, source: { kind: "connector_event", connectorId: mcpId, event: "ticket.created", arguments: { project: "Q" } }, enabled: true });
+		expect(made.status, JSON.stringify(made.json)).toBe(201);
+		const id = made.json.id as string;
+		expect(await rows()).toEqual([]);
+		expect(await reconcileWatches(deps, d.stack.admin as never)).toBe(1);
+		expect(stand.subscribed).toHaveLength(subscribedBefore + 1);
+		expect(stand.subscribed.at(-1)).toMatchObject({ name: "ticket.created", arguments: { project: "Q" } });
+		expect(await rows()).toEqual([{ trigger_id: id, status: "active" }]);
+		expect(await reconcileWatches(deps, d.stack.admin as never)).toBe(0); // nothing to do
+		// Paused: the server is told to stop, and the grant is no longer renewed.
+		const revision = made.json.revision as number;
+		expect((await web.call("POST", `/api/triggers/${id}/pause`, undefined, { "if-match": `"${revision}"` })).status).toBe(200);
+		expect(await reconcileWatches(deps, d.stack.admin as never)).toBe(1);
+		expect(stand.unsubscribed).toHaveLength(unsubscribedBefore + 1);
+		expect(stand.unsubscribed.at(-1)).toMatchObject({ name: "ticket.created", arguments: { project: "Q" } });
+		expect(await rows()).toEqual([]);
+		// Resumed: subscribed again. Deleted: unsubscribed, and renewDue finds nothing to renew.
+		const paused = (await web.call("GET", `/api/triggers/${id}`)).json;
+		expect((await web.call("POST", `/api/triggers/${id}/resume`, undefined, { "if-match": `"${paused.revision}"` })).status).toBe(200);
+		expect(await reconcileWatches(deps, d.stack.admin as never)).toBe(1);
+		expect(await rows()).toEqual([{ trigger_id: id, status: "active" }]);
+		await d.stack.admin.query("UPDATE pim_app.watch_subscriptions SET renew_before = now() WHERE trigger_id = $1", [id]);
+		const live = (await web.call("GET", `/api/triggers/${id}`)).json;
+		expect((await web.call("DELETE", `/api/triggers/${id}`, undefined, { "if-match": `"${live.revision}"` })).status).toBe(200);
+		expect(await renewDue(deps, d.stack.admin as never)).toBe(0); // a deleted watch is not renewed
+		expect(await reconcileWatches(deps, d.stack.admin as never)).toBe(1);
+		expect(stand.unsubscribed).toHaveLength(unsubscribedBefore + 2);
+		expect(await rows()).toEqual([]);
+	}, 120_000);
+	it("lets an agent find, connect, add and remove connectors, asking the person before it changes anything", async () => {
+		const newAgent = async (name: string) => (await web.call("POST", "/api/agents", { name, description: `${name} helps`, instructions: `You are ${name}.`, apps: [], contacts: [] })).json.id as string;
+		const [boss, helper] = [await newAgent("Boss"), await newAgent("Helper")];
+		await d.stack.admin.query("INSERT INTO pim_app.owner_settings (owner_id, key, value) VALUES ($1, 'majordomo', to_jsonb($2::text)) ON CONFLICT (owner_id, key) DO UPDATE SET value = to_jsonb($2::text)", [ownerId, boss]);
+		const bossChat = (await web.call("POST", "/api/sessions", { title: "Boss", agentId: boss })).json.id as string;
+		const helperChat = (await web.call("POST", "/api/sessions", { title: "Helper", agentId: helper })).json.id as string;
+		const resultsIn = async (chat: string, tool: string) => {
+			const c = (await d.stack.admin.query("SELECT partition_id, conversation_id FROM pim_runtime.conversation_partitions WHERE public_chat_id = $1", [chat])).rows[0];
+			if (!c) return [];
+			return (await readTranscript(d.stack.runtime, ownerId, c.partition_id, Number(c.conversation_id)) as { model?: { role: string; toolName?: string; content: { text?: string }[] }[] }[]).flatMap((e) => (e.model ?? []).filter((m) => m.role === "toolResult" && m.toolName === tool).map((m) => m.content.map((c) => c.text ?? "").join("")));
+		};
+		/** A turn in `chat`; a call that asks first is answered as `decide` says, and the turn is waited for. */
+		const turn = async (chat: string, calls: ReturnType<typeof fauxToolCall>[], decide?: { tool: string; approve: boolean }) => {
+			const before = (await resultsIn(chat, "send_to_user")).length;
+			faux.setResponses([toolUse(...calls), toolUse(fauxToolCall("send_to_user", { message: `done ${++n}` })), fauxAssistantMessage(`ended ${n}`)] as never);
+			expect((await web.call("POST", `/api/sessions/${chat}/messages`, { commandId: `m-${n}`, text: `go ${n}` })).status).toBe(202);
+			if (decide) {
+				const filed = await waitFor(`the ${decide.tool} approval`, async () => (await d.stack.admin.query("SELECT id, args FROM pim_app.approvals WHERE tool = $1 AND state = 'waiting' AND public_chat_id = $2", [decide.tool, chat])).rows[0], 60_000);
+				expect(filed.args.explicit).toBe(true);
+				expect((await web.call("POST", `/api/approvals/${filed.id}/decision`, { approve: decide.approve })).status).toBe(200);
+			}
+			await waitFor("the turn to end", async () => ((await resultsIn(chat, "send_to_user")).length > before ? true : undefined), 30_000);
+		};
+		const appsOf = async (id: string) => (await d.stack.admin.query("SELECT config->'apps' AS apps FROM pim_app.agents WHERE id = $1", [id])).rows[0].apps as string[];
+
+		// Finding, listing and connecting need no approval: the person is only given a link to sign in at.
+		await turn(helperChat, [fauxToolCall("find_connector", { connector: "spotify" }), fauxToolCall("list_connectors", {}), fauxToolCall("connect_connector", { connector: "google/drive" }), fauxToolCall("connect_connector", { connector: "spotify/spotify" }), fauxToolCall("connect_connector", { connector: "nonesuch" })]);
+		expect((await resultsIn(helperChat, "find_connector"))[0]).toMatch(/- Spotify \[id: spotify\/spotify\] \(connected\)/);
+		expect(JSON.parse((await resultsIn(helperChat, "list_connectors"))[0]!)).toEqual(expect.arrayContaining([expect.objectContaining({ app: "spotify/spotify", state: "ready", tools: ["now_playing", "search", "play", "pause"] })]));
+		// The calls of one turn run side by side: what each answered is found by what it says, not by its place.
+		const connects = await resultsIn(helperChat, "connect_connector");
+		const find = (re: RegExp) => connects.find((r) => re.test(r))!;
+		const link = /Give them this link: (\S+)/.exec(find(/Google Drive needs/))?.[1];
+		expect(link).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/google\/auth\?/);
+		// The link is the real one: signing in at it connects the connector.
+		stand.grant.drive = "https://www.googleapis.com/auth/drive.file";
+		expect((await signIn(link!)).json).toContain("Google Drive is connected");
+		expect(find(/Spotify/)).toMatch(/^Spotify is already connected/);
+		expect(find(/nonesuch/)).toMatch(/offers no connector nonesuch/);
+
+		// Changing the agent's connectors asks first, every time, and nothing changes before the person says yes.
+		const lookup = (await web.call("POST", "/api/admin/apps", { name: "Lookup two", url: `${standOrigin}/mcp`, description: "Looks things up" })).json.app.id as string;
+		await turn(helperChat, [fauxToolCall("manage_connectors", { add: [lookup] })], { tool: "connector:manage", approve: false });
+		expect((await resultsIn(helperChat, "manage_connectors"))[0]).toMatch(/did not approve/);
+		expect(await appsOf(helper)).toEqual([]);
+		await turn(helperChat, [fauxToolCall("manage_connectors", { add: [lookup] })], { tool: "connector:manage", approve: true });
+		expect((await resultsIn(helperChat, "manage_connectors"))[1]).toMatch(/Helper's connectors are updated[\s\S]*Lookup two needs the person to sign in\. Give them this link: http:\/\/127\.0\.0\.1:\d+\/mcpas\/authorize/);
+		expect(await appsOf(helper)).toEqual([lookup]);
+		await turn(helperChat, [fauxToolCall("manage_connectors", { remove: [lookup] })], { tool: "connector:manage", approve: true });
+		expect(await appsOf(helper)).toEqual([]);
+
+		// Only the majordomo adds a connector to this Pim, with the person's yes, and it is then one of its connectors.
+		await turn(helperChat, [fauxToolCall("add_custom_connector", { name: "Mine", url: `${standOrigin}/mcp` })]);
+		expect((await resultsIn(helperChat, "add_custom_connector"))[0]).toBe("Only the person's majordomo does that.");
+		// A server this Pim has a connector for already is that connector, not a second one.
+		await turn(bossChat, [fauxToolCall("add_custom_connector", { name: "Same server", url: `${standOrigin}/mcp` })], { tool: "connector:add", approve: true });
+		expect((await resultsIn(bossChat, "add_custom_connector"))[0]).toMatch(/^Lookup two is one of this Pim's connectors \[id: custom\/lookup-two-\w+\], and one of yours\./);
+		await turn(bossChat, [fauxToolCall("add_custom_connector", { name: "Mine", url: `${standOrigin}/other-mcp` })], { tool: "connector:add", approve: true });
+		const added = (await d.stack.admin.query("SELECT value FROM pim_app.instance_settings WHERE key = 'custom_apps'")).rows[0].value as { id: string; name: string; url: string }[];
+		expect(added.filter((c) => c.name === "Same server")).toEqual([]);
+		expect(added.find((c) => c.name === "Mine")).toMatchObject({ url: `${standOrigin}/other-mcp` });
+		expect((await resultsIn(bossChat, "add_custom_connector"))[1]).toMatch(/^Mine is one of this Pim's connectors \[id: custom\/mine-[0-9a-f]+\], and one of yours\./);
+		expect((await appsOf(boss)).map((ref) => ref.replace(/-\w+$/, ""))).toEqual(["custom/lookup-two", "custom/mine"]);
 	}, 240_000);
 });

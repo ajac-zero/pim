@@ -15,16 +15,16 @@ const sessionOnly = (action: string) => SESSION_ONLY.has(action) || action.start
 /** Actions a guest never takes. */
 const GUEST_DENIED = /^(admin:|coding:|computer:|token:|mcp:|app:deploy|trigger:computer)/;
 /** What an agent acting in its owner's space may do. It never decides approvals (its scopes omit approval:), administers, or touches credentials. */
-const AGENT_SCOPES = ["api:*", "app:*", "coding:*", "computer:*", "trigger:*", "http:*", "connector:*", "skill:*"];
+const AGENT_SCOPES = ["api:*", "app:*", "coding:*", "computer:*", "trigger:*", "http:*", "connector:*", "skill:*", "memory:*"];
 /** Coding actions: the permission an admin's CodingGrant must list. */
 const CODING_ACTIONS = new Set<string>(CODING_PERMISSIONS);
 /**
- * Coding actions, deploying an app's backend onto a personal computer, a skill installed from outside Pim, and a connector's tool that asks,
+ * Coding actions, deploying an app's backend onto a personal computer, a skill installed from outside Pim or written by an agent, a named memory scope shared with another agent, a connector added to Pim, and a connector's tool that asks,
  * have effects outside Pim that a person approves each time unless a StandingApproval covers them. What an agent does on the person's computer
  * (a shell command, deleting a file, acting in the desktop, sending a form in its browser) is its own to do, and HTTP requests are how it
  * calls APIs, so those run without asking.
  */
-const NEEDS_APPROVAL = new Set<string>(["coding:push", "coding:pr", "coding:merge", "app:deploy", "connector:call", "skill:install"]);
+const NEEDS_APPROVAL = new Set<string>(["coding:push", "coding:pr", "coding:merge", "app:deploy", "connector:call", "skill:install", "skill:write", "memory:share", "connector:add", "connector:manage", "trigger:computer_grant"]);
 
 export const principalId = (p: Principal): string => {
 	switch (p.kind) {

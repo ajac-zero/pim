@@ -5,7 +5,7 @@
  * `connector_call` calls one. A tool set to On runs; a tool set to Ask files an approval and parks until a person decides (as `http_request` does); a tool set to Off is
  * neither offered nor callable. A call that is not read-only is sent once: its outcome is on an external operation, so a replay does not send it again.
  */
-import { Type } from "@earendil-works/pi-ai";
+import { Type, validateToolArguments } from "@earendil-works/pi-ai";
 import { defineTool, type PromptSection, type ToolRegistration } from "@earendil-works/pi-durable";
 import type { App } from "@pim/v2-app/app";
 import type { Tool as DiscoveredTool, ToolFetcher } from "@pim/v2-app/connectors";
@@ -194,9 +194,47 @@ export function resultText(result: any): string {
 	return out.length > 100_000 ? `${out.slice(0, 100_000)}\n[... ${out.length - 100_000} more characters]` : out;
 }
 
+/** What a tool's answer is made of: text, and the pictures a connector's tool returned, which the model looks at. */
+type Part = { type: "text"; text: string } | { type: "image"; data: string; mimeType: string };
+/** The most pictures one answer keeps, and the most they may weigh together (as base64), so a connector cannot fill the context or the operation's receipt. */
+const MAX_IMAGES = 4;
+const MAX_IMAGE_CHARS = 4_000_000;
+
+/** An MCP tool's result for the model: its text, with its images passed on as images (as v1 did), up to a few. */
+export function resultContent(result: any): Part[] {
+	const parts: Part[] = [];
+	let images = 0;
+	let weight = 0;
+	for (const c of result?.content ?? []) {
+		if (c?.type === "image" && typeof c.data === "string" && typeof c.mimeType === "string" && /^image\/(png|jpeg|gif|webp)$/.test(c.mimeType) && images < MAX_IMAGES && weight + c.data.length <= MAX_IMAGE_CHARS) {
+			images++;
+			weight += c.data.length;
+			parts.push({ type: "image", data: c.data, mimeType: c.mimeType });
+		} else if (c?.type === "image") parts.push({ type: "text", text: `[image ${c.mimeType ?? ""} not shown]` });
+		else if (c?.type === "text" && typeof c.text === "string") parts.push({ type: "text", text: c.text });
+		else parts.push({ type: "text", text: JSON.stringify(c) });
+	}
+	if (parts.length === 0 && result?.structuredContent !== undefined) parts.push({ type: "text", text: JSON.stringify(result.structuredContent) });
+	const out = parts.flatMap((part) => (part.type === "text" ? [part.text.length > 100_000 ? `${part.text.slice(0, 100_000)}\n[... ${part.text.length - 100_000} more characters]` : part.text] : []));
+	// The text parts are one answer, clipped as `resultText` clips it; the images follow.
+	const joined = out.join("\n");
+	return [...(joined ? [{ type: "text", text: joined } as Part] : []), ...parts.filter((part) => part.type === "image")];
+}
+
+/** Checks a call's arguments against the tool's input schema, as v1's typed tools were checked by pi; a schema pi cannot compile lets the call through. */
+export function checkArguments(tool: McpTool, id: string, args: Record<string, unknown>): { args: Record<string, unknown> } | { error: string } {
+	try {
+		return { args: validateToolArguments({ name: tool.name, description: tool.description ?? "", parameters: { type: "object", ...tool.inputSchema } } as never, { type: "toolCall", id, name: tool.name, arguments: args } as never) };
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		if (!message.startsWith("Validation failed")) return { args };
+		return { error: `${message.slice(0, 1500)}\n\nThe tool takes: ${JSON.stringify(tool.inputSchema ?? {}).slice(0, 2000)}` };
+	}
+}
+
 // ---- the agent's tools ----
 
-type Result = { content: { type: "text"; text: string }[]; isError?: boolean };
+type Result = { content: Part[]; isError?: boolean };
 const text = (s: string, isError = false): Result => ({ content: [{ type: "text", text: s }], ...(isError ? { isError } : {}) });
 
 export type ConnectorToolsDeps = {
@@ -293,15 +331,21 @@ export function connectorToolset(deps: ConnectorToolsDeps): { tools: ToolRegistr
 		return p.kind === "agent" && p.agentId !== "pim" ? p.agentId : undefined;
 	};
 
+	const PAGE = 25;
 	const list = defineTool({
 		name: "connector_tools",
-		description: "The tools of the person's connected services (MCP servers) that you may use, with what each takes. A tool marked asksFirst waits for the person's approval when you call it. Call one with connector_call.",
-		parameters: Type.Object({}),
+		description: `The tools of the person's connected services (MCP servers) that you may use, with what each takes, ${PAGE} at a time: give offset for the next page, or connector (its id) and query (words of a tool's name or description) to find one. A tool marked asksFirst waits for the person's approval when you call it. Call one with connector_call.`,
+		parameters: Type.Object({ connector: Type.Optional(Type.String()), query: Type.Optional(Type.String()), offset: Type.Optional(Type.Integer({ minimum: 0 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50 })) }),
 		replay: "safe",
-		async execute(_args: unknown, api: any) {
-			const { offered: tools, unreachable } = await offered(await agentOf(api.conversationId));
-			if (tools.length === 0) return text(unreachable.length ? `No tools are available: ${unreachable.join(", ")} could not be reached.` : "You have no connector tools. The person can connect a service and switch its tools on in Settings.");
-			return text(JSON.stringify({ tools: tools.map((o) => ({ connector: o.connector.id, service: o.connector.name, tool: o.tool.name, description: o.tool.description ?? null, inputSchema: o.tool.inputSchema, readOnly: o.tool.annotations?.readOnlyHint === true, asksFirst: o.permission === "ask" })), ...(unreachable.length ? { unreachable } : {}) }, null, 1));
+		async execute(args: { connector?: string; query?: string; offset?: number; limit?: number }, api: any) {
+			const { offered: all, unreachable } = await offered(await agentOf(api.conversationId));
+			if (all.length === 0) return text(unreachable.length ? `No tools are available: ${unreachable.join(", ")} could not be reached.` : "You have no connector tools. The person can connect a service and switch its tools on in Settings, or you can find one with find_connector.");
+			const wanted = (args.query ?? "").toLowerCase().split(/\s+/).filter(Boolean);
+			const tools = all.filter((o) => (!args.connector || o.connector.id === args.connector || o.connector.name.toLowerCase() === args.connector.toLowerCase()) && wanted.every((w) => `${o.connector.name} ${o.tool.name} ${o.tool.description ?? ""}`.toLowerCase().includes(w)));
+			if (tools.length === 0) return text(`None of the ${all.length} tools matches${args.connector ? ` in ${args.connector}` : ""}${args.query ? ` "${args.query}"` : ""}. Leave connector or query out to see them all.`);
+			const from = Math.min(args.offset ?? 0, tools.length);
+			const page = tools.slice(from, from + (args.limit ?? PAGE));
+			return text(JSON.stringify({ total: tools.length, from, tools: page.map((o) => ({ connector: o.connector.id, service: o.connector.name, tool: o.tool.name, description: o.tool.description ?? null, inputSchema: o.tool.inputSchema, readOnly: o.tool.annotations?.readOnlyHint === true, asksFirst: o.permission === "ask" })), ...(from + page.length < tools.length ? { next: `offset ${from + page.length} of ${tools.length}` } : {}), ...(unreachable.length ? { unreachable } : {}) }, null, 1));
 		},
 	} as never) as unknown as ToolRegistration;
 
@@ -324,6 +368,10 @@ export function connectorToolset(deps: ConnectorToolsDeps): { tools: ToolRegistr
 				const { permission } = resolvePermission(c, tool, perms, agentId);
 				if (permission === "off") return text(`The tool ${args.tool} of ${c.name} is switched off, so it was not called.`, true);
 				const readOnly = tool.annotations?.readOnlyHint === true;
+				// Checked before anyone is asked: a call the tool would refuse for its arguments is not worth a person's approval.
+				const checked = checkArguments(tool, String(api.callId), args.arguments ?? {});
+				if ("error" in checked) return text(checked.error, true);
+				args = { ...args, arguments: checked.args };
 				const taskId = String(api.taskId);
 				if (permission === "ask") {
 					const app = deps.app;
@@ -348,20 +396,22 @@ export function connectorToolset(deps: ConnectorToolsDeps): { tools: ToolRegistr
 					: () => withBearer(c, (bearer) => withSession(deps.transport, c.url ?? "", bearer, (rpc) => rpc("tools/call", { name: tool.name, arguments: args.arguments ?? {} }), 30_000));
 				if (readOnly) {
 					const result = await run();
-					return text(resultText(result), result?.isError === true);
+					return { content: resultContent(result), ...(result?.isError === true ? { isError: true } : {}) };
 				}
 				// A call with effects, once: its outcome is on the operation, so a replay or a new owner finds it there, and one in flight is reconciled, not made again.
 				const operationId = `connector:${deps.partitionId}:${taskId}`;
 				const op = await deps.ops.begin({ operationId, ownerId: deps.owner, partitionId: PartitionId.parse(deps.partitionId), taskId, toolName: "connector_call", capability: `connector:${c.id}`, idempotencyKey: `pim-${ownerId}-${deps.partitionId}-${taskId}` } as never);
-				if (op.state === "completed") return text(String((op.receipt as any)?.summary ?? "Done."));
+				if (op.state === "completed") return Array.isArray((op.receipt as any)?.content) ? { content: (op.receipt as any).content } : text(String((op.receipt as any)?.summary ?? "Done."));
 				if (op.state === "failed" || op.state === "cancelled") return text(`The call did not go through: ${String((op.receipt as any)?.error ?? op.state)}`, true);
 				if (op.state !== "pending") return text(`The call was started, but what became of it is not known (${op.state}). It was not made again; check with ${c.name} before asking again.`, true);
 				await deps.ops.transition(ownerId, operationId, "running");
 				try {
 					const result = await run();
 					const summary = resultText(result);
-					await deps.ops.transition(ownerId, operationId, result?.isError === true ? "failed" : "completed", result?.isError === true ? { error: summary } : { summary });
-					return text(summary, result?.isError === true);
+					const content = resultContent(result);
+					// What the model was shown is kept on the operation, pictures included, so a replay shows the same.
+					await deps.ops.transition(ownerId, operationId, result?.isError === true ? "failed" : "completed", result?.isError === true ? { error: summary } : { summary, ...(content.some((part) => part.type === "image") ? { content } : {}) });
+					return { content, ...(result?.isError === true ? { isError: true } : {}) };
 				} catch (error) {
 					const message = error instanceof Error ? error.message : String(error);
 					await deps.ops.transition(ownerId, operationId, "needs_reconciliation", { error: message });
@@ -379,7 +429,8 @@ export function connectorToolset(deps: ConnectorToolsDeps): { tools: ToolRegistr
 			const agentId = await agentOf(input.conversationId).catch(() => undefined);
 			const { offered: tools } = await offered(agentId).catch(() => ({ offered: [] as Offered[] }));
 			if (tools.length === 0) return undefined;
-			return `Tools of the person's connected services, called with connector_call (connector, tool, arguments); connector_tools shows what each takes.\n${tools.slice(0, 60).map((o) => `- ${o.connector.name} (${o.connector.id}) ${o.tool.name}${o.permission === "ask" ? " [asks first]" : ""}${o.tool.description ? `: ${o.tool.description.slice(0, 160)}` : ""}`).join("\n")}`;
+			const shown = tools.slice(0, 60);
+			return `Tools of the person's connected services, called with connector_call (connector, tool, arguments); connector_tools shows what each takes, and finds a tool by connector or query.\n${shown.map((o) => `- ${o.connector.name} (${o.connector.id}) ${o.tool.name}${o.permission === "ask" ? " [asks first]" : ""}${o.tool.description ? `: ${o.tool.description.slice(0, 160)}` : ""}`).join("\n")}${tools.length > shown.length ? `\n… and ${tools.length - shown.length} more tools: find them with connector_tools (connector, query, offset).` : ""}`;
 		},
 	} as unknown as PromptSection;
 	return { tools: [list, call], sections: [section] };

@@ -16,13 +16,15 @@ import type { Process } from "../src/main.ts";
 import { readTranscript, waitFor } from "../../v2-runtime/test/support/rig.ts";
 import { Client } from "./support/client.ts";
 import { type Deployment, base, start, startS3 } from "./support/processes.ts";
-import { createStack, describeWith, freePort, hasNats, startNats } from "./support/stack.ts";
+import { createStack, describeWith, freePort, hasNats, startNats, sentAndAnswered } from "./support/stack.ts";
 
 const real = describeWith(hasNats());
 /** A Chrome for the browser test: `PIM_TEST_CHROME`, or the one the orb's agent-browser keeps; the test is skipped without one. */
 const browsers = join(homedir(), ".agent-browser/browsers");
 const CHROME = process.env.PIM_TEST_CHROME ?? (existsSync(browsers) ? readdirSync(browsers, { withFileTypes: true }).map((e) => join(browsers, e.name, "chrome")).find(existsSync) : undefined);
 const COMPUTER = fileURLToPath(new URL("../../../computer/pim-computer.ts", import.meta.url));
+/** A real 1x1 PNG, which the image endpoint draws. */
+const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==", "base64");
 
 real("an agent on a paired computer", () => {
 	let d: Deployment;
@@ -37,6 +39,7 @@ real("an agent on a paired computer", () => {
 	let home: string;
 	let root: string;
 	let token: string;
+	let images: ReturnType<typeof createServer> | undefined;
 	const faux = fauxProvider({ provider: "faux", models: [{ id: "m" }] });
 	const toolUse = (...calls: ReturnType<typeof fauxToolCall>[]) => fauxAssistantMessage(calls, { stopReason: "toolUse" });
 	const transcript = async () => {
@@ -49,7 +52,7 @@ real("an agent on a paired computer", () => {
 		faux.setResponses([...script, toolUse(fauxToolCall("send_to_user", { message: `done ${++n}` })), fauxAssistantMessage(`ended ${n}`)] as never);
 		expect((await web.call("POST", `/api/sessions/${chatId}/messages`, { commandId: `m-${n}`, text: words })).status).toBe(202);
 		const mine = n;
-		return () => waitFor(`the turn "${words}" to end`, async () => ((await transcript()).includes(`ended ${mine}`) ? true : undefined), 60_000);
+		return () => waitFor(`the turn "${words}" to end`, async () => (sentAndAnswered(await transcript(), `done ${mine}`) ? true : undefined), 60_000);
 	};
 	const connected = (online: boolean) => waitFor(`the computer to be ${online ? "online" : "offline"}`, async () => ((await web.call("GET", "/api/computer")).json.state === (online ? "online" : "offline") ? true : undefined), 30_000);
 	const startDaemon = (...extra: string[]) => {
@@ -69,10 +72,14 @@ real("an agent on a paired computer", () => {
 		expect(registered.status).toBe(201);
 		ownerId = registered.json.account.ownerId;
 		chatId = (await web.call("POST", "/api/sessions", { title: "Work" })).json.id;
-		runner = await start(d, "runner", { pollMs: 40, providers: () => [faux.provider] }, { PIM_DEFAULT_MODEL: "faux/m", PIM_APP_DATABASE_URL: stack.url("gate") });
+		// An image endpoint, for generate_image: it answers every request with a real 1x1 PNG.
+		images = createServer((_req, res) => res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ data: [{ b64_json: PNG.toString("base64") }] })));
+		await new Promise<void>((resolve) => images!.listen(0, "127.0.0.1", resolve));
+		runner = await start(d, "runner", { pollMs: 40, providers: () => [faux.provider] }, { PIM_DEFAULT_MODEL: "faux/m", PIM_APP_DATABASE_URL: stack.url("gate"), OPENAI_API_KEY: "sk-images", PIM_OPENAI_BASE_URL: `http://127.0.0.1:${(images.address() as { port: number }).port}/v1`, PIM_IMAGE_MODEL: "openai/gpt-image-1" });
 	}, 180_000);
 	afterAll(async () => {
 		daemon?.kill("SIGKILL");
+		images?.close();
 		await Promise.allSettled([runner?.close(), gate?.close()]);
 		await app?.db.end();
 		d?.nats.stop();
@@ -106,7 +113,7 @@ real("an agent on a paired computer", () => {
 		expect((await web.call("GET", "/api/computer")).json.computer).toMatchObject({ agent: expect.stringContaining("pim-computer"), root: expect.any(String) });
 		writeFileSync(join(root, "hello.txt"), "line one\nline two\n");
 
-		const end = await ask("run a command", toolUse(fauxToolCall("shell", { command: "echo from-the-computer > made.txt; cat hello.txt" })), toolUse(fauxToolCall("file_read", { path: "/workspace/made.txt" })), toolUse(fauxToolCall("send_to_user", { message: "Done." })));
+		const end = await ask("run a command", toolUse(fauxToolCall("shell", { command: "echo from-the-computer > made.txt; cat hello.txt" })), toolUse(fauxToolCall("file_read", { path: "/workspace/made.txt" })));
 		await end();
 		expect((await d.stack.admin.query("SELECT count(*)::int AS n FROM pim_app.approvals")).rows[0].n).toBe(0);
 		expect(readFileSync(join(root, "made.txt"), "utf8")).toBe("from-the-computer\n");
@@ -119,7 +126,6 @@ real("an agent on a paired computer", () => {
 			"work on files",
 			toolUse(fauxToolCall("file_write", { path: "/workspace/notes/a.md", content: "alpha\nbeta\n" })),
 			toolUse(fauxToolCall("file_edit", { path: "/workspace/hello.txt", edits: [{ oldText: "line two", newText: "line 2" }] }), fauxToolCall("file_read", { path: "/etc/passwd" }), fauxToolCall("file_find", { pattern: "**/*.md" })),
-			toolUse(fauxToolCall("send_to_user", { message: "Done." })),
 		);
 		await end2();
 		expect(readFileSync(join(root, "notes/a.md"), "utf8")).toBe("alpha\nbeta\n");
@@ -141,7 +147,6 @@ real("an agent on a paired computer", () => {
 		const end = await ask(
 			"read the pdf",
 			toolUse(fauxToolCall("file_read", { path: "/workspace/big.pdf" }), fauxToolCall("file_edit", { path: "/workspace/big.txt", edits: [{ oldText: "x", newText: "y" }] })),
-			toolUse(fauxToolCall("send_to_user", { message: "Done." })),
 		);
 		await end();
 		expect(Date.now() - started).toBeLessThan(25_000);
@@ -176,7 +181,7 @@ real("an agent on a paired computer", () => {
 		] as never);
 		const content = [{ type: "text", text: "What is this?" }, { type: "image", data: photo.toString("base64"), mimeType: "image/jpeg" }];
 		expect((await web.call("POST", `/api/sessions/${chatId}/messages`, { commandId: `m-${mine}`, operationId: `m-${mine}`, text: "What is this?", content })).status).toBe(202);
-		await waitFor("the turn with the photo to end", async () => ((await transcript()).includes(`ended ${mine}`) ? true : undefined), 60_000);
+		await waitFor("the turn with the photo to end", async () => (sentAndAnswered(await transcript(), `done ${mine}`) ? true : undefined), 60_000);
 		expect(asked).toHaveLength(1);
 		expect(asked[0]!.mimeType).toBe("image/jpeg");
 		expect(fitted(asked[0]!).length).toBeLessThan(750_000);
@@ -198,7 +203,7 @@ real("an agent on a paired computer", () => {
 				const result = context.messages.findLast((m) => m.role === "toolResult")!;
 				read = result.content.filter((part) => part.type === "image");
 				note = result.content.map((part) => (part as { text?: string }).text ?? "").join("");
-				return toolUse(fauxToolCall("send_to_user", { message: "Seen." }));
+				return toolUse(fauxToolCall("current_time", {}));
 			},
 		);
 		await end();
@@ -206,6 +211,17 @@ real("an agent on a paired computer", () => {
 		expect(read[0]!.mimeType).toBe("image/jpeg");
 		expect(fitted(read[0]!).length).toBeLessThan(750_000);
 		expect(note).toContain(`/workspace/photo.jpg (${photo.length} bytes; scaled down to fit)`);
+	}, 120_000);
+
+	it("writes an image it draws onto the computer too, where the agent's file and shell tools look, and says so", async () => {
+		const end = await ask("draw a kite", toolUse(fauxToolCall("generate_image", { prompt: "a red kite", path: "/workspace/images/kite.png" })));
+		await end();
+		const answer = JSON.parse((await results("generate_image")).at(-1)!);
+		expect(answer.note).toMatch(/file_read it/);
+		// It is a file on the computer, bytes intact, and still one of the files the chat shows.
+		expect(readFileSync(join(root, "images/kite.png")).equals(PNG)).toBe(true);
+		const shown = await fetch(`${base(gate)}/api/files/content?path=${encodeURIComponent("/workspace/images/kite.png")}`, { headers: { "x-pim-ingress-secret": web.ingress, cookie: web.cookie } });
+		expect(Buffer.from(await shown.arrayBuffer()).equals(PNG)).toBe(true);
 	}, 120_000);
 
 	it("goes unavailable when the computer leaves", async () => {

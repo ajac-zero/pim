@@ -275,11 +275,16 @@ export const UserMessage = memo(function UserMessage({
               : undefined;
           return url ? [url] : [];
         });
-  // A saved image is shown as its preview, so its link to the file isn't shown too.
+  // A saved image the message carries is shown as its preview, so its link to
+  // the file isn't shown too. The message carries its first saved images only,
+  // so the links past them stay.
+  let previewed = 0;
   const shown =
     images.length > 0
       ? text
-          .replace(SAVED_IMAGE_LINK, "")
+          .replace(SAVED_IMAGE_LINK, (link) =>
+            previewed++ < images.length ? "" : link,
+          )
           .replace(/\n{3,}/g, "\n\n")
           .trim()
       : text;

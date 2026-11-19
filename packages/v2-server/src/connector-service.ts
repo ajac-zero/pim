@@ -14,6 +14,7 @@ import type { Tool } from "@pim/v2-app/connectors";
 import { BadRequestError, NotFoundError } from "@pim/v2-app/errors";
 import { openString } from "@pim/v2-app/crypto";
 import { appStore, CredentialRenewals, SignInLost } from "./connector-credential.ts";
+import { type ConnectorSkill, listSkills } from "./connector-skills.ts";
 import { mcpFetchTools, parseCredential, type Transport } from "./connector-tools.ts";
 import { type CustomApp } from "./compat/admin-gallery.ts";
 import { ApiError, AuthRefused } from "./native/http.ts";
@@ -271,6 +272,20 @@ export class ConnectorService {
 		} catch (error) {
 			if (error instanceof AuthRefused) throw new BadRequestError(`${native.name} refused the connection's credential; connect it again in Connectors.`);
 			throw error;
+		}
+	}
+
+	/** The skills a connected server publishes over the MCP Skills extension, as the connector's own screen lists them. A server that cannot be reached, or publishes none, has none. */
+	async skills(p: Principal, id: string): Promise<ConnectorSkill[]> {
+		await this.app.identity.authz.enforce(p, "api:read");
+		const row = (await this.#rows(p.ownerId)).find((r) => r.id === id);
+		if (!row) throw new NotFoundError(`No connector ${id}`);
+		if (!row.url || row.status !== "connected") return [];
+		try {
+			const renewals = new CredentialRenewals({ crypto: this.app.crypto, store: appStore(this.app), fetch: this.transport.fetch, now: this.now, leadMs: 60_000 });
+			return (await listSkills(this.transport, row.url, (await renewals.open(p.ownerId, row)).bearer)).skills;
+		} catch {
+			return [];
 		}
 	}
 

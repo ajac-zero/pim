@@ -17,24 +17,26 @@ import { type Actor, repoName } from "@pim/v2-forge/authz";
 import { BRANCH_OR_COMMIT, COMMIT, MAX_DIFF_CHARS, MAX_TEST_RUNS, brief, diffText, latestTests, listing, pushedMessage, testRun, threadArg } from "./coding-tools.ts";
 import type { RelayBus } from "@pim/v2-app/relay";
 import { hostSpeaks, postToRoom } from "./rooms.ts";
-import { computerTools } from "./computer-tools.ts";
+import { computerTools, filesPath } from "./computer-tools.ts";
 import { type ImageSources, imageTools } from "./image-tools.ts";
 import type { ForgeParts } from "./forge-assembly.ts";
 import type { EnvelopeCrypto } from "@pim/v2-contracts/platform";
 import { uiBlockReference } from "@pim/ui-lang";
 import { loadWidgets, MAX_WIDGETS, type ShownWidget, uiDiagnostics, widgetRefs } from "./agent-widgets.ts";
-import { connectorToolset, type Transport } from "./connector-tools.ts";
+import { chatApps, connectorToolset, type Transport } from "./connector-tools.ts";
 import { watchTools } from "./watch-tools.ts";
 import { canvasTools } from "./canvas-tools.ts";
 import { connectorAdminTools } from "./connector-admin-tools.ts";
 import { builtinSkill } from "./builtin-skills.ts";
-import { readSkillFolder } from "./skill-sources.ts";
+import { readSkillFolder, readSkillFromFiles } from "./skill-sources.ts";
+import { resolveWriter } from "./skill-tools.ts";
 import { adminTools } from "./admin-tools.ts";
 import { rosterOf, teamTools } from "./agent-team-tools.ts";
 import { recordResult } from "./tool-approval.ts";
 import { roomTools } from "./room-tools.ts";
 import { triggerTools } from "./trigger-tools.ts";
-import { copiedFiles } from "./app-from-files.ts";
+import { copiedFiles, listPersonFolder, readPersonFile, savePersonFile } from "./app-from-files.ts";
+import { bytesOf, isBinary, sizeOfFile, typeOfFile } from "@pim/v2-app/app-files";
 import { noteTools } from "./note-tools.ts";
 import { goalTools } from "./goal-tools.ts";
 import { memoryTools } from "./memory-tools.ts";
@@ -403,7 +405,10 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 		}, "safe"),
 
 		// Skills and goals.
-		read("read_skill", "Read a skill's instructions and the names of its files: one of the person's own, or one that comes with Pim.", Type.Object({ name: S() }), async (app, call, a) => {
+		read("read_skill", "Read a skill's instructions and the names of its files: one of the person's own, or one that comes with Pim, by its name alone; or one a connected connector publishes (listed under the connector in your prompt), by its name and the connector's.", Type.Object({ name: S(), connector: O(S({ description: "The connector that publishes the skill; leave out for one of your own or Pim's." })) }), async (app, call, a) => {
+			// A guest's chat, or a visit, works with none of the owner's connectors.
+			if (a.connector !== undefined && (await toolsAllowed(app, ownerId, call.chat)) !== null) return text("This chat works with none of its owner's connectors.", true);
+			if (a.connector !== undefined) return connectors.skills.read((await chatApps(runtime, ownerId, call.chat)).apps, a.connector, a.name);
 			const s = await app.agents.getSkill(call.p, a.name).catch((error) => {
 				if (builtinSkill(a.name)) return undefined;
 				throw error;
@@ -411,29 +416,44 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 			if (!s) return text(`${builtinSkill(a.name)!.instructions}\n\nFiles: none`);
 			return text(`Skill ${a.name}, version ${s.version}:\n${s.body}\n\nFiles: ${Object.keys(s.files ?? {}).join(", ") || "none"}`);
 		}),
-		read("read_skill_file", "Read one of a skill's supporting files.", Type.Object({ name: S(), path: S() }), async (app, call, a) => {
-			const file = ((await app.agents.getSkill(call.p, a.name)).files ?? {})[a.path];
-			return file === undefined ? text(`${a.name} has no file ${a.path}.`, true) : text(file);
+		read("read_skill_file", "Read one of a skill's supporting files, by its path relative to the skill, such as references/guide.md: one of yours by the skill's name alone, or a connector's skill with the connector's name too.", Type.Object({ name: S(), path: S(), connector: O(S({ description: "The connector that publishes the skill; leave out for one of your own." })), save_to: O(S({ description: "A path in the person's files, such as /workspace/scripts/convert.py, to copy one of your own skill's files to instead of reading it, replacing any file there: a script or a template, text or not." })) }), async (app, call, a) => {
+			if (a.connector !== undefined && (await toolsAllowed(app, ownerId, call.chat)) !== null) return text("This chat works with none of its owner's connectors.", true);
+			if (a.connector !== undefined) return connectors.skills.readFile((await chatApps(runtime, ownerId, call.chat)).apps, a.connector, a.name, a.path);
+			const skill = await app.agents.getSkill(call.p, a.name);
+			const path = String(a.path).replace(/^\.\//, "");
+			const file = (skill.files ?? {})[path];
+			if (file === undefined) return text(`${a.name} has no file ${a.path}. Its files: ${Object.keys(skill.files ?? {}).join(", ") || "none"}.`, true);
+			if (a.save_to !== undefined) {
+				try {
+					const saved = await savePersonFile({ ownerId, app, relay: deps.relay }, call.p, a.save_to, bytesOf(file));
+					return text(`Copied ${path} from the ${a.name} skill, version ${skill.version}, to ${saved.path} (${saved.size} bytes).`);
+				} catch (error) {
+					return text(`Not copied: ${error instanceof Error ? error.message : String(error)}`, true);
+				}
+			}
+			return isBinary(file) ? text(`(binary file, ${sizeOfFile(file)} bytes, ${typeOfFile(path)}): copy it to the person's files with save_to to use it.`) : text(file);
 		}),
-		tool("install_skill", "Install a skill from a GitHub folder (https://github.com/owner/repo/tree/ref/path, holding a SKILL.md and any files it uses). A person approves it first, with the files it holds listed; what is installed is exactly what they approved, at the commit the folder is at now.", Type.Object({ source: S({ minLength: 1 }), name: O(S()) }),
+		tool("install_skill", "Install a skill someone published, as one of your skills, when the person asks for it: a folder in the Agent Skills format with a SKILL.md and any files it uses, on GitHub (https://github.com/owner/repo/tree/ref/path) or in the person's files (/workspace/skills/name). A person approves it first, with the files it holds listed; what is installed is exactly what they approved, at the commit the folder is at now. To update one of your skills from its source, give its version as base_version. Only the person's majordomo can give agent, to install it for another of their agents.", Type.Object({ source: S({ minLength: 1, description: "The skill's folder on GitHub, such as https://github.com/owner/repo/tree/main/skills/name, or in the person's files, such as /workspace/skills/name." }), name: O(S()), base_version: O(Type.Integer({ minimum: 1, description: "To update one of your skills: its version, as read_skill gave it." })), agent: O(S({ description: "The id of another of the person's agents to install it for instead, from your_agents. Only their majordomo installs skills for other agents." })) }),
 			async (args, api) => {
 				const app = deps.app;
 				if (!app) return noApp();
 				const taskId = String(api.taskId);
 				try {
-					const folder = await readSkillFolder(deps.fetch, args.source);
 					const chat = await deps.chatOf(api.conversationId);
 					const p = await principalOf(app, chat);
+					const files = { ownerId, app, relay: deps.relay };
+					const folder = String(args.source).startsWith("/") ? await readSkillFromFiles({ list: (dir) => listPersonFolder(files, p, dir), read: (path) => readPersonFile(files, p, path, 10_000_000) }, filesPath(args.source) ?? args.source) : await readSkillFolder(deps.fetch, args.source);
 					const name = args.name ?? folder.name;
-					// An agent's switch for skills, in Tool permissions: off, it installs none.
-					const self = (await rosterOf(runtime, ownerId, chat)).self;
-					if (self && (await app.db.owner(ownerId, async (tx) => (await tx.query("SELECT 1 FROM pim_app.tool_permissions WHERE audience = $1 AND app = '' AND tool = 'write_skill' AND permission = 'off'", [`agent:${self}`])).rowCount))) return text("The person turned skills off for this agent, so no skill is installed.", true);
+					// Who may install it, and for whom: an agent's own skills, or any agent's for the majordomo; an agent's switch for skills, in Tool permissions, off, and it installs none.
+					const who = await resolveWriter({ ownerId, runtime }, app, { chat, p, api, agentId: null, context: undefined }, name, args.agent);
+					if ("error" in who) return who.error;
+					if (who.existing && args.base_version !== undefined && args.base_version !== who.existing.version) return text(`${name} is at version ${who.existing.version} now, not ${args.base_version}: read it again before updating it.`, true);
 					const signal = (await runtime.read<{ payload: { approved?: boolean } }>(ownerId, "SELECT payload FROM pim_runtime.durable_signals WHERE owner_id = $1 AND task_id = $2 AND kind = 'approval' ORDER BY signal_id DESC LIMIT 1", [ownerId, taskId])).rows[0];
 					if (signal && signal.payload.approved !== true) return text(`A person did not approve this skill, so it was not installed.${await noteOn(app, ownerId, signal.payload)}`, true);
 					const filed = (await app.db.owner(ownerId, async (tx) => (await tx.query("SELECT id, args FROM pim_app.approvals WHERE tool = 'skill:install' AND args->>'taskId' = $1 LIMIT 1", [taskId])).rows[0])) as { id: string; args: { commit?: string; hashes?: Record<string, string> } } | undefined;
 					if (!signal && !filed) {
 						const names = Object.keys(folder.hashes);
-						const summary = `Install the skill ${name} from ${folder.source}: ${names.length} file${names.length === 1 ? "" : "s"} (${names.slice(0, 12).join(", ")}${names.length > 12 ? ", …" : ""})`;
+						const summary = `Install the skill ${name}${who.target && who.by && who.target.id !== who.by.id ? ` for ${who.target.name}` : ""} from ${folder.source}: ${names.length} file${names.length === 1 ? "" : "s"} (${names.slice(0, 12).join(", ")}${names.length > 12 ? ", …" : ""})`;
 						const gate = await app.approvals.gate(p, { action: "skill:install", tool: "install_skill", resource: { source: folder.source.replace(/\/tree\/.*$/, "") }, ...(chat ? { chatId: chat } : {}), args: { taskId, callId: api.callId, source: folder.source, commit: folder.commit, name, hashes: folder.hashes, summary }, timeoutMs: 24 * 3600_000, onTimeout: "deny", explicit: true });
 						if (gate.outcome === "waiting") return { output: [{ type: "text", text: "Waiting for a person's approval." }], control: { suspend: true } } as never;
 					} else if (!signal) {
@@ -441,10 +461,12 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 					}
 					// What was approved is what is installed: the folder read again must be the one the person was shown.
 					if (filed?.args.hashes && JSON.stringify(Object.entries(filed.args.hashes).sort()) !== JSON.stringify(Object.entries(folder.hashes).sort())) return text("The skill's files are not the ones that were approved, so it was not installed. Ask again to see them.", true);
-					const files = { ...folder.files, ".source": JSON.stringify({ source: folder.source, commit: folder.commit }) };
-					const exists = await app.agents.getSkill(p, name).then(() => true, () => false);
-					await (exists ? app.agents.updateSkill(p, name, { description: folder.description, body: folder.body, files }) : app.agents.createSkill(p, { name, description: folder.description, body: folder.body, files }));
-					const done = `${exists ? "Saved a new version of" : "Installed"} the skill ${name} from ${folder.source}.`;
+					const kept = { ...folder.files, ".source": JSON.stringify({ source: folder.source, commit: folder.commit }) };
+					const exists = who.existing !== undefined;
+					await (exists ? app.agents.updateSkill(p, name, { description: folder.description, body: folder.body, files: kept, ...(args.base_version === undefined ? {} : { baseVersion: args.base_version }) }) : app.agents.createSkill(p, { name, description: folder.description, body: folder.body, files: kept }));
+					// An installed skill is one of the agent's it is for, which is what puts it in that agent's prompt.
+					if (who.target && !who.target.skills.includes(name)) await app.agents.update(p, who.target.id, { skills: [...who.target.skills, name] });
+					const done = `${exists ? "Saved a new version of" : "Installed"} the skill ${name}${who.target ? `, one of ${who.target.name}'s skills` : ""}, from ${folder.source}.`;
 					await recordResult(app, ownerId, "skill:install", taskId, done);
 					return text(done);
 				} catch (error) {
@@ -551,7 +573,7 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 	// Memory (`./memory-tools.ts`), goals (`./goal-tools.ts`), and reading, changing and listing notes (`./note-tools.ts`).
 	tools.push(...webTools({ tool, fetch: deps.fetch, publicUrl }));
 	tools.push(...memoryTools({ ownerId, runtime, read, write }));
-	tools.push(...skillTools({ ownerId, runtime, read }));
+	tools.push(...skillTools({ ownerId, runtime, read, copy: copied }));
 	tools.push(...goalTools({ read, write }));
 	tools.push(...noteTools({ ownerId, read, write, card: (app, id, note) => noteCard(app, ownerId, id, note) }));
 

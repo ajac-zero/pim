@@ -60,8 +60,8 @@ export function connectorScreens(env: Env = process.env): Route[] {
 			return ok(found);
 		}),
 		route("DELETE", "/api/mcp/:id", async ({ app, principal, params }) => (await service(app).disconnect(await principal(), params[0]!), ok({ deleted: true }))),
-		// Skills and events a connector offers beyond tools are not carried yet (docs/architecture/v2-connectors.md).
-		route("GET", "/api/mcp/:id/skills", async ({ app, principal }) => (await app.identity.authz.enforce(await principal(), "api:read"), ok({ skills: [] }))),
+		// The skills a connector publishes (the MCP Skills extension), as v1 listed them: the SKILL.md's address, its name and description, and the manifest of its files. Events are the watch tools' (`../watch-tools.ts`).
+		route("GET", "/api/mcp/:id/skills", async ({ app, principal, params }) => ok({ skills: (await service(app).skills(await principal(), params[0]!)).map((skill) => ({ uri: skill.uri, name: skill.name, description: skill.description, files: skill.files })) })),
 		route("GET", "/api/mcp/:id/events", async ({ app, principal }) => (await app.identity.authz.enforce(await principal(), "api:read"), ok({ events: [] }))),
 
 		// Where a service sends the browser back after a sign-in: `/mcp/callback/apps` for a native connector (one address for everyone, which providers need registered), and

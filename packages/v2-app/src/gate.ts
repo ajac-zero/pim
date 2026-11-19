@@ -26,7 +26,7 @@ export type GateOptions = {
 	before?: (ctx: Ctx, route: Route) => Promise<Reply | undefined>;
 };
 
-const CORS = { "access-control-allow-origin": "*", "access-control-allow-methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS", "access-control-allow-headers": "Authorization, Content-Type, If-Match, Idempotency-Key", "access-control-expose-headers": "ETag", "access-control-max-age": "86400" };
+const CORS = { "access-control-allow-origin": "*", "access-control-allow-methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS", "access-control-allow-headers": "Authorization, Content-Type, If-Match, Idempotency-Key, Mcp-Protocol-Version, Mcp-Session-Id", "access-control-expose-headers": "ETag", "access-control-max-age": "86400" };
 
 export const builtInRoutes: Route[] = [...hostedRoutes, ...chatgptRoutes, ...domainRoutes, ...coreRoutes, ...authRoutes];
 
@@ -34,8 +34,9 @@ export function createGate(app: App, options: GateOptions = {}): Server {
 	const routes = [...(options.first ?? []), ...builtInRoutes, ...(options.routes ?? [])];
 	return createServer(async (req, res) => {
 		try {
-			// API clients in a browser on another site: tokens work there, cookies do not (SameSite=Strict, and the Origin check of the routes that change something).
-			if (/^\/api(\/|\?|$)/.test(req.url ?? "")) {
+			// API clients in a browser on another site: tokens work there, cookies do not (SameSite=Strict, and the Origin check of the routes that change something). The MCP
+			// endpoint and its sign-in answer them too, for an MCP client that runs in a page.
+			if (/^\/(api|mcp|oauth|\.well-known)(\/|\?|$)/.test(req.url ?? "")) {
 				for (const [name, value] of Object.entries(CORS)) res.setHeader(name, value);
 				if (req.method === "OPTIONS") return void res.writeHead(204).end();
 			}
@@ -66,6 +67,9 @@ async function handle(app: App, routes: Route[], options: GateOptions, req: Inco
 		const ctx = makeCtx(app, req, url, m.slice(1).map(decodeURIComponent), { origin, appsOrigin: options.appsOrigin });
 		return send(res, (await options.before?.(ctx, r)) ?? (await r.run(ctx)));
 	}
+	// A path some route answers, with a method none does: 405 and the methods it takes, rather than a 404 that says the path is not there.
+	const allowed = [...new Set(routes.filter((r) => r.pattern.test(url.pathname)).map((r) => r.method))];
+	if (allowed.length > 0) return send(res, { status: 405, headers: { allow: allowed.join(", ") }, body: { error: "method_not_allowed", message: `${url.pathname} takes ${allowed.join(", ")}` } });
 	throw new NotFoundError();
 }
 

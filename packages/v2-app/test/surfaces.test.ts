@@ -503,7 +503,13 @@ describe("export and deletion", () => {
 		// An API token, even an unscoped one, cannot delete the account: that is session-only.
 		const viaToken = await fetch(`${base}/api/account`, { method: "DELETE", headers: { authorization: `Bearer ${api.token}` } });
 		expect(viaToken.status).toBe(403);
-		expect((await u.http("/api/account", { method: "DELETE" })).status).toBe(200);
+		// It asks the person to say whose account it is, as v1 did, and ends their session with it.
+		expect((await u.http("/api/account", { method: "DELETE" })).status).toBe(400);
+		expect((await u.http("/api/account", { method: "DELETE", body: body({ confirm: "someone-else" }) })).status).toBe(400);
+		const gone = await u.http("/api/account", { method: "DELETE", body: body({ confirm: "leaver" }) });
+		expect(gone.status).toBe(200);
+		expect(await gone.json()).toEqual({ deleted: true });
+		expect(gone.headers.get("set-cookie")).toMatch(/pim_session=; .*Max-Age=0/);
 		expect((await u.http("/api/account")).status).toBe(401); // its sessions were revoked with it
 		expect((await app.identity.authz.account(o))?.status).toBe("deleting");
 		await expect(app.identity.authz.enforce(asSession(o), "api:read")).rejects.toMatchObject({ status: 410 });

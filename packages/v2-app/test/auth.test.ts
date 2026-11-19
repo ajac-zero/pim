@@ -257,6 +257,22 @@ describe("cookies and credentials", () => {
 		expect(bearerOf({ headers: { authorization: "Bearer h" } } as never, url("/x?token=q"), false).bearer).toBe("h");
 	});
 
+	it("answers a wrong method with 405 and what the path takes, rejects a body that is not an object, and lets MCP clients in pages in with CORS", async () => {
+		const { c } = await join("shapes-user");
+		const wrong = await c.call("PUT", "/api/sessions", {});
+		expect(wrong.status).toBe(405);
+		expect(wrong.res.headers.get("allow")).toContain("POST");
+		expect((await c.call("GET", "/api/nope")).status).toBe(404);
+		expect((await c.call("POST", "/api/sessions", [1])).status).toBe(400);
+		const mcp = await c.call("GET", "/mcp");
+		expect(mcp.status).toBe(405);
+		expect(mcp.res.headers.get("access-control-allow-origin")).toBe("*");
+		const preflight = await c.call("OPTIONS", "/mcp", undefined, { origin: "https://client.example", "access-control-request-method": "POST" });
+		expect(preflight.status).toBe(204);
+		expect(preflight.res.headers.get("access-control-allow-headers")).toContain("Authorization");
+		expect((await c.call("OPTIONS", "/.well-known/oauth-authorization-server")).status).toBe(204);
+	});
+
 	it("refuses a cookie request from another site, and a sign-out ends the session on the server", async () => {
 		const { c } = await join("cookie-user");
 		expect((await c.call("POST", "/api/sessions", {}, { origin: "https://evil.example" })).status).toBe(403);

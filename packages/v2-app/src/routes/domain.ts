@@ -1,5 +1,5 @@
 import { BadRequestError, NotFoundError } from "../errors.ts";
-import { ok, type Reply, route, type Route } from "../http.ts";
+import { clearCookie, ok, type Reply, route, type Route, sessionCookieName } from "../http.ts";
 import { isWebProviderInput, toServiceInput, toWebProvider } from "../web-providers.ts";
 
 const int = (v: string | null, fallback: number) => (v === null ? fallback : Number.isInteger(Number(v)) ? Number(v) : fallback);
@@ -208,5 +208,13 @@ export const domainRoutes: Route[] = [
 	// ---- the account's own data ----
 	route("GET", "/api/account/export", async ({ app, principal }) => ok(await app.sharing.export(await principal()), 200, { "content-disposition": 'attachment; filename="pim-export.json"' })),
 	route("GET", "/api/export", async ({ app, principal }) => ok(await app.sharing.export(await principal()), 200, { "content-disposition": 'attachment; filename="pim-export.json"' })),
-	route("DELETE", "/api/account", async ({ app, principal }) => (await app.identity.deleteSelf(await principal()), none())),
+	// Deleting takes the person, signed in, saying whose account it is, as v1 asked: `{ confirm: <username> }`. The session ends with it.
+	route("DELETE", "/api/account", async ({ app, principal, json, secure }) => {
+		const p = await principal();
+		await app.identity.authz.enforce(p, "account:delete");
+		const username = (await app.identity.authz.account(p.ownerId))?.username;
+		if ((await json()).confirm !== username) throw new BadRequestError(`To delete your account, send { "confirm": "${username}" }.`);
+		await app.identity.deleteSelf(p);
+		return ok({ deleted: true }, 200, { "set-cookie": clearCookie(sessionCookieName(secure), secure) });
+	}),
 ];

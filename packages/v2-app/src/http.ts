@@ -107,11 +107,14 @@ export function makeCtx(app: App, req: IncomingMessage, url: URL, params: string
 		maybePrincipal: () => resolve().catch((error) => (error instanceof UnauthorizedError ? null : Promise.reject(error))),
 		json: async (limit = 1_000_000) => {
 			const body = await readBody(req, limit);
+			let parsed: unknown;
 			try {
-				return body.length ? JSON.parse(Buffer.from(body).toString("utf8")) : {};
+				parsed = body.length ? JSON.parse(Buffer.from(body).toString("utf8")) : {};
 			} catch {
 				throw new BadRequestError("The body is not valid JSON");
 			}
+			if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new BadRequestError("The body must be a JSON object");
+			return parsed as Record<string, any>;
 		},
 		form: async () => new URLSearchParams(Buffer.from(await readBody(req, 100_000)).toString("utf8")),
 		bytes: (limit = 25_000_000) => readBody(req, limit),

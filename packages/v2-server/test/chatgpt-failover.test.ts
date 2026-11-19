@@ -53,7 +53,7 @@ async function fakeOpenAI() {
 			return json(200, { access_token: `access-${state.refreshes + 1}`, refresh_token: state.valid, expires_in: 3600 });
 		}
 		if (req.url?.endsWith("/responses")) {
-			// A turn is asked once and answers with a send_to_user call; the request that follows with its result ends the turn in plain text.
+			// A turn is asked once and answers with a send_to_user call, which finishes it.
 			const followUp = (JSON.parse(text) as { input?: { type?: string }[] }).input?.at(-1)?.type === "function_call_output";
 			if (!followUp) state.responses.push(String(req.headers.authorization));
 			if (state.limited) return json(429, { error: { message: "Rate limit reached", type: "rate_limit_error", code: "rate_limit_exceeded" } });
@@ -193,7 +193,7 @@ real("Sign in with ChatGPT and provider failover", () => {
 		expect((await web.call("PUT", "/api/model/fallbacks", { models: [{ provider: "openai", id: MODEL }, { provider: "faux", id: "m" }] })).status).toBe(200);
 		chatId = (await web.call("POST", "/api/sessions", { title: "Plan" })).json.id;
 		const before = (await stored()).version;
-		await say("hello", "ended plan");
+		await say("hello", "plan says hi");
 		expect(openai.state.refreshes).toBe(1);
 		expect(openai.state.responses).toEqual(["Bearer access-2"]);
 		expect((await stored()).version).toBeGreaterThan(before);
@@ -218,7 +218,7 @@ real("Sign in with ChatGPT and provider failover", () => {
 	it("moves to the next model on a 429, leaves nothing of the failed attempt, and skips the cooling model afterwards", async () => {
 		openai.state.limited = true;
 		faux.setResponses([fauxAssistantMessage([fauxToolCall("send_to_user", { message: "from the fallback" })], { stopReason: "toolUse" }), fauxAssistantMessage("ended the fallback")] as never);
-		await say("hello again", "ended the fallback");
+		await say("hello again", "from the fallback");
 		const asked = openai.state.responses.length;
 		expect(asked).toBeGreaterThanOrEqual(2);
 		const shown = await transcript();
@@ -226,10 +226,12 @@ real("Sign in with ChatGPT and provider failover", () => {
 		expect(shown).not.toContain('"stopReason":"error"');
 		// The plan's model is cooling: the next turn goes straight to the fallback without asking it.
 		faux.setResponses([fauxAssistantMessage([fauxToolCall("send_to_user", { message: "fallback again" })], { stopReason: "toolUse" }), fauxAssistantMessage("ended again")] as never);
-		await say("and again", "ended again");
+		await say("and again", "fallback again");
 		expect(openai.state.responses).toHaveLength(asked);
 		// The cooldown is in the database, where every other Runner reads it.
 		expect((await d.stack.admin.query("SELECT ref FROM pim_runtime.provider_cooldowns WHERE until > now()")).rows.map((r) => r.ref)).toContain(`openai/${MODEL}`);
+		// A plan that says it is out of usage is left for the first rung of v1's backoff (five minutes), not for the short cooldown of an overloaded model.
+		expect((await d.stack.admin.query("SELECT until > now() + interval '4 minutes' AS long FROM pim_runtime.provider_cooldowns WHERE ref = $1", [`openai/${MODEL}`])).rows[0]).toEqual({ long: true });
 		const calls = (await d.stack.admin.query("SELECT provider, model FROM pim_app.model_calls")).rows;
 		expect(calls).toContainEqual({ provider: "faux", model: "m" });
 	}, 90_000);

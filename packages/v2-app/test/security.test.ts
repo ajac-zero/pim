@@ -89,6 +89,18 @@ describe("sessions, tokens and owner status", () => {
 		await expect(f.app.identity.authenticate(session)).rejects.toBeInstanceOf(UnauthorizedError);
 	});
 
+	it("keeps the administration and the computer's desktop to a browser session, whatever a token's scopes", async () => {
+		const adminSession = f.admin.principal;
+		const all = await f.app.identity.authenticate((await f.app.identity.createToken(adminSession, { name: "all", scopes: ["*"] })).token);
+		for (const action of ["admin:settings", "admin:accounts", "admin:compute", "computer:screen"]) {
+			await expect(f.app.identity.authz.enforce(all, action)).rejects.toMatchObject({ reason: "session-only" });
+		}
+		await f.app.identity.authz.enforce(adminSession, "admin:settings");
+		await f.app.identity.authz.enforce(adminSession, "computer:screen");
+		// What a token may otherwise do is still its scopes' to say.
+		await f.app.identity.authz.enforce(all, "computer:use");
+	});
+
 	it("suspends (403) and deletes (410) an owner across session, token, MCP, trigger and public execution", async () => {
 		const e = await member(f.app, f.admin.principal, "erin");
 		const owner = e.account.ownerId;

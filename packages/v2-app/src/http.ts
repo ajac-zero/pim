@@ -62,8 +62,8 @@ export async function readBody(req: IncomingMessage, limit: number): Promise<Uin
 const STRICT_PATHS = /^\/(p|hosted|app-pages|shared)\//;
 
 /**
- * The credential a request carries: a bearer header, else the session cookie, else (only on a WebSocket upgrade, which cannot set headers from a
- * browser, and never on published-app or artifact paths) `?token=`.
+ * The credential a request carries: a bearer header, else the session cookie, else `?token=`: on a WebSocket upgrade (a browser cannot set headers on one) and,
+ * as v1 allowed, on a read of the API (`GET /api/...?token=`, for a script or a browser address bar). Never on a write, nor on published-app or artifact paths.
  */
 export function bearerOf(req: IncomingMessage, url: URL, secure: boolean): { bearer?: string; viaCookie: boolean } {
 	const auth = req.headers.authorization;
@@ -72,7 +72,8 @@ export function bearerOf(req: IncomingMessage, url: URL, secure: boolean): { bea
 	if (cookie) return { bearer: cookie, viaCookie: true };
 	const upgrade = req.headers.upgrade?.toLowerCase() === "websocket";
 	const token = url.searchParams.get("token");
-	if (token && upgrade && !STRICT_PATHS.test(url.pathname)) return { bearer: token, viaCookie: false };
+	const apiRead = ["GET", "HEAD"].includes(req.method ?? "GET") && /^\/api(\/|$)/.test(url.pathname);
+	if (token && (upgrade || apiRead) && !STRICT_PATHS.test(url.pathname)) return { bearer: token, viaCookie: false };
 	return { viaCookie: false };
 }
 

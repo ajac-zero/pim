@@ -6,8 +6,12 @@ import { newId } from "./ids.ts";
 
 export type Account = { ownerId: OwnerId; username: string; role: AccountRole; status: AccountStatus; bot: boolean };
 
-/** Actions only a browser session may take; a token, agent or delegate cannot, whatever its scopes (audit B1 gap 3). */
-const SESSION_ONLY = new Set(["token:create", "token:revoke", "session:revoke", "passkey:manage", "account:delete"]);
+/**
+ * Actions only a browser session may take; a token, agent or delegate cannot, whatever its scopes: managing credentials, deleting the account, every `admin:` action
+ * (the majordomo's own calls run as the admin's session) and the desktop and displays, which take input as if at the computer itself (v1's session-only routes).
+ */
+const SESSION_ONLY = new Set(["token:create", "token:revoke", "session:revoke", "passkey:manage", "account:delete", "computer:screen"]);
+const sessionOnly = (action: string) => SESSION_ONLY.has(action) || action.startsWith("admin:");
 /** Actions a guest never takes. */
 const GUEST_DENIED = /^(admin:|coding:|computer:|token:|mcp:|app:deploy|trigger:computer)/;
 /** What an agent acting in its owner's space may do. It never decides approvals (its scopes omit approval:), administers, or touches credentials. */
@@ -95,7 +99,7 @@ export class Authorizer implements AuthorizerContract {
 		const role = account!.role;
 		if (eff.kind === "token" && !scopeAllows(eff.scopes, action)) throw new ForbiddenError(action, "scope");
 		if (eff.kind === "agent" && !scopeAllows(AGENT_SCOPES, action)) throw new ForbiddenError(action, "agent-scope");
-		if (SESSION_ONLY.has(action) && eff.kind !== "user") throw new ForbiddenError(action, "session-only");
+		if (sessionOnly(action) && eff.kind !== "user") throw new ForbiddenError(action, "session-only");
 		if (action.startsWith("admin:") && role !== "admin") throw new ForbiddenError(action, "admin-only");
 		if (role === "guest" && GUEST_DENIED.test(action)) throw new ForbiddenError(action, "guest");
 		if (CODING_ACTIONS.has(action)) await this.#codingGrant(request, action as CodingPermission, resource);

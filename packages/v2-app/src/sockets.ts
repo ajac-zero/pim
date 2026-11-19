@@ -77,6 +77,8 @@ export function attachSockets(server: Server, app: App, options: GateOptions = {
 				const { bearer } = bearerOf(req, url, secure);
 				const p = await app.identity.authenticate(bearer);
 				await app.identity.authz.enforce(p, "api:read");
+				// The desktop takes input as if at the computer itself: only the person, signed in in their browser, uses it.
+				if (url.pathname === COMPUTER_SCREEN) await app.identity.authz.enforce(p, "computer:screen");
 				// Before upgrading: no computer, in this process or any other, is a clean refusal.
 				if (url.pathname === COMPUTER_SCREEN) await app.relay.acquire(p.ownerId, "desktop_screen");
 				if (url.pathname === BROWSER_LIVE) await app.relay.acquire(p.ownerId, "browser_live");

@@ -145,6 +145,14 @@ real("the vertical slice", () => {
 		});
 		live_.follow([`chat:${chatId}`, "sidebar"]);
 		await waitFor("the live socket", () => (live_.status === "live" ? true : undefined));
+		// A page of another site (a hosted app is one) cannot ride the visitor's cookie into the Live socket; a socket with no Origin, as a native client opens, can.
+		const closedWith = (origin: string) => new Promise<number>((resolve) => {
+			const ws = new WebSocket(`ws://127.0.0.1:${live.host.port}/api/ws`, { headers: { cookie: web.cookie, origin, "x-pim-ingress-secret": d.ingressSecret } });
+			ws.on("close", (code) => resolve(code));
+			ws.on("open", () => setTimeout(() => ws.close(1000), 1_500));
+		});
+		expect(await closedWith("https://evil.example.com")).toBe(4003);
+		expect(await closedWith(`http://127.0.0.1:${live.host.port}`)).toBe(1000);
 		faux.setResponses([fauxAssistantMessage("Hello, Anibal.")]);
 		const t0 = Date.now();
 		const admitted = await web.call("POST", `/api/sessions/${chatId}/messages`, { commandId: "m-1", text: "hi" });

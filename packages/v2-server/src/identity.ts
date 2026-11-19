@@ -10,7 +10,7 @@ import type { App } from "@pim/v2-app/app";
 import { newId } from "@pim/v2-app/ids";
 import { type ApprovalFiled, repoName } from "@pim/v2-forge/authz";
 import type { Forge } from "@pim/v2-forge/forge";
-import { bearerOf } from "@pim/v2-app/http";
+import { bearerOf, fromAnotherSite } from "@pim/v2-app/http";
 import type { LiveIdentity } from "@pim/v2-live/server/identity";
 import type { Pulse } from "@pim/v2-live/server/pulse";
 import type { Pool } from "pg";
@@ -24,8 +24,10 @@ export class AppLiveIdentity implements LiveIdentity {
 	) {}
 
 	async authenticate(request: IncomingMessage): Promise<Principal | null> {
-		const { bearer } = bearerOf(request, new URL(request.url ?? "/", "http://live"), this.secure);
+		const { bearer, viaCookie } = bearerOf(request, new URL(request.url ?? "/", "http://live"), this.secure);
 		if (!bearer) return null;
+		// A page of another site (a hosted app is one) must not ride the visitor's cookie into their sidebar and chats; a `?token=` or bearer is its own credential.
+		if (viaCookie && fromAnotherSite(request)) return null;
 		const kind = bearer.startsWith("pims_") ? "session" : bearer.startsWith("pim_") ? "token" : "consumer";
 		const { rows } = await this.pool.query<{ kind: string; owner_id: string; id: string; scopes: string[]; role: "admin" | "member" | "guest"; status: string }>("SELECT * FROM pim_app.live_authenticate($1, $2)", [sha256(bearer), kind]);
 		const row = rows[0];

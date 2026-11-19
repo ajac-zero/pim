@@ -143,6 +143,8 @@ export function computerRoutes(options: { source?: string } = {}): Route[] {
 		}),
 		route("GET", "/api/computer/displays", async (ctx) => {
 			const p = await ctx.principal();
+			// The displays show the chats' titles, and taking one over pauses its agent: the person's browser only, like the desktop itself.
+			await ctx.app.identity.authz.enforce(p, "computer:screen");
 			await ctx.app.identity.authz.enforce(p, "computer:use");
 			const computer = await ctx.app.relay.acquire(p.ownerId, "displays").catch(() => null);
 			const shown = await computer?.call<{ displays: unknown[]; queue: unknown[] }>("displays_list", {}).catch(() => null);
@@ -150,6 +152,7 @@ export function computerRoutes(options: { source?: string } = {}): Route[] {
 			return ok({ displays: (shown?.displays ?? []).map(label), queue: (shown?.queue ?? []).map(label) }, 200, noStore);
 		}),
 		route("POST", "/api/computer/displays/control", async (ctx) => {
+			await ctx.app.identity.authz.enforce(await ctx.principal(), "computer:screen");
 			const { computer } = await withComputer(ctx, "displays");
 			const b = await ctx.json();
 			if (typeof b.thread !== "string" || !b.thread) throw new BadRequestError("thread must name the thread whose display to take over");

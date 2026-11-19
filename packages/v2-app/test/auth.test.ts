@@ -244,13 +244,16 @@ describe("cookies and credentials", () => {
 		expect(plain.res.headers.get("set-cookie")).not.toMatch(/Secure/);
 	});
 
-	it("accepts ?token= only on a WebSocket upgrade, never on published or app paths or plain requests", () => {
-		const req = (upgrade?: string) => ({ headers: upgrade ? { upgrade } : {} }) as never;
+	it("accepts ?token= only on a WebSocket upgrade or a read of the API, never on published or app paths or a write", () => {
+		const req = (upgrade?: string, method = "GET") => ({ method, headers: upgrade ? { upgrade } : {} }) as never;
 		const url = (p: string) => new URL(p, "http://x");
 		expect(bearerOf(req("websocket"), url("/api/notes/live?token=pim_abc"), false).bearer).toBe("pim_abc");
 		expect(bearerOf(req("websocket"), url("/hosted/o/app/t/x?token=pim_abc"), false).bearer).toBeUndefined();
 		expect(bearerOf(req("websocket"), url("/p/pa_1?token=pim_abc"), false).bearer).toBeUndefined();
-		expect(bearerOf(req(), url("/api/account?token=pim_abc"), false).bearer).toBeUndefined();
+		expect(bearerOf(req(), url("/api/account?token=pim_abc"), false).bearer).toBe("pim_abc");
+		expect(bearerOf(req(undefined, "POST"), url("/api/sessions?token=pim_abc"), false).bearer).toBeUndefined();
+		expect(bearerOf(req(), url("/shared/o/x?token=pim_abc"), false).bearer).toBeUndefined();
+		expect(bearerOf(req(), url("/health?token=pim_abc"), false).bearer).toBeUndefined();
 		expect(bearerOf({ headers: { authorization: "Bearer h" } } as never, url("/x?token=q"), false).bearer).toBe("h");
 	});
 

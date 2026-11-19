@@ -1,6 +1,7 @@
 // The Runner keeps a partition resident while chats in it are active. A provider whose address changes in the meantime (an imported one pointed at a reachable host, a
 // key rotated) must be what the next message runs on, not what the partition was opened with: a stale address failed every call with "Connection error" and never
 // reached the server.
+import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import type { Db as RuntimeDb } from "@pim/v2-runtime/db";
 import { compatibleProvider, createAgentHost } from "../src/agent-host.ts";
@@ -64,5 +65,38 @@ describe("the agent host's model catalog", () => {
 		expect(JSON.stringify(result(bodies[0]).content)).toContain("Error: 404 not found");
 		expect(result(bodies[1])).toMatchObject({ is_error: true });
 		expect(JSON.stringify(result(bodies[1]).content)).not.toContain("Error:");
+	});
+
+	it("sends a gateway's non-Claude model tool schemas Vertex takes, and Claude's as the tool gave them", async () => {
+		const bodies: any[] = [];
+		const real = globalThis.fetch;
+		globalThis.fetch = (async (_url: unknown, init?: RequestInit) => (bodies.push(JSON.parse(String(init?.body))), new Response("{}", { status: 500 }))) as typeof fetch;
+		try {
+			const gateway = compatibleProvider("gw", "AI Gateway", "http://127.0.0.1:1/anthropic", [{ id: "claude-sonnet-5-5" }, { id: "gemini-4-carbon" }], () => "k", "anthropic-messages");
+			const parameters = Type.Object({
+				icon: Type.Union([Type.String(), Type.Null()]),
+				color: Type.Optional(Type.Union([Type.Literal("red"), Type.Literal("blue")], { description: "A color." })),
+				where: Type.Union([Type.Object({ city: Type.String() }), Type.Object({ zip: Type.Number() })]),
+			});
+			const before = JSON.stringify(parameters);
+			// pi-ai carries a transcript's tools in its leading system message.
+			const context = { messages: [{ role: "system", content: "", toolsAdded: [{ name: "create_agent", description: "Make an agent.", parameters }], timestamp: 0 }, { role: "user", content: "go", timestamp: 1 }] };
+			for (const id of ["gemini-4-carbon", "claude-sonnet-5-5"]) {
+				const model = gateway.getModels().find((m: any) => m.id === id) as any;
+				await (gateway as any).stream(model, context, { apiKey: "k", maxRetries: 0 }).result();
+			}
+			const [gemini, claude] = bodies.map((b) => b.tools[0].input_schema);
+			expect(gemini.properties.icon).toEqual({ type: "string" });
+			expect(gemini.properties.color).toEqual({ type: "string", enum: ["red", "blue"], description: "A color." });
+			// A union that is a real choice stays one, with every branch typed and nothing else set beside `anyOf`.
+			expect(Object.keys(gemini.properties.where)).toEqual(["anyOf"]);
+			expect(gemini.properties.where.anyOf.every((branch: any) => branch.type === "object")).toBe(true);
+			expect(JSON.stringify(gemini)).not.toContain('"type":"null"');
+			expect(claude.properties.icon).toHaveProperty("anyOf");
+			// The tool's own schema, which checks the model's arguments, is not changed.
+			expect(JSON.stringify(parameters)).toBe(before);
+		} finally {
+			globalThis.fetch = real;
+		}
 	});
 });

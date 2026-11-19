@@ -44,6 +44,7 @@ import { createFailover, failureKind, failureMessage } from "./provider-failover
 import { DESCRIBE_WORK, runUtility } from "./compat/utility.ts";
 import { Progress } from "./progress.ts";
 import { priceOf } from "./model-prices.ts";
+import { withTypedTools } from "./typed-schemas.ts";
 import { fallbackMaxTokens } from "@pim/v2-app/web-providers";
 import { memoryLinesOf, offeredModels } from "./deployment.ts";
 import { type VisitBrief, visitMemory, visitPreamble } from "./visit-brief.ts";
@@ -250,7 +251,7 @@ function messagesProvider(id: string, name: string, baseUrl: string, models: Con
 	} as never) as any;
 	// Requests are the ones v1 sent such an endpoint: no empty answers in the history (Claude refuses the system message they displace), and no thinking
 	// asked for in the middle of a tool round that began without it.
-	const wrap = (stream: (model: any, context: any, options?: any) => any) => (model: any, context: any, options?: any) => stream(model, withoutToolErrorFlag(withoutEmptyAnswers(context, model), model), withoutThinkingMidToolRound(context, options));
+	const wrap = (stream: (model: any, context: any, options?: any) => any) => (model: any, context: any, options?: any) => stream(model, withTypedTools(withoutToolErrorFlag(withoutEmptyAnswers(context, model), model), model), withoutThinkingMidToolRound(context, options));
 	return { ...configured, stream: wrap(configured.stream), streamSimple: wrap(configured.streamSimple) } as Provider;
 }
 

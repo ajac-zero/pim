@@ -13,6 +13,7 @@ import type { Principal } from "@pim/v2-contracts/identity";
 import type { IncomingMessage } from "node:http";
 import { randomBytes } from "node:crypto";
 import { CUSTOM_APPS_KEY, type CustomApp, customApps } from "./admin-gallery.ts";
+import { ComposeWorkspaceProvider } from "@pim/coding/workspace/compose";
 import { readDeployment } from "../deployment.ts";
 import { deleted, ms, ok } from "./admin-util.ts";
 
@@ -168,12 +169,32 @@ export function screenRoutes(env: Env): Route[] {
 			const quota = await app.db.anonymous(async (tx) => (await tx.query("SELECT max_concurrent, compute_minutes FROM pim_forge.forge_quotas WHERE subject_type = 'deployment' AND subject_id = '*'")).rows[0]);
 			// The providers coding sandboxes run on are the ones its pools name (the pools themselves are below, from Forge); a provider is set up in the deployment's environment, not here.
 			const names = (await app.db.anonymous(async (tx) => (await tx.query("SELECT DISTINCT provider FROM pim_forge.forge_pools ORDER BY provider")).rows)).map((r) => String(r.provider));
-			// Everyone's sandbox minutes are in rows each owner alone can read, so the deployment's own usage is shown as nothing here.
-			return ok({ providers: names.map((id) => ({ id, kind: id, name: id, settings: {}, credentialsSet: {}, codingSandbox: true, agentComputer: false })), kinds: names.map((id) => ({ kind: id, name: id, fields: [] })), quota: { maxConcurrentWorkspaces: quota?.max_concurrent === null || quota === undefined ? null : Number(quota.max_concurrent), monthlySandboxMinutes: quota?.compute_minutes === null || quota === undefined ? null : Number(quota.compute_minutes), maxSessionMinutes: null }, usage: { month: new Date().toISOString().slice(0, 7), minutes: 0, running: 0, byProvider: [], top: [] } });
+			// Everyone's sandbox minutes are in rows each owner alone can read: the totals come through a definer function that returns sums only (migration 0703).
+			const month = new Date().toISOString().slice(0, 7);
+			const overview = (await app.db.anonymous(async (tx) => (await tx.query("SELECT pim_forge.compute_usage_overview($1) AS o", [new Date(`${month}-01T00:00:00Z`)])).rows[0]?.o)) as { byProvider: { provider: string; minutes: number; running: number }[]; top: { ownerId: string; minutes: number; running: number }[] } | undefined;
+			const byProvider = (overview?.byProvider ?? []).map((r) => ({ provider: r.provider, minutes: Math.round(Number(r.minutes)), running: r.running }));
+			const accounts = new Map((await app.db.anonymous(async (tx) => (await tx.query("SELECT owner_id, username FROM pim_app.accounts WHERE owner_id = ANY($1)", [(overview?.top ?? []).map((r) => r.ownerId)])).rows)).map((r) => [r.owner_id as string, r.username as string]));
+			const usage = { month, minutes: byProvider.reduce((n, r) => n + r.minutes, 0), running: byProvider.reduce((n, r) => n + r.running, 0), byProvider, top: (overview?.top ?? []).map((r) => ({ username: accounts.get(r.ownerId) ?? null, minutes: Math.round(Number(r.minutes)), running: r.running })) };
+			return ok({ providers: names.map((id) => ({ id, kind: id, name: id, settings: {}, credentialsSet: {}, codingSandbox: true, agentComputer: false })), kinds: names.map((id) => ({ kind: id, name: id, fields: [] })), quota: { maxConcurrentWorkspaces: quota?.max_concurrent === null || quota === undefined ? null : Number(quota.max_concurrent), monthlySandboxMinutes: quota?.compute_minutes === null || quota === undefined ? null : Number(quota.compute_minutes), maxSessionMinutes: null }, usage });
 		}),
-		...(["POST /api/admin/compute/providers", "PUT /api/admin/compute/providers/:id", "DELETE /api/admin/compute/providers/:id", "POST /api/admin/compute/providers/:id/validate"] as const).map((spec) => {
+		// One cheap read against the sandbox manager the deployment's environment names, as v1's Check did: whether it answers, and how many of its workspaces are running.
+		route("POST", "/api/admin/compute/providers/:id/validate", async ({ app, principal, params }) => {
+			await admin(app, await principal(), "admin:compute");
+			const manager = env.PIM_CODING_MANAGER_URL && env.PIM_CODING_MANAGER_TOKEN ? new ComposeWorkspaceProvider({ managerUrl: env.PIM_CODING_MANAGER_URL, token: env.PIM_CODING_MANAGER_TOKEN }) : null;
+			const named = (await app.db.anonymous(async (tx) => (await tx.query("SELECT 1 FROM pim_forge.forge_pools WHERE provider = $1 LIMIT 1", [params[0]!])).rows)).length > 0;
+			if (!named && params[0] !== manager?.id) throw new NotFoundError("No such compute provider");
+			if (!manager || params[0] !== manager.id) return ok({ ok: false, message: "This provider is set in the deployment's environment; Pim has no address to check it at.", ms: 0 });
+			const started = Date.now();
+			try {
+				const health = await manager.managerHealth();
+				return ok({ ok: true, message: `Reachable: ${health.running} of ${health.maxConcurrent} workspaces running.`, ms: Date.now() - started });
+			} catch (error) {
+				return ok({ ok: false, message: String(error instanceof Error ? error.message : error).slice(0, 300), ms: Date.now() - started });
+			}
+		}),
+		...(["POST /api/admin/compute/providers", "PUT /api/admin/compute/providers/:id", "DELETE /api/admin/compute/providers/:id"] as const).map((spec) => {
 			const [method, path] = spec.split(" ") as [string, string];
-			return route(method, path, async ({ app, principal }) => (await admin(app, await principal(), "admin:compute"), unsupported("Changing a compute provider here")));
+			return route(method, path, async ({ app, principal }) => (await admin(app, await principal(), "admin:compute"), unsupported("Adding, changing or removing a compute provider here")));
 		}),
 	];
 }

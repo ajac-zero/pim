@@ -166,6 +166,21 @@ describe("the web app's apps, gallery and admin routes", () => {
 		expect((await call("ada", "GET", "/api/admin/compute")).json).toMatchObject({ providers: [{ id: "sandbox-manager", kind: "sandbox-manager", name: "sandbox-manager", codingSandbox: true, agentComputer: false, credentialsSet: {} }], kinds: [{ kind: "sandbox-manager", fields: [] }] });
 		expect((await call("bob", "GET", "/api/admin/compute")).status).toBe(403);
 		expect((await call("ada", "POST", "/api/admin/compute/providers", { kind: "e2b" })).json).toMatchObject({ error: "not_supported", message: expect.stringContaining("environment") });
+		// Everyone's sandbox minutes this month, by provider and by person, though each person's ledger is theirs alone: Ada ran a workspace for 30 minutes, Bob one still running, last month's is not counted.
+		const adaId = (await stack.admin.query("SELECT owner_id FROM pim_app.accounts WHERE username = 'ada'")).rows[0].owner_id;
+		const bobId = (await stack.admin.query("SELECT owner_id FROM pim_app.accounts WHERE username = 'bob'")).rows[0].owner_id;
+		const thisMonth = new Date().toISOString().slice(0, 7);
+		const at = (minutesAgo: number) => new Date(Math.max(Date.parse(`${thisMonth}-01T00:00:00Z`) + 1_000, Date.now() - minutesAgo * 60_000));
+		await stack.admin.query("INSERT INTO pim_forge.forge_compute_usage (owner_id, thread_id, provider, began_at, ended_at) VALUES ($1,'t1','sandbox-manager',$2,$3), ($4,'t2','sandbox-manager',$5,NULL), ($1,'t3','sandbox-manager','2020-01-05','2020-01-06')", [adaId, new Date(`${thisMonth}-01T10:00:00Z`), new Date(`${thisMonth}-01T10:30:00Z`), bobId, at(0)]);
+		const usage = (await call("ada", "GET", "/api/admin/compute")).json.usage;
+		expect(usage).toMatchObject({ month: thisMonth, running: 1, byProvider: [{ provider: "sandbox-manager", running: 1 }] });
+		expect(usage.minutes).toBeGreaterThanOrEqual(30);
+		expect(usage.top[0]).toEqual({ username: "ada", minutes: 30, running: 0 });
+		expect(usage.top.map((t: { username: string }) => t.username)).toContain("bob");
+		// Checking a provider: one that the sandbox pools name but the environment gives no address for says so; an unknown one is not found.
+		expect((await call("ada", "POST", "/api/admin/compute/providers/sandbox-manager/validate", {})).json).toMatchObject({ ok: false, message: expect.stringContaining("environment") });
+		expect((await call("ada", "POST", "/api/admin/compute/providers/nope/validate", {})).status).toBe(404);
+		await stack.admin.query("DELETE FROM pim_forge.forge_compute_usage");
 		await stack.admin.query("DELETE FROM pim_forge.forge_pools");
 		expect((await call("ada", "GET", "/api/admin/computer-host")).json).toMatchObject({ paired: false, connected: false });
 		// Pairing it is the computer host's own tests (computer-host.test.ts): a member cannot.

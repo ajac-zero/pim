@@ -20,7 +20,7 @@ At every request an agent's chats get the core preamble, then an `agent` section
 
 ```ts
 // extensions/ledger.ts
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { defineTool, section } from "@earendil-works/pi-durable";
 import { defineGatedAction, definePimExtension } from "../src/extensions/define";
 
@@ -38,7 +38,7 @@ export const ledger = definePimExtension({
 				parameters: Type.Object({ name: Type.String(), amount: Type.Number(), due: Type.String() }),
 				async execute({ name, amount, due }) {
 					data.put(`bill:${name}`, { name, amount, due, paid: false });
-					return { content: [{ type: "text", text: `Recorded ${name}.` }] };
+					return { output: [{ type: "text", text: `Recorded ${name}.` }] };
 				},
 			}),
 		],
@@ -122,7 +122,7 @@ Don't rename a connector's `id`: people's agents store it.
 For a service with no MCP server, such as Spotify or Plaid, an extension implements the connector: its sign-in and its tools, in place of a `url`. To everything else it is a connector like the others: agents list it, people connect it once from Connectors, and tool permissions and approvals cover its tools. [`spotify.ts`](../src/extensions/spotify.ts) is a complete one.
 
 ```ts
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { defineAppTool, definePimExtension, oauth2 } from "../src/extensions/define";
 
 export const music = definePimExtension({
@@ -180,7 +180,7 @@ export const music = definePimExtension({
 [`google.ts`](../src/extensions/google.ts) is what Google's connectors share. `googleApp` makes a connector from Google's sign-in, renewal and revocation, and the connector's own tools; `googleFetch` and `googleJson` call Google's APIs with the person's credential; `googleExtension` is the extension they are offered in, so each is `google/<app>`:
 
 ```ts
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { defineAppTool } from "./define";
 import { GOOGLE_SCOPES, googleApp, googleJson } from "./google";
 

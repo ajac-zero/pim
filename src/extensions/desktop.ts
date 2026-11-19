@@ -1,4 +1,4 @@
-import { type Static, Type } from "@earendil-works/pi-ai";
+import { type Static, Type } from "typebox";
 import { defineExtension, defineTool, type ToolExecutionResult } from "@earendil-works/pi-durable";
 import type { Computer } from "../computer";
 import { defineGatedAction, type GatedAction } from "./approvals";
@@ -26,7 +26,7 @@ const sessionOf = (conversation: string) => `pim-${conversation.replace(/[^\w-]/
 async function driverCall(computer: Computer, thread: string, tool: string, args: Record<string, unknown>): Promise<ToolExecutionResult> {
 	try {
 		const result = (await computer.driver(tool, args, thread)) as McpCallResult;
-		return { content: toContent(result), ...(result.isError ? { isError: true } : {}) };
+		return { output: toContent(result), ...(result.isError ? { isError: true } : {}) };
 	} catch (error) {
 		return text(error instanceof Error ? error.message : String(error), true);
 	}

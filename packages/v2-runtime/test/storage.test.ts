@@ -1,3 +1,5 @@
+import { OwnershipLost, StorageRejected } from "../src/errors.ts";
+import { commitWrites } from "@earendil-works/pi-durable/testing";
 import { randomUUID } from "node:crypto";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -5,7 +7,7 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import pg from "pg";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { StorageRejected, type ConversationId, type EntryId } from "@earendil-works/pi-durable";
+import { type ConversationId, type EntryId } from "@earendil-works/pi-durable";
 import { PartitionDirectory } from "../src/directory.ts";
 import { IdAllocator, leaseIdBlock, seedIdHighWater } from "../src/ids.ts";
 import { migrate } from "../src/migrate.ts";
@@ -31,7 +33,7 @@ describe("migrations", () => {
 	it("apply once, are recorded with their checksum, and refuse a changed file", async () => {
 		expect((await migrate(database.db.pool)).applied).toEqual([]);
 		const names = (await database.db.pool.query<{ name: string }>("SELECT name FROM public.pim_schema_migrations WHERE number >= 100 ORDER BY number")).rows.map((r) => r.name);
-		expect(names).toEqual(["pi_runtime_schema", "pi_conversations_entries", "pi_tasks_submissions", "pi_documents", "pi_commit_receipts_outbox", "runtime_ownership_and_inbox", "external_operations"]);
+		expect(names).toEqual(["pi_runtime_schema", "pi_conversations_entries", "pi_tasks_submissions", "pi_documents", "pi_commit_receipts_outbox", "runtime_ownership_and_inbox", "external_operations", "sleeping_tasks"]);
 		const dir = mkdtempSync(join(tmpdir(), "pim-mig-"));
 		writeFileSync(join(dir, "0100_pi_runtime_schema.sql"), "select 1;");
 		await expect(migrate(database.db.pool, dir)).rejects.toThrow(/changed after it was applied/);
@@ -47,7 +49,7 @@ describe("migrations", () => {
 			await fresh.db.pool.query("DROP SCHEMA pim_runtime CASCADE; CREATE SCHEMA pim_runtime; DELETE FROM public.pim_schema_migrations WHERE number >= 100");
 			const pools = [0, 1, 2, 3].map(() => new pg.Pool({ connectionString: fresh.url, max: 1 }));
 			const results = await Promise.all(pools.map((pool) => migrate(pool)));
-			expect(results.reduce((n, r) => n + r.applied.length, 0)).toBe(7);
+			expect(results.reduce((n, r) => n + r.applied.length, 0)).toBe(8);
 			await Promise.all(pools.map((pool) => pool.end()));
 		} finally {
 			await fresh.drop();
@@ -59,7 +61,7 @@ describe("owner isolation", () => {
 	it("row-level security hides other owners from a non-superuser connection and rejects cross-owner writes", async () => {
 		const a = await openTestPartition(database.db);
 		const b = await openTestPartition(database.db);
-		await a.storage.commit([conversation(2), entry(3, 2, { data: "secret of A" })], ctx);
+		await commitWrites(a.storage, [conversation(2), entry(3, 2, { data: "secret of A" })], ctx);
 		const app = database.appPool();
 		const client = await app.connect();
 		try {
@@ -78,8 +80,8 @@ describe("owner isolation", () => {
 	it("never reads another owner's records through the storage even for the same ids", async () => {
 		const a = await openTestPartition(database.db);
 		const b = await openTestPartition(database.db);
-		await a.storage.commit([conversation(2), entry(3, 2, { data: "A" })], ctx);
-		await b.storage.commit([conversation(2), entry(3, 2, { data: "B" })], ctx); // ids are per owner
+		await commitWrites(a.storage, [conversation(2), entry(3, 2, { data: "A" })], ctx);
+		await commitWrites(b.storage, [conversation(2), entry(3, 2, { data: "B" })], ctx); // ids are per owner
 		expect((await a.storage.entry(3 as EntryId, ctx))?.entry.data).toBe("A");
 		expect((await b.storage.entry(3 as EntryId, ctx))?.entry.data).toBe("B");
 	});
@@ -98,11 +100,11 @@ describe("partition directory and the home rule", () => {
 		await expect(database.db.read(ownerId, "INSERT INTO pim_runtime.conversation_partitions (owner_id, conversation_id, partition_id) VALUES ($1, 1, $2)", [ownerId, family])).rejects.toThrow(/home partition/);
 		// And the storage refuses the commit that would create it, before anything is written.
 		const part = await openTestPartition(database.db, { ownerId, partitionId: family, kind: "family" });
-		await expect(part.storage.commit([conversation(1)], ctx)).rejects.toBeInstanceOf(StorageRejected);
+		await expect(commitWrites(part.storage, [conversation(1)], ctx)).rejects.toBeInstanceOf(StorageRejected);
 		expect((await database.db.read(ownerId, "SELECT 1 FROM pim_runtime.record_ids WHERE owner_id = $1 AND id = 1", [ownerId])).rowCount).toBe(0);
 		// Routing: conversation 1 is home, others come from the directory, and a row cannot be moved.
 		expect(await directory.routeConversation(ownerId, "1")).toBe(home);
-		await part.storage.commit([conversation(40)], ctx);
+		await commitWrites(part.storage, [conversation(40)], ctx);
 		expect(await directory.routeConversation(ownerId, 40)).toBe(family);
 		await expect(database.db.read(ownerId, "UPDATE pim_runtime.conversation_partitions SET partition_id = $2 WHERE owner_id = $1 AND conversation_id = 40", [ownerId, home])).rejects.toThrow(/immutable/);
 		const uuid = "7b5c0f0e-2f4e-4c4a-9a43-6b9b0b0f6a11";
@@ -110,7 +112,7 @@ describe("partition directory and the home rule", () => {
 		await expect(directory.registerPublicChat(ownerId, uuid, 40)).rejects.toThrow(/already been published/);
 		// The id of a conversation about to be created is chosen beforehand.
 		part.storage.reservePublicChatId(uuid);
-		await part.storage.commit([conversation(41)], ctx);
+		await commitWrites(part.storage, [conversation(41)], ctx);
 		expect(await directory.routeChat(ownerId, uuid)).toEqual({ partitionId: family, conversationId: 41 });
 		expect(await directory.publicChatId(ownerId, 41)).toBe(uuid);
 	});
@@ -120,10 +122,10 @@ describe("partition directory and the home rule", () => {
 		const famId = randomUUID();
 		const home = await openTestPartition(database.db, { ownerId, kind: "home" });
 		const family = await openTestPartition(database.db, { ownerId, kind: "family", partitionId: famId });
-		await home.storage.commit([conversation(2), entry(3, 2)], ctx);
-		await expect(family.storage.commit([conversation(4, { conversationId: 2, at: 3 })], ctx)).rejects.toThrow(new RegExp(`Conversation 2 is not in partition ${famId}`));
-		await expect(family.storage.commit([entry(5, 2)], ctx)).rejects.toThrow(/not in partition/);
-		await expect(family.storage.commit([conversation(3)], ctx)).rejects.toThrow(/already belongs to entry/); // ids are one owner-wide namespace
+		await commitWrites(home.storage, [conversation(2), entry(3, 2)], ctx);
+		await expect(commitWrites(family.storage, [conversation(4, { conversationId: 2, at: 3 })], ctx)).rejects.toThrow(new RegExp(`Conversation 2 is not in partition ${famId}`));
+		await expect(commitWrites(family.storage, [entry(5, 2)], ctx)).rejects.toThrow(/not in partition/);
+		await expect(commitWrites(family.storage, [conversation(3)], ctx)).rejects.toThrow(/already belongs to entry/); // ids are one owner-wide namespace
 		await expect(family.storage.entry(3 as EntryId, ctx)).resolves.toBeUndefined();
 	});
 });
@@ -138,12 +140,12 @@ describe("leases", () => {
 		await new Promise((resolve) => setTimeout(resolve, 1_600)); // more than two TTLs
 		expect(lease.isLocallyValid()).toBe(true);
 		const storage = await PgPiStorage.openForOwner({ db: database.db, fence: lease });
-		await storage.commit([conversation(2)], ctx);
+		await commitWrites(storage, [conversation(2)], ctx);
 		// Another owner takes the row at a higher epoch (as after a long pause).
 		await database.db.read(ownerId, "UPDATE pim_runtime.partitions SET holder_id = 'thief', epoch = epoch + 1 WHERE owner_id = $1", [ownerId]);
 		await waitFor("the owner to notice", () => (lease.lostReason !== undefined ? true : undefined), 3_000);
 		expect(lease.signal.aborted).toBe(true);
-		await expect(storage.commit([conversation(3)], ctx)).rejects.toBeInstanceOf(StorageRejected);
+		await expect(commitWrites(storage, [conversation(3)], ctx)).rejects.toBeInstanceOf(OwnershipLost);
 	});
 
 	it("only one of several concurrent claimants takes a free partition", async () => {
@@ -170,8 +172,8 @@ describe("commit outbox and receipts", () => {
 		await listener.query("LISTEN pim_runtime_outbox");
 		const seen: { ownerId: string; partitionId: string; seq: number }[] = [];
 		listener.on("notification", (n) => seen.push(JSON.parse(n.payload ?? "{}")));
-		const seq = await part.storage.commit([conversation(2), entry(3, 2)], ctx);
-		const rejected = await part.storage.commit([conversation(2)], ctx).catch((e: unknown) => e);
+		const seq = await commitWrites(part.storage, [conversation(2), entry(3, 2)], ctx);
+		const rejected = await commitWrites(part.storage, [conversation(2)], ctx).catch((e: unknown) => e);
 		expect(rejected).toBeInstanceOf(StorageRejected);
 		await waitFor("the notification", () => (seen.length > 0 ? true : undefined));
 		await new Promise((resolve) => setTimeout(resolve, 100));

@@ -8,7 +8,7 @@
  * watches' tools are untouched.
  */
 
-import { type TSchema, Type } from "@earendil-works/pi-ai";
+import { type TSchema, Type } from "typebox";
 import { defineExtension, defineTool, type ToolExecutionApi, type ToolExecutionResult } from "@earendil-works/pi-durable";
 import { json, text } from "../extensions/services";
 import type { Role } from "../tasks";

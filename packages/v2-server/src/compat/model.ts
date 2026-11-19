@@ -11,8 +11,8 @@ import { BadRequestError, NotFoundError, PimError } from "@pim/v2-app/errors";
 import { ok, type Route, route } from "@pim/v2-app/http";
 import { toWebProvider } from "@pim/v2-app/web-providers";
 import { CodexImagesSignIn } from "../codex-images.ts";
-import { currentOpenaiProvider } from "../openai-catalog.ts";
 import { offeredModels } from "../deployment.ts";
+import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 
 type Env = Record<string, string | undefined>;
 type ModelRef = { provider: string; id: string };
@@ -22,7 +22,7 @@ const SHARED = "shared:";
 const CATALOGS: Record<string, { name: string; models: () => readonly Model<Api>[] }> = {
 	anthropic: { name: "Anthropic", models: () => anthropicProvider().getModels() as never },
 	// The plan's models are the ones that answer in the Responses API; the API-key service offers the same catalog.
-	openai: { name: "OpenAI API", models: () => (currentOpenaiProvider().getModels() as readonly Model<Api>[]).filter((m) => m.api === "openai-responses") },
+	openai: { name: "OpenAI API", models: () => (openaiProvider().getModels() as readonly Model<Api>[]).filter((m) => m.api === "openai-responses") },
 	google: { name: "Google Gemini", models: () => googleProvider().getModels() as never },
 };
 

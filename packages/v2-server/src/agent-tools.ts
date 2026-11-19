@@ -6,7 +6,7 @@
  */
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { defineExtension, defineTool, type PromptSection, type ToolRegistration } from "@earendil-works/pi-durable";
 import { QUOTA_MESSAGE } from "@pim/v2-app/quota";
 import type { App } from "@pim/v2-app/app";
@@ -65,8 +65,8 @@ export type ToolDeps = {
 	chatOf(conversationId: number | string): Promise<string | null>;
 };
 
-type Result = { content: { type: "text"; text: string }[]; isError?: boolean };
-const text = (s: string, isError = false): Result => ({ content: [{ type: "text", text: s }], ...(isError ? { isError } : {}) });
+type Result = { output: { type: "text"; text: string }[]; isError?: boolean };
+const text = (s: string, isError = false): Result => ({ output: [{ type: "text", text: s }], ...(isError ? { isError } : {}) });
 const json = (v: unknown): Result => text(JSON.stringify(v, null, 1));
 
 const MAX_BODY = 100_000;
@@ -395,9 +395,9 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 						const names = Object.keys(folder.hashes);
 						const summary = `Install the skill ${name} from ${folder.source}: ${names.length} file${names.length === 1 ? "" : "s"} (${names.slice(0, 12).join(", ")}${names.length > 12 ? ", …" : ""})`;
 						const gate = await app.approvals.gate(p, { action: "skill:install", resource: { source: folder.source.replace(/\/tree\/.*$/, "") }, ...(chat ? { chatId: chat } : {}), args: { taskId, callId: api.callId, source: folder.source, commit: folder.commit, name, hashes: folder.hashes, summary }, timeoutMs: 24 * 3600_000, onTimeout: "deny", explicit: true });
-						if (gate.outcome === "waiting") return { content: [{ type: "text", text: "Waiting for a person's approval." }], control: { suspend: true } } as never;
+						if (gate.outcome === "waiting") return { output: [{ type: "text", text: "Waiting for a person's approval." }], control: { suspend: true } } as never;
 					} else if (!signal) {
-						return { content: [{ type: "text", text: "Waiting for a person's approval." }], control: { suspend: true } } as never;
+						return { output: [{ type: "text", text: "Waiting for a person's approval." }], control: { suspend: true } } as never;
 					}
 					// What was approved is what is installed: the folder read again must be the one the person was shown.
 					if (filed?.args.hashes && JSON.stringify(Object.entries(filed.args.hashes).sort()) !== JSON.stringify(Object.entries(folder.hashes).sort())) return text("The skill's files are not the ones that were approved, so it was not installed. Ask again to see them.", true);
@@ -469,9 +469,9 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 					if (signal && signal.payload.approved !== true) return text(`A person did not approve this request, so it was not sent.${await noteOn(app, ownerId, signal.payload)}`, true);
 					if (!signal) {
 						const filed = await app.db.owner(ownerId, async (tx) => (await tx.query("SELECT id FROM pim_app.approvals WHERE tool = 'http:request' AND args->>'taskId' = $1 LIMIT 1", [taskId])).rows[0]?.id as string | undefined);
-						if (filed) return { content: [{ type: "text", text: "Waiting for a person's approval." }], control: { suspend: true } } as never;
+						if (filed) return { output: [{ type: "text", text: "Waiting for a person's approval." }], control: { suspend: true } } as never;
 						const gate = await app.approvals.gate(p, { action: "http:request", resource: { host: url.host, method: args.method }, ...(chat ? { chatId: chat } : {}), args: { taskId, callId: api.callId, method: args.method, url: url.href, headers: redactHeaders(args.headers), body: typeof args.body === "string" ? args.body.slice(0, 2000) : undefined }, timeoutMs: 24 * 3600_000, onTimeout: "deny" });
-						if (gate.outcome === "waiting") return { content: [{ type: "text", text: "Waiting for a person's approval." }], control: { suspend: true } } as never;
+						if (gate.outcome === "waiting") return { output: [{ type: "text", text: "Waiting for a person's approval." }], control: { suspend: true } } as never;
 					}
 					// The request itself, once: its outcome is on the operation, so a replay or a new owner finds it there, and one that was in flight is reconciled, not sent again.
 					const operationId = `http:${partitionId}:${taskId}`;

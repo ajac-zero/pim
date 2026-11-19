@@ -1,5 +1,5 @@
-import type { Context } from "@earendil-works/chord";
-import { type Static, Type } from "@earendil-works/pi-ai";
+import type { Context } from "@earendil-works/chord/context";
+import { type Static, Type } from "typebox";
 import { defineExtension, defineTool, section, type ToolExecutionApi } from "@earendil-works/pi-durable";
 import { type Agent, type AgentStore, agentInput, agentLabel } from "../agents";
 import { sha256 } from "../artifacts";

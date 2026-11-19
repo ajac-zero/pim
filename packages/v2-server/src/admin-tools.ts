@@ -6,7 +6,7 @@
  * and each call goes through the very route a person's screen does, under the Authorizer's `admin:*` actions, so the last-admin guard and every other rule stand.
  * What the tools answer has secrets stripped, and each call is recorded in the audit log.
  */
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { defineTool, type ToolRegistration } from "@earendil-works/pi-durable";
 import type { App } from "@pim/v2-app/app";
 import { httpStatus } from "@pim/v2-app/errors";
@@ -16,8 +16,8 @@ import { OwnerId } from "@pim/v2-contracts/identity";
 import { adminCompatRoutes } from "./compat/admin.ts";
 import { diagnosticsRoutes } from "./compat/diagnostics.ts";
 
-type Result = { content: { type: "text"; text: string }[]; isError?: boolean };
-const text = (s: string, isError = false): Result => ({ content: [{ type: "text", text: s }], ...(isError ? { isError } : {}) });
+type Result = { output: { type: "text"; text: string }[]; isError?: boolean };
+const text = (s: string, isError = false): Result => ({ output: [{ type: "text", text: s }], ...(isError ? { isError } : {}) });
 
 const SECRET_KEY = /^(key|apikey|api_key|secret|token|credential|password|setupurl|links|code|authorization)$/i;
 const SECRET_VALUE = /#(setup|invite|claim)=/;
@@ -165,7 +165,7 @@ export function adminTools(deps: AdminToolsDeps): ToolRegistration[] {
 						return text("The admin did not approve this change, so it was not made.", true);
 					}
 					if (!signal) {
-						const waiting = { content: [{ type: "text", text: "Waiting for the admin's approval." }], control: { suspend: true } } as never;
+						const waiting = { output: [{ type: "text", text: "Waiting for the admin's approval." }], control: { suspend: true } } as never;
 						const filed = await app.db.owner(ownerId, async (tx) => (await tx.query("SELECT id FROM pim_app.approvals WHERE tool = 'admin:write' AND args->>'taskId' = $1 LIMIT 1", [taskId])).rows[0]?.id as string | undefined);
 						if (filed) return waiting;
 						// Every time, by the admin: a standing approval does not stand in for it, so the approval is filed directly and not through the gate.

@@ -16,7 +16,7 @@
  * tool refuses: there is nothing to grant a source on.
  */
 
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { defineExtension, defineTool } from "@earendil-works/pi-durable";
 import { approvalNote, fileApproval, type GatedAction } from "../extensions/approvals";
 import { type PimServices, text } from "../extensions/services";

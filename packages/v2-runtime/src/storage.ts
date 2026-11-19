@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
-import type { Context, JsonValue } from "@earendil-works/chord";
+import type { Context } from "@earendil-works/chord/context";
+import type { JsonValue } from "@earendil-works/chord/json";
 import { applyImmutableBatches } from "@earendil-works/chord/delta";
 import {
 	type ConversationId,
 	type ConversationQuery,
 	type ConversationRecord,
+	type CommitResult,
 	type Cursor,
 	type DocumentAddress,
 	type DocumentId,
@@ -20,7 +22,6 @@ import {
 	type Seq,
 	type Storage,
 	type StorageWrite,
-	StorageRejected,
 	type StoredDocument,
 	type SubmissionId,
 	type SubmissionQuery,
@@ -32,7 +33,7 @@ import {
 import type { PartitionLease } from "@pim/v2-contracts/runtime-seam";
 import pg from "pg";
 import { type Db, SCHEMA, setLocalSql } from "./db.ts";
-import { AmbiguousCommit, OwnershipLost } from "./errors.ts";
+import { AmbiguousCommit, OwnershipLost, StorageRejected } from "./errors.ts";
 import { IdAllocator } from "./ids.ts";
 
 const S = SCHEMA;
@@ -166,7 +167,25 @@ export class PgPiStorage implements Storage {
 
 	// ---- commit ----
 
-	async commit(writes: readonly StorageWrite[], _context: Context): Promise<Seq> {
+	async commit(batches: readonly (readonly StorageWrite[])[], receive: (index: number, seq: Seq) => void, _context: Context): Promise<CommitResult> {
+		// Publish receipts after the accepted prefix is durable, so a receipt's reader sees every accepted batch.
+		const receipts: Seq[] = [];
+		try {
+			for (const writes of batches) {
+				try {
+					receipts.push(await this.#commitBatch(writes));
+				} catch (error) {
+					if (error instanceof StorageRejected) return { stored: receipts.length, refused: error };
+					throw error;
+				}
+			}
+			return { stored: receipts.length };
+		} finally {
+			for (const [index, seq] of receipts.entries()) receive(index, seq);
+		}
+	}
+
+	async #commitBatch(writes: readonly StorageWrite[]): Promise<Seq> {
 		this.#assertUsable();
 		if (!this.fence.isLocallyValid()) {
 			const lost = new OwnershipLost(this.partitionId, this.fence.epoch, "the local lease has run out");
@@ -549,13 +568,12 @@ type Batch = {
 	maxId: number;
 };
 
-function rejection(error: unknown): StorageRejected {
+function rejection(error: unknown): unknown {
 	if (error instanceof StorageRejected) return error;
-	const reason = error instanceof Error ? error.message : String(error);
 	if (error instanceof pg.DatabaseError && error.code === "23505" && error.constraint === "documents_one_current") {
 		return new StorageRejected("Document address already has a current incarnation", { cause: error });
 	}
-	return new StorageRejected(`The batch was rejected: ${reason}`, { cause: error });
+	return error;
 }
 
 /** Split a batch by record type, keeping the last write of a task or submission written twice, and check what needs no database. */

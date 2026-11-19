@@ -1,4 +1,4 @@
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { type AppToolContext, defineAppTool, definePimExtension, oauth2 } from "./define";
 
 /**

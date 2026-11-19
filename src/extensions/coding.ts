@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { defineTool, section } from "@earendil-works/pi-durable";
 import { NO_CODING_SANDBOX_LINE } from "../compute";
 import { deploymentSettings } from "../deployment";

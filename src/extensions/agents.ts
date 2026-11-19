@@ -1,5 +1,5 @@
 import { defineExtension, defineTool, section } from "@earendil-works/pi-durable";
-import { type Static, Type } from "@earendil-works/pi-ai";
+import { type Static, Type } from "typebox";
 import {
 	AGENT_COLORS,
 	checkIcon,
@@ -46,7 +46,7 @@ const Changes = Type.Object({
 	),
 	remove_contacts: Type.Optional(Type.Array(Type.String(), { maxItems: MAX_AGENTS, description: "Names of contacts to stop handing tasks to." })),
 	emoji: Type.Optional(Type.String({ description: "One emoji shown as the icon." })),
-	color: Type.Optional(Type.Union(AGENT_COLORS.map((color) => Type.Literal(color)), { description: "The color behind the emoji." })),
+	color: Type.Optional(Type.Enum(AGENT_COLORS, { description: "The color behind the emoji." })),
 	icon: Type.Optional(
 		Type.Union([Type.String(), Type.Null()], {
 			description: `An image shown as the icon in place of the emoji: a PNG, JPEG, WebP or GIF of at most ${MAX_ICON_BYTES / 1024} KB, as a path in the person's files, such as ${FILES_ROOT}/images/coach.png, or the http(s) URL of an image on the web. null removes it, to show the emoji again.`,
@@ -354,7 +354,7 @@ export function agentExtension(
 				}),
 			),
 			emoji: Type.Optional(Type.String({ description: "One emoji shown as its icon, such as 🏃 for a running coach." })),
-			color: Type.Optional(Type.Union(AGENT_COLORS.map((color) => Type.Literal(color)), { description: "The color behind its emoji." })),
+			color: Type.Optional(Type.Enum(AGENT_COLORS, { description: "The color behind its emoji." })),
 		}),
 		// A rerun finds the agent it made by its role, and makes no other.
 		replay: "safe",

@@ -44,7 +44,7 @@ describe("early approval signals", () => {
 		const taskId = await toolTaskId(ownerId);
 		await runner.inbox.recordSignal(ownerId, partitionId, { key: `approval:${taskId}`, kind: "approval", taskId, payload: { decision: "approve" } });
 		await resident.pump();
-		// pi 1.1.0 only remembers this request in memory: the task has not suspended yet.
+		// The patched pi-durable only remembers this request in memory: the task has not suspended yet.
 		expect(rig.events.some((e) => e.type === "signal" && e.result === "requested")).toBe(true);
 		expect(await settledAt(ownerId)).toEqual([null]);
 		rig.state.gateLatch.release();

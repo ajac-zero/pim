@@ -1,3 +1,4 @@
+import { StorageRejected } from "../src/errors.ts";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { ConversationId } from "@earendil-works/pi-durable";
@@ -47,7 +48,7 @@ describe("ambiguous COMMIT", () => {
 			expect(failure).toBeInstanceOf(AmbiguousCommit);
 			expect(proxy.fired).toBeGreaterThan(0);
 			// pi poisons the Session on a failure that is not StorageRejected: nothing more runs through it.
-			await expect(root.commit((tx) => tx.appendEntry(root.id, { kind: "note", data: "after poison" }), BACKGROUND_CONTEXT)).rejects.toThrow(/poisoned|closed|unknown/i);
+			await expect(root.commit((tx) => tx.appendEntry(root.id, { kind: "note", data: "after poison" }), BACKGROUND_CONTEXT)).rejects.toThrow(/Session failed|closed/i);
 
 			const reconciled = await waitFor("the Runner to reconcile", () => rig.events.find((e) => e.type === "reconciled"));
 			const batchId = (failure as AmbiguousCommit).batchId;

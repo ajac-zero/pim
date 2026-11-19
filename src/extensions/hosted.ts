@@ -1,4 +1,4 @@
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { defineExtension, defineTool } from "@earendil-works/pi-durable";
 import { ACCESS_LEVELS, MANIFEST_FILE, parseManifest } from "../app-manifest";
 import { type ArtifactStore, checkTitle, MAX_ARTIFACT_FILES } from "../artifacts";

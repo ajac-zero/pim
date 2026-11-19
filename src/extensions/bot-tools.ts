@@ -1,4 +1,5 @@
-import type { ImageContent, TextContent, TSchema } from "@earendil-works/pi-ai";
+import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
+import type { TSchema } from "typebox";
 import { defineExtension, defineTool, type ToolRegistration } from "@earendil-works/pi-durable";
 import { text } from "./services";
 
@@ -74,7 +75,7 @@ export function botToolsExtension(
 							const call = tool.ask ? { session: String(api.conversationId), callId: api.callId, username } : null;
 							const result = await run(tool.name, (args ?? {}) as Record<string, unknown>, call);
 							if (result === null) return { control: { suspend: true } };
-							return { content: result.content, ...(result.isError ? { isError: true } : {}) };
+							return { output: result.content, ...(result.isError ? { isError: true } : {}) };
 						} catch (error) {
 							return text(`${tool.name} failed: ${error instanceof Error ? error.message : String(error)}`, true);
 						}

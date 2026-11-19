@@ -3,9 +3,10 @@
 Pim's portable persistent runtime (the `v2-runtime` workstream): pi-durable on PostgreSQL, partitioned by conversation family, with fenced ownership and
 a Runner that hosts the partitions. It imports no Cloudflare module and nothing from `src/` or `web/`.
 
-Pinned to `@earendil-works/pi-durable` 1.1.0 plus Pim's patch (`Harness.resumeTask`, the `suspend` retry policy). 1.1.0
-has no `wake()` or `onWake`; everything below is built on `Harness.open`, `inspect()`, `resume()`, `resumeTask()`,
-`subscribeCommits()`, `subscribeClose()` and `close()`.
+Pinned to `@earendil-works/pi-durable` 1.5.2 plus Pim's patch (`Harness.resumeTask`, `control.suspend` for held tool calls,
+the `suspend` retry policy for held failed generations, and queued inputs that carry their content). Everything below is
+built on `Harness.open`, `inspect()`, `resume()`, `resumeTask()`, `observeCommits()` and `close()`; Pim does not use pi's
+`wake()` or `onWake`.
 
 ## What is in it
 
@@ -109,7 +110,7 @@ on is, and a running or ready task as parked only when its checkpoint (`until`, 
 (`generation.retry.at`, `deferred.pollAt`) says it sleeps at least `longWaitMs`; that time becomes `due_work.next_due_at`.
 A new task kind that sleeps long and does not put its due time in its checkpoint will pin a Runner.
 
-**Early approvals.** Patched 1.1.0 remembers a `resumeTask` for a task that has not suspended yet only in memory. A
+**Early approvals.** Patched pi-durable remembers a `resumeTask` for a task that has not suspended yet only in memory. A
 decision is recorded in `durable_signals` first, and the owner calls `resumeTask` for every unsettled signal at every
 activation. A signal is settled when `resumeTask` returns `resumed` or `terminal`, or, after `requested`, when the task is
 seen to wait and wake (or end). A tool's `beforeTool` hook should read the decision from `PartitionInbox.signalByKey`, so
@@ -131,7 +132,7 @@ binaries (`scripts/ensure-postgres.sh` installs them), or uses `PIM_V2_PG_URL`. 
 pnpm --filter @pim/v2-runtime test
 ```
 
-`conformance.test.ts` runs pi's `registerStorageConformance` (24 cases in 1.1.0) and the benchmark seeds against
+`conformance.test.ts` runs pi's `registerStorageConformance` (its cases for the pinned version) and the benchmark seeds against
 `PgPiStorage`. The rest cover fencing, split brain, lease expiry mid-stream, early signals and crashes, the deactivation
 race, ambiguous `COMMIT` (a TCP proxy drops the connection around a real `COMMIT`), the legacy import, eviction, drain,
 admission, row-level security and migrations.

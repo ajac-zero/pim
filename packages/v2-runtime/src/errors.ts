@@ -1,11 +1,11 @@
-import { StorageRejected } from "@earendil-works/pi-durable";
+/** A batch refused by the storage's record or document checks, with no durable effect. */
+export class StorageRejected extends Error {}
 
 /**
- * This owner no longer holds the partition: another Runner took a higher epoch, or the lease ran out. It is a
- * StorageRejected because it is thrown before the commit transaction changes anything, which is the guarantee pi
- * reads from that class.
+ * This owner no longer holds the partition: another Runner took a higher epoch, or the lease ran out. Unlike a
+ * refused batch, this fails the Session, so nothing continues to run under the lost fence.
  */
-export class OwnershipLost extends StorageRejected {
+export class OwnershipLost extends Error {
 	readonly partitionId: string;
 	readonly epoch: bigint;
 	constructor(partitionId: string, epoch: bigint, message: string, options?: { cause?: unknown }) {
@@ -17,8 +17,8 @@ export class OwnershipLost extends StorageRejected {
 }
 
 /**
- * COMMIT was sent and its outcome is unknown: the connection failed before the acknowledgement. This is not a
- * StorageRejected, so pi poisons the Session; `reconcileAmbiguousCommit` says afterwards whether the batch landed.
+ * COMMIT was sent and its outcome is unknown: the connection failed before the acknowledgement. pi poisons the
+ * Session; `reconcileAmbiguousCommit` says afterwards whether the batch landed.
  */
 export class AmbiguousCommit extends Error {
 	readonly batchId: string;

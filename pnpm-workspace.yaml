@@ -13,13 +13,15 @@ allowBuilds:
   workerd: true
 minimumReleaseAgeExclude:
   - '@cloudflare/vitest-pool-workers@0.23.0'
-  - '@earendil-works/chord@1.1.0'
-  - '@earendil-works/pi-ai@1.1.0'
-  - '@earendil-works/pi-durable@1.1.0'
-  - '@earendil-works/pi-telemetry@1.1.0'
+  - '@earendil-works/chord@1.5.2'
+  - '@earendil-works/pi-ai@1.5.2'
+  - '@earendil-works/pi-durable@1.5.2'
+  - '@earendil-works/pi-schema@1.5.2'
+  - '@earendil-works/pi-codemode@1.5.2'
+  - '@earendil-works/pi-telemetry@1.5.2'
   - agents@0.27.0
 patchedDependencies:
-  '@earendil-works/pi-ai@1.1.0': patches/@earendil-works__pi-ai@1.1.0.patch
-  '@earendil-works/pi-durable@1.1.0': patches/@earendil-works__pi-durable@1.1.0.patch
+  '@earendil-works/pi-ai@1.5.2': patches/@earendil-works__pi-ai@1.5.2.patch
+  '@earendil-works/pi-durable@1.5.2': patches/@earendil-works__pi-durable@1.5.2.patch
   '@modelcontextprotocol/client@2.0.0': patches/@modelcontextprotocol__client@2.0.0.patch
   agents@0.27.0: patches/agents@0.27.0.patch

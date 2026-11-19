@@ -1,4 +1,4 @@
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { defineExtension, defineTool, section } from "@earendil-works/pi-durable";
 import { type ArtifactStore, type ArtifactVersion, checkTitle } from "../artifacts";
 import { HttpError } from "@pim/shared/http";

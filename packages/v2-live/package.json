@@ -13,8 +13,8 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@earendil-works/pi-ai": "1.1.0",
-    "@earendil-works/pi-durable": "1.1.0",
+    "@earendil-works/pi-ai": "1.5.2",
+    "@earendil-works/pi-durable": "1.5.2",
     "@pim/shared": "workspace:*",
     "@pim/v2-contracts": "workspace:*",
     "@nats-io/transport-node": "^3.0.0",

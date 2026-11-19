@@ -384,6 +384,8 @@ const translations = {
     imagesOnly: "Only PNG, JPEG, WebP and GIF images can be attached.",
     imageTooLarge: "That image is too large.",
     tooManyImages: "A message can carry at most {count} images.",
+    imagesNotShown:
+      "Only the first {count} images are attached; open the others with file_read.",
     fileTooLarge: "That file is too large: at most 25 MB.",
     tooManyFiles: "A message can carry at most {count} files.",
     modelCantSeeImages:
@@ -2506,6 +2508,8 @@ const translations = {
     imagesOnly: "Solo se pueden adjuntar imágenes PNG, JPEG, WebP y GIF.",
     imageTooLarge: "Esa imagen es demasiado grande.",
     tooManyImages: "Un mensaje puede llevar como máximo {count} imágenes.",
+    imagesNotShown:
+      "Solo van adjuntas las primeras {count} imágenes; abre las demás con file_read.",
     fileTooLarge: "Ese archivo es demasiado grande: 25 MB como máximo.",
     tooManyFiles: "Un mensaje puede llevar como máximo {count} archivos.",
     modelCantSeeImages:

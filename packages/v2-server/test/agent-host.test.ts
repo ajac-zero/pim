@@ -161,10 +161,11 @@ real("the default agent host", () => {
 		expect(shown).toMatch(/<active_goals>[\s\S]*Run a 5k[\s\S]*Run 2k/);
 		expect(shown).toMatch(/<memory>[\s\S]*Tea/);
 		// Every model call is a row in the ledger, with its tokens.
-		const calls = await rows("SELECT provider, model, input_tokens FROM pim_app.model_calls");
+		const calls = await rows("SELECT provider, model, output_tokens FROM pim_app.model_calls");
 		expect(calls.length).toBeGreaterThanOrEqual(5);
 		expect(calls[0]).toMatchObject({ provider: "faux", model: "m" });
-		expect(Number(calls[0].input_tokens)).toBeGreaterThan(0);
+		// The faux model bills a first prompt as cache writes (pi 1.5), so the ledger's input column can be 0 while its output is not.
+		expect(Number(calls[0].output_tokens)).toBeGreaterThan(0);
 		// A chat's calls are attributed to the chat, which is what its cost and activity read.
 		expect(new Set((await rows("SELECT public_chat_id, run_kind FROM pim_app.model_calls WHERE run_kind = 'chat'")).map((r) => r.public_chat_id))).toEqual(new Set([chatId]));
 		const priced = (await web.call("GET", `/api/sessions/${chatId}/cost`)).json;

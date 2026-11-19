@@ -477,18 +477,17 @@ function ComposerInner({
     // Throwing tells PromptInput not to clear the text, so Enter on a
     // disabled composer doesn't wipe what the user typed.
     if (!canSend) throw new Error("Composer is not ready to send.");
-    let typed = message.text.trim();
+    const typed = message.text.trim();
     if (message.files.length === 0) {
       send(typed);
       return;
     }
     setPreparing(true);
     try {
-      const shown = seesImages
-        ? message.files
-            .filter((file) => IMAGE_TYPES.includes(file.mediaType))
-            .slice(0, MAX_IMAGES)
+      const pictures = seesImages
+        ? message.files.filter((file) => IMAGE_TYPES.includes(file.mediaType))
         : [];
+      const shown = pictures.slice(0, MAX_IMAGES);
       const [images, saved] = await Promise.all([
         Promise.all(
           shown.map((file) =>
@@ -499,16 +498,36 @@ function ComposerInner({
         ),
         saves ? Promise.all(message.files.map(attached.save)) : [],
       ]);
-      // Each saved file is linked by its path, which opens it in the chat and tells the agent where it is.
-      const links = saved.map((path) => `[${baseName(path)}](<${path}>)`);
-      typed = [typed, links.join("\n")].filter(Boolean).join("\n\n");
+      // Each saved file is linked by its path, which opens it in the chat and
+      // tells the agent where it is. An image the model is shown follows its
+      // own link, so the agent knows which file it is; the images past
+      // MAX_IMAGES are only linked, and the agent is told to open them.
+      const parts: Exclude<UserContent, string> = typed
+        ? [{ type: "text", text: typed }]
+        : [];
+      saved.forEach((path, index) => {
+        const gap = index > 0 ? "\n" : typed ? "\n\n" : "";
+        parts.push({
+          type: "text",
+          text: `${gap}[${baseName(path)}](<${path}>)`,
+        });
+        const file = message.files[index];
+        const image = file && images[shown.indexOf(file)];
+        if (image) parts.push(image);
+      });
+      if (saves && pictures.length > shown.length) {
+        parts.push({
+          type: "text",
+          text: `\n\n${t("imagesNotShown", { count: MAX_IMAGES })}`,
+        });
+      }
+      if (!saves) parts.push(...images);
       send(
         images.length > 0
-          ? [
-              ...(typed ? [{ type: "text" as const, text: typed }] : []),
-              ...images,
-            ]
-          : typed,
+          ? parts
+          : parts
+              .map((part) => (part.type === "text" ? part.text : ""))
+              .join(""),
       );
       // The files are in the message now, so removing them from the composer mustn't delete them.
       attached.release();

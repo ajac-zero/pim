@@ -4,7 +4,8 @@
 // page all show the same transcript. Then a coding thread under an explicit grant and a standing approval wakes the chat and lands its spend in the cost ledger.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { WebSocket } from "ws";
-import { createModels, Type } from "@earendil-works/pi-ai";
+import { createModels } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { createRegistry, defineExtension, defineTool, type HarnessOptions } from "@earendil-works/pi-durable";
 import { LiveClient, type LiveSocket, type LiveUpdate, SnapshotRefused } from "@pim/shared/live-client";
@@ -57,7 +58,7 @@ real("the vertical slice", () => {
 				const { rows } = await d.stack.admin.query("SELECT 1 FROM pim_runtime.durable_signals WHERE owner_id = $1 AND task_id = $2", [ownerId, api.taskId]);
 				if (rows.length > 0) {
 					toolRuns.push("approved");
-					return { content: [{ type: "text", text: "done with approval" }] };
+					return { output: [{ type: "text", text: "done with approval" }] };
 				}
 				// The tool files the approval the person will see, once per task, naming the task so the decision can wake it.
 				await appForTools.db.owner(ownerId, (tx) =>
@@ -70,7 +71,7 @@ real("the vertical slice", () => {
 		registry.install(defineExtension({ name: "approve", tools: [approve] }));
 		const agent = { model: { provider: "faux", modelId: "m" } };
 		return {
-			harnessOptions: (): HarnessOptions => ({ models, registry, settings: { retry: { enabled: false, maxRetries: 0, baseDelayMs: 1_000 }, progress: { partialIntervalMs: 60, outputIntervalMs: 100 } } as never }),
+			harnessOptions: (): HarnessOptions => ({ models, registry, settings: { retry: { enabled: false, maxRetries: 0, baseDelayMs: 1_000 }, progress: { partialIntervalMs: 60, outputIntervalMs: 100, persistWithinMs: 0 } } as never }),
 			homeRoot: () => ({ agent }),
 			chatAgent: () => agent,
 			pollMs: 40,

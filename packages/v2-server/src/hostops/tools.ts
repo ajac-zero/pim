@@ -7,15 +7,15 @@
  * application's own record of the decision, not what a tool says). The request is queued once however often the call is replayed. Nothing here runs a command: the daemon does,
  * on the host, outside every role of the stack, as an unprivileged user with no stack credentials.
  */
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { defineExtension, defineTool, section, type ToolRegistration } from "@earendil-works/pi-durable";
 import type { App } from "@pim/v2-app/app";
 import { newId } from "@pim/v2-app/ids";
 import { hostServices } from "./routes.ts";
 import { checkHostOp, EXEC_MAX_COMMAND, EXEC_MAX_OUTPUT, EXEC_MAX_TIMEOUT, HOST_OPS, HOST_SERVICES, type HostOpName, type HostOpView, type HostOpsCaller } from "./service.ts";
 
-type Result = { content: { type: "text"; text: string }[]; isError?: boolean };
-const text = (s: string, isError = false): Result => ({ content: [{ type: "text", text: s }], ...(isError ? { isError } : {}) });
+type Result = { output: { type: "text"; text: string }[]; isError?: boolean };
+const text = (s: string, isError = false): Result => ({ output: [{ type: "text", text: s }], ...(isError ? { isError } : {}) });
 const clip = (s: string, n = 60_000) => (s.length > n ? `${s.slice(0, n)}\n[… cut; ${s.length - n} more characters]` : s);
 /** A call waits this long for its operation to end; a deploy can take longer, and then the answer is the operation's id, which `hostops_op` follows. */
 const WAIT_MS = 100_000;
@@ -40,7 +40,7 @@ function summarize(op: HostOpName, a: Record<string, string | number>): string {
 
 export function hostopsTools(deps: HostOpsToolDeps): ToolRegistration[] {
 	const { ownerId, partitionId } = deps;
-	const waiting = { content: [{ type: "text", text: "Waiting for a person's approval." }], control: { suspend: true } } as never;
+	const waiting = { output: [{ type: "text", text: "Waiting for a person's approval." }], control: { suspend: true } } as never;
 	const tool = (name: string, description: string, parameters: any, execute: (args: any, api: any) => Promise<Result>) =>
 		defineTool({ name, description, parameters, replay: "safe", execute: async (args: any, api: any) => {
 			try {

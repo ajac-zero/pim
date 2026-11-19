@@ -1,0 +1,48 @@
+diff --git a/dist/api/anthropic-messages.js b/dist/api/anthropic-messages.js
+index 4f7052d2bb80b14c00ac3a1ef0684bbcac166a5b..81b53b34f5ea68d5ac84c0120a0e9b6aeb1452ea 100644
+--- a/dist/api/anthropic-messages.js
++++ b/dist/api/anthropic-messages.js
+@@ -84,7 +84,7 @@ const fromClaudeCodeName = (name, tools) => {
+ function convertImageBlock(image) {
+     return {
+         type: "image",
+-        source: {
++        source: image.url ? { type: "url", url: image.url } : {
+             type: "base64",
+             media_type: image.mimeType,
+             data: image.data,
+diff --git a/dist/api/openai-responses-shared.js b/dist/api/openai-responses-shared.js
+index 3901bfc4bc6dee0eb45a209dbcbdb59d6c55d054..42db87c65ba97a8189ef7c3a2e3e77c5e9ec1700 100644
+--- a/dist/api/openai-responses-shared.js
++++ b/dist/api/openai-responses-shared.js
+@@ -52,7 +52,7 @@ function convertToolResultOutput(model, content) {
+         output.push({
+             type: "input_image",
+             detail: "auto",
+-            image_url: `data:${image.mimeType};base64,${image.data}`,
++            image_url: image.url ?? `data:${image.mimeType};base64,${image.data}`,
+         });
+     }
+     return output;
+@@ -213,7 +213,7 @@ export function convertResponsesMessages(model, context, allowedToolCallProvider
+                     return {
+                         type: "input_image",
+                         detail: "auto",
+-                        image_url: `data:${item.mimeType};base64,${item.data}`,
++                        image_url: item.url ?? `data:${item.mimeType};base64,${item.data}`,
+                     };
+                 });
+                 if (content.length === 0)
+diff --git a/dist/types.d.ts b/dist/types.d.ts
+index b410a7bab16c395090ab63e362288306950dec64..e48e6015c68e5f171e1b0d2f82905ee165cf8a6a 100644
+--- a/dist/types.d.ts
++++ b/dist/types.d.ts
+@@ -274,6 +274,8 @@ export interface ImageContent {
+     type: "image";
+     data: string;
+     mimeType: string;
++    /** Where OpenAI Responses and Anthropic Messages fetch the image instead of sending `data`. */
++    url?: string;
+ }
+ export interface ToolCall {
+     type: "toolCall";

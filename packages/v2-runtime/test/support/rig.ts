@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { createModels, Type } from "@earendil-works/pi-ai";
+import { createModels } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { type Conversation, createRegistry, defineExtension, defineTool, type EntryRecord, type Harness, type HarnessOptions, type TaskId } from "@earendil-works/pi-durable";
 import type { Db } from "../../src/db.ts";
@@ -62,7 +63,7 @@ export function createRig(db: Db, ownerId: string) {
 				context.abortSignal?.throwIfAborted();
 			}
 			if (!hadDecision) return { control: { suspend: true } };
-			return { content: [{ type: "text", text: "approved" }] };
+			return { output: [{ type: "text", text: "approved" }] };
 		},
 	});
 	// A tool that never returns and ignores its abort signal, as a hung connection or a stuck process does.
@@ -74,7 +75,7 @@ export function createRig(db: Db, ownerId: string) {
 		execute: async () => {
 			state.hangs++;
 			await new Promise(() => {});
-			return { content: [] };
+			return { output: [] };
 		},
 	});
 	const registry = createRegistry();

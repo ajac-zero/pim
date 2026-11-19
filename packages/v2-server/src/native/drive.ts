@@ -1,4 +1,4 @@
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { GOOGLE_AUTHORIZE_PARAMS, GOOGLE_SCOPES, GoogleApiError, googleCheck, googleFetch, googleJson } from "./google.ts";
 import { readBody } from "./http.ts";
 import type { ActionContext, NativeApp, NativeTool, ToolContext } from "./native.ts";

@@ -5,7 +5,8 @@
  * `connector_call` calls one. A tool set to On runs; a tool set to Ask files an approval and parks until a person decides (as `http_request` does); a tool set to Off is
  * neither offered nor callable. A call that is not read-only is sent once: its outcome is on an external operation, so a replay does not send it again.
  */
-import { Type, validateToolArguments } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
+import { validateToolArguments } from "@earendil-works/pi-ai";
 import { defineTool, type PromptSection, type ToolRegistration } from "@earendil-works/pi-durable";
 import type { App } from "@pim/v2-app/app";
 import type { Tool as DiscoveredTool, ToolFetcher } from "@pim/v2-app/connectors";
@@ -234,8 +235,8 @@ export function checkArguments(tool: McpTool, id: string, args: Record<string, u
 
 // ---- the agent's tools ----
 
-type Result = { content: Part[]; isError?: boolean };
-const text = (s: string, isError = false): Result => ({ content: [{ type: "text", text: s }], ...(isError ? { isError } : {}) });
+type Result = { output: { type: "text"; text: string }[]; isError?: boolean };
+const text = (s: string, isError = false): Result => ({ output: [{ type: "text", text: s }], ...(isError ? { isError } : {}) });
 
 export type ConnectorToolsDeps = {
 	ownerId: string;
@@ -382,7 +383,7 @@ export function connectorToolset(deps: ConnectorToolsDeps): { tools: ToolRegistr
 					const signal = (await runtime.read<{ payload: { approved?: boolean } }>(ownerId, "SELECT payload FROM pim_runtime.durable_signals WHERE owner_id = $1 AND task_id = $2 AND kind = 'approval' ORDER BY signal_id DESC LIMIT 1", [ownerId, taskId])).rows[0];
 					if (signal && signal.payload.approved !== true) return text("A person did not approve this call, so it was not made.", true);
 					if (!signal) {
-						const waiting = { content: [{ type: "text", text: "Waiting for a person's approval." }], control: { suspend: true } } as never;
+						const waiting = { output: [{ type: "text", text: "Waiting for a person's approval." }], control: { suspend: true } } as never;
 						const filed = await app.db.owner(ownerId, async (tx) => (await tx.query("SELECT id FROM pim_app.approvals WHERE tool = 'connector:call' AND args->>'taskId' = $1 LIMIT 1", [taskId])).rows[0]?.id as string | undefined);
 						if (filed) return waiting;
 						const gate = await app.approvals.gate(p, { action: "connector:call", resource: { connector: c.id, tool: tool.name }, ...(chat ? { chatId: chat } : {}), args: { taskId, callId: api.callId, connector: c.id, service: c.name, tool: tool.name, readOnly, arguments: redact(args.arguments) }, timeoutMs: 24 * 3600_000, onTimeout: "deny", explicit: tool.annotations?.destructiveHint === true });

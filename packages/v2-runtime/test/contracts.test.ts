@@ -1,3 +1,4 @@
+import { commitWrites } from "@earendil-works/pi-durable/testing";
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { OwnerId } from "@pim/v2-contracts/identity";
@@ -48,9 +49,9 @@ describe("the canonical contracts", () => {
 	it("writes RuntimeOutboxEvents with a gapless commitSeq per partition and the conversation's public chat id", async () => {
 		const part = await openTestPartition(database.db);
 		const ctx = BACKGROUND_CONTEXT;
-		const commit = (id: number) => part.storage.commit([{ type: "conversation", value: { id: id as ConversationId } }, { type: "entry", value: { id: (id + 1) as EntryId, conversationId: id as ConversationId, kind: "note" } }], ctx);
+		const commit = (id: number) => commitWrites(part.storage, [{ type: "conversation", value: { id: id as ConversationId } }, { type: "entry", value: { id: (id + 1) as EntryId, conversationId: id as ConversationId, kind: "note" } }], ctx);
 		const seqs = [await commit(2), await commit(4), await commit(6)];
-		await part.storage.commit([{ type: "conversation", value: { id: 2 as ConversationId } }], ctx).catch(() => {}); // rejected: consumes nothing
+		await commitWrites(part.storage, [{ type: "conversation", value: { id: 2 as ConversationId } }], ctx).catch(() => {}); // rejected: consumes nothing
 		seqs.push(await commit(8));
 		const rows = (await database.db.read<{ commit_seq: string; projection_version: number; public_chat_id: string; conversation_id: string; event_kind: string; payload: string; partition_id: string }>(part.ownerId, "SELECT * FROM pim_runtime.runtime_outbox WHERE owner_id = $1 ORDER BY commit_seq", [part.ownerId])).rows;
 		const events: RuntimeOutboxEvent[] = rows.map((r) => ({

@@ -1,4 +1,4 @@
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { defineTool } from "@earendil-works/pi-durable";
 import type { AppCatalog, AppSkill } from "./app-catalog";
 import type { McpBridge, McpResourceContent } from "./mcp";

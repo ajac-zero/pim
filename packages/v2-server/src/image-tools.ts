@@ -14,7 +14,7 @@
  * cannot be known is not drawn again. The file is an object at `<owner>/files/workspace/images/...` (purpose `file`), the same store as the Files screen.
  */
 import { posix } from "node:path";
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { defineTool, type ToolRegistration } from "@earendil-works/pi-durable";
 import type { App } from "@pim/v2-app/app";
 import { openString, type KeyringCrypto } from "@pim/v2-app/crypto";
@@ -41,8 +41,8 @@ export type ImageSources = {
 };
 
 type Part = { type: "text"; text: string };
-type Result = { content: Part[]; isError?: boolean };
-const text = (s: string, isError = false): Result => ({ content: [{ type: "text", text: s }], ...(isError ? { isError } : {}) });
+type Result = { output: Part[]; isError?: boolean };
+const text = (s: string, isError = false): Result => ({ output: [{ type: "text", text: s }], ...(isError ? { isError } : {}) });
 
 /** The endpoints an owner's providers and the deployment's environment make available, with their keys opened. */
 export async function imageEndpoints(db: RuntimeDb, crypto: KeyringCrypto | undefined, env: Record<string, string | undefined>, ownerId: string): Promise<ImageEndpoint[]> {

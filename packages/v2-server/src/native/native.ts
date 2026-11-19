@@ -6,7 +6,7 @@
  * as in v1: with none set, the directory does not list it. The service's addresses can be pointed elsewhere (`PIM_GOOGLE_AUTH_URL`, `PIM_GOOGLE_TOKEN_URL`, `PIM_GOOGLE_REVOKE_URL`,
  * `PIM_GMAIL_API_URL`, `PIM_DRIVE_API_URL`, `PIM_SPOTIFY_AUTH_URL`, `PIM_SPOTIFY_TOKEN_URL`, `PIM_SPOTIFY_API_URL`): a proxy, or a stand-in in tests. The tools call only the configured API's origin.
  */
-import type { TSchema } from "@earendil-works/pi-ai";
+import type { TSchema } from "typebox";
 import { driveApp } from "./drive.ts";
 import { gmailApp } from "./gmail.ts";
 import { spotifyApp } from "./spotify.ts";

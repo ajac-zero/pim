@@ -307,6 +307,10 @@ expect(await as("SELECT kind, app_ref, status FROM pim_app.connectors WHERE owne
 		const amp = rows.find((r) => r.harness === "amp")!;
 		const cli = rows.find((r) => r.harness === "claude-code")!;
 		expect(amp.state).toBe("running");
+		// v1 let every member code: the person who had coding threads keeps coding under a grant of their own (push, pull request and merge ask them), once however often the promotion runs.
+		const grants = (await d.stack.admin.query("SELECT permission, requires_approval FROM pim_forge.forge_grants WHERE subject_id = $1 AND revoked_at IS NULL ORDER BY permission", [ADA])).rows;
+		expect(grants).toEqual(["coding:abort", "coding:merge", "coding:pr", "coding:push", "coding:start", "coding:steer"].map((permission) => ({ permission, requires_approval: ["coding:merge", "coding:pr", "coding:push"].includes(permission) })));
+		expect((await d.stack.admin.query("SELECT 1 FROM pim_app.coding_grants WHERE owner_id = $1 AND revoked_at IS NULL", [ADA])).rowCount).toBe(1);
 		expect(amp.orb.threadId).toBe("T-fixture-amp-0001");
 		expect(cli.state).toBe("idle");
 		// Amp's cloud is a fake that already holds the thread the legacy deployment started.

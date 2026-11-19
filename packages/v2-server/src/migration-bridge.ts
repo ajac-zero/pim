@@ -352,7 +352,22 @@ async function promoteForge(pool: Pool, owner: string): Promise<number> {
 			await pool.query("INSERT INTO pim_forge.forge_events (thread_id, seq, kind, data, at) VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING", [t.thread_id, e.seq, e.kind, typeof e.data === "string" ? e.data : JSON.stringify(e.data ?? {}), ts(e.at)]);
 		}
 	}
+	// v1 let every member code; v2 asks for a grant. A person who had coding threads keeps coding: they are given what an admin would give (start, steer, abort, and push, pull request and merge with a person's yes), on any repository
+	// the deployment allows. Someone who never coded is left for an admin to grant, as is a guest.
+	if (rows.length) await promoteCodingGrant(pool, owner);
 	return n;
+}
+
+/** The coding grant of a person whose v1 space had coding threads: one row in the application and its mirror in Forge, once (a person who has a live grant already keeps theirs). */
+async function promoteCodingGrant(pool: Pool, owner: string): Promise<void> {
+	const account = (await pool.query("SELECT role FROM pim_app.accounts WHERE owner_id = $1", [owner])).rows[0];
+	if (!account || account.role === "guest") return;
+	if ((await pool.query("SELECT 1 FROM pim_app.coding_grants WHERE owner_id = $1 AND revoked_at IS NULL", [owner])).rowCount) return;
+	const grantId = `cg_${randomUUID().replace(/-/g, "")}`;
+	await pool.query("INSERT INTO pim_app.coding_grants (grant_id, owner_id, permissions, pools, repositories, quota, granted_by) VALUES ($1,$2,$3,'{}','{}','{}',$4)", [grantId, owner, ["coding:start", "coding:steer", "coding:push", "coding:pr", "coding:merge"], "migration"]);
+	for (const permission of ["coding:start", "coding:steer", "coding:abort", "coding:push", "coding:pr", "coding:merge"]) {
+		await pool.query("INSERT INTO pim_forge.forge_grants (subject_type, subject_id, permission, requires_approval, granted_by, source_grant_id) VALUES ('user',$1,$2,$3,'migration',$4)", [owner, permission, ["coding:push", "coding:pr", "coding:merge"].includes(permission), grantId]);
+	}
 }
 
 

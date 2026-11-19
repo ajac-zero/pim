@@ -56,7 +56,7 @@ export function codingRest(d: RestDeps): Handler {
 					if (b.budgetUsd !== undefined && b.budgetUsd !== null && !(typeof b.budgetUsd === "number" && Number.isFinite(b.budgetUsd) && b.budgetUsd > 0)) throw new ForgeError("invalid", "budgetUsd must be a positive number of dollars");
 					if (b.ref !== undefined && (typeof b.ref !== "string" || b.ref.length > 200)) throw new ForgeError("invalid", "ref must be at most 200 characters");
 					for (const field of ["pool", "provider"]) if (b[field] !== undefined && (typeof b[field] !== "string" || b[field].length > 100)) throw new ForgeError("invalid", `${field} must be at most 100 characters`);
-					const r = await forge.start(actor, { operationId: typeof b.operationId === "string" ? b.operationId : randomUUID(), task: str(b.task, "task"), repo: str(b.repo, "repo"), ref: b.ref, harness: b.harness, chatId: b.chat, budgetUsd: b.budgetUsd ?? null, pool: b.pool ?? b.provider, profile: b.profile, parent: typeof b.parent === "string" ? b.parent : undefined });
+					const r = await forge.start(actor, { operationId: typeof b.operationId === "string" ? b.operationId : randomUUID(), task: str(b.task, "task"), repo: str(b.repo, "repo"), ref: b.ref, harness: b.harness, chatId: b.chat, budgetUsd: b.budgetUsd ?? null, pool: b.pool, provider: b.provider, profile: b.profile, parent: typeof b.parent === "string" ? b.parent : undefined });
 					return json(r.created ? 201 : 200, r);
 				}
 			}
@@ -114,7 +114,8 @@ export function codingRest(d: RestDeps): Handler {
 						await forge.archive(actor, id);
 						return json(200, { ok: true });
 					case "POST push": {
-						const r = await forge.push(actor, id);
+						const b = await readJson(req);
+						const r = await forge.push(actor, id, { branch: typeof b.branch === "string" ? b.branch : undefined });
 						return json(r.status === "approval_required" ? 202 : 200, r);
 					}
 					case "POST pull-request": {

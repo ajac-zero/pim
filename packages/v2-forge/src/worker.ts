@@ -200,9 +200,14 @@ export class ForgeWorker {
 			return "done";
 		}
 		if (!thread.workspaceRef) {
-			const poolId = thread.placement?.pool ?? this.d.defaultPool ?? "default";
+			// A thread that names no pool takes the first with room by priority, as v1 placed it; one pinned at its start stays on that pool.
+			const poolId = thread.placement?.pool ?? (await scheduler.choosePool()) ?? this.d.defaultPool ?? "default";
 			const admitted = await scheduler.admit(thread.threadId, poolId, thread.ownerId);
-			if (admitted.kind === "queued") return "queued";
+			if (admitted.kind === "queued") {
+				// Where it waits is where it will run when promoted.
+				if (thread.placement?.pool !== poolId) await store.fenced(thread.threadId, epoch, (q) => store.patch(q, thread.threadId, { placement: { ...(thread.placement ?? {}), pool: poolId } }));
+				return "queued";
+			}
 			if (admitted.kind === "unhealthy") {
 				await store.fenced(thread.threadId, epoch, async (q) => {
 					await store.patch(q, thread.threadId, { placement: { pool: poolId } });

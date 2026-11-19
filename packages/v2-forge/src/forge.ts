@@ -11,9 +11,10 @@ import { type GitHost, type Objects, type OrbClients } from "./ports";
 import { ForgeScheduler } from "./scheduler";
 import { ForgeStore, type OutboxTopic, type ThreadRow } from "./store";
 import { type Credentials } from "./tokens";
-import { MAX_DIFF_CHARS, autosaveWorkspace, checkpointWorkspace, ensureBase, gitIn, keepDiff, makeDiff } from "./checkpoint";
+import { threadRef } from "./identity";
+import { MAX_DIFF_CHARS, autosaveWorkspace, checkpointWorkspace, ensureBase, gitIn, keepDiff, latestCheckpoint, makeDiff } from "./checkpoint";
 import { REPO_DIR } from "./git-checkout";
-import { parseTestSummary } from "@pim/coding/tools/test-results";
+import { type TestSummary, parseTestSummary } from "@pim/coding/tools/test-results";
 
 export type ForgeConfig = {
 	db: Db;
@@ -36,7 +37,7 @@ export type ForgeConfig = {
 /** A thread as a person or an agent reads it: the row without what signs its credentials or says who steps it. */
 export type ThreadView = Omit<ThreadRow, "gatewayNonce" | "leaseHolder"> & { capabilities: ReturnType<typeof capabilitiesOf> };
 
-export type StartRequest = { operationId: string; harness?: Harness; task: string; repo: string; ref?: string; chatId?: string; budgetUsd?: number | null; pool?: string; profile?: object; /** A thread of the same person that this one continues from. */ parent?: string };
+export type StartRequest = { operationId: string; harness?: Harness; task: string; repo: string; ref?: string; chatId?: string; budgetUsd?: number | null; pool?: string; /** Pins to this sandbox provider's first usable pool instead of naming one. */ provider?: string; profile?: object; /** A thread of the same person that this one continues from. */ parent?: string };
 export type ThreadDiff = { source: "workspace" | "orb"; diff: string; unpushedOrb: boolean; since: string | null; head: string | null; truncated: boolean };
 export type Gated<T> = ({ status: "done" } & T) | { status: "approval_required"; approvalId: string };
 
@@ -59,6 +60,12 @@ export class Forge {
 	/** A person's answer to an approval Forge filed (a push, pull request or merge): the thread's next try goes ahead or is refused. */
 	decideApproval(actor: Actor, approvalId: string, approve: boolean): Promise<{ threadId: string; action: string }> {
 		return this.c.authz.decide(approvalId, actor, approve);
+	}
+
+	/** The thread's newest checkpoint: the commit its latest turn ended on. Null before its first. */
+	async checkpoint(actor: Actor, ref: string): Promise<{ sha: string; message: string } | null> {
+		const c = await latestCheckpoint(this.c.db, (await this.own(actor, ref)).threadId);
+		return c && { sha: c.sha, message: c.message };
 	}
 
 	/** When the thread's latest turn ended (null before its first), and its place in its pool's line while it waits for a workspace (1 is next; null when it isn't waiting). */
@@ -109,16 +116,19 @@ export class Forge {
 		if (typeof req.task !== "string" || !req.task.trim()) throw new ForgeError("invalid", "A coding thread needs a task");
 		if (typeof req.operationId !== "string" || !req.operationId || req.operationId.length > 200) throw new ForgeError("invalid", "A coding thread needs an operationId");
 		if (!repoName(req.repo)) throw new ForgeError("invalid", `Not a repository: ${req.repo}`);
-		if (harness === "amp" && req.pool && req.pool !== "orbs") throw new ForgeError("invalid", "Amp threads run in orbs, not in a pool");
+		if (harness === "amp" && ((req.pool && req.pool !== "orbs") || (req.provider && !["orbs", "amp-http"].includes(req.provider)))) throw new ForgeError("invalid", "Amp threads run in orbs, not in a pool");
+		// Pinned to a pool by id, or to a provider's first usable pool.
+		const pool = harness === "amp" ? undefined : (req.pool ?? (req.provider ? ((await this.c.scheduler.choosePool({ provider: req.provider })) ?? undefined) : undefined));
+		if (harness !== "amp" && !req.pool && req.provider && !pool) throw new ForgeError("invalid", `No usable sandbox pool of provider ${req.provider}`);
 		// Permission first (a person without a grant learns that, not what the deployment lacks), then whether the deployment can run it at all.
-		await this.c.authz.check(actor, "coding:start", { repo: req.repo, pool: harness === "amp" ? null : (req.pool ?? null) });
-		await assertCapability(this.c.db, harness, this.c.ampConfigured, req.pool);
+		await this.c.authz.check(actor, "coding:start", { repo: req.repo, pool: harness === "amp" ? null : (pool ?? null) });
+		await assertCapability(this.c.db, harness, this.c.ampConfigured, pool);
 		await tx(this.c.db, (q) => this.c.scheduler.checkQuota(q, actor.ownerId, actor.tenantId ?? null, { startingWorkspaceThread: false }));
 		const parent = req.parent ? (await this.own(actor, req.parent)).threadId : null;
 		const { thread, created } = await this.c.store.start({ ownerId: actor.ownerId, operationId: req.operationId, harness, task: req.task, repo: req.repo, ref: req.ref, chatId: req.chatId, createdBy: actor.agent ? `agent:${actor.agent}` : actor.ownerId, budgetUsd: req.budgetUsd, profile: req.profile, limits: parent ? { parent } : null }, this.c.authz.policy.branchPrefix);
 		if (created) {
 			await this.c.store.locked(thread.threadId, async (q) => {
-				if (req.pool) await this.c.store.patch(q, thread.threadId, { placement: { pool: req.pool } });
+				if (pool) await this.c.store.patch(q, thread.threadId, { placement: { pool } });
 				if (harness !== "amp") await this.c.store.enqueueInbox(q, thread.threadId, req.operationId, "start", { prompt: req.task });
 				await this.c.store.emit(q, "projection", `created:${thread.threadId}`, thread.threadId, { type: "coding.created", threadId: thread.threadId, harness });
 			});
@@ -130,7 +140,7 @@ export class Forge {
 	async list(actor: Actor, o: { archived?: boolean } = {}) {
 		if (actor.role === "guest") throw new ForbiddenError("coding", "guests can't use coding threads");
 		const rows = (await this.c.db.query<Row>("select * from pim_forge.forge_threads where owner_id = $1 and ($2 or state <> 'archived') order by created_at desc limit 200", [actor.ownerId, o.archived ?? false])).rows;
-		return rows.map((r) => ({ threadId: r.thread_id, url: `/coding/${r.thread_id}`, task: r.task, harness: r.harness, status: r.state, stateReason: r.state_reason, repo: r.repo, branch: r.branch, spentUsd: Number(r.spent_usd), createdBy: r.created_by, createdAt: r.created_at, unread: !r.last_seen_at || new Date(r.updated_at) > new Date(r.last_seen_at) }));
+		return rows.map((r) => ({ threadId: r.thread_id, url: `/coding/${r.thread_id}`, task: r.task, harness: r.harness, status: r.state, stateReason: r.state_reason, repo: r.repo, branch: r.branch, spentUsd: Number(r.spent_usd), createdBy: r.created_by, createdAt: r.created_at, orb: r.orb ?? null, unread: !r.last_seen_at || new Date(r.updated_at) > new Date(r.last_seen_at) }));
 	}
 
 	async markSeen(actor: Actor, ref: string): Promise<void> {
@@ -269,6 +279,34 @@ export class Forge {
 		}
 	}
 
+	/**
+	 * An Amp thread Pim didn't start, read through the person's own Amp login: its state and its messages. Null when `given` isn't an Amp thread id or page, or is one of this person's own Forge threads
+	 * (and when there is no Amp login to read it with, `orb_auth`). Only agents' read tools use it, as in v1.
+	 */
+	async external(actor: Actor, given: string): Promise<{ threadId: string; url: string; state: string; messages: TranscriptMessage[] } | null> {
+		if (actor.role === "guest") throw new ForbiddenError("coding", "guests can't use coding threads");
+		const ref = threadRef(given);
+		if (ref.kind !== "amp") return null;
+		if (await this.c.store.find(actor.ownerId, given).then(() => true, () => false)) return null;
+		const client = await this.c.orbs({ threadId: ref.id, ownerId: actor.ownerId });
+		if (!client) throw new ForgeError("unsupported", "No Amp login is set up to read that thread with");
+		const status = await client.state(ref.id);
+		const messages: TranscriptMessage[] = [];
+		let after: string | undefined;
+		for (let page = 0; page < 50; page++) {
+			const got = await client.messages(ref.id, after ? { after } : {});
+			if (!got.length) break;
+			for (const m of got) {
+				const parts = m.parts ?? [{ type: "text" as const, text: m.text }];
+				messages.push({ id: m.id, role: m.role, timestamp: m.at, parts: parts.flatMap((p): TranscriptMessage["parts"][number][] => (p.type === "text" ? [{ type: "text", text: p.text }] : p.type === "toolCall" ? [{ type: "tool-call", id: p.id, name: p.name, arguments: p.arguments as never }] : [])) });
+				for (const p of parts) if (p.type === "toolResult") messages.push({ id: `${m.id}:${p.id}`, role: "tool", timestamp: m.at, parts: [{ type: "tool-result", id: p.id, name: p.name, content: [{ type: "text", text: p.text }], error: p.isError }] });
+			}
+			after = got.at(-1)!.id;
+		}
+		const state = { working: "running", idle: "idle", awaiting_approval: "waiting_input", error: "failed", unknown: "running" }[status.state];
+		return { threadId: ref.id, url: `https://ampcode.com/threads/${ref.id}`, state, messages };
+	}
+
 	/** The transcript's messages: the newest `tail` when asked, and one role when asked. */
 	async transcript(actor: Actor, ref: string, o: { tail?: number; role?: "user" | "assistant" } = {}) {
 		const t = await this.own(actor, ref);
@@ -276,7 +314,9 @@ export class Forge {
 	}
 
 	/** The transcript as coding_transcript pages it: `offset`/`limit`/`tail`, one `role` (user, assistant, tool or notice), or a one-line `summary` of each message. */
-	async transcriptPage(actor: Actor, ref: string, want: { offset?: number; limit?: number; role?: "user" | "assistant" | "tool" | "notice"; summary?: boolean; tail?: boolean } = {}) {
+	async transcriptPage(actor: Actor, ref: string, want: { offset?: number; limit?: number; role?: "user" | "assistant" | "tool" | "notice"; summary?: boolean; tail?: boolean; /** Also an Amp thread Pim didn't start. */ external?: boolean } = {}) {
+		const outside = want.external ? await this.external(actor, ref) : null;
+		if (outside) return pageTranscript(outside.messages, want);
 		const t = await this.own(actor, ref);
 		return pageTranscript(await this.messages(t.threadId), want);
 	}
@@ -290,9 +330,9 @@ export class Forge {
 	 * One message whole, by the id `transcriptPage` gave it, paged by lines (`offset` from 1, `limit` up to 2000) as coding_transcript_output reads it.
 	 * Without an id it is the thread's last assistant message.
 	 */
-	async transcriptOutput(actor: Actor, ref: string, want: { id?: string; offset?: number; limit?: number } = {}): Promise<{ text: string }> {
-		const t = await this.own(actor, ref);
-		const messages = await this.messages(t.threadId);
+	async transcriptOutput(actor: Actor, ref: string, want: { id?: string; offset?: number; limit?: number; external?: boolean } = {}): Promise<{ text: string }> {
+		const outside = want.external ? await this.external(actor, ref) : null;
+		const messages = outside ? outside.messages : await this.messages((await this.own(actor, ref)).threadId);
 		const id = want.id ?? messages.filter((m) => m.role === "assistant").at(-1)?.id;
 		if (id === undefined) return { text: "" };
 		const out = transcriptOutput(messages, id, want);
@@ -366,9 +406,9 @@ export class Forge {
 	}
 
 	/** The thread's test runs, oldest first, each with the counts its runner printed when they can be read. */
-	async tests(actor: Actor, ref: string) {
+	async tests(actor: Actor, ref: string): Promise<{ seq: number; command: string; exit_code: number | null; output: string; at: string; summary: TestSummary | null }[]> {
 		const t = await this.own(actor, ref);
-		return (await this.c.db.query<Row>("select seq, command, exit_code, output, at from pim_forge.forge_test_runs where thread_id = $1 order by seq", [t.threadId])).rows.map((r) => ({ ...r, summary: parseTestSummary(r.output) ?? null }));
+		return (await this.c.db.query<Row>("select seq, command, exit_code, output, at from pim_forge.forge_test_runs where thread_id = $1 order by seq", [t.threadId])).rows.map((r) => ({ seq: Number(r.seq), command: r.command, exit_code: r.exit_code, output: r.output, at: r.at, summary: parseTestSummary(r.output) ?? null }));
 	}
 
 	/** What a push takes is HEAD, so the work the agent left uncommitted is committed first (a checkpoint); a thread whose turn is running is left alone, its work isn't finished. */
@@ -394,21 +434,22 @@ export class Forge {
 		return t.workspaceRef;
 	}
 
-	async push(actor: Actor, ref: string): Promise<Gated<{ outcome: "pushed" | "unchanged"; sha: string; branch: string }>> {
+	/** Pushes the thread's work to its own branch, or to another of the branches Pim may push to (`branch`: under the prefix, never the default). */
+	async push(actor: Actor, ref: string, o: { branch?: string } = {}): Promise<Gated<{ outcome: "pushed" | "unchanged"; sha: string; branch: string }>> {
 		const t = await this.own(actor, ref);
 		const ws = this.workspaceOf(t);
 		const pending = await this.gate(actor, "coding:push", "push", t);
 		if (pending) return { status: "approval_required", ...pending };
-		const branch = t.branch!;
+		const branch = o.branch ?? t.branch!;
 		assertPushBranch(this.c.authz.policy, branch, await this.c.git.defaultBranch(t.repo));
 		await this.commitWork(t);
 		const r = await this.c.git.push(ws, t.repo, branch);
-		await this.c.store.locked(t.threadId, (q) => this.c.store.patch(q, t.threadId, { last_pushed_sha: r.sha }));
+		if (branch === t.branch) await this.c.store.locked(t.threadId, (q) => this.c.store.patch(q, t.threadId, { last_pushed_sha: r.sha }));
 		await this.c.authz.consumeApproval(t.threadId, "push");
 		return { status: "done", ...r, branch };
 	}
 
-	async openPullRequest(actor: Actor, ref: string, title?: string, body?: string): Promise<Gated<{ url: string; number: number }>> {
+	async openPullRequest(actor: Actor, ref: string, title?: string, body?: string): Promise<Gated<{ url: string; number: number; title: string; base: string; head: string }>> {
 		const t = await this.own(actor, ref);
 		const pending = await this.gate(actor, "coding:pr", "pr", t);
 		if (pending) return { status: "approval_required", ...pending };
@@ -417,17 +458,18 @@ export class Forge {
 		// Into the branch the thread started from, or the default branch when it started from a commit (or from main, which is the default's usual name).
 		const base = !t.ref || t.ref === "main" || /^[0-9a-f]{40}$/i.test(t.ref) ? await this.c.git.defaultBranch(t.repo) : t.ref;
 		const first = t.task.split("\n")[0]!.trim().slice(0, 100) || branch;
-		const pr = await this.c.git.openPullRequest(t.repo, branch, base, title?.trim() || first, body ?? `${t.task.length > 2000 ? `${t.task.slice(0, 2000)}…` : t.task}\n\n---\nOpened by Pim from a coding thread.`);
+		const named = title?.trim() || first;
+		const pr = await this.c.git.openPullRequest(t.repo, branch, base, named, body ?? `${t.task.length > 2000 ? `${t.task.slice(0, 2000)}…` : t.task}\n\n---\nOpened by Pim from a coding thread.`);
 		await this.c.store.locked(t.threadId, (q) => this.c.store.patch(q, t.threadId, { pull_request: pr }));
 		await this.c.authz.consumeApproval(t.threadId, "pr");
-		return { status: "done", ...pr };
+		return { status: "done", ...pr, title: named, base, head: branch };
 	}
 
 	/**
 	 * The only way onto the default branch: fast-forward, else rebase, never force; a conflict aborts and changes nothing.
 	 * A sandbox thread's branch is pushed first (Pim pushes for it); an Amp thread's work is already on the host, pushed by Amp, so it is merged from there, as `coding_merge` always did.
 	 */
-	async merge(actor: Actor, ref: string): Promise<Gated<{ outcome: "merged" | "conflict"; method?: string; detail?: string }>> {
+	async merge(actor: Actor, ref: string): Promise<Gated<{ outcome: "merged" | "conflict"; method?: string; detail?: string; sha?: string; base: string }>> {
 		const t = await this.own(actor, ref);
 		const remote = capabilitiesOf(t.harness).family === "remote-orb";
 		const branch = remote ? ((t.orb?.branch as string | undefined) ?? null) : t.branch;
@@ -447,7 +489,7 @@ export class Forge {
 		}
 		const r = await this.c.git.mergeBranch(t.repo, branch!);
 		if (r.outcome === "merged") await this.c.authz.consumeApproval(t.threadId, "merge");
-		return { status: "done", ...r };
+		return { status: "done", ...r, base };
 	}
 
 	/** Archive stops the turn, cuts credentials, frees the slot and tears down the workspace; transcript, diffs, tests and checkpoints stay readable. */

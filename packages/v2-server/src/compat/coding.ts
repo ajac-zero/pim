@@ -1,26 +1,51 @@
 /**
  * The coding threads API in the shapes the web app reads (`web/src/lib/coding.ts`, as v1's Worker answered them), over Forge's own handler. Forge's REST speaks its stored rows
  * (`threadId`, `status`, a `repo` string); the page wants a thread view with `id`, a `repo` object, a `slot` and an `environment`. Every route here reshapes what Forge answers and
- * leaves the rest of `/api/coding/**` (harness logins, the git broker, Gitea, the model gateway) to the inner handler. Not served: the live `events` stream (the page stops
- * following it and reads the transcript again when it regains focus) and an environment build, which Forge has no counterpart for.
+ * leaves the rest of `/api/coding/**` (harness logins, the git broker, Gitea, the model gateway) to the inner handler. The live `events` stream follows the thread's transcript as Forge records it (a message at a time: a
+ * command's output as it prints is not streamed). Not served: an environment build, which Forge has no counterpart for.
  */
-import type { Forge } from "@pim/v2-forge/forge";
+import type { Forge, ThreadView } from "@pim/v2-forge/forge";
 import { json, type Authenticate, type Handler } from "@pim/v2-forge/http/common";
-import type { ThreadRow } from "@pim/v2-forge/store";
+
 
 const NO_ENVIRONMENT = { state: "none", key: null, source: null, builtAt: null, restoredFromKey: null, provisionMs: null, restoreMs: null, setupMs: null, snapshotMs: null, snapshotBytes: null, snapshotKept: null, readyFrom: null, preparedAt: null, rebuildRequested: false, toolchains: [], dependencies: [], testCommands: [], notes: [], services: [], cachePaths: [] };
+/** The page's environment of a thread: what its setup script did in this workspace (Forge keeps no snapshots, so a prepared one is always set up again). */
+const environmentOf = (t: Thread): Record<string, unknown> & { state: string; error?: string } => {
+	const e = (t.provisioning as { environment?: { state: "ready" | "failed"; error?: string; setupMs?: number } } | null)?.environment;
+	return e ? { ...NO_ENVIRONMENT, state: e.state === "failed" ? "failed" : "cached", readyFrom: e.state === "failed" ? null : "setup", setupMs: e.setupMs ?? null, ...(e.error ? { error: e.error } : {}) } : NO_ENVIRONMENT;
+};
 const NO_REBUILD = { error: "This deployment keeps no environment snapshots to rebuild", code: "conflict" };
 
 /** What Forge says of how a thread is getting on (`Forge.progress`), for the page's unread dot and its place in the queue. */
 type Progress = { lastTurnEndedAt: number | null; queuePosition: number | null };
 
 /** Forge's reasons as the page names them: waiting for a pool slot is the queue's own line, and an expired wait says what it waited for. */
-const reasonOf = (reason: string | null) => (reason === "pool_full" ? null : reason === "queue_timeout" ? "queue_expired:slots_full" : reason);
+const reasonOf = (reason: string | null) => {
+	switch (reason) {
+		case "pool_full":
+			return null;
+		case "queue_timeout":
+			return "queue_expired:slots_full";
+		// What the page has words for: a workspace that couldn't be made or reached, and a run that was cut short and goes on.
+		case "pool_unhealthy":
+		case "provision_failed":
+		case "checkout_failed":
+			return "workspace";
+		case "lost":
+		case "resuming":
+			return "interrupted";
+		default:
+			return reason;
+	}
+};
 
-const creator = (t: ThreadRow) => (t.createdBy === t.ownerId || !t.chatId ? { type: "person" } : { type: "agent", agent: t.createdBy, chat: t.chatId });
+/** A thread row without what only Forge may read (see `Forge.status`). */
+type Thread = Omit<ThreadView, "capabilities">;
+
+const creator = (t: Thread) => (t.createdBy === t.ownerId || !t.chatId ? { type: "person" } : { type: "agent", agent: t.createdBy, chat: t.chatId });
 
 /** A thread as the page's list reads it. */
-function summary(t: ThreadRow, progress: Progress) {
+function summary(t: Thread, progress: Progress) {
 	return {
 		id: t.threadId,
 		url: `/coding/${t.threadId}`,
@@ -32,7 +57,7 @@ function summary(t: ThreadRow, progress: Progress) {
 		stateReason: reasonOf(t.stateReason),
 		queue: t.state === "queued" && progress.queuePosition !== null ? { position: progress.queuePosition, reason: "slots_full" } : null,
 		createdBy: creator(t),
-		parent: null,
+		parent: t.parentId,
 		chat: t.chatId,
 		harness: t.harness,
 		spentUsd: t.spentUsd,
@@ -49,9 +74,12 @@ function summary(t: ThreadRow, progress: Progress) {
 }
 
 /** A thread as its page reads it. */
-function view(t: ThreadRow, progress: Progress, unpushed: { commits: number; sha: string; message: string; at: number } | null) {
-	// Forge's own fields stay (a caller of the API reads `workspaceRef` and `lastPushedSha`), but the nonce that signs the thread's grants is never sent.
-	const { gatewayNonce: _nonce, leaseHolder: _holder, ...raw } = t;
+function view(t: Thread, progress: Progress, unpushed: { commits: number; sha: string; message: string; at: number } | null) {
+	// Forge's own fields stay (a caller of the API reads `workspaceRef` and `lastPushedSha`); `Forge.status` already left out the nonce that signs the thread's grants.
+	const raw = t;
+	const environment = environmentOf(t);
+	// A failed setup is shown, not hidden, while nothing else says what the thread is waiting on.
+	const setupFailed = environment.state === "failed" && !t.stateReason && t.state !== "failed" && t.state !== "archived";
 	const pool = t.placement?.pool ?? "";
 	const provider = t.workspaceRef?.provider ?? t.placement?.provider ?? "";
 	return {
@@ -59,7 +87,8 @@ function view(t: ThreadRow, progress: Progress, unpushed: { commits: number; sha
 		...summary(t, progress),
 		threadId: t.threadId,
 		status: t.state,
-		stateDetail: t.stateDetail,
+		stateReason: setupFailed ? "environment_failed" : reasonOf(t.stateReason),
+		stateDetail: setupFailed ? (environment.error ?? null) : t.stateDetail,
 		repo: { url: t.repo, ref: t.ref ?? "", branch: t.branch ?? "", baseSha: t.baseSha },
 		profile: t.profile ?? { providerId: "", model: "" },
 		resolvedProfile: t.profile?.model ? { provider: t.profile.providerId, model: t.profile.model, source: "explicit" } : null,
@@ -76,14 +105,82 @@ function view(t: ThreadRow, progress: Progress, unpushed: { commits: number; sha
 		inbox: 0,
 		// What the page's Push button is for: the newest commit the git host doesn't have. Forge keeps no checkpoints of its own, so `seq` counts the commits waiting.
 		checkpoint: unpushed && { seq: unpushed.commits, sha: unpushed.sha, message: unpushed.message, operationId: null, createdAt: unpushed.at },
-		parentThread: null,
-		environment: NO_ENVIRONMENT,
+		parentThread: t.parentId,
+		environment,
 	};
+}
+
+/** A message the thread recorded, as the pi entry the page's stream folds into its transcript (the page's own reducer reads `entry.model[0]`). */
+const entryOf = (e: { seq: number | string; role: string | null; data: any; at: string | Date }) => {
+	const timestamp = new Date(e.at).getTime();
+	const d = e.data ?? {};
+	const model =
+		e.role === "user"
+			? { role: "user", content: String(d.text ?? ""), timestamp }
+			: e.role === "tool"
+				? { role: "toolResult", toolCallId: String(d.toolCallId ?? ""), toolName: String(d.name ?? "tool"), content: [{ type: "text", text: String(d.text ?? "") }], isError: d.isError === true, timestamp }
+				: e.role === "assistant"
+					? { role: "assistant", content: [...(d.text ? [{ type: "text", text: String(d.text) }] : []), ...((d.toolCalls ?? []) as { id: string; name: string; arguments: unknown }[]).map((c) => ({ type: "toolCall", id: String(c.id), name: String(c.name), arguments: c.arguments ?? {} }))], timestamp, stopReason: "stop" }
+					: null;
+	return model ? { id: Number(e.seq), kind: "pi.message", model: [model] } : null;
+};
+
+/**
+ * The page's live stream (`GET …/events`, newline-delimited JSON): a snapshot of the conversation so far, then each message the thread records as it does, with the run's start and end. Forge records a message when
+ * pi or the CLI finishes it, so what the page follows is one message at a time, not the words as they are written or a command's output as it prints.
+ */
+function follow(forge: Forge, actor: Parameters<Forge["status"]>[0], id: string, signal: AbortSignal, pollMs: number): ReadableStream<Uint8Array> {
+	const encoder = new TextEncoder();
+	let closed = false;
+	return new ReadableStream({
+		async start(controller) {
+			const send = (message: object) => controller.enqueue(encoder.encode(`${JSON.stringify(message)}\n`));
+			let after = 0;
+			const drain = async () => {
+				const entries: NonNullable<ReturnType<typeof entryOf>>[] = [];
+				for (;;) {
+					const rows = await forge.eventsAfter(actor, id, after, 500);
+					for (const row of rows) {
+						after = Number(row.seq);
+						const entry = row.kind === "message" ? entryOf(row as never) : null;
+						if (entry) entries.push(entry);
+					}
+					if (rows.length < 500) return entries;
+				}
+			};
+			let running = (await forge.status(actor, id)).state === "running";
+			send({ type: "snapshot", entries: await drain(), tools: [], ...(running ? { run: {} } : {}) });
+			const stop = () => void (closed = true);
+			signal.addEventListener("abort", stop, { once: true });
+			while (!closed) {
+				await new Promise((r) => setTimeout(r, pollMs));
+				if (closed) break;
+				try {
+					const entries = await drain();
+					const now = (await forge.status(actor, id)).state === "running";
+					const events = [...(now && !running ? [{ type: "run_start" }] : []), ...entries.map((entry) => ({ type: "entry_appended", entry })), ...(!now && running ? [{ type: "run_end" }] : [])];
+					running = now;
+					if (events.length) send({ type: "events", events });
+				} catch {
+					// A read that failed is tried again at the next look; the page reconnects if this ends.
+				}
+			}
+			signal.removeEventListener("abort", stop);
+			try {
+				controller.close();
+			} catch {
+				// Already closed by the page.
+			}
+		},
+		cancel() {
+			closed = true;
+		},
+	});
 }
 
 export type PageApproval = (ownerId: string, forgeApproval: string) => Promise<{ id: string; summary: string } | null>;
 
-export function webCodingShapes(d: { forge: Forge; authenticate: Authenticate; inner: Handler; pageApproval: PageApproval }): Handler {
+export function webCodingShapes(d: { forge: Forge; authenticate: Authenticate; inner: Handler; pageApproval: PageApproval; /** How often the live stream looks for what is new, in ms. */ followMs?: number }): Handler {
 	return async (req) => {
 		const url = new URL(req.url);
 		const path = url.pathname;
@@ -117,16 +214,29 @@ export function webCodingShapes(d: { forge: Forge; authenticate: Authenticate; i
 				case "GET diff": {
 					const r = await d.inner(req);
 					if (!r || r.status !== 200) return r;
-					return json(200, { since: null, head: null, diff: ((await r.json()) as { diff: string }).diff, truncated: false });
+					const kept = (await r.json()) as { diff: string; since: string | null; head: string | null; truncated: boolean; unpushedOrb: boolean };
+					return json(200, { since: kept.since, head: kept.head, diff: kept.diff, truncated: kept.truncated, ...(kept.unpushedOrb ? { unpushedOrb: true } : {}) });
 				}
 				case "GET tests": {
 					const r = await d.inner(req);
 					if (!r || r.status !== 200) return r;
-					const { runs } = (await r.json()) as { runs: { seq: number; command: string; exit_code: number | null; output: string; at: string }[] };
-					return json(200, { runs: runs.map((x) => ({ seq: x.seq, command: x.command, exitCode: x.exit_code, timedOut: false, startedAt: new Date(x.at).getTime(), durationMs: 0, summary: null, output: x.output })) });
+					const { runs } = (await r.json()) as { runs: { seq: number; command: string; exit_code: number | null; output: string; at: string; summary: object | null }[] };
+					return json(200, { runs: runs.map((x) => ({ seq: x.seq, command: x.command, exitCode: x.exit_code, timedOut: false, startedAt: new Date(x.at).getTime(), durationMs: 0, summary: x.summary, output: x.output })) });
 				}
-				case "GET events":
-					return json(404, { error: "The live stream isn't served by this deployment", code: "not_found" });
+				case "GET events": {
+					// The page's live stream; a caller that doesn't ask for one gets Forge's own list.
+					const accept = req.headers.get("accept") ?? "";
+					if (!accept.includes("ndjson") && !accept.includes("event-stream")) return d.inner(req);
+					await forge.status(actor, id);
+					return new Response(follow(forge, actor, id, req.signal, d.followMs ?? 700), { headers: { "content-type": "application/x-ndjson", "cache-control": "no-store", "x-content-type-options": "nosniff" } });
+				}
+				case "GET log": {
+					// v1's log: the entries after `since`, and where to ask next.
+					const since = Number(url.searchParams.get("since") ?? 0);
+					if (!Number.isInteger(since) || since < 0) return json(400, { error: "since must be a log entry's seq", code: "invalid" });
+					const events = await forge.eventsAfter(actor, id, since);
+					return json(200, { events, next: Number(events.at(-1)?.seq ?? since) });
+				}
 				case "POST push": {
 					// The page reads v1's answer: the approval the person decides (the one in their list), and the branch and commit it is for. A push nothing stands in the way of is done already.
 					const r = await d.inner(req);

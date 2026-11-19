@@ -371,4 +371,19 @@ describe("stopping, keeping and retrying turns", () => {
 		const wakes = (await s.pool.query("select dedupe_key from pim_forge.forge_outbox where topic = 'wake' and thread_id = $1", [threadId])).rows.map((r) => r.dedupe_key);
 		expect(wakes).toEqual([`coding:${threadId}:int-steer-${n}`]);
 	});
+	it("places a thread that names no pool on the first pool with room by priority, and a provider's pin on that provider's first", async () => {
+		await s.scheduler.upsertPool({ poolId: "fast", provider: "local", size: 1, priority: 10 });
+		await s.scheduler.upsertPool({ poolId: "spare", provider: "local", size: 1, priority: 5 });
+		const placed: string[] = [];
+		for (const op of ["place-1", "place-2", "place-3"]) {
+			const { threadId } = await s.forge.start(ada, startReq(op, { harness: "claude-code" }));
+			await s.worker({ turns: { "claude-code": new ScriptedPort([{ outcome: "completed", text: "ok" }]) } }).step(threadId);
+			placed.push((await s.store.get(threadId))!.placement.pool);
+		}
+		// "fast" holds one, "spare" one, and the rest overflow to the pool with room (default).
+		expect(placed).toEqual(["fast", "spare", "default"]);
+		const pinned = await s.forge.start(ada, startReq("place-4", { harness: "claude-code", provider: "local" } as never));
+		expect((await s.store.get(pinned.threadId))!.placement).toEqual({ pool: "default" });
+		await expect(s.forge.start(ada, startReq("place-5", { harness: "claude-code", provider: "nowhere" } as never))).rejects.toMatchObject({ code: "invalid" });
+	});
 });

@@ -70,6 +70,18 @@ export class ForgeScheduler {
 		}
 	}
 
+	/**
+	 * The pool a thread that names none is placed on: the first by priority that is enabled, healthy and has room, else the first healthy one (where it waits its turn). Null when no pool is usable, and the caller names its default.
+	 * With `provider`, only that provider's pools count.
+	 */
+	async choosePool(o: { provider?: string } = {}): Promise<string | null> {
+		const pools = (await this.db.query<Row>("select p.pool_id, p.size, (select count(*) from pim_forge.forge_slots s where s.pool_id = p.pool_id) as held, (select count(*) from pim_forge.forge_queue w where w.pool_id = p.pool_id) as waiting from pim_forge.forge_pools p where p.enabled and ($1::text is null or p.provider = $1) order by p.priority desc, p.pool_id", [o.provider ?? null])).rows;
+		const now = this.clock();
+		const healthy: Row[] = [];
+		for (const p of pools) if (poolAvailable(await this.breaker(this.db, p.pool_id), now)) healthy.push(p);
+		return (healthy.find((p) => Number(p.held) < Number(p.size) && Number(p.waiting) === 0) ?? healthy[0])?.pool_id ?? null;
+	}
+
 	/** Gives the thread a slot in the pool, or queues it behind those already waiting (FIFO). Amp threads never come here. */
 	async admit(threadId: string, poolId: string, ownerId: string, tenantId: string | null = null): Promise<Admission> {
 		return tx(this.db, async (q) => {

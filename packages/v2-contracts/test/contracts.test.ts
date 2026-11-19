@@ -81,7 +81,8 @@ describe("migration bands", () => {
 		expect(migrationOwner(200)).toBe("application");
 		expect(migrationOwner(499)).toBe("forge");
 		expect(migrationOwner(600)).toBe("integration");
-		expect(migrationOwner(700)).toBeNull();
+		expect(migrationOwner(799)).toBe("integration");
+		expect(migrationOwner(800)).toBeNull();
 	});
 	it("flags names, band violations and duplicates", () => {
 		expect(validateMigrationFiles("runtime", ["0100_a.sql", "0199_b.sql"])).toEqual([]);

@@ -405,7 +405,7 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 				return text(error instanceof Error ? error.message : String(error), true);
 			}
 		}, "safe"),
-		tool("http_request", "Make an HTTP request that may change something elsewhere (POST, PUT, PATCH, DELETE). A person approves it first, unless they have said it may go ahead. It is sent once: if its outcome cannot be known, it is not sent again.", Type.Object({ method: Type.Union(["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"].map((m) => Type.Literal(m))), url: S(), headers: O(Type.Record(Type.String(), Type.String())), body: O(S()) }),
+		tool("http_request", "Make an HTTP request that may change something elsewhere (POST, PUT, PATCH, DELETE). It is sent once: if its outcome cannot be known, it is not sent again.", Type.Object({ method: Type.Union(["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"].map((m) => Type.Literal(m))), url: S(), headers: O(Type.Record(Type.String(), Type.String())), body: O(S()) }),
 			async (args, api) => {
 				const app = deps.app;
 				if (!app) return noApp();

@@ -3,11 +3,10 @@
  * desktop. The computer is a paired `pim-computer` whose socket the Gate or Relay holds; a Runner reaches it over the Relay's bus (`acquireRemote`), so with no computer
  * connected, or no bus, every tool answers at once that it is unavailable and the chat goes on without it.
  *
- * What has effects outside the conversation asks a person first through the application's approvals, as `http_request` does, unless a standing approval covers it:
- * `shell`, `file_delete`, a desktop action, and (browser) sending a form, pressing Enter in a field that sends one, and uploading files. Once approved, the effect is
- * recorded as an external operation first, so a replay or a new owner of the partition never runs it twice: an outcome that cannot be known is left for a person to check.
- * Reading and writing files, opening and reading pages, and clicking links ask nothing, as in v1; every path is confined to /workspace, and a write that names the file's
- * hash is refused when the file changed since.
+ * The computer is the agent's own to work on, so nothing here asks a person first. What has effects outside the conversation (`shell`, `file_delete`, a desktop action,
+ * and in the browser sending a form, pressing Enter in a field that sends one, and uploading files) still goes through the application's approvals, which let it run,
+ * and is recorded as an external operation first, so a replay or a new owner of the partition never runs it twice: an outcome that cannot be known is left for a person
+ * to check. Every path is confined to /workspace, and a write that names the file's hash is refused when the file changed since.
  */
 import { createHash } from "node:crypto";
 import { posix } from "node:path";

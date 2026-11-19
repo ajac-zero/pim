@@ -1,6 +1,6 @@
 // An owner's MCP connector on the real stack, against a local fake streamable-HTTP MCP server: its tools are discovered and enabled, the agent is offered the ones that are not
 // off, a read-only tool runs, a tool that asks first parks for approval and is called once after a person says yes, an off tool is neither offered nor callable, the
-// permissions screen's API sets Off / Ask / On, and "always approve" turns Ask into On.
+// approval policies (auto, majordomo, explicit) decide what asks, the permissions screen's API sets Off / Ask / On, and "always approve" turns Ask into On.
 import { createServer, type Server } from "node:http";
 import { randomBytes } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -55,6 +55,7 @@ real("connector tools", () => {
 	let d: Deployment;
 	let gate: Process;
 	let runner: Process;
+	let maintenance: Process;
 	let web: Client;
 	let app: App;
 	let ownerId: string;
@@ -95,6 +96,8 @@ real("connector tools", () => {
 		ownerId = registered.json.account.ownerId;
 		chatId = (await web.call("POST", "/api/sessions", { title: "Work" })).json.id;
 		runner = await start(d, "runner", { pollMs: 40, providers: () => [faux.provider] }, { PIM_DEFAULT_MODEL: "faux/m", PIM_APP_DATABASE_URL: stack.url("gate"), ...keys });
+		// Maintenance applies approval timeouts, as the auto policy needs.
+		maintenance = await start(d, "maintenance", { pollMs: 100 });
 		// The person connects the server, finds its tools, and switches two on; the destructive one is left off.
 		const made = await web.call("POST", "/api/connectors", { kind: "custom_mcp", name: "Tickets", url, credential: TOKEN });
 		expect(made.status).toBe(201);
@@ -103,7 +106,7 @@ real("connector tools", () => {
 		expect((await web.call("PUT", `/api/connectors/${connector}/tools`, { tools: ["search", "create_ticket"] })).status).toBe(200);
 	}, 180_000);
 	afterAll(async () => {
-		await Promise.allSettled([runner?.close(), gate?.close()]);
+		await Promise.allSettled([maintenance?.close(), runner?.close(), gate?.close()]);
 		await new Promise((r) => mcp.server.close(r));
 		await app?.db.end();
 		d?.nats.stop();
@@ -153,12 +156,53 @@ real("connector tools", () => {
 		expect((await results("connector_call")).at(-1)).toContain("did not approve");
 	}, 120_000);
 
+	it("answers the approval policies: auto approves what is not answered, the majordomo decides or hands back, explicit waits for the person", async () => {
+		const ticket = (title: string) => toolUse(fauxToolCall("connector_call", { connector, tool: "create_ticket", arguments: { title } }));
+		const created = () => mcp.calls.filter((c) => c.name === "create_ticket").length;
+		const before = created();
+		const approvalOf = async (title: string) => waitFor(`the approval of ${title}`, async () => (await d.stack.admin.query("SELECT id, state, decided_by, args FROM pim_app.approvals WHERE args->'arguments'->>'title' = $1", [title])).rows[0], 60_000);
+
+		// auto: nobody answers; the call goes ahead when the timeout passes, and the approval says the timeout decided.
+		expect((await web.call("PUT", "/api/settings", { approvalPolicy: "auto", approvalTimeoutSeconds: 1 })).status).toBe(200);
+		await send("ticket 10", true, ticket("t10"));
+		await finish();
+		expect((await approvalOf("t10")).state).toBe("timed_out_approved");
+		expect(created()).toBe(before + 1);
+
+		// majordomo: the review is one model call; approve goes ahead as the majordomo's own decision.
+		expect((await web.call("PUT", "/api/settings", { approvalPolicy: "majordomo" })).status).toBe(200);
+		await send("ticket 11", true, ticket("t11"), fauxAssistantMessage('{"decision":"approve","note":"A routine ticket."}'));
+		await finish();
+		expect(await approvalOf("t11")).toMatchObject({ state: "approved", decided_by: "majordomo", args: { review: { status: "decided", note: "A routine ticket." } } });
+		expect(created()).toBe(before + 2);
+
+		// majordomo deny: the call does not go ahead.
+		await send("ticket 12", true, ticket("t12"), fauxAssistantMessage('{"decision":"deny","note":"Not something they asked for."}'));
+		await finish();
+		expect(await approvalOf("t12")).toMatchObject({ state: "denied", decided_by: "majordomo" });
+		expect(created()).toBe(before + 2);
+
+		// majordomo unsure, or an answer that is not a decision: handed back, and the person answers as usual.
+		await send("ticket 13", true, ticket("t13"), fauxAssistantMessage("I think so?"));
+		const handed = await waitFor("the review to hand it back", async () => ((await approvalOf("t13")).args.review?.status === "escalated" ? await approvalOf("t13") : undefined), 60_000);
+		expect(handed.state).toBe("waiting");
+		const listed = (await web.call("GET", "/api/approvals?status=pending")).json.approvals as { id: string; review: { status: string } | null }[];
+		expect(listed.find((a) => a.id === handed.id)?.review?.status).toBe("escalated");
+		expect((await web.call("POST", `/api/approvals/${handed.id}/decision`, { approve: true })).status).toBe(200);
+		await finish();
+		expect(created()).toBe(before + 3);
+		expect((await approvalOf("t13")).decided_by).not.toBe("majordomo");
+		expect((await web.call("PUT", "/api/settings", { approvalPolicy: "explicit" })).status).toBe(200);
+	}, 360_000);
+
 	it("follows the person's Off / Ask / On, and always approve turns Ask into On", async () => {
 		const put = (tool: string, permission: string | null, extra: object = {}) => web.call("PUT", "/api/permissions", { app: connector, tool, permission, ...extra });
+		const approvals = async () => (await d.stack.admin.query("SELECT count(*)::int AS n FROM pim_app.approvals")).rows[0].n as number;
+		const filed = await approvals();
 		expect((await put("create_ticket", "on")).json).toMatchObject({ permission: "on", chosen: "on" });
 		await send("again", false, toolUse(fauxToolCall("connector_call", { connector, tool: "create_ticket", arguments: { title: "Direct" } })));
 		expect(callNames().at(-1)).toBe("create_ticket");
-		expect((await d.stack.admin.query("SELECT count(*)::int AS n FROM pim_app.approvals")).rows[0].n).toBe(2);
+		expect(await approvals()).toBe(filed);
 
 		expect((await put("create_ticket", "off")).json).toMatchObject({ permission: "off" });
 		const before = mcp.calls.length;
@@ -180,7 +224,7 @@ real("connector tools", () => {
 		const count = mcp.calls.length;
 		await send("no asking now", false, toolUse(fauxToolCall("connector_call", { connector, tool: "create_ticket", arguments: { title: "Quiet" } })));
 		expect(mcp.calls.length).toBe(count + 1);
-		expect((await d.stack.admin.query("SELECT count(*)::int AS n FROM pim_app.approvals")).rows[0].n).toBe(3);
+		expect(await approvals()).toBe(filed + 1);
 	}, 240_000);
 
 	it("serves the web app's connected-servers and connections lists, connects a server by its address and removes it", async () => {

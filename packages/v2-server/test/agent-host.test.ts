@@ -1,6 +1,6 @@
 // The default agent host on the real stack: a Runner started without any `harnessOptions` runs a real Pim agent. The only thing given to it is a model provider (pi-ai's
 // faux one, as a deployment's own provider would be) and the databases the tools write through. The agent keeps notes and goals, creates a note and an app, makes an
-// HTTP request that waits for a person's approval and is sent once, and starts a coding thread under an admin's grant; every model call lands in the cost ledger.
+// HTTP request that is sent at once and only once, and starts a coding thread under an admin's grant; every model call lands in the cost ledger.
 import { randomBytes } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
@@ -178,24 +178,16 @@ real("the default agent host", () => {
 		expect(JSON.parse(answered[4]!).widgets).toMatchObject([{ id: "pim.goals/active", kind: "progress", items: [{ title: "Run a 5k", value: 0, max: 2, detail: "Run 2k" }] }]);
 	}, 120_000);
 
-	it("sends an approved HTTP request once, and a request whose outcome is unknown is never sent again", async () => {
+	it("sends an HTTP request at once, and only once: a request whose outcome is unknown is never sent again", async () => {
 		const request = { method: "POST", url: API, headers: { authorization: "Bearer secret-token" }, body: '{"sku":1}' };
-		faux.setResponses([toolUse(fauxToolCall("http_request", request)), toolUse(fauxToolCall("send_to_user", { message: "Ordered." })), fauxAssistantMessage(`ended ${++n}`)] as never);
-		expect((await web.call("POST", `/api/sessions/${chatId}/messages`, { commandId: `m-${n}`, text: "place the order" })).status).toBe(202);
-		const approval = await waitFor("the approval to be filed", async () => (await d.stack.admin.query("SELECT id, args FROM pim_app.approvals WHERE state = 'waiting'")).rows[0], 60_000);
-		// What the person is shown is what will be sent, with the secret left out.
-		expect(approval.args).toMatchObject({ method: "POST", url: API, headers: { authorization: "[redacted]" } });
-		expect(sent).toHaveLength(0);
-		expect((await web.call("POST", `/api/approvals/${approval.id}/decision`, { approve: true })).status).toBe(200);
-		await waitFor("the turn to end", async () => ((await transcript()).includes(`ended ${n}`) ? true : undefined), 60_000);
+		await say("place the order", toolUse(fauxToolCall("http_request", request)));
 		expect(sent).toHaveLength(1);
 		expect(sent[0]).toMatchObject({ method: "POST", url: API, body: '{"sku":1}' });
 		expect(sent[0]!.headers["idempotency-key"]).toMatch(/^pim-/);
+		expect((await d.stack.admin.query("SELECT count(*)::int AS n FROM pim_app.approvals WHERE tool = 'http:request'")).rows[0].n).toBe(0);
 		expect((await d.stack.admin.query("SELECT state, tool_name FROM pim_runtime.external_operations WHERE owner_id = $1", [ownerId])).rows).toEqual([{ state: "completed", tool_name: "http_request" }]);
 
-		// A standing approval stands in for the person; the connection then fails after the request may have gone out: it is not sent again and waits for reconciliation.
-		const standing = await web.call("POST", "/api/admin/standing-approvals", { ownerId, action: "http:request", scope: { host: "93.184.216.34" } });
-		expect(standing.status).toBe(201);
+		// The connection fails after the request may have gone out: it is not sent again and waits for reconciliation.
 		failNext = true;
 		await say("place it again", toolUse(fauxToolCall("http_request", { ...request, body: '{"sku":2}' })));
 		failNext = false;
@@ -203,50 +195,6 @@ real("the default agent host", () => {
 		expect(sent).toHaveLength(1);
 		expect((await d.stack.admin.query("SELECT state FROM pim_runtime.external_operations WHERE owner_id = $1 ORDER BY created_at", [ownerId])).rows.map((r) => r.state)).toEqual(["completed", "needs_reconciliation"]);
 	}, 120_000);
-
-	it("answers the approval policies: auto approves what is not answered, the majordomo decides or hands back, explicit waits for the person", async () => {
-		const other = "http://93.184.216.35/orders";
-		const order = (sku: number) => toolUse(fauxToolCall("http_request", { method: "POST", url: other, body: `{"sku":${sku}}` }));
-		const ask = async (words: string, ...script: unknown[]) => {
-			// Every turn ends the way an agent must: by sending its answer.
-			faux.setResponses([...script, toolUse(fauxToolCall("send_to_user", { message: `done ${++n}` })), fauxAssistantMessage(`ended ${n}`)] as never);
-			expect((await web.call("POST", `/api/sessions/${chatId}/messages`, { commandId: `m-${n}`, text: words })).status).toBe(202);
-		};
-		const sentBefore = sent.length;
-		const approvalOf = async (sku: number) => waitFor(`the approval of order ${sku}`, async () => (await d.stack.admin.query("SELECT id, state, decided_by, args FROM pim_app.approvals WHERE args->>'body' = $1", [`{"sku":${sku}}`])).rows[0], 60_000);
-
-		// auto: nobody answers; the call goes ahead when the timeout passes, and the approval says the timeout decided.
-		expect((await web.call("PUT", "/api/settings", { approvalPolicy: "auto", approvalTimeoutSeconds: 1 })).status).toBe(200);
-		await ask("order 10", order(10));
-		await waitFor("the unanswered order to go ahead", async () => ((await transcript()).includes(`ended ${n}`) ? true : undefined), 90_000);
-		expect((await approvalOf(10)).state).toBe("timed_out_approved");
-		expect(sent.length).toBe(sentBefore + 1);
-
-		// majordomo: the review is one model call; approve goes ahead as the majordomo's own decision.
-		expect((await web.call("PUT", "/api/settings", { approvalPolicy: "majordomo" })).status).toBe(200);
-		await ask("order 11", order(11), fauxAssistantMessage('{"decision":"approve","note":"A routine order."}'));
-		await waitFor("the approved order to go ahead", async () => ((await transcript()).includes(`ended ${n}`) ? true : undefined), 90_000);
-		expect(await approvalOf(11)).toMatchObject({ state: "approved", decided_by: "majordomo", args: { review: { status: "decided", note: "A routine order." } } });
-		expect(sent.length).toBe(sentBefore + 2);
-
-		// majordomo deny: the call does not go ahead.
-		await ask("order 12", order(12), fauxAssistantMessage('{"decision":"deny","note":"Not something they ordered."}'));
-		await waitFor("the denied order to end", async () => ((await transcript()).includes(`ended ${n}`) ? true : undefined), 90_000);
-		expect(await approvalOf(12)).toMatchObject({ state: "denied", decided_by: "majordomo" });
-		expect(sent.length).toBe(sentBefore + 2);
-
-		// majordomo unsure, or an answer that is not a decision: handed back, and the person answers as usual.
-		await ask("order 13", order(13), fauxAssistantMessage("I think so?"));
-		const handed = await waitFor("the review to hand it back", async () => ((await approvalOf(13)).args.review?.status === "escalated" ? await approvalOf(13) : undefined), 60_000);
-		expect(handed.state).toBe("waiting");
-		const listed = (await web.call("GET", "/api/approvals?status=pending")).json.approvals as { id: string; review: { status: string } | null }[];
-		expect(listed.find((a) => a.id === handed.id)?.review?.status).toBe("escalated");
-		expect((await web.call("POST", `/api/approvals/${handed.id}/decision`, { approve: true })).status).toBe(200);
-		await waitFor("the order to go ahead after the person's yes", async () => ((await transcript()).includes(`ended ${n}`) ? true : undefined), 60_000);
-		expect(sent.length).toBe(sentBefore + 3);
-		expect((await approvalOf(13)).decided_by).not.toBe("majordomo");
-		expect((await web.call("PUT", "/api/settings", { approvalPolicy: "explicit" })).status).toBe(200);
-	}, 360_000);
 
 	it("runs a chat on the model chosen for it as often as the person changes it, and not on another", async () => {
 		const chat = (await web.call("POST", "/api/sessions", { title: "Switching" })).json.id as string;

@@ -15,12 +15,12 @@ const AGENT_SCOPES = ["api:*", "app:*", "coding:*", "computer:*", "trigger:*", "
 /** Coding actions: the permission an admin's CodingGrant must list. */
 const CODING_ACTIONS = new Set<string>(CODING_PERMISSIONS);
 /**
- * Coding actions, an HTTP request that writes, deploying an app's backend onto a personal computer, a skill installed from outside Pim, and a
- * connector's tool that asks, have effects outside Pim that a person approves each time unless a StandingApproval covers them. What an agent
- * does on the person's computer (a shell command, deleting a file, acting in the desktop, sending a form in its browser) is its own to do, so
- * it runs without asking.
+ * Coding actions, deploying an app's backend onto a personal computer, a skill installed from outside Pim, and a connector's tool that asks,
+ * have effects outside Pim that a person approves each time unless a StandingApproval covers them. What an agent does on the person's computer
+ * (a shell command, deleting a file, acting in the desktop, sending a form in its browser) is its own to do, and HTTP requests are how it
+ * calls APIs, so those run without asking.
  */
-const NEEDS_APPROVAL = new Set<string>(["coding:push", "coding:pr", "coding:merge", "app:deploy", "http:request", "connector:call", "skill:install"]);
+const NEEDS_APPROVAL = new Set<string>(["coding:push", "coding:pr", "coding:merge", "app:deploy", "connector:call", "skill:install"]);
 
 export const principalId = (p: Principal): string => {
 	switch (p.kind) {

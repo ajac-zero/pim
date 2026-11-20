@@ -29,6 +29,8 @@ export type Agent = {
 	/** The named scopes (`pim_app.memory_scopes`) it also reads. */
 	memoryScopes: string[];
 	adoptedFrom: string | null;
+	/** Set on the agents Pim makes itself and holds fixed: only `pimbot` for now, the admin's agent that looks into why the deployment is not working. */
+	system: "pimbot" | null;
 	createdAt: Date;
 };
 
@@ -44,6 +46,8 @@ const ICON_NAME = /^[a-z][a-z0-9-]{0,39}$/;
 const ONE_EMOJI = new RegExp("^\\p{RGI_Emoji}$", "v");
 /** What an agent's role is for the majordomo, whatever it is named. */
 export const MAJORDOMO_ROLE = "Majordomo";
+/** What an agent's role is for Pimbot, the admin's agent for looking after the deployment, whatever it is named. */
+export const PIMBOT_ROLE = "Pimbot";
 const strings = (v: unknown, what: string): string[] => {
 	if (v === undefined) return [];
 	if (!Array.isArray(v) || v.some((x) => typeof x !== "string")) throw new BadRequestError(`${what} must be a list of names`);
@@ -66,7 +70,7 @@ const rowToAgent = (r: any): Agent => ({
 	id: r.id, name: r.name, role: (r.role ?? r.config.legacy?.role ?? r.name) as string, description: (r.description || r.config.legacy?.description || "") as string, instructions: r.instructions, emoji: r.emoji, color: r.color, icon: r.icon_key,
 	model: r.config.model ?? null, fallbacks: r.config.fallbacks ?? [], skills: r.config.skills ?? [], apps: r.config.apps ?? [],
 	contacts: r.config.contacts ?? [], delegates: r.config.delegates ?? [],
-	memoryScope: r.config.memoryScope ?? `agent-${r.id}`, memoryScopes: r.config.memoryScopes ?? [], adoptedFrom: r.adopted_from, createdAt: r.created_at,
+	memoryScope: r.config.memoryScope ?? `agent-${r.id}`, memoryScopes: r.config.memoryScopes ?? [], adoptedFrom: r.adopted_from, system: r.config.system === "pimbot" ? "pimbot" : null, createdAt: r.created_at,
 });
 
 /**
@@ -134,15 +138,15 @@ export class Agents {
 		}
 	}
 
-	/** `starter` is the majordomo as it is first made: its role is fixed, so it is not held to another agent having had the role first. */
-	async create(p: Principal, input: AgentInput & { name: string }, options: { starter?: boolean } = {}): Promise<Agent> {
+	/** `starter` is the majordomo as it is first made: its role is fixed, so it is not held to another agent having had the role first. `system` makes the agent Pim's own, which is kept as it is: see `PIMBOT_ROLE`. */
+	async create(p: Principal, input: AgentInput & { name: string }, options: { starter?: boolean; system?: "pimbot" } = {}): Promise<Agent> {
 		await this.authz.enforce(p, "api:write");
 		input = withSymbol(input);
 		this.#check(input);
 		const id = newId("a");
 		return this.db.owner(p.ownerId, async (tx) => {
-			await this.#unique(tx, input.name.trim(), options.starter ? undefined : (input.role ?? input.name).trim(), null);
-			const config = await this.#config(tx, p.ownerId, input);
+			await this.#unique(tx, input.name.trim(), options.starter || options.system ? undefined : (input.role ?? input.name).trim(), null);
+			const config = await this.#config(tx, p.ownerId, input, options.system ? { system: options.system } : {});
 			await tx.query("INSERT INTO pim_app.agents (id, owner_id, name, instructions, config, emoji, color, icon_key, role, description) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)", [id, p.ownerId, input.name.trim(), input.instructions ?? "", JSON.stringify(config), input.emoji ?? null, input.color ?? null, input.icon ?? null, (input.role ?? input.name).trim(), input.description ?? ""]);
 			return rowToAgent((await tx.query("SELECT * FROM pim_app.agents WHERE id = $1", [id])).rows[0]);
 		});
@@ -190,8 +194,11 @@ export class Agents {
 			if (input.contacts?.includes(id) || input.delegates?.includes(id)) throw new BadRequestError("An agent cannot be its own contact or delegate");
 			// The majordomo keeps its role whatever it is named or asked to be.
 			const majordomo = await this.#isMajordomo(tx, id);
+			const system = cur.config.system === "pimbot";
 			if (majordomo) input = { ...input, role: MAJORDOMO_ROLE };
-			await this.#unique(tx, input.name?.trim(), majordomo ? undefined : input.role?.trim(), id);
+			// Pimbot is named by the admin like any agent, but its role is what makes it Pimbot.
+			if (system) input = { ...input, role: PIMBOT_ROLE };
+			await this.#unique(tx, input.name?.trim(), majordomo || system ? undefined : input.role?.trim(), id);
 			const config = await this.#config(tx, p.ownerId, input, cur.config);
 			await tx.query(
 				"UPDATE pim_app.agents SET name = coalesce($2, name), instructions = coalesce($3, instructions), config = $4, emoji = CASE WHEN $5 THEN $6 ELSE emoji END, color = CASE WHEN $7 THEN $8 ELSE color END, icon_key = CASE WHEN $9 THEN $10 ELSE icon_key END, role = coalesce($11, role), description = coalesce($12, description), updated_at = now() WHERE id = $1",
@@ -206,6 +213,7 @@ export class Agents {
 		await this.authz.enforce(p, "api:write");
 		await this.db.owner(p.ownerId, async (tx) => {
 			if (await this.#isMajordomo(tx, id)) throw new BadRequestError("Your majordomo can't be deleted: it is there to stay. You can rename it and set how it works.");
+			if ((await tx.query("SELECT 1 FROM pim_app.agents WHERE id = $1 AND config->>'system' = 'pimbot'", [id])).rowCount) throw new BadRequestError("Pimbot can't be deleted: it is there to look into why this Pim is not working.");
 			if (!(await tx.query("UPDATE pim_app.agents SET deleted_at = now() WHERE id = $1 AND deleted_at IS NULL", [id])).rowCount) throw new NotFoundError("No such agent");
 			// What was published of it is taken down with it: its template leaves the gallery and its bot's link is off.
 			await tx.query("DELETE FROM pim_app.templates WHERE owner_id = $1 AND agent_id = $2", [p.ownerId, id]);

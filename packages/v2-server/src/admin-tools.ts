@@ -2,7 +2,7 @@
  * The admin's majordomo runs this deployment through the same admin API the Admin screens use, as three tools: `admin_read` (any GET), `admin_write` (a change that
  * can be undone, such as switching a built-in app or setting the default agent) and `admin_write_approved` (a change that cannot, or that handles a credential: every
  * DELETE, providers and their keys, compute, sign-in and setup links, suspending an account, invites). The last asks the admin each time (an approval, decided in the
- * admin's chat) and never runs on a standing approval. Only the majordomo of an active admin has them: another agent of the admin, a delegate, or anyone else is refused,
+ * admin's chat) and never runs on a standing approval. Only the majordomo or Pimbot of an active admin has them: another agent of the admin, a delegate, or anyone else is refused,
  * and each call goes through the very route a person's screen does, under the Authorizer's `admin:*` actions, so the last-admin guard and every other rule stand.
  * What the tools answer has secrets stripped, and each call is recorded in the audit log.
  */
@@ -100,11 +100,13 @@ export function adminTools(deps: AdminToolsDeps): ToolRegistration[] {
 	const { ownerId } = deps;
 	const admin: Principal = { kind: "user", ownerId: OwnerId.parse(ownerId), role: "admin", sessionId: "majordomo" };
 
-	/** The majordomo of an active admin: the agent a chat answers as when none is chosen, or the one the person's settings name (not another agent, not a delegate), on an account that is an admin and active. */
+	/** The majordomo or Pimbot of an active admin: the agent a chat answers as when none is chosen, or the one the person's settings name as their majordomo (or v1 marked as the default), or the admin's Pimbot (not another agent, not a delegate), on an account that is an admin and active. */
 	const allowed = async (app: App, chat: string | null): Promise<string | null> => {
 		const p = await deps.principalOf(app, chat);
-		const majordomo = p.kind === "agent" && p.agentId !== "pim" ? await app.db.owner(ownerId, async (tx) => (await tx.query("SELECT value FROM pim_app.owner_settings WHERE key = 'majordomo'")).rows[0]?.value as string | undefined) : undefined;
-		if (p.kind !== "agent" || (p.agentId !== "pim" && p.agentId !== majordomo)) return "Only your majordomo runs the deployment: another agent, or a delegate, may not.";
+		const operators = p.kind === "agent" && p.agentId !== "pim"
+			? await app.db.owner(ownerId, async (tx) => (await tx.query("SELECT pim_app.majordomo_id() AS majordomo, (SELECT value #>> '{}' FROM pim_app.owner_settings WHERE key = 'pimbot') AS pimbot")).rows[0] as { majordomo: string | null; pimbot: string | null })
+			: undefined;
+		if (p.kind !== "agent" || (p.agentId !== "pim" && p.agentId !== operators?.majordomo && p.agentId !== operators?.pimbot)) return "Only your majordomo or Pimbot run the deployment: another agent, or a delegate, may not.";
 		const account = await app.identity.authz.account(ownerId);
 		if (!account || account.status !== "active" || account.role !== "admin") return "Only the admin of this Pim runs it.";
 		return null;
@@ -209,7 +211,7 @@ export function adminTools(deps: AdminToolsDeps): ToolRegistration[] {
 	return [
 		read, write("admin_write", false), write("admin_write_approved", true),
 		guarded("admin_audit", "The writes made to the admin area through admin_write and admin_write_approved, newest first: method, path, the admin's decision, status and the keys of the body.", limitOnly, auditOf(["admin_write", "admin_write_approved"])),
-		guarded("pim_diagnostics", "What went wrong in this Pim lately, read only: chats at work now and what each waits on, how long turns took and where the time went (turns), failed runs and tasks, triggers' health, model call errors, provider cooldowns, connectors that aren't ready, approvals waiting, and an event log. Give kind to read one kind, since (an ISO time, or 90m, 6h, 2d) and limit; give chat (a chat's id) with kind turns to read that chat's turns step by step.", Type.Object({ since: Type.Optional(Type.String()), kind: Type.Optional(Type.String()), chat: Type.Optional(Type.String()), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 200 })) }), through("GET", (a) => { const u = new URL("/api/admin/diagnostics", "http://admin.invalid"); for (const k of ["since", "kind", "chat", "limit"]) if (a[k] !== undefined) u.searchParams.set(k, String(a[k])); return u; }, async () => diagnosticsRoutes(deps.env))),
+		guarded("pim_diagnostics", "What went wrong in this Pim lately, read only: chats at work now and what each waits on, how long turns took and where the time went (turns), failed runs and tasks, triggers' health, model call errors, provider cooldowns, connectors that aren't ready, approvals waiting, an event log, and whether the services it needs (PostgreSQL, NATS, the object store, the sandbox manager) answer (services). Give kind to read one kind, since (an ISO time, or 90m, 6h, 2d) and limit; give chat (a chat's id) with kind turns to read that chat's turns step by step.", Type.Object({ since: Type.Optional(Type.String()), kind: Type.Optional(Type.String()), chat: Type.Optional(Type.String()), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 200 })) }), through("GET", (a) => { const u = new URL("/api/admin/diagnostics", "http://admin.invalid"); for (const k of ["since", "kind", "chat", "limit"]) if (a[k] !== undefined) u.searchParams.set(k, String(a[k])); return u; }, async () => diagnosticsRoutes(deps.env))),
 		guarded("pim_health", "How this Pim is doing, read only: how many accounts are active, being erased, how many approvals wait, and how the deployment is set (without addresses or keys).", Type.Object({}), through("GET", () => new URL("/api/admin/health", "http://admin.invalid"), async () => diagnosticsRoutes(deps.env))),
 		guarded("ui_routes", "Every route of the app you can use through ui_read and ui_write, with its class: read, write, destructive (ui_write_destructive, which asks the admin) or blocked (never open to you).", Type.Object({}), async () => text(JSON.stringify({ routes: (await appRoutes()).map((r) => ({ method: r.method, path: readable(r) })).filter((r) => r.path.startsWith("/api/")).map((r) => ({ ...r, class: classOf(r.method, r.path.replace(/:id/g, "x").replace(/\*/g, "x")) })) }))),
 		guarded("ui_read", "Read anything the app reads, through its own route (a GET), such as /api/sessions or /api/goals. Answers JSON as it is, cut at 100,000 characters; give a query to ask for less.", Type.Object({ path: Type.String({ description: "A route of the app, starting /api/, with any query." }) }), async (app, a: { path: string }) => {

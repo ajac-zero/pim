@@ -81,7 +81,7 @@ export function hostRoutes(options: { hostSource?: string; env?: Readonly<Record
 			const body: Record<string, any> = await ctx.json().catch(() => ({}));
 			// Nobody can ask over the API, the admin included: the refusal is the answer, and it is kept.
 			await hostops.enqueue(p ? { kind: p.kind === "user" ? "session" : "token", ownerId: p.ownerId } : { kind: "anonymous", address: addressOf(ctx) }, body.op, body.args);
-			throw new PimError(403, "forbidden", "Only the admin's majordomo can run operations on this Pim's host.");
+			throw new PimError(403, "forbidden", "Only the admin's majordomo or Pimbot can run operations on this Pim's host.");
 		}),
 		// What runs, what the last check found, whether a daemon is there to update the stack, and the newest update (while it runs, and for an hour after).
 		route("GET", "/api/admin/release", async (ctx) => {

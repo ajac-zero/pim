@@ -56,7 +56,7 @@ function server(initial: Partial<HostOpsStatus["credential"]>) {
       args: { op: "restart", args: { service: "egress-proxy" } },
       outcome: "rejected",
       detail:
-        "Only the admin's majordomo can run operations on this Pim's host.",
+        "Only the admin's majordomo or Pimbot can run operations on this Pim's host.",
     },
     {
       id: 1,
@@ -164,7 +164,7 @@ describe("Settings → Deployment → Host operations", () => {
       "agentowner-1/p_helper",
       "restartenqueue",
       '{"service":"egress-proxy"}',
-      "rejectedOnly the admin's majordomo can run operations on this Pim's host.",
+      "rejectedOnly the admin's majordomo or Pimbot can run operations on this Pim's host.",
     ]);
     expect(cells(rows[3]).slice(1)).toEqual([
       "agentowner-1/p_majordomo",

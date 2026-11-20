@@ -396,6 +396,45 @@ real("guests, circles and the admin's majordomo", () => {
 		expect((await d.stack.admin.query("SELECT status FROM pim_app.accounts WHERE username = 'anibal'")).rows[0].status).toBe("active");
 	}, 300_000);
 
+	it("gives the admin a Pimbot that is kept as it is and may run the deployment, and gives no one else one", async () => {
+		const listed = async (person: Person) => (await person.web.call("GET", "/api/agents")).json.agents as { id: string; name: string; role: string; system: string | null; majordomo: boolean }[];
+		const pimbot = (await listed(host)).find((a) => a.system === "pimbot")!;
+		expect(pimbot).toMatchObject({ name: "Pimbot", role: "Pimbot", majordomo: false });
+		expect((await listed(host)).filter((a) => a.system).length).toBe(1);
+		expect((await listed(bob)).some((a) => a.system)).toBe(false);
+
+		// The admin may rename it, but its role stays, and it is neither deleted nor shared.
+		expect((await host.web.call("PUT", `/api/agents/${pimbot.id}`, { name: "Botty", role: "Helper" })).json).toMatchObject({ name: "Botty", role: "Pimbot" });
+		expect((await host.web.call("DELETE", `/api/agents/${pimbot.id}`)).status).toBe(400);
+		expect((await host.web.call("PUT", `/api/agents/${pimbot.id}/bot`, { model: { provider: "faux", id: "m" }, tools: [] })).status).toBe(400);
+		expect((await listed(host)).some((a) => a.id === pimbot.id)).toBe(true);
+
+		// It reads the deployment as the majordomo does, with `since` as an ISO time too.
+		const chat = (await host.web.call("POST", "/api/sessions", { title: "Why?", agentId: pimbot.id })).json.id;
+		const asPimbot: Person = { ...host, chat };
+		await send(asPimbot, "why is it slow?", false, toolUse(fauxToolCall("admin_read", { path: "/api/admin/stats" })), toolUse(fauxToolCall("pim_diagnostics", { kind: "approvals", since: new Date(Date.now() - 3_600_000).toISOString() })), toolUse(fauxToolCall("pim_diagnostics", { since: "yesterday" })));
+		expect(JSON.parse((await results(asPimbot, "admin_read")).at(-1)!)).toMatchObject({ status: 200 });
+		const diagnostics = await results(asPimbot, "pim_diagnostics");
+		expect(JSON.parse(diagnostics[0]!)).toMatchObject({ status: 200, body: { kind: "approvals" } });
+		expect(JSON.parse(diagnostics[1]!)).toMatchObject({ status: 400 });
+
+		// It tries the services this Pim needs from where it runs, and says which failed and whose log to read.
+		const saved = { nats: process.env.PIM_NATS_URL, endpoint: process.env.PIM_S3_ENDPOINT, bucket: process.env.PIM_S3_BUCKET };
+		Object.assign(process.env, { PIM_NATS_URL: d.nats.url, PIM_S3_ENDPOINT: d.s3.endpoint, PIM_S3_BUCKET: "pim", PIM_S3_ACCESS_KEY: "S3RVER", PIM_S3_SECRET_KEY: "S3RVER" });
+		try {
+			await send(asPimbot, "are the services up?", false, toolUse(fauxToolCall("pim_diagnostics", { kind: "services" })));
+			process.env.PIM_NATS_URL = "nats://127.0.0.1:1";
+			await send(asPimbot, "and now?", false, toolUse(fauxToolCall("pim_diagnostics", { kind: "services" })));
+		} finally {
+			for (const [key, value] of [["PIM_NATS_URL", saved.nats], ["PIM_S3_ENDPOINT", saved.endpoint], ["PIM_S3_BUCKET", saved.bucket], ["PIM_S3_ACCESS_KEY", undefined], ["PIM_S3_SECRET_KEY", undefined]] as const) if (value === undefined) delete process.env[key]; else process.env[key] = value;
+		}
+		const [up, down] = (await results(asPimbot, "pim_diagnostics")).slice(-2).map((r) => JSON.parse(r).body);
+		expect(up.services).toMatchObject([{ service: "postgres", status: "ok", logs: "postgres" }, { service: "nats", status: "ok" }, { service: "object_store", status: "ok", logs: "seaweedfs" }, { service: "sandbox_manager", status: "not_configured" }]);
+		expect(up.failing).toEqual([]);
+		expect(down.failing).toEqual(["nats"]);
+		expect(down.services[1]).toMatchObject({ status: "failed", logs: "nats", error: expect.any(String) });
+	}, 300_000);
+
 	it("lets the admin's majordomo read its own audit, diagnostics and health, and do in the app what the person does, with deletes asking first", async () => {
 		await send(host, "audit what you did", false, toolUse(fauxToolCall("admin_audit", { limit: 3 })), toolUse(fauxToolCall("pim_health", {})), toolUse(fauxToolCall("pim_diagnostics", { kind: "approvals" })));
 		const audit = JSON.parse((await results(host, "admin_audit")).at(-1)!);

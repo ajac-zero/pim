@@ -3,7 +3,7 @@
  * `_rollback` and `_exec` ask the host daemon through the queue in `./service.ts`; `hostops_status`, `_audit` and `_op` only read it. The tools are offered to the admin's partitions
  * only, and every call is checked again by the service: a chat whose agent is not the majordomo is refused and the refusal is kept in the audit log.
  *
- * Everything that reaches the host asks a person first, with the exact operation and its arguments in front of them, and one approval runs one operation (the service checks the
+ * Everything that reaches the host asks a person first, except reading stats and logs (`READ_ONLY_OPS`), with the exact operation and its arguments in front of them, and one approval runs one operation (the service checks the
  * application's own record of the decision, not what a tool says). The request is queued once however often the call is replayed. Nothing here runs a command: the daemon does,
  * on the host, outside every role of the stack, as an unprivileged user with no stack credentials.
  */
@@ -12,7 +12,7 @@ import { defineExtension, defineTool, section, type ToolRegistration } from "@ea
 import type { App } from "@pim/v2-app/app";
 import { newId } from "@pim/v2-app/ids";
 import { hostServices } from "./routes.ts";
-import { checkHostOp, EXEC_MAX_COMMAND, EXEC_MAX_OUTPUT, EXEC_MAX_TIMEOUT, HOST_OPS, HOST_SERVICES, type HostOpName, type HostOpView, type HostOpsCaller } from "./service.ts";
+import { checkHostOp, EXEC_MAX_COMMAND, EXEC_MAX_OUTPUT, EXEC_MAX_TIMEOUT, HOST_OPS, HOST_SERVICES, READ_ONLY_OPS, type HostOpName, type HostOpView, type HostOpsCaller } from "./service.ts";
 
 type Result = { output: { type: "text"; text: string }[]; isError?: boolean };
 const text = (s: string, isError = false): Result => ({ output: [{ type: "text", text: s }], ...(isError ? { isError } : {}) });
@@ -69,6 +69,11 @@ export function hostopsTools(deps: HostOpsToolDeps): ToolRegistration[] {
 		// The admin's switch in Tool permissions: off, the operation is not asked for at all (every one is asked about one at a time otherwise).
 		if (await app.db.owner(ownerId, async (tx) => (await tx.query("SELECT 1 FROM pim_app.tool_permissions WHERE audience = 'owner' AND app = '' AND tool = $1 AND permission = 'off'", [`hostops_${op}`])).rowCount)) return text(`hostops_${op} is switched off in Settings → Tool permissions, so it was not asked for.`, true);
 		const checked = checkHostOp(op, args, { approval: false });
+		// What only reads is not asked about: the caller is the admin's majordomo or Pimbot, which the service has just checked, and the request is in the audit log.
+		if (READ_ONLY_OPS.includes(op)) {
+			const queued = await hostops.enqueue(who, op, checked.args, `${partitionId}:${api.taskId}:${api.callId}`);
+			return describe((await hostops.waitFor(queued.id, WAIT_MS)) ?? queued);
+		}
 		const taskId = String(api.taskId);
 		const callId = String(api.callId);
 		// The application's record of the approval decides, not a signal: a person's decision wakes this task, and the call then finds its approval here.
@@ -89,8 +94,8 @@ export function hostopsTools(deps: HostOpsToolDeps): ToolRegistration[] {
 	const op = (name: HostOpName, description: string, parameters: any, args: (a: any) => Record<string, unknown> = () => ({})) => tool(`hostops_${name}`, description, parameters, (a, api) => ask(api, name, args(a)));
 
 	return [
-		op("stats", "The machine's stats as the daemon reports them: load, memory, disk, the stack's containers. A person approves the request first.", Type.Object({})),
-		op("logs", "A service's latest log lines (1 to 500, 100 by default). A person approves the request first. Secrets are taken out.", Type.Object({ service, lines: Type.Optional(Type.Integer({ minimum: 1, maximum: 500 })) }), (a) => ({ service: a.service, ...(a.lines !== undefined ? { lines: a.lines } : {}) })),
+		op("stats", "The machine's stats as the daemon reports them: load, memory, disk, the stack's containers. Nobody is asked first.", Type.Object({})),
+		op("logs", "A service's latest log lines (1 to 500, 100 by default). Nobody is asked first. Secrets are taken out.", Type.Object({ service, lines: Type.Optional(Type.Integer({ minimum: 1, maximum: 500 })) }), (a) => ({ service: a.service, ...(a.lines !== undefined ? { lines: a.lines } : {}) })),
 		op("restart", "Restart one of the stack's services. A person approves it first.", Type.Object({ service }), (a) => ({ service: a.service })),
 		op("set_slot_limit", "How many sandboxes the sandbox manager runs at once (1 to 16). A person approves it first.", Type.Object({ maxConcurrent: Type.Integer({ minimum: 1, maximum: 16 }) }), (a) => ({ maxConcurrent: a.maxConcurrent })),
 		op("deploy", "Deploy a git ref (origin/main by default): the daemon checks the new version and goes back on its own when it fails to come up healthy, which reports rolled_back. A person approves it first. It can take longer than this call waits: then it answers with the operation's id, which hostops_op follows.", Type.Object({ ref: Type.Optional(Type.String({ maxLength: 100 })) }), (a) => ({ ...(a.ref !== undefined ? { ref: a.ref } : {}) })),
@@ -130,6 +135,6 @@ export async function hostopsExtension(deps: HostOpsToolDeps) {
 	return defineExtension({
 		name: "pim-hostops",
 		tools: hostopsTools(deps),
-		sections: [section("host_operations", async () => "As the admin's majordomo you can look after the machine this Pim runs on with the hostops_* tools: stats, logs, restarting a service, updating to the newest release, deploying a checkout and rolling back, and one shell command. Each asks the admin for approval, showing the exact operation, and only the admin's majordomo may use them; every request is kept in an audit log (hostops_audit).")],
+		sections: [section("host_operations", async () => "If you are the admin's majordomo or Pimbot, you can look after the machine this Pim runs on with the hostops_* tools: stats, logs, restarting a service, updating to the newest release, deploying a checkout and rolling back, and one shell command. Each asks the admin for approval, showing the exact operation, and only the admin's majordomo and Pimbot may use them; every request is kept in an audit log (hostops_audit).")],
 	});
 }

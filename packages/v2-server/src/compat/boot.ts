@@ -8,7 +8,7 @@
  */
 import type { Principal } from "@pim/v2-contracts/identity";
 import type { App } from "@pim/v2-app/app";
-import { MAJORDOMO_ROLE, type Agent as V2Agent } from "@pim/v2-app/agents";
+import { MAJORDOMO_ROLE, PIMBOT_ROLE, type Agent as V2Agent } from "@pim/v2-app/agents";
 import { BadRequestError, ConflictError, ForbiddenError, NotFoundError, PimError } from "@pim/v2-app/errors";
 import { usageReport, computeReport } from "./usage.ts";
 import { customApps } from "./admin-gallery.ts";
@@ -51,6 +51,7 @@ export function webAgent(a: V2Agent & { updatedAt?: Date }, majordomoId: string 
 		memoryScope: a.memoryScope,
 		memoryScopes: a.memoryScopes,
 		majordomo: a.id === majordomoId,
+		system: a.system,
 		createdAt: ms(a.createdAt) ?? 0,
 		updatedAt: ms(a.updatedAt ?? a.createdAt) ?? 0,
 	};
@@ -92,6 +93,34 @@ export async function majordomoOf(app: App, p: Principal): Promise<V2Agent> {
 	if (won) return agent;
 	await app.agents.remove(p, agent.id);
 	return majordomoOf(app, p);
+}
+
+/**
+ * Pimbot, the admin's agent for looking into why this Pim is not working (`pimbotRole` in `../agent-prompts.ts`): made the first time an active admin lists their agents, and
+ * remembered in `owner_settings.pimbot`. Anyone else has none.
+ */
+export async function pimbotOf(app: App, p: Principal): Promise<V2Agent | null> {
+	const account = await app.identity.authz.account(p.ownerId);
+	if (!account || account.status !== "active" || account.role !== "admin") return null;
+	const id = (await setting(app, p.ownerId, "pimbot")) as string | undefined;
+	if (id) {
+		const agent = await app.agents.get(p, id).catch(() => null);
+		if (agent) return agent;
+	}
+	// A name the admin already gave one of their agents is not taken from it.
+	let agent: V2Agent | undefined;
+	for (let n = 1; !agent && n < 20; n++) {
+		agent = await app.agents.create(p, { name: n === 1 ? "Pimbot" : `Pimbot ${n}`, role: PIMBOT_ROLE, description: "Looks into why this Pim isn't working, and how to fix it or report it.", emoji: "wrench", color: "teal", instructions: "" }, { system: "pimbot" }).catch((error) => {
+			if (error instanceof ConflictError) return undefined;
+			throw error;
+		});
+	}
+	if (!agent) throw new ConflictError("Pimbot could not be given a name of its own.");
+	// The app asks from several places at once: the first to record its agent wins, and the others' agents are dropped.
+	const won = await app.db.owner(p.ownerId, async (tx) => (await tx.query("INSERT INTO pim_app.owner_settings (owner_id, key, value) VALUES ($1,'pimbot',$2) ON CONFLICT (owner_id, key) DO UPDATE SET value = $2 WHERE NOT EXISTS (SELECT 1 FROM pim_app.agents WHERE id = owner_settings.value #>> '{}' AND deleted_at IS NULL)", [p.ownerId, JSON.stringify(agent.id)])).rowCount === 1);
+	if (won) return agent;
+	await app.db.owner(p.ownerId, (tx) => tx.query("UPDATE pim_app.agents SET deleted_at = now() WHERE id = $1", [agent!.id]));
+	return pimbotOf(app, p);
 }
 
 /** How the first chat starts, as the app gives it, checked: a name of one line of up to 80 characters, a title of up to 100, a language tag. */
@@ -338,6 +367,7 @@ export const bootRoutes: Route[] = [
 	route("GET", "/api/agents", async ({ app, principal }) => {
 		const p = await principal();
 		const majordomo = await majordomoOf(app, p);
+		await pimbotOf(app, p);
 		const agents = await app.agents.list(p);
 		return ok({ agents: [...agents].sort((a, b) => Number(b.id === majordomo.id) - Number(a.id === majordomo.id)).map((a) => webAgent(a, majordomo.id)) });
 	}),

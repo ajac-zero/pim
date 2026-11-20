@@ -217,6 +217,7 @@ export class Sharing {
 	async shareBot(p: Principal, agentId: string, name?: string): Promise<{ id: string; created: boolean }> {
 		await this.authz.enforce(p, "api:write");
 		const agent = await this.agents.get(p, agentId);
+		if (agent.system) throw new BadRequestError(`${agent.name} looks after this Pim and is not shared.`);
 		return this.db.owner(p.ownerId, async (tx) => {
 			const snapshot = (await this.bundles?.of(tx, p.ownerId, agentId)) ?? null;
 			const known = (await tx.query("SELECT id FROM pim_app.bots WHERE owner_id = $1 AND agent_id = $2 FOR UPDATE", [p.ownerId, agentId])).rows[0];
@@ -282,6 +283,7 @@ export class Sharing {
 	async publishTemplate(p: Principal, agentId: string, title?: string) {
 		await this.authz.enforce(p, "api:write");
 		const agent = await this.agents.get(p, agentId);
+		if (agent.system) throw new BadRequestError(`${agent.name} looks after this Pim and is not published.`);
 		let id = `tpl_${secret(9)}`;
 		await this.db.owner(p.ownerId, async (tx) => {
 			const bundle = (await this.bundles?.of(tx, p.ownerId, agentId)) ?? { agent: { name: agent.name, instructions: agent.instructions, emoji: agent.emoji, color: agent.color } };

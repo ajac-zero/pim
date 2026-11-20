@@ -208,7 +208,7 @@ export function AgentSettings({
           </Link>
         </Button>
         {/* Alone on this Pim, there is nobody to publish for, unless it already is. */}
-        {account && (!account.alone || agent.published) && (
+        {account && !agent.system && (!account.alone || agent.published) && (
           <Button
             size="sm"
             variant="outline"
@@ -229,19 +229,24 @@ export function AgentSettings({
           </Button>
         )}
         {/* The admin pays for guests, so only the admin shares bots. */}
-        {isAdmin && !agent.majordomo && <BotShareButton agent={agent} />}
-        {isAdmin && everyones !== undefined && !forEveryone && (
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => choose.mutate(true)}
-            disabled={choose.isPending}
-          >
-            <Users /> {t("makeEveryonesDefault")}
-          </Button>
+        {isAdmin && !agent.majordomo && !agent.system && (
+          <BotShareButton agent={agent} />
         )}
+        {isAdmin &&
+          !agent.system &&
+          everyones !== undefined &&
+          !forEveryone && (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => choose.mutate(true)}
+              disabled={choose.isPending}
+            >
+              <Users /> {t("makeEveryonesDefault")}
+            </Button>
+          )}
         <span className="ml-auto">
-          {agent.majordomo ? null : confirming ? (
+          {agent.majordomo || agent.system ? null : confirming ? (
             <span className="flex items-center gap-1">
               <Button
                 size="sm"

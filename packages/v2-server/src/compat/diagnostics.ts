@@ -9,13 +9,15 @@
  */
 import type { App } from "@pim/v2-app/app";
 import { BadRequestError } from "@pim/v2-app/errors";
+import { S3ObjectStore } from "@pim/v2-app/objects";
+import { probeNats } from "@pim/v2-live/server/pulse";
 import { ok, type Route, route } from "@pim/v2-app/http";
 import { redact, redactSecrets } from "@pim/shared/redact";
 import type { Principal } from "@pim/v2-contracts/identity";
 import { activityOf, chatTurns } from "./activity.ts";
 import { SLOW_CALL_MS } from "../call-details.ts";
 
-export const DIAGNOSTIC_KINDS = ["now", "stalls", "runs", "turns", "triggers", "model_calls", "provider_cooldowns", "coding", "connectors", "approvals", "events"] as const;
+export const DIAGNOSTIC_KINDS = ["now", "stalls", "runs", "turns", "triggers", "model_calls", "provider_cooldowns", "coding", "connectors", "approvals", "events", "services"] as const;
 export type DiagnosticKind = (typeof DIAGNOSTIC_KINDS)[number];
 const SECRET_KEY = /pass(word)?|secret|token|api[_-]?key|authorization|credential|cookie|bearer/i;
 const TEXT_LENGTH = 300;
@@ -47,16 +49,60 @@ export function scrubValue(value: unknown, depth = 0): unknown {
 	return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, SECRET_KEY.test(key) ? "[redacted]" : scrubValue(item, depth + 1)]));
 }
 
+/** How long a probe of a service the Pim needs may take before it counts as failed. */
+const PROBE_MS = 4000;
+type Probe = { service: string; status: "ok" | "failed" | "not_configured"; ms?: number; error?: string; /** The service of the host operations (`hostops_logs`) whose log says more. */ logs?: string; detail?: unknown };
+
+/** Whether each service this Pim needs answers from here (the process the tool runs in): PostgreSQL, NATS, the object store and, when set, the sandbox manager. Each is tried alone with a time limit, and a failure says what the service answered. */
+async function probeServices(app: App, env: Readonly<Record<string, string | undefined>>): Promise<Probe[]> {
+	const timed = async <T>(work: Promise<T>): Promise<T> => {
+		let timer: NodeJS.Timeout | undefined;
+		try {
+			return await Promise.race([work, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`no answer within ${PROBE_MS / 1000} s`)), PROBE_MS); })]);
+		} finally {
+			clearTimeout(timer);
+		}
+	};
+	const probe = async (service: string, logs: string, work: () => Promise<unknown>): Promise<Probe> => {
+		const began = Date.now();
+		try {
+			const detail = await timed(work());
+			return { service, status: "ok", ms: Date.now() - began, logs, ...(detail === undefined ? {} : { detail }) };
+		} catch (error) {
+			return { service, status: "failed", ms: Date.now() - began, logs, error: scrub(error instanceof Error ? `${error.name}: ${error.message}` : String(error)) };
+		}
+	};
+	const absent = (service: string, logs: string, what: string): Probe => ({ service, status: "not_configured", logs, error: what });
+	const pool = app.db.pool as unknown as { totalCount?: number; idleCount?: number; waitingCount?: number };
+	return Promise.all([
+		probe("postgres", "postgres", async () => {
+			await app.db.anonymous((tx) => tx.query("SELECT 1"));
+			// A waiting count above 0 for long is a pool that is too small for the load, or a database that is slow to answer.
+			return { pool: { total: pool.totalCount ?? null, idle: pool.idleCount ?? null, waiting: pool.waitingCount ?? null } };
+		}),
+		env.PIM_NATS_URL ? probe("nats", "nats", async () => ({ round_trip_ms: await probeNats(env.PIM_NATS_URL!.split(","), PROBE_MS) })) : absent("nats", "nats", "PIM_NATS_URL is not set"),
+		env.PIM_S3_ENDPOINT && env.PIM_S3_BUCKET
+			? probe("object_store", "seaweedfs", async () => void (await new S3ObjectStore(env.PIM_S3_BUCKET!, { endpoint: env.PIM_S3_ENDPOINT!, region: env.PIM_S3_REGION ?? "us-east-1", ...(env.PIM_S3_ACCESS_KEY && env.PIM_S3_SECRET_KEY ? { credentials: { accessKeyId: env.PIM_S3_ACCESS_KEY, secretAccessKey: env.PIM_S3_SECRET_KEY } } : {}) }).check()))
+			: absent("object_store", "seaweedfs", "PIM_S3_ENDPOINT or PIM_S3_BUCKET is not set"),
+		env.PIM_CODING_MANAGER_URL
+			? probe("sandbox_manager", "sandbox-manager", async () => {
+				const res = await fetch(new URL("/health", env.PIM_CODING_MANAGER_URL), { signal: AbortSignal.timeout(PROBE_MS), ...(env.PIM_CODING_MANAGER_TOKEN ? { headers: { authorization: `Bearer ${env.PIM_CODING_MANAGER_TOKEN}` } } : {}) });
+				if (!res.ok) throw new Error(`/health answered ${res.status}`);
+			})
+			: absent("sandbox_manager", "sandbox-manager", "PIM_CODING_MANAGER_URL is not set, so coding threads have no sandbox"),
+	]);
+}
+
 export type DiagnosticQuery = { since?: string; kind?: string; limit?: number; chat?: string };
 
-/** The report of `kind` (default `now`) for one owner's space; `since` is a count and a unit (`30m`, `6h`, `2d`), default 24h. */
-export async function diagnose(app: App, ownerId: string, query: DiagnosticQuery = {}) {
+/** The report of `kind` (default `now`) for one owner's space; `since` is an ISO time, or a count and a unit (`30m`, `6h`, `2d`), default 24h. */
+export async function diagnose(app: App, ownerId: string, query: DiagnosticQuery = {}, env: Readonly<Record<string, string | undefined>> = process.env) {
 	const kind = (query.kind ?? "now") as DiagnosticKind;
 	if (!DIAGNOSTIC_KINDS.includes(kind)) throw new BadRequestError(`kind is one of ${DIAGNOSTIC_KINDS.join(", ")}`);
 	const match = DURATION.exec(query.since ?? "24h");
-	if (!match) throw new BadRequestError("since is a count and a unit: 30m, 6h or 2d");
-	const sinceMs = Number(match[1]) * { m: 60_000, h: 3_600_000, d: 86_400_000 }[match[2] as "m" | "h" | "d"];
-	const since = new Date(Date.now() - sinceMs);
+	const at = match ? undefined : /^\d{4}-\d{2}-\d{2}T/.test(query.since ?? "") ? new Date(query.since!) : undefined;
+	if (!match && (!at || Number.isNaN(at.getTime()))) throw new BadRequestError("since is an ISO time, or a count and a unit: 30m, 6h or 2d");
+	const since = at ?? new Date(Date.now() - Number(match![1]) * { m: 60_000, h: 3_600_000, d: 86_400_000 }[match![2] as "m" | "h" | "d"]);
 	const limit = Math.min(Math.max(Math.floor(query.limit ?? 20), 1), 50);
 	const rows = (sql: string, params: unknown[] = []) => app.db.owner(ownerId, async (tx) => (await tx.query(sql, params)).rows);
 	const base = { kind, since: since.toISOString(), generatedAt: new Date().toISOString() };
@@ -144,6 +190,10 @@ export async function diagnose(app: App, ownerId: string, query: DiagnosticQuery
 			const all = await rows("SELECT ref, until, reason FROM pim_app.owner_provider_cooldowns($1) ORDER BY until DESC", [ownerId]);
 			return scrubValue({ ...base, count: all.length, items: all.slice(0, limit).map((r) => ({ model: r.ref, active: new Date(r.until).getTime() > Date.now(), until: r.until, reason: r.reason })), note: "While a model cools down after a failure, requests go to the next model of the chat's list; a usage limit's cooldown lasts until it resets. A model's entry goes once it answers again." });
 		}
+		case "services": {
+			const probes = await probeServices(app, env);
+			return scrubValue({ ...base, services: probes, failing: probes.filter((p) => p.status === "failed").map((p) => p.service), note: "Each service was tried from the process that ran this tool, with a limit of 4 s. For one that failed, read its log with hostops_logs (the service named in logs) and the host's containers with hostops_stats. The other roles (gate, live, runner, forge, maintenance, canvas, relay) and the proxy are read the same way." });
+		}
 		case "events": {
 			const items = await rows("SELECT at, kind, detail FROM pim_app.diagnostic_events WHERE at >= $1 ORDER BY id DESC LIMIT $2", [since, limit]);
 			return {
@@ -175,7 +225,7 @@ export function diagnosticsRoutes(env: Readonly<Record<string, string | undefine
 			const p = await principal();
 			await admin(app, p);
 			const limit = url.searchParams.get("limit");
-			return ok(await diagnose(app, p.ownerId, { ...(url.searchParams.get("chat") ? { chat: url.searchParams.get("chat")! } : {}), ...(url.searchParams.get("kind") ? { kind: url.searchParams.get("kind")! } : {}), ...(url.searchParams.get("since") ? { since: url.searchParams.get("since")! } : {}), ...(limit ? { limit: Number(limit) } : {}) }));
+			return ok(await diagnose(app, p.ownerId, { ...(url.searchParams.get("chat") ? { chat: url.searchParams.get("chat")! } : {}), ...(url.searchParams.get("kind") ? { kind: url.searchParams.get("kind")! } : {}), ...(url.searchParams.get("since") ? { since: url.searchParams.get("since")! } : {}), ...(limit ? { limit: Number(limit) } : {}) }, env));
 		}),
 		route("GET", "/api/admin/health", async ({ app, principal }) => (await admin(app, await principal()), ok(await health(app, env)))),
 	];

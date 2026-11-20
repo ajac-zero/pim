@@ -110,6 +110,19 @@ real("host operations through the admin's majordomo", () => {
 		expect((await web.call("GET", "/api/hostops/status")).json).toMatchObject({ credential: { present: true }, agent: { version: expect.any(String) } });
 	}, 180_000);
 
+	it("reads the host's stats and a service's logs without asking, and still keeps the request in the audit log", async () => {
+		const before = (await d.stack.admin.query("SELECT count(*)::int AS n FROM pim_app.approvals WHERE tool LIKE 'hostops_%'")).rows[0].n as number;
+		const end = await ask(web, chatId, ownerId, "what does the gate say?", toolUse(fauxToolCall("hostops_logs", { service: "gate", lines: 20 })));
+		await end();
+		expect((await resultsOf(chatId, ownerId, "hostops_logs"))[0]).toMatch(/\(logs\): (succeeded|failed)/);
+		expect((await d.stack.admin.query("SELECT count(*)::int AS n FROM pim_app.approvals WHERE tool LIKE 'hostops_%'")).rows[0].n).toBe(before);
+		expect((await d.stack.admin.query("SELECT approval_id, caller_agent_id, args FROM pim_app.hostops_ops WHERE op = 'logs'")).rows).toMatchObject([{ approval_id: null, caller_agent_id: "pim", args: { service: "gate", lines: 20 } }]);
+		expect((await audit()).some((r) => r.action === "enqueue" && r.outcome === "queued" && r.args?.op === "logs")).toBe(true);
+		await (await ask(web, chatId, ownerId, "how is the host?", toolUse(fauxToolCall("hostops_stats", {}))))();
+		expect((await resultsOf(chatId, ownerId, "hostops_stats"))[0]).toMatch(/\(stats\): (succeeded|failed)/);
+		expect((await d.stack.admin.query("SELECT count(*)::int AS n FROM pim_app.approvals WHERE tool LIKE 'hostops_%'")).rows[0].n).toBe(before);
+	}, 180_000);
+
 	it("queues nothing when the person declines, and refuses an agent that is not the majordomo", async () => {
 		const queued = async () => (await d.stack.admin.query("SELECT count(*)::int AS n FROM pim_app.hostops_ops")).rows[0].n as number;
 		const before = await queued();

@@ -4,9 +4,9 @@
  * (`pimhostops_…`, only its digest is kept here) and the stack never holds the Docker socket, so the operations wait in a queue here until it polls, and it reports each
  * result back. Arbitrary shell never runs in any role of the stack: `exec` is a command the daemon runs, as an unprivileged user, on the host.
  *
- * Only the admin's majordomo may ask (`assertCaller`), whatever tool or route a request came through; the admin, signed in to the app, reads the status and the audit log and
- * issues the daemon's credential. Every operation, read-only ones included, runs only under an approval a person gave in the app for exactly that operation and its arguments,
- * and each approval runs one operation (v1 asked only for `exec`; here everything that reaches the host asks). Every request, refused or not, and every change of an
+ * Only the admin's majordomo or Pimbot may ask (`assertCaller`), whatever tool or route a request came through; the admin, signed in to the app, reads the status and the audit log and
+ * issues the daemon's credential. Every operation runs only under an approval a person gave in the app for exactly that operation and its arguments, and each approval runs
+ * one operation (v1 asked only for `exec`; here everything that reaches the host asks), except reading the host's stats and a service's logs (`READ_ONLY_OPS`). Every request, refused or not, and every change of an
  * operation's state is in the audit log with anything that looks like a secret taken out. What the daemon is allowed to run is checked again by the daemon.
  */
 import { createHash } from "node:crypto";
@@ -73,6 +73,8 @@ const ARG_KEYS: Record<HostOpName, readonly string[]> = {
 	exec: ["command", "timeoutSeconds", "maxOutputBytes", "approval"],
 	update: ["tag", "approval"],
 };
+/** Operations that only read, so the admin's majordomo or Pimbot asks for them without an approval; the daemon takes the secrets out of what they return, and each request is in the audit log. */
+export const READ_ONLY_OPS: readonly HostOpName[] = ["stats", "logs"];
 /** What the daemon is not told of an operation: which approval it ran under, and who approved. */
 const NOT_FOR_DAEMON = ["approval", "approver"];
 const REF = /^[A-Za-z0-9._/-]{1,100}$/;
@@ -197,7 +199,7 @@ export class HostOps {
 	}
 
 	/**
-	 * Whether `caller` may ask for host operations: only the majordomo of the admin's space, which is the agent a chat answers as when it names none (`pim`) or the one the admin
+	 * Whether `caller` may ask for host operations: only the majordomo or Pimbot of the admin's space; the majordomo is the agent a chat answers as when it names none (`pim`) or the one the admin
 	 * named. Throws the error to answer anyone else with, 401 for nobody and 403 for everyone else; the refusal is kept in the audit log.
 	 */
 	async assertCaller(caller: HostOpsCaller, action: string, asked: unknown): Promise<void> {
@@ -206,14 +208,15 @@ export class HostOps {
 			throw error;
 		};
 		if (caller.kind === "anonymous") return refuse(new UnauthorizedError());
-		const refusal = new PimError(403, "forbidden", "Only the admin's majordomo can run operations on this Pim's host.");
+		const refusal = new PimError(403, "forbidden", "Only the admin's majordomo or Pimbot can run operations on this Pim's host.");
 		if (caller.kind !== "agent") return refuse(refusal);
 		const row = await this.db.owner(caller.ownerId, async (tx) => ({
 			account: (await tx.query("SELECT role, status FROM pim_app.accounts WHERE owner_id = $1", [caller.ownerId])).rows[0],
-			majordomo: (await tx.query("SELECT value FROM pim_app.owner_settings WHERE key = 'majordomo'")).rows[0]?.value as string | undefined,
+			majordomo: (await tx.query("SELECT pim_app.majordomo_id() AS id")).rows[0]?.id as string | undefined,
+			pimbot: (await tx.query("SELECT value #>> '{}' AS id FROM pim_app.owner_settings WHERE key = 'pimbot'")).rows[0]?.id as string | undefined,
 		}));
 		if (!row.account || row.account.status !== "active" || row.account.role !== "admin") return refuse(refusal);
-		if (caller.agentId !== "pim" && caller.agentId !== row.majordomo) return refuse(refusal);
+		if (caller.agentId !== "pim" && caller.agentId !== row.majordomo && caller.agentId !== row.pimbot) return refuse(refusal);
 	}
 
 	/**
@@ -249,7 +252,7 @@ export class HostOps {
 		const actor = actorOf(caller);
 		let checked: ReturnType<typeof checkHostOp>;
 		try {
-			checked = checkHostOp(op, args);
+			checked = checkHostOp(op, args, { approval: !READ_ONLY_OPS.includes(op as HostOpName) });
 		} catch (error) {
 			await this.#refused(actor, "enqueue", asked, (error as Error).message, "invalid");
 			throw error;
@@ -261,7 +264,7 @@ export class HostOps {
 		}
 		let approver: string;
 		try {
-			approver = await this.#approver(agent.ownerId, checked.op, checked.args);
+			approver = READ_ONLY_OPS.includes(checked.op) ? `${agent.ownerId} (read only, no approval asked)` : await this.#approver(agent.ownerId, checked.op, checked.args);
 		} catch (error) {
 			await this.#refused(actor, "enqueue", checked, (error as Error).message);
 			throw error;
@@ -280,7 +283,7 @@ export class HostOps {
 					const busy = (await tx.query("SELECT id FROM pim_app.hostops_ops WHERE op = ANY($1) AND state IN ('queued', 'running') LIMIT 1", [REPLACES_STACK])).rows[0];
 					if (busy) throw new ConflictError(`A deploy, rollback or update (${busy.id}) is already queued or running.`);
 				}
-				const row = (await tx.query("INSERT INTO pim_app.hostops_ops (id, request_key, approval_id, caller_owner_id, caller_agent_id, caller_chat_id, op, args, state) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'queued') RETURNING *", [id, key ?? null, String(checked.args.approval), asker.ownerId, asker.agentId, asker.chatId, checked.op, JSON.stringify(stored)])).rows[0];
+				const row = (await tx.query("INSERT INTO pim_app.hostops_ops (id, request_key, approval_id, caller_owner_id, caller_agent_id, caller_chat_id, op, args, state) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'queued') RETURNING *", [id, key ?? null, checked.args.approval === undefined ? null : String(checked.args.approval), asker.ownerId, asker.agentId, asker.chatId, checked.op, JSON.stringify(stored)])).rows[0];
 				await this.#audit(tx, actor, "enqueue", "queued", id, { op: checked.op, args: stored });
 				return view(row);
 			});

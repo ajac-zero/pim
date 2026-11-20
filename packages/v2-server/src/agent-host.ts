@@ -39,7 +39,7 @@ import { chatgptCredentialStore, chatgptProvider, type ChatGPTRunnerOptions, typ
 import type { ForgeParts } from "./forge-assembly.ts";
 import { mentionedAgents } from "./rooms.ts";
 import { describeGoal } from "./goal-tools.ts";
-import { agentsSection, ASSISTANT_INSTRUCTIONS, delegatesSection, identity, majordomoRole, MAX_TASK_DEPTH, NO_CODING_SANDBOX_LINE, startedBySection, type Roster } from "./agent-prompts.ts";
+import { agentsSection, ASSISTANT_INSTRUCTIONS, delegatesSection, identity, majordomoRole, MAX_TASK_DEPTH, pimbotRole, NO_CODING_SANDBOX_LINE, startedBySection, type Roster } from "./agent-prompts.ts";
 import { createFailover, failureKind, failureMessage } from "./provider-failover.ts";
 import { DESCRIBE_WORK, runUtility } from "./compat/utility.ts";
 import { Progress } from "./progress.ts";
@@ -612,7 +612,7 @@ export function createAgentHost(options: AgentHostOptions) {
 				const me = roster?.agents.find((a) => a.id === c.agent?.id);
 				const who = c.agent ? `You are ${c.agent.name}, an agent of ${c.username ?? "this person"} in Pim.` : `You are Pim, ${c.username ? `${c.username}'s` : "a person's"} assistant.`;
 				const own = c.agent?.instructions ? `Your instructions, which come before your general habits wherever the two differ:\n${c.agent.instructions}` : undefined;
-				return [AGENT_PREAMBLE, who, me ? identity(me) : undefined, c.agent?.majordomo ? majordomoRole(c.agent.name) : undefined, ASSISTANT_INSTRUCTIONS, own].filter(Boolean).join("\n\n");
+				return [AGENT_PREAMBLE, who, me ? identity(me) : undefined, c.agent?.majordomo ? majordomoRole(c.agent.name) : undefined, c.agent?.config?.system === "pimbot" ? pimbotRole(c.agent.name) : undefined, ASSISTANT_INSTRUCTIONS, own].filter(Boolean).join("\n\n");
 			}),
 			section("your_agents", async (input) => {
 				if (await visitOf(input.conversationId)) return undefined;

@@ -1,13 +1,13 @@
 # Host operations
 
-The admin's majordomo can look after the machine a self-hosted Pim runs on: read its stats and services' logs, restart a service, change how many sandboxes run at once, deploy a new version and roll back. It asks a small daemon on the host, `hostopsd`, which runs a fixed list of operations, and, with your approval each time, one command you can read first. How the queue, the checks and the audit log work is in [reference.md](reference.md#host-operations).
+The admin's majordomo and Pimbot can look after the machine a self-hosted Pim runs on: read its stats and services' logs, restart a service, change how many sandboxes run at once, deploy a new version and roll back. It asks a small daemon on the host, `hostopsd`, which runs a fixed list of operations, and, with your approval each time, one command you can read first. How the queue, the checks and the audit log work is in [reference.md](reference.md#host-operations).
 
 ## What the majordomo can do
 
 | Tool | Operation |
 | --- | --- |
-| `hostops_stats` | The host's stats, as the daemon reports them |
-| `hostops_logs` | A service's latest log lines (`lines`, 1 to 500, 100 by default) |
+| `hostops_stats` | The host's stats, as the daemon reports them; asks no approval |
+| `hostops_logs` | A service's latest log lines (`lines`, 1 to 500, 100 by default); asks no approval |
 | `hostops_restart` | Restart a service |
 | `hostops_set_slot_limit` | How many sandboxes the sandbox manager runs at once (`maxConcurrent`, 1 to 16) |
 | `hostops_deploy` | Deploy a git ref (`ref`, `origin/main` by default). The daemon checks the new version and rolls back on its own when it fails, which reports `rolled_back` |
@@ -20,7 +20,7 @@ The admin's majordomo can look after the machine a self-hosted Pim runs on: read
 
 The services are `sandbox-manager`, `egress-proxy`, `docker-socket-proxy` and `hostopsd`. Each call waits up to 100 seconds for its operation to end. A deploy or rollback can take longer: the call then answers with the operation's id, and the majordomo follows it with `hostops_op`. One deploy or rollback runs at a time. A deploy, or a restart of the sandbox-manager, waits up to 10 minutes for the manager to have no running sessions before it recreates it, so a scheduled deploy doesn't kill coding threads that are working; after that it goes ahead and the result says so.
 
-Except `hostops_exec`, nothing asks first: there is no approval to wait for, so the majordomo can run them from a schedule at night. What keeps them safe is that only these operations and arguments exist, that a failed deploy rolls back, and that every request, refused or not, is in the audit log.
+Reading stats and logs (`hostops_stats`, `hostops_logs`) asks nothing: only the admin's majordomo and Pimbot can ask, the daemon takes secrets out of what it returns, and the request is in the audit log. Every other operation asks you first (`hostops_exec` shows you the command to read), so none of them runs from a schedule at night unless you are at the app. What keeps them safe is that only these operations and arguments exist, that a failed deploy rolls back, and that every request, refused or not, is in the audit log.
 
 ## Running a command
 
@@ -36,7 +36,7 @@ The daemon runs as a member of the `docker` group, which is root on the host: a 
 
 ## Who can use them
 
-Only the majordomo of the admin's space. Other agents, the admin's included, aren't offered the tools or told about them, and if one reached them anyway it would be refused and the refusal kept in the audit log. Nobody can ask for an operation over the API, an MCP client or the web app, the admin included: the admin asks their majordomo, and for a command approves it.
+Only the majordomo and Pimbot of the admin's space ([Pimbot](reference.md#pimbot) is the admin's agent for finding out why something doesn't work). Other agents, the admin's included, aren't offered the tools or told about them, and if one reached them anyway it would be refused and the refusal kept in the audit log. Nobody can ask for an operation over the API, an MCP client or the web app, the admin included: the admin asks their majordomo, and for a command approves it.
 
 ## Setting up the daemon
 

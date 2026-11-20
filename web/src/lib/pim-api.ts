@@ -250,6 +250,8 @@ export type Agent = {
   color: string | null;
   /** Your majordomo: the one that talks in chats started without choosing an agent. There is one, always the same, and it can't be deleted. */
   majordomo: boolean;
+  /** An agent Pim made and keeps: Pimbot, the admin's agent for looking into why this Pim isn't working. It can't be deleted or shared. */
+  system?: "pimbot" | null;
   createdAt: number;
   updatedAt: number;
 };

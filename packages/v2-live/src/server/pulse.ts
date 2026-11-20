@@ -36,6 +36,16 @@ const ALL_SAY = `${NATS_SUBJECT_ROOT}.*.say`;
 const revocationSubject = (ownerId: string) => `${NATS_SUBJECT_ROOT}.${OwnerId.parse(ownerId)}.revoked`;
 const ALL_REVOCATIONS = `${NATS_SUBJECT_ROOT}.*.revoked`;
 
+/** Whether NATS answers at `servers`: how long a round trip took in milliseconds, or what it said when it did not (it never retries, and it always closes). */
+export async function probeNats(servers: string | string[], timeoutMs: number): Promise<number> {
+	const nc = await connect({ servers, timeout: timeoutMs, maxReconnectAttempts: 0 });
+	try {
+		return await nc.rtt();
+	} finally {
+		await nc.close().catch(() => undefined);
+	}
+}
+
 export class NatsPulse implements Pulse {
 	readonly #nc: NatsConnection;
 	readonly #codec = new TextEncoder();

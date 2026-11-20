@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import type { ObjectMetadata, ObjectRange, ObjectStore } from "@pim/v2-contracts/platform";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
-import { GetObjectCommand, HeadObjectCommand, PutObjectCommand, DeleteObjectCommand, S3Client, type S3ClientConfig } from "@aws-sdk/client-s3";
+import { GetObjectCommand, HeadBucketCommand, HeadObjectCommand, PutObjectCommand, DeleteObjectCommand, S3Client, type S3ClientConfig } from "@aws-sdk/client-s3";
 import { Authorizer } from "./authz.ts";
 import type { Db } from "./db.ts";
 import { BadRequestError, GoneError, NotFoundError } from "./errors.ts";
@@ -53,6 +53,10 @@ export class S3ObjectStore implements ObjectStore {
 			if ((error as { name?: string }).name === "NoSuchKey") return null;
 			throw error;
 		}
+	}
+	/** Whether the bucket answers to these credentials: throws what the service said when it does not. */
+	async check(): Promise<void> {
+		await this.#s3.send(new HeadBucketCommand({ Bucket: this.bucket }));
 	}
 	async head(key: string) {
 		try {

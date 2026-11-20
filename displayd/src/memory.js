@@ -2,11 +2,15 @@
 // table of cases in test/memory.test.js is the whole policy. displayd shares the agent computer
 // with its primary display and browser, so the guard scales with the machine and counts swap.
 const GiB = 1024 ** 3
+const MiB = 1024 ** 2
 
-export const EXPECTED_DISPLAY_BYTES = 1 * GiB // Xvnc, openbox and dbus (0.8 GiB) plus a browser (0.4 GiB)
+// A display holds no browser: agents browse in one shared headless Chromium outside displayd. Measured, Xvnc,
+// openbox, dbus with the accessibility bus and the desktop driver take about 170 MiB; the rest is for the app an
+// agent opens on it.
+export const EXPECTED_DISPLAY_BYTES = 384 * MiB
 export const MIN_SWAP_FREE_BYTES = 1 * GiB // swap that must be free when the machine has any
 export const MAX_DISPLAYS = 6
-const SLOT_BYTES = EXPECTED_DISPLAY_BYTES + 0.5 * GiB // what each display in the hard maximum is budgeted
+const SLOT_BYTES = EXPECTED_DISPLAY_BYTES + 128 * MiB // what each display in the hard maximum is budgeted
 
 // What must stay available for the computer's own processes: 15% of MemTotal, between 0.5 and 3 GiB.
 export function reserveBytesFor(memTotalBytes) {

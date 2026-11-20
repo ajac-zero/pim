@@ -101,7 +101,7 @@ export type ExecResult = {
 	readonly truncated: boolean;
 };
 
-export type ExecArgs = { readonly command: string; readonly cwd?: string; readonly timeoutMs?: number; readonly maxBytes?: number; readonly thread?: string; readonly env?: Readonly<Record<string, string>>; /** Variables taken out of the process environment before `env` is added. */ readonly unset?: readonly string[] };
+export type ExecArgs = { readonly command: string; readonly cwd?: string; readonly timeoutMs?: number; readonly maxBytes?: number; readonly thread?: string; readonly env?: Readonly<Record<string, string>>; /** Variables taken out of the process environment before `env` is added. */ readonly unset?: readonly string[]; /** Hears the output as it comes, stdout and stderr together. */ readonly onOutput?: (text: string) => void };
 
 /** Where this computer keeps the space's files, how it runs commands, and its browser (tests give their own). */
 export type Machine = {
@@ -110,8 +110,8 @@ export type Machine = {
 	exec(args: ExecArgs, cwd: string): Promise<ExecResult>;
 	/** The primary browser, where the person signs in, or none where this computer has no Chrome. */
 	readonly browser?: BrowserHost;
-	/** A browser for each thread on its own display; without it, a call that names a thread gets the primary one (tests give theirs). */
-	readonly threadBrowsers?: ThreadBrowsers;
+	/** Each agent's browser, a context of its own in one shared headless Chrome; without it, a call that names a thread gets the primary one (tests give theirs). */
+	readonly agentBrowsers?: AgentBrowsers;
 	/** Its desktop, for the person to see and use, or none where nothing streams it. */
 	readonly screen?: ScreenHost;
 	/** Cua Driver, for the agents to use its desktop's apps, or none where cua-spacesd doesn't run. */
@@ -120,6 +120,8 @@ export type Machine = {
 	readonly displays?: DisplayHost;
 	/** The backends of the space's apps that run here, or none where nothing supervises them (tests give their own). */
 	readonly apps?: Apps;
+	/** What each thread's commands printed, for the person to watch; none where nobody keeps it (tests give their own). */
+	readonly terminals?: Terminals;
 };
 
 /**
@@ -336,13 +338,16 @@ export class Link {
 		}
 		if (!op.startsWith("browser_")) return handle(this.#machine, op, args);
 		const browser = this.#machine.browser;
-		// A call that names a thread is for that thread's own browser, on its display; never the primary one.
+		// A call that names a thread is for the browser of the agent it names (or, from a viewer, of the agent the thread browses as); never the primary one.
 		const thread = typeof args.thread === "string" && args.thread !== "" ? args.thread : undefined;
-		const threadBrowsers = thread === undefined ? undefined : this.#machine.threadBrowsers;
-		const key = thread ?? "";
+		const agent = typeof args.agent === "string" && args.agent !== "" ? args.agent : undefined;
+		const agentBrowsers = thread === undefined ? undefined : this.#machine.agentBrowsers;
+		// A viewer of a thread's window (which names no agent) has a channel beside the agent's own, so watching doesn't cut the agent off.
+		const key = thread === undefined ? "" : agentBrowsers && !agent ? `view ${thread}` : thread;
 		if (op === "browser_status") {
-			const running = threadBrowsers ? threadBrowsers.running(thread!) : browser ? await browser.running() : false;
-			return { available: browser !== undefined, running };
+			const running = agentBrowsers ? await agentBrowsers.running(thread!, agent) : browser ? await browser.running() : false;
+			// `agents` says the agents browse in a browser of their own here, never in the primary one.
+			return { available: browser !== undefined, running, ...(this.#machine.agentBrowsers ? { agents: true } : {}) };
 		}
 		if (!browser) throw new CallError("This computer has no browser: install Google Chrome or Chromium there, or name one with PIM_CHROME, and restart pim-computer.", "ENOSYS");
 		switch (op) {
@@ -357,16 +362,19 @@ export class Link {
 					this.#channels.delete(key);
 					this.#send(JSON.stringify({ type: "cdp_closed", channel: id }));
 				};
-				const link = await (threadBrowsers ? threadBrowsers.connect(thread!, onMessage, onClose) : browser.connect(onMessage, onClose));
+				const link: BrowserChannel & { context?: string } = await (agentBrowsers ? agentBrowsers.connect(thread!, agent, onMessage, onClose) : browser.connect(onMessage, onClose));
 				this.#channels.set(key, { id, browser: link });
-				return { channel: id, ...(link.note ? { note: link.note } : {}) };
+				return { channel: id, ...(link.context ? { context: link.context } : {}), ...(link.note ? { note: link.note } : {}) };
 			}
-			case "browser_disconnect":
-				if (this.#channels.get(key)?.id === args.channel) this.#closeChannel(key);
+			case "browser_disconnect": {
+				// By the channel it names, whoever it was opened for.
+				const open = [...this.#channels].find(([, one]) => one.id === args.channel);
+				if (open) this.#closeChannel(open[0]);
 				return null;
+			}
 			case "browser_stop":
-				this.#closeChannel(key);
-				await (threadBrowsers ? threadBrowsers.stop(thread!) : browser.stop());
+				if (!agentBrowsers) this.#closeChannel(key);
+				await (agentBrowsers ? agentBrowsers.stop(thread!, agent) : browser.stop());
 				return null;
 			default:
 				throw new CallError(`This computer doesn't know the call ${op}. Update pim-computer.`, "ENOSYS");
@@ -960,8 +968,20 @@ export async function handle(machine: Machine, op: string, args: Args): Promise<
 				// person's own display is taken out of its environment, so a GUI program fails instead of landing on their screen.
 				const env = typeof args.thread === "string" && machine.displays ? await machine.displays.envOf(args.thread) : undefined;
 				const unset = typeof args.thread === "string" && machine.displays && !env ? DISPLAY_VARIABLES : undefined;
-				return await machine.exec({ ...(args as ExecArgs), ...(env ? { env } : {}), ...(unset ? { unset } : {}) }, cwd);
+				// The person watches a thread's commands as they run (`terminal_read`).
+				const shown = typeof args.thread === "string" ? machine.terminals?.start(args.thread, args.command, typeof args.cwd === "string" ? args.cwd : WORKSPACE) : undefined;
+				try {
+					const result = await machine.exec({ ...(args as ExecArgs), ...(env ? { env } : {}), ...(unset ? { unset } : {}), ...(shown ? { onOutput: shown.write } : {}) }, cwd);
+					shown?.end(result);
+					return result;
+				} catch (error) {
+					shown?.end({ exitCode: null, signal: null, timedOut: false });
+					throw error;
+				}
 			}
+			case "terminal_read":
+				if (typeof args.thread !== "string" || args.thread === "") throw new CallError("thread must name the thread whose commands to read", "EINVAL");
+				return machine.terminals?.read(args.thread, typeof args.version === "number" ? args.version : undefined) ?? { version: 0, commands: [] };
 			default:
 				throw new CallError(`This computer doesn't know the call ${op}. Update pim-computer.`, "ENOSYS");
 		}
@@ -1008,20 +1028,81 @@ class Output {
 	}
 }
 
+/** One command a thread ran, as its terminal shows it. */
+export type TerminalCommand = { id: number; command: string; cwd: string; startedAt: number; endedAt: number | null; exitCode: number | null; signal: string | null; timedOut: boolean; output: string };
+
+/** How many of a thread's commands its terminal keeps, how much of each one's output (its end), and how many threads' terminals are kept. */
+const TERMINAL_COMMANDS = 20;
+const TERMINAL_OUTPUT_CHARS = 32_000;
+const TERMINAL_THREADS = 100;
+
+/**
+ * What each thread's commands printed, as they run: the last twenty commands of each of the last hundred
+ * threads to run one, with the end of their output, kept in memory for the person to watch. `version`
+ * counts every change to a thread's terminal, so a reader that has seen it gets no copy again.
+ */
+export class Terminals {
+	readonly #threads = new Map<string, { version: number; next: number; commands: TerminalCommand[] }>();
+	readonly #now: () => number;
+
+	constructor(now: () => number = Date.now) {
+		this.#now = now;
+	}
+
+	/** A command the thread starts: `write` adds to what it printed, `end` says how it ended. */
+	start(thread: string, command: string, cwd: string): { write(text: string): void; end(result: Pick<ExecResult, "exitCode" | "signal" | "timedOut">): void } {
+		let terminal = this.#threads.get(thread);
+		this.#threads.delete(thread);
+		terminal ??= { version: 0, next: 1, commands: [] };
+		this.#threads.set(thread, terminal);
+		while (this.#threads.size > TERMINAL_THREADS) this.#threads.delete(this.#threads.keys().next().value!);
+		const entry: TerminalCommand = { id: terminal.next++, command, cwd, startedAt: this.#now(), endedAt: null, exitCode: null, signal: null, timedOut: false, output: "" };
+		terminal.commands.push(entry);
+		if (terminal.commands.length > TERMINAL_COMMANDS) terminal.commands.shift();
+		terminal.version++;
+		const live = terminal;
+		return {
+			write: (text) => {
+				if (!text) return;
+				entry.output += text;
+				if (entry.output.length > TERMINAL_OUTPUT_CHARS) entry.output = entry.output.slice(-TERMINAL_OUTPUT_CHARS);
+				live.version++;
+			},
+			end: (result) => {
+				entry.endedAt = this.#now();
+				entry.exitCode = result.exitCode;
+				entry.signal = result.signal;
+				entry.timedOut = result.timedOut;
+				live.version++;
+			},
+		};
+	}
+
+	/** The thread's commands, oldest first, or only its version when that is `seen`. */
+	read(thread: string, seen?: number): { version: number; commands?: TerminalCommand[] } {
+		const terminal = this.#threads.get(thread);
+		if (!terminal) return { version: 0, commands: [] };
+		return seen === terminal.version ? { version: terminal.version } : { version: terminal.version, commands: terminal.commands };
+	}
+}
+
 /** What points a program at the primary display. */
 const DISPLAY_VARIABLES = ["DISPLAY", "XAUTHORITY", "WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS"] as const;
 
 /** Runs a command in a login shell, in its own process group, killed with it at the timeout. `$PIM_WORKSPACE` is the root. */
-export async function runCommand({ command, timeoutMs = 120_000, maxBytes = 64_000, env, unset }: ExecArgs, cwd: string, root: string): Promise<ExecResult> {
+export async function runCommand({ command, timeoutMs = 120_000, maxBytes = 64_000, env, unset, onOutput }: ExecArgs, cwd: string, root: string): Promise<ExecResult> {
 	const { spawn } = await import("node:child_process");
+	const { StringDecoder } = await import("node:string_decoder");
 	const shell = process.env.SHELL || "/bin/bash";
 	const base = { ...process.env };
 	for (const name of unset ?? []) delete base[name];
 	const child = spawn(shell, ["-lc", command], { cwd, detached: true, stdio: ["ignore", "pipe", "pipe"], env: { ...base, ...env, PIM_WORKSPACE: root } });
 	const stdout = new Output(maxBytes);
 	const stderr = new Output(maxBytes);
-	child.stdout!.on("data", (chunk: Buffer) => stdout.add(chunk));
-	child.stderr!.on("data", (chunk: Buffer) => stderr.add(chunk));
+	// A decoder for each stream, so a character split across chunks is shown whole.
+	const decoders = [new StringDecoder("utf8"), new StringDecoder("utf8")];
+	child.stdout!.on("data", (chunk: Buffer) => (stdout.add(chunk), onOutput?.(decoders[0]!.write(chunk))));
+	child.stderr!.on("data", (chunk: Buffer) => (stderr.add(chunk), onOutput?.(decoders[1]!.write(chunk))));
 	let timedOut = false;
 	const timer = setTimeout(() => {
 		timedOut = true;
@@ -1441,9 +1522,11 @@ async function keepSessions(profile: string): Promise<void> {
  * `BROWSER_IDLE_MS` with nobody connected; with its windows on a desktop,
  * where the person may be using it too, it stays open. A Chrome running
  * with the profile, left by an earlier run of this program or opened by
- * the person, is used as it is.
+ * the person, is used as it is. Without `restore` it opens none of the
+ * pages it had, as the agents' shared Chrome, whose windows are in contexts
+ * that end with it.
  */
-function localBrowser(executable: string, profile: string, headful: boolean, log: (line: string) => void): BrowserHost {
+function localBrowser(executable: string, profile: string, headful: boolean, log: (line: string) => void, restore = true): BrowserHost {
 	let child: import("node:child_process").ChildProcess | undefined;
 	let starting: Promise<string> | undefined;
 	let connections = 0;
@@ -1471,7 +1554,7 @@ function localBrowser(executable: string, profile: string, headful: boolean, log
 		const { spawn } = await import("node:child_process");
 		await fs.mkdir(profile, { recursive: true });
 		await fs.rm(portFile, { force: true });
-		await keepSessions(profile);
+		if (restore) await keepSessions(profile);
 		const args = [
 			"--remote-debugging-port=0",
 			// Chrome started with the flag above tells pages it's automated (`navigator.webdriver`), and Google's sign-in turns it away.
@@ -1644,7 +1727,7 @@ async function grpcWeb(base: string, token: string, method: string, message: num
 	return answer;
 }
 
-/** How many displays at a time may be signed in to a site, and the domains (with their subdomains) whose cookies are its sign-in. */
+/** How many agents at a time may be signed in to a site, and the domains (with their subdomains) whose cookies are its sign-in. */
 export type SiteLimit = { max: number; domains: string[] };
 
 /** A computer's per-thread displays: calls a thread's driver tool on its own display, and finds the environment of the one it holds. */
@@ -1793,27 +1876,14 @@ export class DisplayClient {
 		return { control: body?.lease?.control === "user" ? "user" : "agent" };
 	}
 
-	/** The sites whose sign-ins are limited to a number of displays at a time, with their domains; none when displayd can't say (or is older). */
-	async sites(): Promise<Record<string, SiteLimit>> {
+	/** The sites whose sign-ins are limited to a number of agents at a time, with their domains, as displayd's sites.json sets them; undefined when displayd can't say. */
+	async sites(): Promise<Record<string, SiteLimit> | undefined> {
 		try {
 			const { status, body } = await this.#request("GET", "/sites");
-			return status === 200 && body?.sites && typeof body.sites === "object" ? body.sites : {};
+			return status === 200 && body?.sites && typeof body.sites === "object" ? body.sites : undefined;
 		} catch {
-			return {};
+			return undefined;
 		}
-	}
-
-	/** Takes the thread a slot of a limited site: granted, refused because other chats hold it, or unreachable when displayd can't say. */
-	async claimSite(thread: string, site: string): Promise<"granted" | "refused" | "unreachable"> {
-		try {
-			const { status, body } = await this.#request("POST", "/site-claim", { threadId: thread, site });
-			if (status === 200) return body?.granted === true ? "granted" : "refused";
-		} catch {}
-		return "unreachable";
-	}
-
-	async releaseSite(thread: string, site: string): Promise<void> {
-		await this.#request("POST", "/site-release", { threadId: thread, site }).catch(() => undefined);
 	}
 
 	/** The environment of the display the thread holds, if it does: it never leases one. */
@@ -1861,7 +1931,7 @@ export class DisplayClient {
 	}
 }
 
-/** A DevTools connection as `ThreadBrowsers` uses it: text in and out, as over a WebSocket. */
+/** A DevTools connection as `AgentBrowsers` uses it: text in and out, as over a WebSocket. */
 export type DevToolsSocket = {
 	send(data: string): void;
 	onMessage(listener: (data: string) => void): void;
@@ -1869,51 +1939,15 @@ export type DevToolsSocket = {
 	close(): void;
 };
 
-/** Opens a DevTools connection to the browser on a loopback port; rejects while nothing answers there. */
-export type DevTools = (port: number) => Promise<DevToolsSocket>;
-
-/** Chrome's DevTools on a loopback port, over its browser-level WebSocket. */
-export const loopbackDevTools: DevTools = async (port) => {
-	const response = await fetch(`http://127.0.0.1:${port}/json/version`, { signal: AbortSignal.timeout(2_000) });
-	const { webSocketDebuggerUrl } = (await response.json()) as { webSocketDebuggerUrl: string };
-	const socket = new WebSocket(webSocketDebuggerUrl);
-	await new Promise<void>((resolve, reject) => {
-		socket.addEventListener("open", () => resolve(), { once: true });
-		socket.addEventListener("error", () => reject(new Error("Couldn't connect to the browser.")), { once: true });
-	});
-	return {
-		send: (data) => {
-			if (socket.readyState === WebSocket.OPEN) socket.send(data);
-		},
-		onMessage: (listener) => socket.addEventListener("message", (event) => listener(String(event.data))),
-		onClose: (listener) => socket.addEventListener("close", () => listener()),
-		close: () => socket.close(),
-	};
-};
-
-/** A Chrome process as `ThreadBrowsers` starts and ends it. */
-export type ChromeProcess = { readonly pid?: number; kill(signal?: NodeJS.Signals): void; onExit(listener: () => void): void; stderr(): string };
-export type ChromeLaunch = { executable: string; args: string[]; env: Record<string, string>; profile: string };
-
-/** Starts Chrome in a process group of its own, so that it and its helpers end together. */
-function spawnChrome({ executable, args, env }: ChromeLaunch): Promise<ChromeProcess> {
-	return import("node:child_process").then(({ spawn }) => {
-		const child = spawn(executable, args, { env, detached: true, stdio: ["ignore", "ignore", "pipe"] });
-		let errors = "";
-		child.stderr!.on("data", (chunk: Buffer) => {
-			errors = (errors + chunk.toString("utf8")).slice(-2_000);
-		});
-		return {
-			...(child.pid === undefined ? {} : { pid: child.pid }),
-			kill: (signal = "SIGTERM") => {
-				try {
-					if (child.pid !== undefined) process.kill(-child.pid, signal);
-				} catch {}
-			},
-			onExit: (listener) => void child.on("exit", listener),
-			stderr: () => errors,
-		};
-	});
+/** A DevTools connection to one of this computer's browsers, opened through its `BrowserHost` (which starts it first when it isn't running). */
+async function hostSocket(host: BrowserHost): Promise<DevToolsSocket> {
+	const messages: ((data: string) => void)[] = [];
+	const closes: (() => void)[] = [];
+	const channel = await host.connect(
+		(data) => messages.forEach((listener) => listener(data)),
+		() => closes.forEach((listener) => listener()),
+	);
+	return { send: (data) => channel.send(data), onMessage: (listener) => void messages.push(listener), onClose: (listener) => void closes.push(listener), close: () => channel.close() };
 }
 
 type Cookie = Record<string, unknown>;
@@ -1921,17 +1955,20 @@ type Cookie = Record<string, unknown>;
 /** What the signed-in primary browser had at some moment. */
 type Snapshot = { cookies: Cookie[]; takenAt: number };
 
-/** The sentence an agent reads when a thread's browser has no sign-ins to start with. */
+/** The sentence an agent reads when its browser has no sign-ins to start with. */
 export const SIGNED_OUT = "The primary browser has no saved sign-ins; ask the person to sign in on the Primary desktop in Computer; never ask for credentials in chat.";
+
+/** The sites whose sign-ins only so many agents may use at a time, where displayd can't say (as where it doesn't run): the same as displayd's own default. */
+export const DEFAULT_SITES: Record<string, SiteLimit> = { "linkedin.com": { max: 1, domains: ["linkedin.com", "licdn.com"] } };
 
 /** How old a snapshot of the primary browser's sign-ins may be before a new browser takes a fresh one. */
 const SNAPSHOT_MAX_AGE_MS = 5 * 60_000;
-/** How long a thread's browser runs with nobody connected before it quits. */
-const THREAD_BROWSER_IDLE_MS = 20 * 60_000;
-/** How long a thread's profile stays after its display went. */
-const PROFILE_KEEP_MS = 24 * 60 * 60_000;
+/** How often an agent's sign-ins are saved while it's connected; they're saved too when its last connection closes. */
+const SAVE_EVERY_MS = 5 * 60_000;
+/** How long an agent's browser stays open with nobody connected to it, before its context (and its windows) close; its sign-ins are saved. */
+const AGENT_BROWSER_IDLE_MS = 20 * 60_000;
 
-/** The folder name for a thread: its id where that is a plain name, else a hash of it. */
+/** The folder name for an agent or thread: its id where that is a plain name, else a hash of it. */
 export function threadFolder(thread: string): string {
 	if (/^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/.test(thread)) return thread;
 	return `${thread.replace(/[^A-Za-z0-9._-]/g, "_").replace(/^[._-]+/, "").slice(0, 40)}-${createHash("sha256").update(thread).digest("hex").slice(0, 12)}`;
@@ -1946,7 +1983,7 @@ class Rpc {
 	constructor(socket: DevToolsSocket) {
 		this.#socket = socket;
 		socket.onMessage((data) => {
-			const message = JSON.parse(data) as { id?: number; result?: unknown; error?: { message?: string } };
+			const message = JSON.parse(data) as { id?: number; sessionId?: string; result?: unknown; error?: { message?: string } };
 			const pending = message.id === undefined ? undefined : this.#pending.get(message.id);
 			if (!pending) return;
 			this.#pending.delete(message.id!);
@@ -1976,129 +2013,160 @@ class Rpc {
 	}
 }
 
-/** What a thread's browser is: the Chrome on its display, and the connections to it. */
-type ThreadBrowser = {
-	lease: string | undefined;
-	port: number;
-	process: ChromeProcess;
-	profile: string;
+/** What an agent's browser is: its context in the shared Chrome, and the connections to it. */
+type AgentBrowser = {
+	context: string;
 	connections: number;
 	syncedAt: number;
-	/** The limited sites whose slot this browser holds, and those it was refused: their cookies were not copied. */
+	/** The limited sites whose slot this agent holds, and those it was refused: their cookies were not copied. */
 	claimed: Set<string>;
 	withheld: Set<string>;
+	saver?: ReturnType<typeof setInterval>;
 	idle?: ReturnType<typeof setTimeout>;
-	keepAlive?: ReturnType<typeof setInterval>;
 };
 
-export type ThreadBrowsersOptions = {
-	/** The Chrome or Chromium to start. */
-	executable: string;
-	/** Where each thread's profile folder is made: `~/.displayd/threads`. */
+export type AgentBrowsersOptions = {
+	/** The one headless Chrome the agents share, each in a browser context of its own. */
+	shared: BrowserHost;
+	/** Where each agent's sign-ins are kept between runs: `~/.pim-computer/agents`. */
 	root: string;
-	/** The primary browser's profile, whose sign-ins are copied. */
+	/** The primary browser's profile, whose sign-ins are copied in, and the browser itself (started when it isn't running, to read them). */
 	primaryProfile: string;
-	/** The primary browser, which is started when it isn't running, to read its sign-ins. */
 	primary: BrowserHost;
 	/** The file listing the origins whose localStorage is copied too: `~/.displayd/storage-origins.json`. */
 	storageOrigins: string;
-	displays: Pick<DisplayClient, "acquire" | "touch" | "leases" | "sites" | "claimSite" | "releaseSite">;
+	/** The limited sites, as displayd's sites.json sets them; undefined where displayd can't say, and the default applies. */
+	sites: () => Promise<Record<string, SiteLimit> | undefined>;
 	log: (line: string) => void;
-	devTools?: DevTools;
-	launch?: (launch: ChromeLaunch) => Promise<ChromeProcess>;
 	now?: () => number;
-	/** How often the leases are checked for one that ended; default 15 s. */
-	watchMs?: number;
-	/** How long Chrome has to answer on its port; default 30 s. */
-	startMs?: number;
 };
 
 /**
- * A Chrome for each thread, on the display displayd leased that thread
- * and with the DevTools port reserved for it, with a clean profile of its
- * own. Chrome keeps no sign-ins of its own: what the person signed in to
- * in the primary browser (their cookies, and the localStorage of the
- * origins in `storage-origins.json`) is copied in as it starts, so an
- * agent browses signed in without ever seeing a password. The browser
- * ends with the display, on `stop`, or after twenty minutes with nobody
- * connected; the profile folder is removed a day after the display.
+ * Each agent's browser: a browser context of its own in one headless
+ * Chrome that the agents share, so no agent needs a display to browse and
+ * the computer runs one Chrome however many agents browse. A context is a
+ * separate cookie jar and storage, so what one agent is signed in to is not
+ * signed in for another; every chat of the agent shares it, each in a
+ * window of its own. The agent's cookies are saved to
+ * `<root>/<agent>/cookies.json` (only the person can read it) and restored
+ * when its context is made again, after the Chrome quit or this program
+ * restarted; the person's sign-ins in the primary browser are copied on
+ * top, so theirs win. Sites limited to a number of agents at a time
+ * (displayd's sites.json, or `DEFAULT_SITES`) are counted here: an agent
+ * over the limit gets none of that site's cookies until another lets go.
+ *
+ * The connections pass through unread, but for three messages: a window or
+ * a download setting the space asks for goes in the agent's context, and the
+ * list of targets shows only that context's (a viewer, which names no agent,
+ * sees only the windows its chat opened). Closing a chat's browser closes its
+ * windows; an agent's context closes once it has no window left and nobody
+ * connected, or after twenty minutes with nobody connected.
  */
-export class ThreadBrowsers {
-	readonly #o: ThreadBrowsersOptions;
-	readonly #devTools: DevTools;
-	readonly #browsers = new Map<string, ThreadBrowser>();
-	readonly #starting = new Map<string, Promise<{ browser: ThreadBrowser; note?: string }>>();
+export class AgentBrowsers {
+	readonly #o: AgentBrowsersOptions;
+	readonly #agents = new Map<string, AgentBrowser>();
+	readonly #starting = new Map<string, Promise<{ browser: AgentBrowser; note?: string }>>();
+	/** The agent each thread browses as, as the space last said. */
+	readonly #threads = new Map<string, string>();
+	/** The windows each thread opened. */
+	readonly #windows = new Map<string, Set<string>>();
+	/** The agents that hold a slot of each limited site. */
+	readonly #holders = new Map<string, Set<string>>();
 	#snapshot: Snapshot | undefined;
-	#watcher: ReturnType<typeof setInterval> | undefined;
 
-	constructor(options: ThreadBrowsersOptions) {
+	constructor(options: AgentBrowsersOptions) {
 		this.#o = options;
-		this.#devTools = options.devTools ?? loopbackDevTools;
 	}
 
 	#now(): number {
 		return (this.#o.now ?? Date.now)();
 	}
 
-	/** Whether the thread's browser is running, without leasing a display for it. */
-	running(thread: string): boolean {
-		return this.#browsers.has(thread);
+	/** The agent a call is for: the one it names, else (for a viewer) the one its thread last browsed as. */
+	#ownerOf(thread: string, agent?: string): string | undefined {
+		return agent ?? this.#threads.get(thread);
+	}
+
+	/** Whether the agent's browser is running, without starting it. */
+	async running(thread: string, agent?: string): Promise<boolean> {
+		const owner = this.#ownerOf(thread, agent);
+		if (owner === undefined || !this.#agents.has(owner)) return false;
+		if (await this.#o.shared.running()) return true;
+		this.#forgetAll();
+		return false;
 	}
 
 	/**
-	 * Opens a DevTools connection to the thread's browser, leasing its display and
-	 * starting it first when it isn't running. A thread that can't have a display yet
-	 * gets the retryable error; it never gets the primary browser.
+	 * Opens a DevTools connection to the agent's browser for one of its threads, starting the shared Chrome and
+	 * making the agent's context first when they aren't there. `agent` is undefined for a viewer of the thread's window.
 	 */
-	async connect(thread: string, onMessage: (data: string) => void, onClose: () => void): Promise<BrowserChannel & { note?: string }> {
-		const acquired = await this.#o.displays.acquire(thread);
-		if ("error" in acquired) throw new CallError(acquired.error, "EDISPLAY");
-		const { lease } = acquired;
-		await this.#o.displays.touch(thread, { browser: true });
-		if (typeof lease.cdpPort !== "number" || !lease.env) throw new CallError("display_unavailable The thread's display has no DevTools port reserved. Try again shortly.", "EDISPLAY");
-		let browser = this.#browsers.get(thread);
-		// A display that ended and was leased again is a new one: its browser is gone with it.
-		if (browser && browser.lease !== lease.id) await this.stop(thread);
-		let note: string | undefined;
-		browser = this.#browsers.get(thread);
-		if (!browser) {
-			const starting = (this.#starting.get(thread) ?? this.#start(thread, lease)).finally(() => this.#starting.delete(thread));
-			this.#starting.set(thread, starting);
-			({ browser, note } = await starting);
-		} else if (await this.#primaryIsNewer(browser.syncedAt)) {
-			note = await this.#copySignIns(thread, browser, true);
-			browser.syncedAt = this.#now();
-		} else if (browser.withheld.size > 0) {
-			// A site refused before may be free now: only its cookies are copied, so the others keep what the page has made of them.
-			note = await this.#copySignIns(thread, browser, false, new Set(browser.withheld));
-		}
-		const live = browser;
-		clearTimeout(live.idle);
-		live.keepAlive ??= setInterval(() => void this.#o.displays.touch(thread, { browser: true }), 60_000);
-		live.keepAlive.unref?.();
-		const socket = await this.#devTools(live.port).catch(() => {
+	async connect(thread: string, agent: string | undefined, onMessage: (data: string) => void, onClose: () => void): Promise<BrowserChannel & { context: string; note?: string }> {
+		const owner = this.#ownerOf(thread, agent);
+		if (owner === undefined) throw new CallError("This chat has no browser open.", "EBROWSER");
+		this.#threads.set(thread, owner);
+		const { browser, note } = await this.#ensure(owner);
+		const socket = await hostSocket(this.#o.shared).catch(() => {
 			throw new CallError("Couldn't connect to the browser.", "EBROWSER");
 		});
-		live.connections++;
+		browser.connections++;
+		clearTimeout(browser.idle);
+		browser.saver ??= setInterval(() => void this.#save(owner).catch(() => {}), SAVE_EVERY_MS);
+		browser.saver.unref?.();
 		let open = true;
 		const closed = () => {
 			if (!open) return;
 			open = false;
-			if (--live.connections > 0 || this.#browsers.get(thread) !== live) return;
-			clearInterval(live.keepAlive);
-			live.keepAlive = undefined;
-			live.idle = setTimeout(() => {
-				this.#o.log(`Nobody has used the browser of thread ${thread} for a while, so it quits.`);
-				void this.stop(thread);
-			}, THREAD_BROWSER_IDLE_MS);
-			live.idle.unref?.();
+			if (--browser.connections === 0 && this.#agents.get(owner) === browser) {
+				clearInterval(browser.saver);
+				browser.saver = undefined;
+				void this.#save(owner).catch((error) => this.#o.log(`Couldn't save the sign-ins of agent ${owner}: ${(error as Error).message}`));
+				browser.idle = setTimeout(() => {
+					this.#o.log(`Nobody has used the browser of agent ${owner} for a while, so it closes.`);
+					void this.#close(owner);
+				}, AGENT_BROWSER_IDLE_MS);
+				browser.idle.unref?.();
+			}
 			onClose();
 		};
-		socket.onMessage(onMessage);
+		// What the space asks for, kept to the agent's context; the list of targets it asks for, and the windows it opens, answered from it.
+		// Keyed by session and id: the space may send these on a session it attached to the browser.
+		const pending = new Map<string, "create" | "list">();
+		const windows = this.#windows.get(thread) ?? this.#windows.set(thread, new Set()).get(thread)!;
+		socket.onMessage((data) => {
+			if (pending.size > 0) {
+				const message = JSON.parse(data) as { id?: number; sessionId?: string; result?: { targetId?: string; targetInfos?: { targetId: string; browserContextId?: string }[] } };
+				const key = `${message.sessionId ?? ""} ${message.id}`;
+				const kind = message.id === undefined ? undefined : pending.get(key);
+				if (kind) {
+					pending.delete(key);
+					if (kind === "create" && message.result?.targetId) windows.add(message.result.targetId);
+					if (kind === "list" && message.result?.targetInfos) {
+						const own = message.result.targetInfos.filter((target) => target.browserContextId === browser.context);
+						for (const id of windows) if (!own.some((target) => target.targetId === id)) windows.delete(id);
+						// A viewer sees the windows its chat opened, where it opened any.
+						const shown = agent === undefined && windows.size > 0 ? own.filter((target) => windows.has(target.targetId)) : own;
+						return onMessage(JSON.stringify({ ...message, result: { ...message.result, targetInfos: shown } }));
+					}
+				}
+			}
+			onMessage(data);
+		});
 		socket.onClose(closed);
 		return {
+			context: browser.context,
 			...(note ? { note } : {}),
-			send: (data) => socket.send(data),
+			send: (data) => {
+				const message = JSON.parse(data) as { id?: number; method?: string; params?: Record<string, unknown>; sessionId?: string };
+				if (message.id !== undefined) {
+					const key = `${message.sessionId ?? ""} ${message.id}`;
+					if (message.method === "Target.createTarget" || message.method === "Browser.setDownloadBehavior") {
+						if (message.method === "Target.createTarget") pending.set(key, "create");
+						return socket.send(JSON.stringify({ ...message, params: { ...message.params, browserContextId: browser.context } }));
+					}
+					if (message.method === "Target.getTargets") pending.set(key, "list");
+				}
+				socket.send(data);
+			},
 			close: () => {
 				socket.close();
 				closed();
@@ -2106,144 +2174,129 @@ export class ThreadBrowsers {
 		};
 	}
 
-	async #start(thread: string, lease: Lease): Promise<{ browser: ThreadBrowser; note?: string }> {
-		const profile = path.join(this.#o.root, threadFolder(thread), "chrome");
-		await fs.mkdir(profile, { recursive: true, mode: 0o700 });
-		await fs.chmod(path.dirname(profile), 0o700);
-		await fs.chmod(profile, 0o700);
-		await fs.rm(path.join(path.dirname(profile), "ended"), { force: true });
-		const port = lease.cdpPort!;
-		const launch: ChromeLaunch = {
-			executable: this.#o.executable,
-			profile,
-			env: { ...Object.fromEntries(Object.entries(process.env).filter(([name, value]) => value !== undefined && name !== "WAYLAND_DISPLAY")) as Record<string, string>, ...lease.env },
-			args: [
-				`--remote-debugging-port=${port}`,
-				"--remote-debugging-address=127.0.0.1",
-				// Chrome started with the flag above tells pages it's automated (`navigator.webdriver`), and Google's sign-in turns it away.
-				"--disable-blink-features=AutomationControlled",
-				`--user-data-dir=${profile}`,
-				"--no-first-run",
-				"--no-default-browser-check",
-				"--use-mock-keychain",
-				"--disable-dev-shm-usage",
-				"--window-size=1280,800",
-				// Chrome's sandbox can't run as root, as in a container.
-				...(process.getuid?.() === 0 ? ["--no-sandbox"] : []),
-			],
-		};
-		this.#o.log(`Starting a browser for thread ${thread} on ${lease.env!.DISPLAY ?? "its display"}: ${this.#o.executable}`);
-		const process_ = await (this.#o.launch ?? spawnChrome)(launch);
-		let exited = false;
-		const browser: ThreadBrowser = { lease: lease.id, port, process: process_, profile, connections: 0, syncedAt: this.#now(), claimed: new Set(), withheld: new Set() };
-		process_.onExit(() => {
-			exited = true;
-			if (this.#browsers.get(thread) === browser) void this.stop(thread);
-		});
-		try {
-			const until = this.#now() + (this.#o.startMs ?? 30_000);
-			for (;;) {
-				if (exited) throw new CallError(`The browser quit as it started: ${process_.stderr().trim() || "it said nothing"}`, "EBROWSER");
-				try {
-					(await this.#devTools(port)).close();
-					break;
-				} catch {
-					if (this.#now() > until) throw new CallError("The browser didn't start within 30 seconds.", "EBROWSER");
-					await new Promise((resolve) => setTimeout(resolve, 100));
+	/** The agent's context, made (with its sign-ins) when it has none, or its sign-ins brought up to date. */
+	async #ensure(owner: string): Promise<{ browser: AgentBrowser; note?: string }> {
+		const starting = this.#starting.get(owner);
+		if (starting) return starting;
+		const ensuring = (async () => {
+			const rpc = new Rpc(await hostSocket(this.#o.shared));
+			try {
+				let browser = this.#agents.get(owner);
+				// The shared Chrome quit (after a while unused) since: its contexts went with it.
+				if (browser && !(await rpc.call<{ browserContextIds: string[] }>("Target.getBrowserContexts")).browserContextIds.includes(browser.context)) {
+					this.#forgetAll();
+					browser = undefined;
 				}
+				if (!browser) {
+					const { browserContextId } = await rpc.call<{ browserContextId: string }>("Target.createBrowserContext", { disposeOnDetach: false });
+					browser = { context: browserContextId, connections: 0, syncedAt: this.#now(), claimed: new Set(), withheld: new Set() };
+					// The agent's own sign-ins, and then the person's, go in before anyone drives the browser.
+					const note = await this.#copySignIns(owner, browser, rpc, true, await this.#saved(owner));
+					this.#agents.set(owner, browser);
+					return { browser, ...(note ? { note } : {}) };
+				}
+				let note: string | undefined;
+				if (await this.#primaryIsNewer(browser.syncedAt)) {
+					note = await this.#copySignIns(owner, browser, rpc, true, []);
+					browser.syncedAt = this.#now();
+				} else if (browser.withheld.size > 0) {
+					// A site refused before may be free now: only its cookies are copied, so the others keep what the pages have made of them.
+					note = await this.#copySignIns(owner, browser, rpc, false, await this.#saved(owner), new Set(browser.withheld));
+				}
+				return { browser, ...(note ? { note } : {}) };
+			} finally {
+				rpc.close();
 			}
-			// The person's sign-ins go in before anyone drives the browser.
-			const note = await this.#copySignIns(thread, browser, true);
-			this.#browsers.set(thread, browser);
-			this.#watch();
-			return { browser, ...(note ? { note } : {}) };
-		} catch (error) {
-			process_.kill("SIGKILL");
-			for (const site of browser.claimed) await this.#o.displays.releaseSite(thread, site);
-			throw error;
-		}
-	}
-
-	/** Quits the thread's browser: its process, and its connections. The profile stays for a day. */
-	async stop(thread: string): Promise<void> {
-		const browser = this.#browsers.get(thread);
-		if (!browser) return;
-		this.#browsers.delete(thread);
-		clearTimeout(browser.idle);
-		clearInterval(browser.keepAlive);
-		browser.process.kill("SIGTERM");
-		for (const site of browser.claimed) await this.#o.displays.releaseSite(thread, site);
-		const hard = setTimeout(() => browser.process.kill("SIGKILL"), 3_000);
-		hard.unref?.();
-		await fs.writeFile(path.join(path.dirname(browser.profile), "ended"), String(this.#now())).catch(() => {});
-		if (this.#browsers.size === 0 && this.#watcher) {
-			clearInterval(this.#watcher);
-			this.#watcher = undefined;
-		}
-	}
-
-	/** Ends every thread's browser at once, as this program ends. */
-	killAll(): Promise<unknown> {
-		const released: Promise<void>[] = [];
-		for (const [thread, browser] of this.#browsers) {
-			browser.process.kill("SIGKILL");
-			// Best effort: on a signal the program waits for these, on a plain exit they may not get out.
-			for (const site of browser.claimed) released.push(this.#o.displays.releaseSite(thread, site));
-		}
-		this.#browsers.clear();
-		return Promise.allSettled(released);
-	}
-
-	/** Checks now that each browser's display still is the one it started on, and ends the browsers of those that went. */
-	async check(): Promise<void> {
-		const leases = await this.#o.displays.leases();
-		if (!leases) return;
-		for (const thread of [...this.#browsers.keys()]) {
-			const lease = leases.find((one) => one.threadId === thread && (one.state === "active" || one.state === "idle" || one.state === "starting"));
-			if (!lease || lease.id !== this.#browsers.get(thread)?.lease) {
-				this.#o.log(`The display of thread ${thread} ended, so its browser quits.`);
-				await this.stop(thread);
-			}
-		}
-	}
-
-	#watch(): void {
-		if (this.#watcher) return;
-		this.#watcher = setInterval(() => void this.check().catch(() => {}), this.#o.watchMs ?? 15_000);
-		this.#watcher.unref?.();
+		})().finally(() => this.#starting.delete(owner));
+		this.#starting.set(owner, ensuring);
+		return ensuring;
 	}
 
 	/**
-	 * Removes the profile folders of threads whose display went more than a day ago, and
-	 * starts the day for those it hasn't seen go (as after a restart). Folders of threads
-	 * with a display now, or browser running, stay.
+	 * Closes the thread's windows. When that leaves its agent with no window and nobody connected, the agent's
+	 * context closes too, and lets go of its limited sites.
 	 */
-	async sweep(): Promise<void> {
-		const leases = await this.#o.displays.leases();
-		if (!leases) return;
-		const live = new Set(leases.filter((lease) => lease.state !== "gone" && lease.state !== "reaping" && lease.state !== "queued" && lease.state !== "timeout").map((lease) => threadFolder(String(lease.threadId))));
-		for (const thread of this.#browsers.keys()) live.add(threadFolder(thread));
-		let names: string[];
+	async stop(thread: string, agent?: string): Promise<void> {
+		const owner = this.#ownerOf(thread, agent);
+		const browser = owner === undefined ? undefined : this.#agents.get(owner);
+		if (!owner || !browser || !(await this.#o.shared.running())) return;
+		const rpc = new Rpc(await hostSocket(this.#o.shared));
 		try {
-			names = await fs.readdir(this.#o.root);
+			for (const id of this.#windows.get(thread) ?? []) await rpc.call("Target.closeTarget", { targetId: id }).catch(() => {});
+			this.#windows.delete(thread);
+			const { targetInfos } = await rpc.call<{ targetInfos: { type: string; browserContextId?: string }[] }>("Target.getTargets");
+			const left = targetInfos.some((target) => target.type === "page" && target.browserContextId === browser.context);
+			if (!left && browser.connections === 0) await this.#close(owner);
+		} finally {
+			rpc.close();
+		}
+	}
+
+	/** Closes the agent's context, with its windows in every chat; its sign-ins are saved first, and stay. */
+	async #close(owner: string): Promise<void> {
+		const browser = this.#agents.get(owner);
+		if (!browser) return;
+		await this.#save(owner).catch(() => {});
+		this.#forget(owner);
+		if (!(await this.#o.shared.running())) return;
+		const rpc = new Rpc(await hostSocket(this.#o.shared));
+		try {
+			await rpc.call("Target.disposeBrowserContext", { browserContextId: browser.context });
 		} catch {
-			return;
+		} finally {
+			rpc.close();
 		}
-		for (const name of names) {
-			const dir = path.join(this.#o.root, name);
-			const marker = path.join(dir, "ended");
-			if (live.has(name)) {
-				await fs.rm(marker, { force: true });
-				continue;
-			}
-			const endedAt = Number(await fs.readFile(marker, "utf8").catch(() => ""));
-			if (!Number.isFinite(endedAt) || endedAt <= 0) {
-				await fs.writeFile(marker, String(this.#now())).catch(() => {});
-			} else if (this.#now() - endedAt >= PROFILE_KEEP_MS) {
-				this.#o.log(`Removing the browser profile of ${name}, whose display ended a day ago.`);
-				await fs.rm(dir, { recursive: true, force: true });
-			}
+	}
+
+	/** Saves every agent's sign-ins and quits the shared Chrome, as this program ends. */
+	async endAll(): Promise<void> {
+		await Promise.allSettled([...this.#agents.keys()].map((owner) => this.#save(owner)));
+		this.#forgetAll();
+		await this.#o.shared.stop();
+	}
+
+	#forget(owner: string): void {
+		const browser = this.#agents.get(owner);
+		if (browser) clearInterval(browser.saver), clearTimeout(browser.idle);
+		this.#agents.delete(owner);
+		for (const held of this.#holders.values()) held.delete(owner);
+		for (const [thread, of] of this.#threads) if (of === owner) this.#windows.delete(thread);
+	}
+
+	#forgetAll(): void {
+		for (const owner of [...this.#agents.keys()]) this.#forget(owner);
+	}
+
+	#jar(owner: string): string {
+		return path.join(this.#o.root, threadFolder(owner), "cookies.json");
+	}
+
+	/** The cookies the agent's browser had when they were last saved, without those that have expired since. */
+	async #saved(owner: string): Promise<Cookie[]> {
+		try {
+			const cookies = JSON.parse(await fs.readFile(this.#jar(owner), "utf8")) as Cookie[];
+			const now = this.#now() / 1000;
+			return Array.isArray(cookies) ? cookies.filter((cookie) => !(typeof cookie.expires === "number" && cookie.expires > 0 && cookie.expires < now)) : [];
+		} catch {
+			return [];
 		}
+	}
+
+	/** Saves the cookies of the agent's browser, readable by the person only. */
+	async #save(owner: string): Promise<void> {
+		const browser = this.#agents.get(owner);
+		if (!browser || !(await this.#o.shared.running())) return;
+		const rpc = new Rpc(await hostSocket(this.#o.shared));
+		let cookies: Cookie[];
+		try {
+			({ cookies } = await rpc.call<{ cookies: Cookie[] }>("Storage.getCookies", { browserContextId: browser.context }));
+		} finally {
+			rpc.close();
+		}
+		const file = this.#jar(owner);
+		await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
+		await fs.writeFile(`${file}.tmp`, JSON.stringify(cookies), { mode: 0o600 });
+		await fs.rename(`${file}.tmp`, file);
 	}
 
 	async #primaryIsNewer(since: number): Promise<boolean> {
@@ -2251,38 +2304,11 @@ export class ThreadBrowsers {
 		return Math.max(...stamps) > since;
 	}
 
-	/** The primary browser's port, starting the browser first when it isn't running; undefined where it can't be. */
-	async #primaryPort(): Promise<number | undefined> {
-		const port = async () => {
-			const first = (await fs.readFile(path.join(this.#o.primaryProfile, "DevToolsActivePort"), "utf8").catch(() => "")).split("\n")[0] ?? "";
-			const number = Number(first);
-			if (!Number.isInteger(number) || number <= 0) return undefined;
-			return (await this.#devTools(number).then(
-				(socket) => (socket.close(), true),
-				() => false,
-			))
-				? number
-				: undefined;
-		};
-		const found = await port();
-		if (found) return found;
-		try {
-			// Started as for an agent, it runs on with its profile, and quits when unused.
-			(await this.#o.primary.connect(() => {}, () => {})).close();
-		} catch (error) {
-			this.#o.log(`The primary browser couldn't be started to read its sign-ins: ${(error as Error).message}`);
-			return undefined;
-		}
-		return port();
-	}
-
 	/** What the primary browser has now: its cookies, taken afresh when `fresh` or when the last were old or the browser has changed since. */
 	async #cookies(fresh: boolean): Promise<Snapshot | undefined> {
 		const known = this.#snapshot;
 		if (known && !fresh && this.#now() - known.takenAt < SNAPSHOT_MAX_AGE_MS && !(await this.#primaryIsNewer(known.takenAt))) return known;
-		const port = await this.#primaryPort();
-		if (port === undefined) return undefined;
-		const rpc = new Rpc(await this.#devTools(port));
+		const rpc = new Rpc(await hostSocket(this.#o.primary));
 		try {
 			const { cookies } = await rpc.call<{ cookies: Cookie[] }>("Storage.getCookies");
 			return (this.#snapshot = { cookies, takenAt: this.#now() });
@@ -2291,24 +2317,31 @@ export class ThreadBrowsers {
 		}
 	}
 
+	/** Takes the agent a slot of a limited site, where fewer agents than its limit hold one. */
+	#claim(owner: string, site: string, max: number): boolean {
+		const held = this.#holders.get(site) ?? this.#holders.set(site, new Set()).get(site)!;
+		if (!held.has(owner) && held.size >= max) return false;
+		held.add(owner);
+		return true;
+	}
+
 	/**
-	 * Copies the person's sign-ins from the primary browser into the thread's browser; the note for the agent
-	 * when there are none to copy, or when a site limited to a number of displays at a time (displayd's
-	 * sites.json) is held by other chats: that site's cookies stay out, so one account isn't seen from several
-	 * browsers at once. `only` names the sites to retry, whose cookies are the only ones copied.
+	 * Copies `own` (the agent's saved cookies) and then the person's sign-ins from the primary browser into the
+	 * agent's context; the note for the agent when the person has none, or when a limited site is held by as many
+	 * other agents as it allows: that site's cookies stay out, so one account isn't used from several browsers at
+	 * once. `only` names the sites to retry, whose cookies are the only ones copied.
 	 */
-	async #copySignIns(thread: string, browser: ThreadBrowser, fresh: boolean, only?: Set<string>): Promise<string | undefined> {
+	async #copySignIns(owner: string, browser: AgentBrowser, rpc: Rpc, fresh: boolean, own: Cookie[], only?: Set<string>): Promise<string | undefined> {
 		let snapshot: Snapshot | undefined;
 		try {
 			snapshot = await this.#cookies(fresh);
 		} catch (error) {
 			this.#o.log(`Couldn't read the primary browser's sign-ins: ${(error as Error).message}`);
 		}
-		if (!snapshot) return `The primary browser couldn't be read, so this browser has no sign-ins. ${SIGNED_OUT.replace(/^The primary browser has no saved sign-ins; /, "")}`;
-		const limits = await this.#o.displays.sites();
+		const limits = (await this.#o.sites().catch(() => undefined)) ?? DEFAULT_SITES;
 		const bySite = new Map<string, Cookie[]>();
 		const free: Cookie[] = [];
-		for (const cookie of snapshot.cookies) {
+		for (const cookie of [...own, ...(snapshot?.cookies ?? [])]) {
 			const host = String(cookie.domain ?? "").toLowerCase().replace(/^\./, "");
 			const site = Object.keys(limits).find((name) => limits[name]!.domains.some((domain) => host === domain || host.endsWith(`.${domain}`)));
 			if (site === undefined) free.push(cookie);
@@ -2318,51 +2351,41 @@ export class ThreadBrowsers {
 		const notes: string[] = [];
 		for (const [site, cookies] of bySite) {
 			if (only && !only.has(site)) continue;
-			const claim = await this.#o.displays.claimSite(thread, site);
-			if (claim === "granted") {
+			if (this.#claim(owner, site, limits[site]!.max)) {
 				browser.claimed.add(site);
 				browser.withheld.delete(site);
 				copy.push(...cookies);
-			} else if (claim === "unreachable") {
-				browser.withheld.add(site);
-				notes.push(`Signed-in access to ${site} is limited to ${limits[site]!.max} display(s) at a time to avoid account flags, but displayd could not be reached to take a slot, so ${site} sign-ins were not copied. Use the Primary desktop for ${site} (ask the person to do the task there or wait), or retry later; never ask for credentials in chat.`);
 			} else {
 				browser.withheld.add(site);
-				notes.push(`Signed-in access to ${site} is limited to ${limits[site]!.max} display(s) at a time to avoid account flags, and another chat holds it. Use the Primary desktop for ${site} (ask the person to do the task there or wait), or retry later; never ask for credentials in chat.`);
+				notes.push(`Signed-in access to ${site} is limited to ${limits[site]!.max} agent(s) at a time to avoid account flags, and another agent holds it. Use the Primary desktop for ${site} (ask the person to do the task there or wait), or retry later; never ask for credentials in chat.`);
 			}
 		}
-		const rpc = new Rpc(await this.#devTools(browser.port));
 		try {
-			if (copy.length > 0) {
-				await rpc.call("Storage.setCookies", { cookies: copy.map(cookieParam) });
-				if (!only) await this.#copyStorage(rpc).catch((error) => this.#o.log(`Couldn't copy localStorage: ${(error as Error).message}`));
-			}
+			if (copy.length > 0) await rpc.call("Storage.setCookies", { cookies: copy.map(cookieParam), browserContextId: browser.context });
+			if (!only && snapshot && snapshot.cookies.length > 0) await this.#copyStorage(rpc, browser.context).catch((error) => this.#o.log(`Couldn't copy localStorage: ${(error as Error).message}`));
 		} catch (error) {
-			this.#o.log(`Couldn't copy the sign-ins into the thread's browser: ${(error as Error).message}`);
-		} finally {
-			rpc.close();
+			this.#o.log(`Couldn't copy the sign-ins into the browser of agent ${owner}: ${(error as Error).message}`);
 		}
-		if (!only && snapshot.cookies.length === 0) return SIGNED_OUT;
+		if (!snapshot) notes.unshift(`The primary browser couldn't be read, so its sign-ins weren't copied. ${SIGNED_OUT.replace(/^The primary browser has no saved sign-ins; /, "")}`);
+		else if (!only && snapshot.cookies.length === 0 && own.length === 0) return SIGNED_OUT;
 		return notes.length > 0 ? notes.join("\n") : undefined;
 	}
 
-	/** Copies the localStorage of the origins in `storage-origins.json` (none by default), from the primary browser into the one `to` is connected to. */
-	async #copyStorage(to: Rpc): Promise<void> {
+	/** Copies the localStorage of the origins in `storage-origins.json` (none by default), from the primary browser into the agent's context. */
+	async #copyStorage(to: Rpc, context: string): Promise<void> {
 		let origins: string[] = [];
 		try {
 			const listed = JSON.parse(await fs.readFile(this.#o.storageOrigins, "utf8"));
 			if (Array.isArray(listed)) origins = listed.filter((origin): origin is string => typeof origin === "string" && /^https?:\/\/[^/]+$/.test(origin));
 		} catch {}
 		if (origins.length === 0) return;
-		const primaryPort = await this.#primaryPort();
-		if (primaryPort === undefined) return;
-		const from = new Rpc(await this.#devTools(primaryPort));
+		const from = new Rpc(await hostSocket(this.#o.primary));
 		try {
 			for (const origin of origins) {
 				const items = await onOrigin(from, origin, `JSON.stringify(Object.entries(localStorage))`);
 				const entries = JSON.parse(String(items)) as [string, string][];
 				if (entries.length === 0) continue;
-				await onOrigin(to, origin, `(${JSON.stringify(entries)}).forEach(([key, value]) => localStorage.setItem(key, value))`);
+				await onOrigin(to, origin, `(${JSON.stringify(entries)}).forEach(([key, value]) => localStorage.setItem(key, value))`, context);
 			}
 		} finally {
 			from.close();
@@ -2390,8 +2413,8 @@ function cookieParam(cookie: Cookie): Cookie {
 }
 
 /** Evaluates `expression` in a page of `origin`, opened for it in a tab of its own and closed after: the page is what has the origin's storage. */
-async function onOrigin(rpc: Rpc, origin: string, expression: string): Promise<unknown> {
-	const { targetId } = await rpc.call<{ targetId: string }>("Target.createTarget", { url: `${origin}/`, background: true });
+async function onOrigin(rpc: Rpc, origin: string, expression: string, browserContextId?: string): Promise<unknown> {
+	const { targetId } = await rpc.call<{ targetId: string }>("Target.createTarget", { url: `${origin}/`, background: true, ...(browserContextId ? { browserContextId } : {}) });
 	try {
 		const { sessionId } = await rpc.call<{ sessionId: string }>("Target.attachToTarget", { targetId, flatten: true });
 		for (let waited = 0; waited < 10_000; waited += 250) {
@@ -3321,7 +3344,7 @@ async function main(): Promise<void> {
 	const apps = new Apps();
 	process.on("exit", () => apps.killAll());
 	if (triggers) process.on("exit", () => triggers.killOwned());
-	// Set once the thread browsers exist: ends them and lets go of their sites' slots before the program exits.
+	// Set once the agents' browser exists: saves their sign-ins and quits it before the program exits.
 	let endBrowsers: () => Promise<unknown> = async () => {};
 	const stop = () => Promise.allSettled([apps.stopAll(), endBrowsers(), ...(triggers ? [triggers.close()] : [])]).finally(() => process.exit(0));
 	for (const signal of ["SIGTERM", "SIGINT"] as const) process.on(signal, () => void stop());
@@ -3333,34 +3356,30 @@ async function main(): Promise<void> {
 				? { tokenFile: env.DISPLAYD_TOKEN_FILE }
 				: {}),
 	});
-	// Each thread's browser runs on its own display, with the person's sign-ins copied from the primary browser.
-	const threadBrowsers =
+	// The agents browse in one headless Chrome of their own, each agent in a context with its own sign-ins and the person's copied in.
+	const agentBrowsers =
 		chrome && browser
-			? new ThreadBrowsers({
-					executable: chrome,
-					root: path.join(os.homedir(), ".displayd", "threads"),
+			? new AgentBrowsers({
+					shared: localBrowser(chrome, path.join(os.homedir(), ".pim-computer", "agents-browser"), false, log, false),
+					root: path.join(os.homedir(), ".pim-computer", "agents"),
 					primaryProfile: path.join(os.homedir(), ".pim-computer", "browser"),
 					primary: browser,
 					storageOrigins: path.join(os.homedir(), ".displayd", "storage-origins.json"),
-					displays,
+					sites: () => displays.sites(),
 					log,
 				})
 			: undefined;
-	if (threadBrowsers) {
-		process.on("exit", () => void threadBrowsers.killAll());
-		endBrowsers = () => threadBrowsers.killAll();
-		void threadBrowsers.sweep().catch(() => {});
-		setInterval(() => void threadBrowsers.sweep().catch(() => {}), 60 * 60_000).unref();
-	}
+	if (agentBrowsers) endBrowsers = () => agentBrowsers.endAll();
 	const machine: Machine = {
 		root,
 		exec: (args, cwd) => runCommand(args, cwd, root),
 		...(browser ? { browser } : {}),
-		...(threadBrowsers ? { threadBrowsers } : {}),
+		...(agentBrowsers ? { agentBrowsers } : {}),
 		...(screen ? { screen } : {}),
 		...(driver ? { driver } : {}),
 		displays,
 		apps,
+		terminals: new Terminals(),
 	};
 	// An update of pim-computer is how an older computer gets displayd, which runs on in the background and never stops this.
 	const embedded = await startEmbeddedDisplayd({ say: log });

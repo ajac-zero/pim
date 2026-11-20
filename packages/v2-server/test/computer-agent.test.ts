@@ -120,6 +120,10 @@ real("an agent on a paired computer", () => {
 		expect((await results("shell"))[0]).toMatch(/Exit code 0[\s\S]*line one/);
 		expect((await results("file_read"))[0]).toContain("from-the-computer");
 		expect((await d.stack.admin.query("SELECT state, tool_name FROM pim_runtime.external_operations WHERE owner_id = $1", [ownerId])).rows).toEqual([{ state: "completed", tool_name: "shell" }]);
+		// The chat's terminal shows the command with what it printed; a reader that has seen it gets no copy again.
+		const terminal = (await web.call("GET", `/api/terminal?session=${chatId}`)).json;
+		expect(terminal).toMatchObject({ available: true, commands: [{ command: "echo from-the-computer > made.txt; cat hello.txt", cwd: "/workspace", output: "line one\nline two\n", exitCode: 0 }] });
+		expect((await web.call("GET", `/api/terminal?session=${chatId}&version=${terminal.version}`)).json).toEqual({ available: true, version: terminal.version });
 
 		// Files: write, then a conflicting edit is refused, an edit lands, and a path outside /workspace is refused.
 		const end2 = await ask(

@@ -13,7 +13,8 @@ and a person's take-over. `DisplayAllocator` takes its runner, store and memory 
 One display is one process group, started by one supervisor shell: `Xvnc` (1280x800, VNC on a
 loopback port only, no TCP X), `openbox`, a private `dbus-daemon` session and
 `at-spi-bus-launcher` and the display's own Cua Driver (`cua-env-driver serve`, an MCP server on a
-loopback port that sees only this display's windows; tools there need `delivery_mode: "foreground"`). If any of them exits the group ends. Its context directory,
+loopback port that sees only this display's windows; tools there need `delivery_mode: "foreground"`), or Pim's own driver in
+its place (`DISPLAYD_DRIVER_BIN`, below). If any of them exits the group ends. Its context directory,
 `/run/pim/displays/<id>/` (0700), holds what a process needs to join it:
 
 | File | Meaning |
@@ -40,9 +41,12 @@ lease. A display whose processes die is reaped. Displays start one at a time, ol
 so the memory reading that admits the next one includes the last.
 
 The memory guard (`src/memory.js`) scales with the computer displayd runs in. A display is admitted
-only if `MemAvailable - 1 GiB >= reserve`, where the reserve is 15% of `MemTotal` clamped to 0.5–3 GiB,
-and, when the computer has swap, `SwapFree >= 1 GiB`. At most `min(6, floor((MemTotal - reserve) / 1.5 GiB))`
-displays run, so 2 on a 3.9 GiB computer.
+only if `MemAvailable - 384 MiB >= reserve`, where the reserve is 15% of `MemTotal` clamped to 0.5–3 GiB,
+and, when the computer has swap, `SwapFree >= 1 GiB`. At most `min(6, floor((MemTotal - reserve) / 512 MiB))`
+displays run, so 6 on a 3.9 GiB computer and 3 on a 2 GiB one. A display holds no browser (agents browse in
+pim-computer's one shared headless Chromium): its Xvnc, openbox, dbus with the accessibility bus and desktop
+driver measure about 170 MiB, and the rest of the 384 MiB is for the app an agent opens there. Because the guard
+reads `MemAvailable` each time, the shared browser's own use is counted as it grows.
 
 State is kept in `state.json` in the state dir. After a restart displayd re-adopts every display
 whose process group is still its own (the pidfile and the name in `/proc/<pid>/cmdline`) and that
@@ -105,12 +109,13 @@ limited to `max` displays at a time. The limits are in `sites.json` in the state
 { "linkedin.com": { "max": 1, "domains": ["linkedin.com", "licdn.com"] } }
 ```
 
-`domains` (default: the site's name) match a host and its subdomains. pim-computer claims a slot
-for each limited site among the primary browser's cookies before copying them into a thread's
-browser, and copies only the cookies of sites it was granted; a thread that is refused is told, and
-is the one to ask the person to use the Primary desktop. A claim ends with its thread's display
-(released, reaped, preempted), with `POST /site-release`, and when that thread's browser stops. Claims
-are kept in `state.json` and survive a restart with their displays. Desktop tools are not limited.
+`domains` (default: the site's name) match a host and its subdomains. pim-computer reads the limits
+from `GET /sites` (and uses the default above where displayd doesn't answer) and counts them itself,
+per agent, since agents browse in its shared headless Chrome rather than on displays: an agent over a
+site's limit gets none of its cookies, is told, and is the one to ask the person to use the Primary
+desktop. The claims API (`POST /site-claim`, `POST /site-release`, the claims in `/displays` and
+`/health`) still works for other clients; a claim ends with its thread's display (released, reaped,
+preempted) or on release, and claims are kept in `state.json` and survive a restart with their displays.
 Adding a site is an entry in the file.
 
 ## Run
@@ -122,7 +127,7 @@ Adding a site is an entry in the file.
 | `DISPLAYD_STATE_DIR` | `/var/lib/displayd` | Holds `state.json` |
 | `DISPLAYD_CONTEXT_DIR` | `/run/pim/displays` | Context directories |
 | `DISPLAYD_MAX_DISPLAYS` | 6 | Lowers the hard maximum (the memory guard may already set it lower) |
-| `DISPLAYD_DRIVER_BIN` | `/usr/local/bin/cua-env-driver` | The Cua Driver binary |
+| `DISPLAYD_DRIVER_BIN` | `/usr/local/bin/cua-env-driver` | The display's driver: Cua's, or Pim's own, `computer/desktop-driver.ts` (which needs `wmctrl`, `xdotool` and `python3-gi` with `gir1.2-atspi-2.0` and `gir1.2-gtk-3.0`), which serves the same tools and doesn't stream the display |
 | `DISPLAYD_IDLE_TTL_MIN`, `DISPLAYD_BROWSER_TTL_MIN` | 10, 20 | Idle TTLs |
 
 ## Install

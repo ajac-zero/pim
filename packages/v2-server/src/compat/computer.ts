@@ -4,6 +4,7 @@
  *   GET / POST / DELETE /api/computer      its status, pairing one (the `pimc_` token is shown only in the answer) and forgetting it
  *   GET /api/computer/displays             the per-thread desktops on it, and POST .../displays/control to take one over
  *   GET / DELETE /api/browser?session=     whether its browser exists, and closing a chat's window
+ *   GET /api/terminal?session=             the commands a chat's agents ran in the shell, with their output as it comes
  *   GET / HEAD / PUT /api/files(/content)  the person's files on it, and DELETE /api/files
  *   GET /install.sh, GET /pim-computer.ts  what installs and updates `pim-computer` on a machine, public like the Worker's, and the triggers runtime's modules it loads beside it
  *
@@ -55,8 +56,10 @@ const etags = (header: string | string[] | undefined) => (typeof header === "str
  * the command's result, and the connection is closed after. Reading is never starting: `browser_status` says first whether the browser is running.
  */
 async function withBrowser<T>(computer: Computer, thread: string | null, use: (send: (method: string, params?: object, sessionId?: string) => Promise<any>) => Promise<T>): Promise<T | null> {
+	let perAgent = false;
 	const open = async (t: string | undefined) => {
-		const status = await computer.call<{ available: boolean; running: boolean }>("browser_status", t ? { thread: t } : {});
+		const status = await computer.call<{ available: boolean; running: boolean; agents?: boolean }>("browser_status", t ? { thread: t } : {});
+		perAgent ||= status.agents === true;
 		if (!status.running) return null;
 		let nextId = 0;
 		const waiting = new Map<number, (message: { result?: unknown; error?: { message: string } }) => void>();
@@ -80,7 +83,8 @@ async function withBrowser<T>(computer: Computer, thread: string | null, use: (s
 	};
 	try {
 		const own = await open(thread ?? undefined);
-		if (own || !thread) return own?.value ?? null;
+		// Where the agents browse in a browser of their own, a chat that hasn't browsed has nothing to show.
+		if (own || !thread || perAgent) return own?.value ?? null;
 		// A chat that hasn't leased a browser of its own shows the shared one when the computer has no displays at all (displayd is not there), as the agent's tools do.
 		const shown = await computer.call<{ displays: unknown[]; queue: unknown[] }>("displays_list", {}).catch(() => null);
 		const none = !shown || (shown.displays.length === 0 && shown.queue.length === 0);
@@ -179,6 +183,18 @@ export function computerRoutes(options: { source?: string } = {}): Route[] {
 			});
 			if (!png) throw new NotFoundError("The browser is closed");
 			return { status: 200, headers: { "content-type": "image/png", "cache-control": "no-store, private", "x-content-type-options": "nosniff" }, raw: png };
+		}),
+		// The commands a chat's agents ran in the shell, with what they printed as they run; `version` the reader has seen gets no copy again.
+		route("GET", "/api/terminal", async (ctx) => {
+			const p = await ctx.principal();
+			await ctx.app.identity.authz.enforce(p, "computer:use");
+			const session = ctx.url.searchParams.get("session");
+			if (!session) throw new BadRequestError("session must name the chat whose commands to read");
+			const seen = Number(ctx.url.searchParams.get("version"));
+			const computer = await ctx.app.relay.acquire(p.ownerId, "shell").catch(() => null);
+			// An older computer doesn't keep its commands: it has nothing to show.
+			const read = computer ? await computer.call<{ version: number; commands?: unknown[] }>("terminal_read", { thread: session, ...(Number.isInteger(seen) && seen > 0 ? { version: seen } : {}) }).catch(() => null) : null;
+			return ok({ available: read !== null, version: read?.version ?? 0, ...(read?.commands || !read ? { commands: read?.commands ?? [] } : {}) }, 200, noStore);
 		}),
 		route("DELETE", "/api/browser", async (ctx) => {
 			const { computer } = await withComputer(ctx, "browser");

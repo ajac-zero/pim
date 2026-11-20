@@ -5,7 +5,8 @@ import puppeteer, { type Browser, type CDPSession, type Dialog, type ElementHand
  * What the browser needs of the person's computer: a relay-bus call, a DevTools connection through the computer's socket and the folder of the person's files.
  * `./computer-tools.ts` gives it one that reaches the owner's paired computer over the Relay's bus.
  */
-export type BrowserTransport = { onmessage?: (message: string) => void; onclose?: () => void; note?: string; send(message: string): void; close(): void };
+/** `context` is the agent's browser context in the computer's shared Chrome, where it has one: the windows of other agents there are not this connection's to see. */
+export type BrowserTransport = { onmessage?: (message: string) => void; onclose?: () => void; note?: string; context?: string; send(message: string): void; close(): void };
 export type Computer = {
 	/** Whether a computer is connected now; a use that needs one says so when it is not. */
 	paired(): boolean;
@@ -31,9 +32,12 @@ export type Computer = {
  * browsing at once don't take each other's pages, and work in their windows
  * at the same time; one window does one thing at a time. A tab would do
  * for keeping pages apart, but Chrome doesn't draw a tab behind another,
- * which breaks pages that wait to be seen. The windows share the profile,
- * so what the person signs in to is signed in in all of them. Where each
- * window is, is kept, so it opens again there after the browser quits.
+ * which breaks pages that wait to be seen. Each agent's windows are in a
+ * browser context of its own in one headless Chrome the agents share, so
+ * what an agent signs in to is signed in for all its chats and for no other
+ * agent; the person's sign-ins in the computer's primary browser are copied
+ * into every agent's. Where each window is, is kept, so it opens again
+ * there after the browser quits.
  *
  * Pages are read as text with numbered references to what can be clicked
  * or typed into. A reference is stored on its element in the page, and
@@ -264,10 +268,9 @@ export class PimBrowser {
 	readonly #computer: Computer;
 	readonly #meta: Meta;
 	/**
-	 * Each conversation's own browser (the conversation id is also the thread
-	 * its display is leased to), on a display of its own: the computer gives
-	 * each chat a Chrome with a clean profile and the person's sign-ins
-	 * copied in, so chats never share a screen or a window.
+	 * Each conversation's connection to its agent's browser (a context in the
+	 * computer's shared Chrome, with the agent's sign-ins and the person's
+	 * copied in), which sees only that agent's windows.
 	 */
 	readonly #connections = new Map<string, Connection>();
 	/** Each chat's window, while the space is connected to the browser. */
@@ -749,7 +752,8 @@ export class PimBrowser {
 			const transport = await this.#computer.connectBrowser(chat);
 			if (transport.note) connection.note = transport.note;
 			// The window's own size, so what the person sees when they take over is what the agents read.
-			const browser = await puppeteer.connect({ transport, defaultViewport: null });
+			const { context } = transport;
+			const browser = await puppeteer.connect({ transport, defaultViewport: null, ...(context ? { targetFilter: (target: Target) => target.type() === "browser" || (target as unknown as { _getTargetInfo(): { browserContextId?: string } })._getTargetInfo().browserContextId === context } : {}) });
 			browser.on("disconnected", () => {
 				if (connection.browser !== browser) return;
 				connection.browser = undefined;

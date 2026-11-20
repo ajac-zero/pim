@@ -38,6 +38,7 @@ export class ComputerError extends PimError {
 }
 
 export type ComputerInfo = { agent: string; hostname: string; platform: string; arch: string; user: string; root: string; browser: string | null; screen: boolean; desktop: boolean; protocol: number; connectedAt: number };
+export type BrowserLink = { send(data: string): void; close(): void; context?: string; note?: string };
 export type FileEvent = { event: "file_changed"; path: string; [key: string]: unknown } | { event: "watch_error"; path: string; code: string | null };
 
 /** What a caller needs of a paired computer, wherever its socket is held: in this process (`ComputerConnection`) or in another one, over the bus (`RemoteComputer`). */
@@ -51,7 +52,8 @@ export interface Computer {
 	openScreen(channel: number, handler: (data: string | Uint8Array | null) => void, display?: string): Promise<void>;
 	screenInput(channel: number, data: string): void;
 	closeScreen(channel: number): void;
-	openBrowser(handler: (data: string | null) => void, thread?: string): Promise<{ send(data: string): void; close(): void }>;
+	/** A DevTools connection to the browser of the agent (`agent`) browsing in the thread, or, naming no agent, to that thread's as a viewer; `context` is the agent's browser context, where the computer has one. */
+	openBrowser(handler: (data: string | null) => void, thread?: string, agent?: string): Promise<BrowserLink>;
 	openAppSocket(appId: string, path: string, headers: Record<string, string>, handler: (data: Uint8Array | string | null) => void): Promise<{ send(data: Uint8Array | string): void; close(): void }>;
 	ping(): Promise<number | null>;
 }
@@ -66,7 +68,7 @@ export type RelayRequest =
 	| { op: "call"; name: string; args: Record<string, unknown>; timeoutMs?: number }
 	| { op: "watch" | "unwatch"; path: string }
 	| { op: "screen_open"; id: string; channel: number; display?: string }
-	| { op: "browser_open"; id: string; thread?: string }
+	| { op: "browser_open"; id: string; thread?: string; agent?: string }
 	| { op: "appws_open"; id: string; appId: string; path: string; headers: Record<string, string> };
 export type RelayReply = { ok: true; result?: unknown } | { ok: false; unavailable?: boolean; status?: number; message: string; remote?: { code?: string; [key: string]: unknown } };
 export type RelayStreamMessage =
@@ -307,10 +309,12 @@ export class ComputerConnection implements Computer {
 	}
 
 	/** A DevTools connection to the computer's browser: its messages go to `handler`, and `send` writes to it. */
-	async openBrowser(handler: (data: string | null) => void, thread?: string): Promise<{ send(data: string): void; close(): void }> {
-		const { channel } = await this.call<{ channel: number }>("browser_connect", thread ? { thread } : {}, 120_000);
+	async openBrowser(handler: (data: string | null) => void, thread?: string, agent?: string): Promise<BrowserLink> {
+		const { channel, context, note } = await this.call<{ channel: number; context?: string; note?: string }>("browser_connect", { ...(thread ? { thread } : {}), ...(agent ? { agent } : {}) }, 120_000);
 		this.#cdp.set(channel, handler);
 		return {
+			...(context ? { context } : {}),
+			...(note ? { note } : {}),
 			send: (data) => {
 				if (this.#cdp.has(channel) && !this.#closed) this.socket.send(JSON.stringify({ type: "cdp", channel, data }));
 			},
@@ -426,11 +430,11 @@ export class RemoteComputer implements Computer {
 	}
 
 	/** Registers stream `id` before it is opened, so no frame the computer sends first is lost; undone when the open fails. */
-	async #open(id: string, request: RelayRequest, handler: (m: RelayStreamMessage) => void, timeoutMs: number): Promise<void> {
+	async #open(id: string, request: RelayRequest, handler: (m: RelayStreamMessage) => void, timeoutMs: number): Promise<unknown> {
 		this.#streams.set(id, handler);
 		this.#listen();
 		try {
-			await this.#ask(request, timeoutMs);
+			return (await this.#ask(request, timeoutMs)).result;
 		} catch (error) {
 			this.#streams.delete(id);
 			this.#maybeUnlisten();
@@ -469,10 +473,10 @@ export class RemoteComputer implements Computer {
 		} else if (m.k === "data") handler(m.binary ? new Uint8Array(Buffer.from(m.data, "base64")) : m.data);
 	}
 
-	async openBrowser(handler: (data: string | null) => void, thread?: string): Promise<{ send(data: string): void; close(): void }> {
+	async openBrowser(handler: (data: string | null) => void, thread?: string, agent?: string): Promise<BrowserLink> {
 		const id = newId("rb");
-		await this.#open(id, { op: "browser_open", id, ...(thread ? { thread } : {}) }, (m) => this.#down(id, m, (d) => handler(d === null ? null : String(d))), 120_000 + 3_000);
-		return { send: (data) => this.#streams.has(id) && this.bus.publish(this.ownerId, { k: "data", id, dir: "up", binary: false, data }), close: () => this.#end(id) };
+		const opened = ((await this.#open(id, { op: "browser_open", id, ...(thread ? { thread } : {}), ...(agent ? { agent } : {}) }, (m) => this.#down(id, m, (d) => handler(d === null ? null : String(d))), 120_000 + 3_000)) ?? {}) as { context?: string; note?: string };
+		return { ...opened, send: (data) => this.#streams.has(id) && this.bus.publish(this.ownerId, { k: "data", id, dir: "up", binary: false, data }), close: () => this.#end(id) };
 	}
 
 	async openAppSocket(appId: string, path: string, headers: Record<string, string>, handler: (data: Uint8Array | string | null) => void): Promise<{ send(data: Uint8Array | string): void; close(): void }> {
@@ -697,9 +701,9 @@ export class Relay {
 					this.#hosted.set(request.id, { up: (data) => link.screenInput(request.channel, String(data)), close: () => (this.#hosted.delete(request.id), link.closeScreen(request.channel)) });
 					return { ok: true };
 				case "browser_open": {
-					const transport = await link.openBrowser((data) => down(request.id, data), request.thread);
+					const transport = await link.openBrowser((data) => down(request.id, data), request.thread, request.agent);
 					this.#hosted.set(request.id, { up: (data) => transport.send(String(data)), close: () => (this.#hosted.delete(request.id), transport.close()) });
-					return { ok: true };
+					return { ok: true, result: { ...(transport.context ? { context: transport.context } : {}), ...(transport.note ? { note: transport.note } : {}) } };
 				}
 				case "appws_open": {
 					const transport = await link.openAppSocket(request.appId, request.path, request.headers, (data) => down(request.id, data));

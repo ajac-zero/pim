@@ -3,29 +3,33 @@ import { test } from 'node:test'
 import { memoryGuard, parseMeminfo, reserveBytesFor } from '../src/memory.js'
 
 const GiB = 1024 ** 3
+const MiB = 1024 ** 2
 const TOTAL = 15.6 * GiB
 
-const SMALL = 3.9 * GiB // the agent computer: 4 GiB swap, reserve about 0.585 GiB, hard maximum 2
+const SMALL = 3.9 * GiB // the agent computer: 4 GiB swap, reserve about 0.585 GiB, hard maximum 6 (512 MiB slots)
 // [name, total, available, active, swapTotal, swapFree, allow]
 const table = [
 	['3.9 GiB computer, 2.7 GiB available, none running', SMALL, 2.7 * GiB, 0, 4 * GiB, 4 * GiB, true],
-	['3.9 GiB computer, one running, still fits', SMALL, 2.7 * GiB, 1, 4 * GiB, 4 * GiB, true],
-	['3.9 GiB computer, hard maximum of 2 reached', SMALL, 2.7 * GiB, 2, 4 * GiB, 4 * GiB, false],
-	['3.9 GiB computer, too little memory available', SMALL, 1.5 * GiB, 0, 4 * GiB, 4 * GiB, false],
+	['3.9 GiB computer, five running, the sixth still fits', SMALL, 2.7 * GiB, 5, 4 * GiB, 4 * GiB, true],
+	['3.9 GiB computer, hard maximum of 6 reached', SMALL, 2.7 * GiB, 6, 4 * GiB, 4 * GiB, false],
+	['3.9 GiB computer, just under reserve 0.585 + cost 0.375', SMALL, 0.96 * GiB - 1, 0, 4 * GiB, 4 * GiB, false],
+	['3.9 GiB computer, 1 GiB available is enough for one', SMALL, 1 * GiB, 0, 4 * GiB, 4 * GiB, true],
 	['low free swap refuses', SMALL, 2.7 * GiB, 0, 4 * GiB, 1 * GiB - 1, false],
 	['swap free at exactly 1 GiB is enough', SMALL, 2.7 * GiB, 0, 4 * GiB, 1 * GiB, true],
 	['no swap at all is not a refusal', SMALL, 2.7 * GiB, 0, 0, 0, true],
+	['2 GiB computer, hard maximum of 3', 2 * GiB, 1.5 * GiB, 3, 0, 0, false],
+	['2 GiB computer, third display taken', 2 * GiB, 1.5 * GiB, 2, 0, 0, true],
 	['15.6 GiB, 10 GiB available, none running', 15.6 * GiB, 10 * GiB, 0, 0, 0, true],
 	['15.6 GiB, sixth display taken', 15.6 * GiB, 10 * GiB, 5, 0, 0, true],
 	['15.6 GiB, hard maximum of 6', 15.6 * GiB, 14 * GiB, 6, 0, 0, false],
-	['15.6 GiB, just under reserve 2.34 + cost 1', 15.6 * GiB, 3.34 * GiB - 1, 0, 0, 0, false],
+	['15.6 GiB, just under reserve 2.34 + cost 0.375', 15.6 * GiB, 2.715 * GiB - 1, 0, 0, 0, false],
 	['no memory at all', 15.6 * GiB, 0, 0, 0, 0, false],
 ]
 for (const [name, total, avail, active, swapTotal, swapFree, allow] of table)
 	test(`memoryGuard: ${name}`, () => {
 		const r = memoryGuard({ memAvailableBytes: avail, memTotalBytes: total, swapTotalBytes: swapTotal, swapFreeBytes: swapFree, activeDisplays: active })
 		assert.equal(r.allow, allow, r.reason)
-		assert.equal(r.headroomBytes, avail - 1 * GiB - reserveBytesFor(total))
+		assert.equal(r.headroomBytes, avail - 384 * MiB - reserveBytesFor(total))
 	})
 
 test('reserveBytesFor clamps 15% of MemTotal to 0.5-3 GiB', () => {

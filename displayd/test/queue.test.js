@@ -8,7 +8,7 @@ const GiB = 1024 ** 3
 const MIN = 60_000
 let clock, runner, store
 
-// Memory for 2 displays at 3.9 GiB total, as on the real computer, so a third thread must queue.
+// Two displays at most (`maxDisplays`), on a 3.9 GiB computer, so a third thread must queue.
 const mem = { memAvailableBytes: 3 * GiB, memTotalBytes: 3.9 * GiB }
 beforeEach(() => {
 	clock = 1_000_000

@@ -61,7 +61,7 @@ test('the lease carries the display environment', async () => {
 test('states: queued, starting, active, idle, active again, reaping, gone', async () => {
 	const a = make()
 	// Not enough memory: the lease waits in queued.
-	mem.memAvailableBytes = 3 * GiB
+	mem.memAvailableBytes = 2.5 * GiB
 	assert.equal((await a.acquire('t1', 's1')).state, 'queued')
 	assert.equal(a.get('t1').display, null)
 	assert.equal(runner.calls.length, 0)

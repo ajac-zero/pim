@@ -5,7 +5,7 @@ import type { AddressInfo } from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { DisplayClient, handle, Link, type Machine, runCommand, type ScreenHost } from "../pim-computer";
+import { DisplayClient, handle, Link, type Machine, runCommand, type ScreenHost, Terminals } from "../pim-computer";
 
 type Req = { method: string; url: string; body: any; auth?: string };
 
@@ -192,6 +192,46 @@ describe("exec with a thread", () => {
 		expect(await run("q")).toBeNull();
 		expect(await run()).toBeNull();
 		expect(displayd.seen.some((r) => r.url === "/acquire")).toBe(false);
+	});
+});
+
+describe("a thread's terminal", () => {
+	it("shows a thread's commands with their output as it comes, how they ended, and nothing of other threads", async () => {
+		const machine: Machine = { root: dir, exec: (args, cwd) => runCommand(args, cwd, dir), terminals: new Terminals() };
+		const read = (thread: string, version?: number) => handle(machine, "terminal_read", { thread, ...(version === undefined ? {} : { version }) }) as Promise<any>;
+		const running = handle(machine, "exec", { command: "printf 'one\\n'; sleep 0.4; printf 'two\\n' >&2; exit 3", thread: "a" });
+		let during: any;
+		for (let waited = 0; waited < 2_000; waited += 20) {
+			during = await read("a");
+			if (during.commands[0]?.output) break;
+			await new Promise((resolve) => setTimeout(resolve, 20));
+		}
+		expect(during.commands).toMatchObject([{ id: 1, command: "printf 'one\\n'; sleep 0.4; printf 'two\\n' >&2; exit 3", cwd: "/workspace", output: "one\n", endedAt: null, exitCode: null }]);
+		expect((await running as any).exitCode).toBe(3);
+		const after = await read("a");
+		expect(after.commands).toMatchObject([{ id: 1, output: "one\ntwo\n", exitCode: 3, timedOut: false }]);
+		expect(after.commands[0].endedAt).toEqual(expect.any(Number));
+		expect(after.version).toBeGreaterThan(during.version);
+		// A reader that has seen this version gets no copy again.
+		expect(await read("a", after.version)).toEqual({ version: after.version });
+		// Another thread's terminal is its own; a command that names no thread is in none.
+		await handle(machine, "exec", { command: "echo b", thread: "b", cwd: "/workspace" });
+		await handle(machine, "exec", { command: "echo nobody" });
+		expect((await read("a")).commands).toHaveLength(1);
+		expect((await read("b")).commands.map((c: any) => c.output)).toEqual(["b\n"]);
+		expect(await read("c")).toEqual({ version: 0, commands: [] });
+	});
+
+	it("keeps a thread's last twenty commands, with the end of a long output", async () => {
+		const terminals = new Terminals();
+		for (let i = 1; i <= 22; i++) terminals.start("a", `echo ${i}`, "/workspace").end({ exitCode: 0, signal: null, timedOut: false });
+		const long = terminals.start("a", "yes", "/workspace");
+		long.write(`${"x".repeat(40_000)}END`);
+		const { commands } = terminals.read("a");
+		expect(commands!.map((c) => c.command).slice(0, 2)).toEqual(["echo 4", "echo 5"]);
+		expect(commands).toHaveLength(20);
+		expect(commands!.at(-1)!.output).toHaveLength(32_000);
+		expect(commands!.at(-1)!.output.endsWith("END")).toBe(true);
 	});
 });
 

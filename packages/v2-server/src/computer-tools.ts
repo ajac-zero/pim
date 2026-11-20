@@ -24,6 +24,7 @@ import { hostedTools } from "./hosted-tools.ts";
 import { recordResult } from "./tool-approval.ts";
 import { sawFile } from "./file-changes.ts";
 import { type BrowserTransport, type Computer as BrowserComputer, describePage, PimBrowser } from "./computer-browser.ts";
+import { rosterOf } from "./agent-team-tools.ts";
 
 type Part = { type: "text"; text: string } | { type: "image"; data: string; mimeType: string };
 type Result = { output: Part[]; isError?: boolean };
@@ -426,9 +427,18 @@ export function computerTools(deps: ComputerToolDeps, kit: ComputerToolKit): Too
 	let root = "";
 	// References count up across pages; a process that restarts begins above anything an earlier one gave, so an approval that waited across a restart reaches the element it named or none.
 	const meta = new Map<string, string>([["browser_next_ref", String(Math.floor(Date.now() / 1000))]]);
-	// Each chat's browser is on a display of its own where the computer runs displayd. A computer without it (a laptop, a plain server) has one browser, the primary, which the chats
-	// share, each in a window of its own; that is remembered once the computer has said so.
+	// Each agent browses in a context of its own in the computer's shared Chrome, with its own sign-ins, and each of its chats in a window of its own: the computer is told the
+	// chat's agent (`agentOf`). An older computer gives each chat a Chrome on a display of its own, where it runs displayd, and otherwise has one browser, the primary,
+	// which the chats share, each in a window of its own; that is remembered once the computer has said so.
 	let sharedBrowser = false;
+	const agents = new Map<string, string>();
+	const agentOf = async (thread: string) => {
+		let agent = agents.get(thread);
+		// A conversation that is not a chat (and so has no agent of its own to find) browses as itself.
+		if (agent === undefined) agents.set(thread, (agent = (await rosterOf(deps.runtime, ownerId, thread).catch(() => null))?.self ?? thread));
+		return agent;
+	};
+	const scoped = (thread: string) => ({ thread, agent: agents.get(thread) ?? thread });
 	const perThread = async <T>(thread: string | undefined, run: (thread: string | undefined) => Promise<T>): Promise<T> => {
 		if (!thread || sharedBrowser) return run(undefined);
 		try {
@@ -442,8 +452,8 @@ export function computerTools(deps: ComputerToolDeps, kit: ComputerToolKit): Too
 	const asBrowser: BrowserComputer = {
 		paired: () => current !== null,
 		status: () => ({ state: current ? "online" : "offline" }),
-		browserStatus: (thread) => (current ? perThread(thread, (t) => current!.call("browser_status", t ? { thread: t } : {})) : Promise.resolve({ available: false, running: false })),
-		stopBrowser: async (thread) => void (await current?.call("browser_stop", thread ? { thread } : {}).catch(() => undefined)),
+		browserStatus: (thread) => (current ? perThread(thread, (t) => current!.call("browser_status", t ? scoped(t) : {})) : Promise.resolve({ available: false, running: false })),
+		stopBrowser: async (thread) => void (await current?.call("browser_stop", thread ? scoped(thread) : {}).catch(() => undefined)),
 		fs: { mkdir: async (path, options) => void (await current!.call("mkdir", { path, recursive: options.recursive })) },
 		localPath: async (path) => {
 			await current!.call("stat", { path });
@@ -455,7 +465,9 @@ export function computerTools(deps: ComputerToolDeps, kit: ComputerToolKit): Too
 		connectBrowser: async (thread) => {
 			const computer = current!;
 			const transport: BrowserTransport = { send: () => {}, close: () => {} };
-			const link = await perThread(thread, (t) => computer.openBrowser((data) => (data === null ? transport.onclose?.() : transport.onmessage?.(data)), t));
+			const link = await perThread(thread, (t) => computer.openBrowser((data) => (data === null ? transport.onclose?.() : transport.onmessage?.(data)), t, t ? (agents.get(t) ?? t) : undefined));
+			if (link.context) transport.context = link.context;
+			if (link.note) transport.note = link.note;
 			transport.send = (message) => link.send(message);
 			transport.close = () => link.close();
 			return transport;
@@ -465,6 +477,7 @@ export function computerTools(deps: ComputerToolDeps, kit: ComputerToolKit): Too
 	/** A browser use: the computer is acquired first (so "unavailable" is immediate), and the browser's own failures are the model's to read. */
 	const browse = async <T>(api: any, run: (chat: string, computer: RemoteComputer) => Promise<T>): Promise<T> => {
 		const { computer, thread } = await use(api, "browser");
+		await agentOf(thread);
 		current = computer;
 		root = computer.info?.root ?? root;
 		if (!computer.info?.browser) throw new Error("The person's computer has no Chrome or Chromium, so there is no browser.");

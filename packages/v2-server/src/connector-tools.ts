@@ -37,21 +37,19 @@ export async function chatApps(runtime: RuntimeDb, ownerId: string, chat: string
 /** Whether an agent lists a connector: by its id, by the directory entry it connects (`google/gmail`), or by its name, as the Connectors screen shows which agents have it. */
 export const listsConnector = (apps: readonly string[], c: Pick<ConnectorRow, "id" | "name" | "appRef">): boolean => apps.includes(c.id) || (c.appRef != null && apps.includes(c.appRef)) || apps.includes(c.name);
 
-/** Whether a tool must ask first under its connector's approval policy. */
-export function needsApproval(tool: Pick<McpTool, "annotations">, approval: Approval): boolean {
-	if (approval === "all") return true;
-	if (approval === "none") return false;
-	return tool.annotations?.readOnlyHint !== true;
+/** Whether a tool must ask first under its connector's approval policy: only `all` asks. Connecting a service is consent to use its tools, so `writes` (the old default) and `none` both let them run. */
+export function needsApproval(approval: Approval): boolean {
+	return approval === "all";
 }
 
 /**
- * A tool's permission for an owner: their choice, or else off until the tool is enabled, then the connector's policy (a read-only tool runs, any other asks). A tool
+ * A tool's permission for an owner: their choice, or else off until the tool is enabled, then the connector's policy (every tool runs, unless the policy is `all`). A tool
  * the connector marks destructive is off until the person switches it On (or Ask), and then runs as they said, as in v1. One agent's switch can only turn it off. A choice is tied to the tool's definition when it was made: a connector
  * that changed a tool the person let run gets it asked about again (`changed`), and an agent's switch for it is off, until they choose anew.
  */
 export function resolvePermission(connector: Pick<ConnectorRow, "id" | "enabledTools" | "approval">, tool: McpTool, permissions: readonly PermissionRow[], agentId?: string, definition: string | null = toolDefinition(tool)) {
 	const row = (audience: string) => permissions.find((p) => p.audience === audience && p.app === connector.id && p.tool === tool.name) ?? null;
-	const fallback: Permission = connector.enabledTools.includes(tool.name) && tool.annotations?.destructiveHint !== true ? (needsApproval(tool, connector.approval) ? "ask" : "on") : "off";
+	const fallback: Permission = connector.enabledTools.includes(tool.name) && tool.annotations?.destructiveHint !== true ? (needsApproval(connector.approval) ? "ask" : "on") : "off";
 	const owner = row("owner");
 	const agent = agentId ? row(agentAudience(agentId)) : null;
 	const ownerChanged = choiceChanged(owner, definition, true);

@@ -289,7 +289,7 @@ export class ConnectorService {
 		}
 	}
 
-	/** Which tools ask first by default: those that do not declare themselves read-only (`writes`), every tool (`all`), or none. */
+	/** Whether tools ask first by default: every tool does under `all`; under `writes` and `none` none does, since connecting a service is consent to use its tools. */
 	async setApproval(p: Principal, id: string, approval: string): Promise<void> {
 		await this.app.identity.authz.enforce(p, "api:write");
 		if (!["writes", "all", "none"].includes(approval)) throw new BadRequestError("approval must be one of writes, all, none");

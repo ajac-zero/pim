@@ -257,13 +257,13 @@ real("native and OAuth connectors", () => {
 		expect(stand.calls("GET /gmail/messages").length).toBeGreaterThan(0);
 	}, 180_000);
 
-	it("connects Spotify, whose playback tools ask first, and reads what is playing", async () => {
+	it("connects Spotify, whose playback tools run like the rest, and reads what is playing", async () => {
 		const started = (await web.call("POST", "/api/mcp", { app: "spotify/spotify" })).json;
 		expect((await signIn(started.authUrl)).json).toContain("Spotify is connected");
 		const c = (await connection("spotify/spotify"))!;
 		expect(c.tools.map((t) => t.name)).toEqual(["now_playing", "search", "play", "pause"]);
 		const perms = (await web.call("GET", "/api/permissions")).json.tools as { app: string; tool: string; permission: string }[];
-		expect(Object.fromEntries(perms.filter((t) => t.app === c.id).map((t) => [t.tool, t.permission]))).toEqual({ now_playing: "on", search: "on", play: "ask", pause: "ask" });
+		expect(Object.fromEntries(perms.filter((t) => t.app === c.id).map((t) => [t.tool, t.permission]))).toEqual({ now_playing: "on", search: "on", play: "on", pause: "on" });
 		await send("what is playing?", toolUse(fauxToolCall("connector_call", { connector: c.id, tool: "now_playing" })));
 		expect((await results("connector_call")).at(-1)).toContain("Playing: Song by Band · Album (61s of 180s)");
 	}, 120_000);

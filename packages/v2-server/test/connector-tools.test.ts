@@ -138,9 +138,11 @@ real("connector tools", () => {
 	it("keeps the credential sealed and shows each tool's default permission", async () => {
 		expect((await d.stack.admin.query("SELECT credential FROM pim_app.connectors")).rows[0].credential).not.toContain(TOKEN);
 		const tools = ((await web.call("GET", "/api/permissions")).json.tools as { app: string | null; tool: string; permission: string; default: string; readOnly: boolean; destructive: boolean }[]).filter((t) => t.app !== null);
-		expect(Object.fromEntries(tools.map((t) => [t.tool, t.permission]))).toEqual({ search: "on", create_ticket: "ask", delete_all: "off" });
+		expect(Object.fromEntries(tools.map((t) => [t.tool, t.permission]))).toEqual({ search: "on", create_ticket: "on", delete_all: "off" });
 		expect(tools.find((t) => t.tool === "search")).toMatchObject({ readOnly: true });
 		expect(tools.find((t) => t.tool === "delete_all")).toMatchObject({ destructive: true });
+		// Connecting is consent, so a tool with effects runs too; the tests that follow need one that asks first, which only the person's own choice makes.
+		expect((await web.call("PUT", "/api/permissions", { app: connector, tool: "create_ticket", permission: "ask" })).json).toMatchObject({ permission: "ask", chosen: "ask" });
 	});
 
 	it("offers the tools that are not off and runs a read-only one", async () => {
@@ -308,7 +310,8 @@ real("connector tools", () => {
 		expect((await put("search", "ask", { agent: "someone" })).status).toBe(400);
 		expect((await put("nothing", "on")).status).toBe(404);
 
-		expect((await put("create_ticket", null)).json).toMatchObject({ permission: "ask", chosen: null });
+		expect((await put("create_ticket", null)).json).toMatchObject({ permission: "on", chosen: null });
+		expect((await put("create_ticket", "ask")).json).toMatchObject({ permission: "ask", chosen: "ask" });
 		await send("ask again", true, toolUse(fauxToolCall("connector_call", { connector, tool: "create_ticket", arguments: { title: "Always" } })));
 		const approval = await waiting();
 		expect((await web.call("POST", `/api/approvals/${approval.id}/approve`, { always: true })).status).toBe(200);

@@ -309,7 +309,7 @@ real("guests, circles and the admin's majordomo", () => {
 		// The host's own agents never see a circle's choices.
 		const own = (await host.web.call("GET", "/api/permissions")).json.tools as { tool: string; permission: string }[];
 		expect(own.find((t) => t.tool === "search")!.permission).toBe("on");
-		expect(own.find((t) => t.tool === "create_ticket")!.permission).toBe("ask");
+		expect(own.find((t) => t.tool === "create_ticket")!.permission).toBe("on");
 
 		// The host's time zone and the memory its circle may read are the visit's, and no other: the circle reads nothing until it is given a scope.
 		const hostP = { kind: "user", ownerId: host.ownerId, role: "admin", sessionId: "s" } as never;

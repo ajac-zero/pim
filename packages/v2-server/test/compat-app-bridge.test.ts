@@ -87,6 +87,9 @@ describe("an app's bridge and its page", () => {
 		await stack?.drop();
 	});
 
+	/** The person's own choice of Ask for a connector's tool, as Settings makes it. */
+	const setToAsk = (connector: string, tool: string) => app.db.owner(people.ada!.ownerId, (tx) => tx.query("INSERT INTO pim_app.tool_permissions (owner_id, audience, app, tool, permission) VALUES ($1, 'owner', $2, $3, 'ask')", [people.ada!.ownerId, connector, tool]));
+
 	const html = (n: string) => ({ "index.html": `<!doctype html><p>${n}</p>` });
 
 	it("keeps text per person and per app, within limits, and lets a circle's members share one scope", async () => {
@@ -153,7 +156,8 @@ describe("an app's bridge and its page", () => {
 		const id = (await call("ada", "POST", "/api/apps", { title: "Tool", kind: "html", files: html("t") })).json.id;
 		const c = connectorId;
 		expect((await bridge("ada", id, 1, "tools.call", { name: `${c}/read`, input: { q: 1 } })).json).toEqual({ needs: { capability: `tool:${c}/read`, label: "Notes: read" } });
-		// `write` is not read-only, so it asks first by default and a page can't use it, nor be granted it.
+		// `write` runs by default like every tool, but once the person sets it to Ask a page can't use it, nor be granted it.
+		await setToAsk(c, "write");
 		expect((await bridge("ada", id, 1, "tools.call", { name: "write" })).json).toMatchObject({ error: "tool_not_on" });
 		expect((await call("ada", "POST", `/api/artifacts/${id}/versions/1/grants`, { capability: `tool:${c}/write` })).status).toBe(403);
 		expect((await bridge("ada", id, 1, "tools.call", { name: "missing" })).status).toBe(404);
@@ -168,7 +172,8 @@ describe("an app's bridge and its page", () => {
 		const id = (await call("ada", "POST", "/api/apps", { title: "Songs", kind: "html", files: html("s") })).json.id;
 		const name = `${spotifyId}/search`;
 		expect((await bridge("ada", id, 1, "tools.call", { name, input: { query: "fado" } })).json).toEqual({ needs: { capability: `tool:${name}`, label: "Spotify: search" } });
-		// `play` has effects, so it asks first and a page can't use it.
+		// `play` is set to Ask, so a page can't use it.
+		await setToAsk(spotifyId, "play");
 		expect((await bridge("ada", id, 1, "tools.call", { name: `${spotifyId}/play` })).json).toMatchObject({ error: "tool_not_on" });
 		await call("ada", "POST", `/api/artifacts/${id}/versions/1/grants`, { capability: `tool:${name}` });
 		expect((await bridge("ada", id, 1, "tools.call", { name, input: { query: "fado" } })).json).toEqual({ value: "- Fado by Ana · Lisboa [spotify:track:1]" });

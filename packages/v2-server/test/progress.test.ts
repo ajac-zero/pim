@@ -113,9 +113,11 @@ real("progress lines on the real stack", () => {
 		expect(asked[0]).toContain("Their request: what is on that page?");
 		expect(asked[0]).toContain("fetch_url");
 		const call = (line.data as { calls: string[] }).calls[0]!;
+		// The model's request lists fetch_url among its tools before the call is written, so wait for the call itself.
 		const done = await waitFor("the transcript", async () => {
 			const rows = (await d.stack.admin.query("SELECT record FROM pim_runtime.entries WHERE owner_id = $1 AND record LIKE '%fetch_url%'", [ownerId])).rows;
-			return rows.length > 0 ? rows.map((r) => r.record).join("\n") : undefined;
+			const records = rows.map((r) => r.record).join("\n");
+			return records.includes(call) ? records : undefined;
 		}, 60_000);
 		expect(done).toContain(call);
 	}, 120_000);

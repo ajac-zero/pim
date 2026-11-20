@@ -38,6 +38,8 @@ export function envFor(d: Deployment, role: "gate" | "live" | "runner" | "forge"
 		PIM_RATE_API: "1000000",
 		// A deployment's default is that the person's majordomo answers approvals; these tests answer them by hand, and the ones about the majordomo's review choose that policy themselves.
 		PIM_APPROVAL_POLICY: "explicit",
+		// The memory nap and the memory tree's summaries ask the model in the background, which would take the scripted answers meant for a test's turns; memory-nap.test.ts turns them on.
+		PIM_MEMORY_NAP: "off",
 		...extra,
 	};
 }

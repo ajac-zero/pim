@@ -1,7 +1,6 @@
 /**
- * The memory nap: while nobody is in a chat, a Runner reads what was said in it since it last napped there and keeps what is worth remembering as a memory (v1's optmem nap,
- * `src/extensions/optmem`, which compressed a space's memory log into a tree of summaries on a background task; V2's memory is a flat list, so what is ported is the part that
- * turns conversations into memories on the memory model).
+ * The memory nap: while nobody is in a chat, a Runner reads what was said in it since it last napped there and keeps what is worth remembering as a memory, on the memory model.
+ * The same loop summarizes the memory into its tree (v1's optmem nap, `src/extensions/optmem`; see `./memory-tree.ts`).
  *
  * - Which chats: those quiet for `PIM_MEMORY_NAP_IDLE_SECONDS` (default 600) that moved since their last nap (`pim_app.nap_candidates`, migration 0647, the one read across
  *   owners). Chats made for tasks, triggers, reviews and visits, a room's seats, archived and deleted chats are not napped.
@@ -9,7 +8,7 @@
  *   The memory and the chat's `napped_at` are one transaction, so a nap that is repeated, or raced by another Runner, writes the same row and never a second memory.
  * - Which model: `complete` of the agent host (`PIM_MEMORY_MODEL`, else the utility model, else the chosen model). A chat whose model is unavailable or fails is tried again later, not
  *   marked; a chat with nothing worth keeping is marked and its memory, if it had one, forgotten.
- * - `PIM_MEMORY_NAP=off` leaves the nap out; `PIM_MEMORY_NAP_POLL_MS` (default 60000) is how often a Runner looks.
+ * - `PIM_MEMORY_NAP=off` leaves the nap and the tree's summaries out; `PIM_MEMORY_NAP_POLL_MS` (default 60000) is how often a Runner looks.
  */
 import { createHash } from "node:crypto";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -17,6 +16,7 @@ import type { App } from "@pim/v2-app/app";
 import type { Db as RuntimeDb } from "@pim/v2-runtime/db";
 import { PgPiStorage } from "@pim/v2-runtime/storage";
 import type { Pool } from "pg";
+import { compressPass } from "./memory-tree.ts";
 
 const MAX_TEXT = 20_000;
 const MIN_TEXT = 120;
@@ -120,13 +120,20 @@ export async function napPass(options: NapOptions, failed = new Map<string, numb
 	return written;
 }
 
-/** Starts the nap loop of a Runner; the returned function stops it, after any pass in flight. */
+/** Starts the nap loop of a Runner, which naps chats and then summarizes the memory they and the agents kept; the returned function stops it, after any pass in flight. */
 export function startMemoryNap(options: NapOptions): () => Promise<void> {
 	if (options.env.PIM_MEMORY_NAP === "off") return async () => {};
 	const failed = new Map<string, number>();
+	const failedOwners = new Map<string, number>();
 	let active: Promise<unknown> | undefined;
 	const timer = setInterval(() => {
-		if (!active) active = napPass(options, failed).catch((error) => options.onError?.(error)).finally(() => (active = undefined));
+		if (!active) {
+			active = napPass(options, failed)
+				.catch((error) => options.onError?.(error))
+				.then(() => compressPass(options, failedOwners))
+				.catch((error) => options.onError?.(error))
+				.finally(() => (active = undefined));
+		}
 	}, Number(options.env.PIM_MEMORY_NAP_POLL_MS ?? 60_000));
 	timer.unref();
 	return async () => {

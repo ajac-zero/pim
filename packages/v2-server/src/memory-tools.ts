@@ -1,5 +1,5 @@
 /**
- * The memory tools with v1's rules (`src/extensions/optmem/index.ts`): an agent keeps, finds, reads, forgets and moves memories only in the scopes it reads, a memory's title is one
+ * The memory tools with v1's rules (`src/extensions/optmem/index.ts`; the summaries `zoom` opens are `./memory-tree.ts`'s): an agent keeps, finds, reads, forgets and moves memories only in the scopes it reads, a memory's title is one
  * line of at most 280 bytes, recall says when it shows only the newest matches, and the majordomo names the person's shared scopes and, once the person approves, lets other agents read
  * them. Where the scopes are kept is `Memories` and `Agents.memoryOf` in `@pim/v2-app`.
  */
@@ -9,6 +9,7 @@ import type { App } from "@pim/v2-app/app";
 import type { Principal } from "@pim/v2-contracts/identity";
 import type { Db as RuntimeDb } from "@pim/v2-runtime/db";
 import { rosterOf } from "./agent-team-tools.ts";
+import { parseScopedBlock, zoomBlock } from "./memory-tree.ts";
 import { askFirst, recordResult } from "./tool-approval.ts";
 
 type Result = { output: { type: "text"; text: string }[]; isError?: boolean };
@@ -55,7 +56,13 @@ export function memoryTools(deps: { ownerId: string; runtime: RuntimeDb; read: D
 			if (total === 0) return text("No match.");
 			return text(`${matches.map((m) => `[${m.id}] (${m.scope}) ${m.title}`).join("\n")}\n${total > matches.length ? `Newest ${matches.length} of ${total} matches. Narrow the pattern.` : `${total} matches.`}`);
 		}),
-		read("zoom", "Read a memory in full, or a block of its lines.", Type.Object({ id: S(), start: O(Type.Integer({ minimum: 1 })), count: O(Type.Integer({ minimum: 1, maximum: 400 })) }), async (app, call, a) => {
+		read("zoom", "Read a memory in full, or a block of its lines, by its id. Given a summary of your memory as it shows it, like everyone/16-31, open it into its two halves; repeat to reach the memories.", Type.Object({ id: S({ description: "A memory's id, or a summary's block, such as everyone/16-31." }), start: O(Type.Integer({ minimum: 1 })), count: O(Type.Integer({ minimum: 1, maximum: 400 })) }), async (app, call, a) => {
+			const block = parseScopedBlock(a.id);
+			if (block) {
+				if (!(await access(app, call)).reads.includes(block.scope)) return text(`You don't read the scope ${block.scope}.`, true);
+				const halves = await zoomBlock(app, ownerId, block.scope, block.block);
+				return typeof halves === "string" ? text(halves, true) : text(halves.join("\n"));
+			}
 			const z = await app.memories.zoom(call.p, a.id, a.start ?? 1, a.count ?? 40, (await access(app, call)).reads).catch((error) => {
 				if ((error as { status?: number }).status === 404) return undefined;
 				throw error;

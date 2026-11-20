@@ -48,6 +48,7 @@ import { withTypedTools } from "./typed-schemas.ts";
 import { type KeptCall, takeCall } from "./call-details.ts";
 import { fallbackMaxTokens } from "@pim/v2-app/web-providers";
 import { memoryLinesOf, offeredModels } from "./deployment.ts";
+import { memoryView } from "./memory-tree.ts";
 import { type VisitBrief, visitMemory, visitPreamble } from "./visit-brief.ts";
 
 type Env = Record<string, string | undefined>;
@@ -642,8 +643,12 @@ export function createAgentHost(options: AgentHostOptions) {
 				const visit = await visitOf(input.conversationId);
 				if (visit) return visitMemory(visit);
 				const c = await ctx(input.conversationId);
-				const scopes = c.agent?.majordomo ? "every scope" : c.agent ? [...new Set([c.agent.config.memoryScope ?? `agent-${c.agent.id}`, ...(c.agent.config.memoryScopes ?? []), "everyone"])].join(", ") : "everyone";
-				return `Your memory (scopes ${scopes}). Save with note, find with recall, read in full with zoom.${c.memories.length ? `\n${c.memories.slice(0, memoryLinesOf(env)).map((m) => `- [${m.id}] (${m.scope}) ${m.title}`).join("\n")}` : "\nNothing is remembered yet."}`;
+				const own = c.agent ? (c.agent.config.memoryScope ?? `agent-${c.agent.id}`) : "everyone";
+				// The majordomo reads every scope there is.
+				const scopes = c.agent?.majordomo ? null : c.agent ? [...new Set([own, ...(c.agent.config.memoryScopes ?? []), "everyone"])] : ["everyone"];
+				const view = await memoryView(db, ownerId, scopes, memoryLinesOf(env), own);
+				const about = `Your long-term memory, oldest first, in scopes that different agents read; \`note\` keeps a memory in your own, ${own}, unless you name another scope you read. Recent memories show as [id] title; a line "#<scope>/a-b" summarizes memories a through b of that scope, and zoom opens it into its halves. Later memories override earlier ones. Find any memory with recall, and read one in full with zoom.`;
+				return `${about}\n${view.length ? view.join("\n") : "Nothing is remembered yet."}`;
 			}),
 			section("room", async (input) => {
 				const chat = await publicChatId(ownerId, input.conversationId);

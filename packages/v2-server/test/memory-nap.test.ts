@@ -1,5 +1,6 @@
 // The memory nap on the real stack: a chat nobody is in is read by a Runner and kept as one memory on the memory model (here pi-ai's faux provider, as a deployment's own
 // provider would be), rewritten when the chat moves on, forgotten when nothing in it is worth keeping, and never written twice. A chat too short to say anything is only marked.
+// The same loop summarizes a scope's memories into its tree, which the prompt shows older memories by, and builds again what a forgotten memory was in.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { App } from "@pim/v2-app/app";
@@ -50,7 +51,7 @@ real("the memory nap", () => {
 		const registered = await web.call("POST", "/auth/register", { username: "anibal", bootstrap: claim, session: true });
 		expect(registered.status).toBe(201);
 		ownerId = registered.json.account.ownerId;
-		runner = await start(d, "runner", { pollMs: 40, providers: () => [faux.provider] }, { PIM_DEFAULT_MODEL: "faux/m", PIM_APP_DATABASE_URL: stack.url("gate"), PIM_MEMORY_NAP_IDLE_SECONDS: "1", PIM_MEMORY_NAP_POLL_MS: "200" });
+		runner = await start(d, "runner", { pollMs: 40, providers: () => [faux.provider] }, { PIM_DEFAULT_MODEL: "faux/m", PIM_APP_DATABASE_URL: stack.url("gate"), PIM_MEMORY_NAP: "on", PIM_MEMORY_NAP_IDLE_SECONDS: "1", PIM_MEMORY_NAP_POLL_MS: "200", PIM_MEMORY_LINES: "8" });
 	}, 180_000);
 	afterAll(async () => {
 		await Promise.allSettled([runner?.close(), gate?.close()]);
@@ -101,4 +102,47 @@ real("the memory nap", () => {
 		await waitFor("the memory to be forgotten", async () => ((await memory(chat))?.deleted_at ? true : undefined), 30_000);
 		expect((await napped(chat)).memory_id).toBeNull();
 	}, 120_000);
+
+	it("summarizes a scope into its tree, shows older memories by their summaries, opens one with zoom, and rebuilds what a forgotten memory was in", async () => {
+		// The chat memory the tests above kept and forgot holds place 0 of everyone; 39 more memories take places 1 to 39.
+		expect((await d.stack.admin.query("SELECT pos, deleted_at IS NOT NULL AS forgotten FROM pim_app.memories WHERE owner_id = $1 AND scope = 'everyone'", [ownerId])).rows).toEqual([{ pos: 0, forgotten: true }]);
+		await d.stack.admin.query("INSERT INTO pim_app.memories (id, owner_id, scope, title, body) SELECT 'm_tree_' || lpad(i::text, 2, '0'), $1, 'everyone', 'fact ' || lpad(i::text, 2, '0'), 'b' FROM generate_series(1, 39) i", [ownerId]);
+		expect((await d.stack.admin.query("SELECT array_agg(pos ORDER BY id) AS p FROM pim_app.memories WHERE id LIKE 'm_tree_%'")).rows[0].p).toEqual([...Array(40).keys()].slice(1));
+		// The model is asked for each block that can be built, smallest first: 20 + 10 + 5 + 2 + 1, the last from its halves' summaries. An empty place is left out.
+		const asked: string[] = [];
+		const summarize = (context: any) => {
+			const prompt = String(context.messages.at(-1).content);
+			asked.push(prompt);
+			return fauxAssistantMessage(`Sum ${/#(\d+-\d+) of the scope/.exec(prompt)![1]}`);
+		};
+		const summaries = async () => (await d.stack.admin.query("SELECT size, lo, text FROM pim_app.memory_summaries WHERE owner_id = $1 AND scope = 'everyone' ORDER BY size, lo", [ownerId])).rows;
+		faux.setResponses(Array.from({ length: 38 }, () => summarize) as never);
+		await waitFor("the tree to be built", async () => ((await summaries()).length === 38 ? true : undefined), 60_000);
+		expect(faux.getPendingResponseCount()).toBe(0);
+		expect(asked[0]).toMatch(/#0-1 of the scope everyone into one line\. Here are its memories, each with the day it was kept:\n\d{4}-\d\d-\d\d fact 01$/);
+		expect(asked.at(-1)).toMatch(/#0-31 of the scope everyone into one line\. Here are the summaries of its two halves:\nSum 0-15\nSum 16-31$/);
+
+		// The prompt shows the oldest memories by summaries and the newest as they are, and zoom opens a summary into its halves.
+		const chat = (await web.call("POST", "/api/sessions", { title: "Tree" })).json.id;
+		let zoomed = "";
+		await say(chat, "What do you know?", fauxAssistantMessage([fauxToolCall("zoom", { id: "everyone/0-31" })], { stopReason: "toolUse" }), (context: any) => {
+			zoomed = JSON.stringify(context.messages.at(-1).content);
+			return reply("Here is what I know.");
+		});
+		// The memory section is in the transcript, where pi keeps the prompt's sections.
+		const shown = await transcript(chat);
+		const view = ["Scope everyone (your own):", "#everyone/0-15 Sum 0-15", "#everyone/16-23 Sum 16-23", "#everyone/24-31 Sum 24-31", "#everyone/32-35 Sum 32-35", "[m_tree_36] fact 36", "[m_tree_37] fact 37", "[m_tree_38] fact 38", "[m_tree_39] fact 39"].join("\n");
+		expect(shown).toContain(JSON.stringify(view).slice(1, -1));
+		expect(zoomed).toContain(JSON.stringify("#everyone/0-15 Sum 0-15\n#everyone/16-31 Sum 16-31").slice(1, -1));
+
+		// Forgetting a memory drops every summary built over its place, and the pass builds them again without it.
+		const before = asked.length;
+		faux.setResponses(Array.from({ length: 5 }, () => summarize) as never);
+		expect((await web.call("DELETE", "/api/memory/log/m_tree_05")).status).toBeLessThan(300);
+		await waitFor("the tree to be built again", async () => ((await summaries()).length === 38 && faux.getPendingResponseCount() === 0 ? true : undefined), 60_000);
+		const again = asked.slice(before);
+		expect(again.map((p) => /#(\d+-\d+) of the scope/.exec(p)![1])).toEqual(["4-5", "4-7", "0-7", "0-15", "0-31"]);
+		expect(again[0]).toContain("fact 04");
+		expect(again[0]).not.toContain("fact 05");
+	}, 180_000);
 });

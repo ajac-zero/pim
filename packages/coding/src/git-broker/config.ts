@@ -19,13 +19,10 @@
  * that needs it fails with `GitBrokerNotConfiguredError`, and public
  * repositories are still cloned anonymously.
  *
- * Two variables set the rules, whether or not the App is configured:
- *
- * - `PIM_GIT_BRANCH_PREFIX`: what every branch Pim pushes starts with,
- *   `pim/` when unset; `none` lets it push any branch but the default one,
- *   `main` and `master`.
- * - `PIM_GIT_REPOS`: the repositories coding threads may use, such as
- *   `acme/*, me/notes`; unset allows any on github.com.
+ * One variable sets the rules, whether or not the App is configured:
+ * `PIM_GIT_BRANCH_PREFIX`, what every branch Pim pushes starts with, `pim/`
+ * when unset; `none` lets it push any branch but the default one, `main` and
+ * `master`.
  */
 
 export const GITHUB_APP_SECRETS = {
@@ -102,26 +99,20 @@ export function githubAppConfig(env: object): GitHubAppConfig {
 export type BrokerPolicy = {
 	/** What every pushed branch starts with; null for any branch (but the default one, `main` and `master`). */
 	readonly branchPrefix: string | null;
-	/** `owner/name` and `owner/*` patterns, lowercase; null for any repository. */
-	readonly repos: readonly string[] | null;
 };
 
 export const DEFAULT_BRANCH_PREFIX = "pim/";
 
 const PREFIX = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,63}$/;
-const REPO_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,38})\/(?:\*|[a-z0-9._-]{1,100})$/;
 
 /**
- * The broker's rules. A prefix Pim can't read stays `pim/`, and a list of
- * repositories it can't read allows none, so a typo never loosens either.
+ * The broker's rules. A prefix Pim can't read stays `pim/`, so a typo never
+ * loosens it.
  */
 export function brokerPolicy(env: object): BrokerPolicy {
 	const prefix = value(env, "PIM_GIT_BRANCH_PREFIX");
 	const branchPrefix = prefix === null ? DEFAULT_BRANCH_PREFIX : prefix === "none" ? null : PREFIX.test(prefix) && !/\.\.|\/\/|\/\./.test(prefix) ? prefix : DEFAULT_BRANCH_PREFIX;
-	const list = value(env, "PIM_GIT_REPOS");
-	if (list === null) return { branchPrefix, repos: null };
-	const patterns = list.toLowerCase().split(/[\s,]+/).filter(Boolean);
-	return { branchPrefix, repos: patterns.every((pattern) => REPO_PATTERN.test(pattern)) ? patterns : [] };
+	return { branchPrefix };
 }
 
 /**

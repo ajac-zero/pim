@@ -17,14 +17,12 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-const access = (allowed: string[]): CodingAccess => ({
+const access = (): CodingAccess => ({
   harnesses: [
     { id: "pi", runsIn: "sandbox", available: false, reason: "No pool." },
     { id: "amp", runsIn: "orb", available: true, reason: null },
   ],
   pools: [],
-  allowedRepositories: allowed,
-  allowedRepositoriesVariable: "PIM_CODING_ALLOWED_REPOS",
 });
 
 const grant: CodingGrant = {
@@ -47,7 +45,7 @@ const member = (username: string, role: string) => ({
   statusReason: null,
 });
 
-function server(allowed: string[], grants: CodingGrant[]) {
+function server(grants: CodingGrant[]) {
   const writes: { route: string; body: unknown }[] = [];
   const reply = (body: unknown) =>
     new Response(JSON.stringify(body), {
@@ -58,8 +56,7 @@ function server(allowed: string[], grants: CodingGrant[]) {
     "fetch",
     vi.fn(async (input: string, init?: RequestInit) => {
       const route = `${init?.method ?? "GET"} ${input}`;
-      if (route === "GET /api/admin/coding-access")
-        return reply(access(allowed));
+      if (route === "GET /api/admin/coding-access") return reply(access());
       if (route === "GET /api/admin/coding-grants") return reply({ grants });
       if (route.startsWith("GET /api/admin/accounts"))
         return reply({
@@ -91,18 +88,14 @@ const show = () =>
   );
 
 describe("Settings → Coding access", () => {
-  it("shows what can run, says how to allow repositories when none is, and revokes a grant", async () => {
-    const writes = server([], [grant]);
+  it("shows what can run and revokes a grant", async () => {
+    const writes = server([grant]);
     show();
     const harnesses = within(
       await screen.findByRole("list", { name: "Where coding runs" }),
     );
     expect(harnesses.getByText("No pool.")).toBeTruthy();
     expect(harnesses.getByText("Runs in an Amp orb")).toBeTruthy();
-    // With nothing allowed, the exact line to set, from what is granted.
-    expect(
-      screen.getByText("PIM_CODING_ALLOWED_REPOS=github.com/acme/*"),
-    ).toBeTruthy();
     fireEvent.click(
       screen.getByRole("button", { name: "Revoke ann's coding access" }),
     );
@@ -114,16 +107,16 @@ describe("Settings → Coding access", () => {
   });
 
   it("gives access with start, steer, push and pull requests by default, never offering a guest", async () => {
-    const writes = server(["acme/*"], []);
+    const writes = server([]);
     show();
     fireEvent.click(
       await screen.findByRole("button", { name: "Give someone access" }),
     );
     const person = screen.getByRole("combobox") as HTMLSelectElement;
     expect([...person.options].map((o) => o.text)).toEqual(["ann", "bo"]);
-    expect((screen.getByRole("textbox") as HTMLInputElement).value).toBe(
-      "acme/*",
-    );
+    fireEvent.change(screen.getByRole("textbox"), {
+      target: { value: "acme/*" },
+    });
     expect(
       (screen.getByRole("checkbox", { name: "Merge" }) as HTMLInputElement)
         .checked,

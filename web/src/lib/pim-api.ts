@@ -1065,7 +1065,7 @@ export type SandboxPoolInput = {
   config?: Record<string, unknown>;
 };
 
-/** What coding can run on here: each harness and whether this deployment can run it, the sandbox pools, and the repositories it allows. */
+/** What coding can run on here: each harness and whether this deployment can run it, and the sandbox pools. */
 export type CodingAccess = {
   harnesses: {
     id: string;
@@ -1074,8 +1074,6 @@ export type CodingAccess = {
     reason: string | null;
   }[];
   pools: { id: string; enabled: boolean }[];
-  allowedRepositories: string[];
-  allowedRepositoriesVariable: string;
 };
 
 export const CODING_PERMISSIONS = [

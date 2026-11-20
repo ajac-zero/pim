@@ -364,8 +364,8 @@ async function promoteForge(pool: Pool, owner: string): Promise<number> {
 		if (typeof r.repo !== "string" || typeof r.setup_script !== "string" || r.setup_script === "" || r.setup_script.length > 65_536) continue;
 		await pool.query("INSERT INTO pim_forge.forge_repo_settings (owner_id, repo, setup_script, updated_at) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING", [owner, r.repo, r.setup_script, ts(r.updated_at)]);
 	}
-	// v1 let every member code; v2 asks for a grant. A person who had coding threads keeps coding: they are given what an admin would give (start, steer, abort, and push, pull request and merge with a person's yes), on any repository
-	// the deployment allows. Someone who never coded is left for an admin to grant, as is a guest.
+	// v1 let every member code; v2 asks for a grant. A person who had coding threads keeps coding: they are given what an admin would give (start, steer, abort, and push, pull request and merge with a person's yes), on any repository.
+	// Someone who never coded is left for an admin to grant, as is a guest.
 	if (rows.length) await promoteCodingGrant(pool, owner);
 	return n;
 }
@@ -376,7 +376,7 @@ async function promoteCodingGrant(pool: Pool, owner: string): Promise<void> {
 	if (!account || account.role === "guest") return;
 	if ((await pool.query("SELECT 1 FROM pim_app.coding_grants WHERE owner_id = $1 AND revoked_at IS NULL", [owner])).rowCount) return;
 	const grantId = `cg_${randomUUID().replace(/-/g, "")}`;
-	await pool.query("INSERT INTO pim_app.coding_grants (grant_id, owner_id, permissions, pools, repositories, quota, granted_by) VALUES ($1,$2,$3,'{}','{}','{}',$4)", [grantId, owner, ["coding:start", "coding:steer", "coding:push", "coding:pr", "coding:merge"], "migration"]);
+	await pool.query("INSERT INTO pim_app.coding_grants (grant_id, owner_id, permissions, pools, repositories, quota, granted_by) VALUES ($1,$2,$3,'{}','{*}','{}',$4)", [grantId, owner, ["coding:start", "coding:steer", "coding:push", "coding:pr", "coding:merge"], "migration"]);
 	for (const permission of ["coding:start", "coding:steer", "coding:abort", "coding:push", "coding:pr", "coding:merge"]) {
 		await pool.query("INSERT INTO pim_forge.forge_grants (subject_type, subject_id, permission, requires_approval, granted_by, source_grant_id) VALUES ('user',$1,$2,$3,'migration',$4)", [owner, permission, ["coding:push", "coding:pr", "coding:merge"].includes(permission), grantId]);
 	}

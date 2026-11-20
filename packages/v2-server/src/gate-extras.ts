@@ -138,7 +138,7 @@ export function forgeRoutes(handler: Handler): Route[] {
 	]);
 }
 
-/** What coding can run on here, for the admin's Settings: each harness with whether this deployment can run it and why not, the pools, and the repositories the deployment allows. */
+/** What coding can run on here, for the admin's Settings: each harness with whether this deployment can run it and why not, and the pools. */
 async function codingAccess(forge: ForgeParts) {
 	const pools = (await forge.db.query("select pool_id, enabled from pim_forge.forge_pools order by priority desc, pool_id")).rows.map((r) => ({ id: r.pool_id as string, enabled: r.enabled as boolean }));
 	const sandbox = pools.some((p) => p.enabled) ? null : "No sandbox pool is enabled. Pools exist once a sandbox manager is configured (PIM_CODING_MANAGER_URL and PIM_CODING_MANAGER_TOKEN).";
@@ -149,14 +149,12 @@ async function codingAccess(forge: ForgeParts) {
 			return { id, runsIn: id === "amp" ? "orb" : "sandbox", available: reason === null, reason };
 		}),
 		pools,
-		allowedRepositories: [...forge.authz.policy.allowedRepos],
-		allowedRepositoriesVariable: "PIM_CODING_ALLOWED_REPOS",
 	};
 }
 
 /**
  * The admin's door to coding authority, through the application's Authorizer (which Forge's tables follow, see `mirrorCodingGrants`): what coding can run on here,
- * and the grants to list, give and take back. The deployment's allowed repositories are only shown: Forge's own processes read them from their environment.
+ * and the grants to list, give and take back.
  */
 export function codingAdminRoutes(forge: ForgeParts): Route[] {
 	return [

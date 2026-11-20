@@ -87,8 +87,7 @@ real("the vertical slice", () => {
 		const stack = await createStack();
 		d = { stack, nats: await startNats(), s3: await startS3(), gatePort: await freePort(), ingressSecret: "ingress" };
 		appForTools = new App(connectApp(stack.url("gate"), 4), new MemoryObjectStore());
-		const gateEnv = { PIM_CODING_ALLOWED_REPOS: "acme/*" };
-		gate = await go(d, "gate", {}, gateEnv);
+		gate = await go(d, "gate", {});
 		live = await go(d, "live", { pollMs: 40 });
 		maintenance = await go(d, "maintenance", { pollMs: 100 });
 		runnerA = await go(d, "runner", hooks(), { PIM_RUNNER_HOLDER_ID: "runner-a" });
@@ -228,7 +227,7 @@ real("the vertical slice", () => {
 
 	it("runs a coding thread under an explicit grant and a standing approval, wakes the chat that started it, and records its spend", async () => {
 		const forgeDb = d.stack.admin as unknown as ForgeDb;
-		const authz = new Authz(forgeDb, { allowedRepos: ["acme/*"], branchPrefix: "pim/" });
+		const authz = new Authz(forgeDb, { branchPrefix: "pim/" });
 		const actor = { ownerId, role: "admin" as const };
 		// A person's harness logins are on the Gate too, sealed under the deployment's keys: none connected yet, and no key material in the answer.
 		const vault = await web.call("GET", "/api/coding/vault");

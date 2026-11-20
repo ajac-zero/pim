@@ -1056,11 +1056,6 @@ const translations = {
     codingAccessInSandbox: "Runs in a sandbox pool",
     codingAccessAvailable: "Available",
     codingAccessUnavailable: "Not available",
-    codingAccessRepositories: "Allowed repositories",
-    codingAccessRepositoriesBody:
-      "The repositories this deployment lets coding touch at all, whoever is granted. They are set where Pim is deployed, not here.",
-    codingAccessNoRepositories:
-      "None is allowed, so every coding thread is refused. Set this in the deployment's environment and restart Pim:",
     codingAccessGrants: "Who may use coding",
     codingAccessGrantsBody:
       "People whose agents may start coding threads, and on which repositories. A grant only permits: pushing, opening a pull request and merging still ask the person each time.",
@@ -1910,7 +1905,7 @@ const translations = {
     codingRepoInvalid:
       "Use a GitHub or Gitea address, such as https://github.com/owner/name.",
     codingRepoForbidden:
-      "This Pim doesn't let coding threads use that repository.",
+      "No coding grant covers that repository. Ask an admin for access.",
     codingRef: "Branch, tag or commit",
     codingRefHint: "Where it starts from; main if empty.",
     codingBudget: "Budget (USD)",
@@ -3190,11 +3185,6 @@ const translations = {
     codingAccessInSandbox: "Se ejecuta en un pool de sandboxes",
     codingAccessAvailable: "Disponible",
     codingAccessUnavailable: "No disponible",
-    codingAccessRepositories: "Repositorios permitidos",
-    codingAccessRepositoriesBody:
-      "Los repositorios que esta instalación deja tocar al código, sea quien sea el autorizado. Se fijan donde se despliega Pim, no aquí.",
-    codingAccessNoRepositories:
-      "Ninguno está permitido, así que se rechaza todo hilo de código. Defínelo en el entorno del despliegue y reinicia Pim:",
     codingAccessGrants: "Quién puede usar código",
     codingAccessGrantsBody:
       "Las personas cuyos agentes pueden iniciar hilos de código, y en qué repositorios. Una autorización solo permite: subir, abrir una pull request y fusionar siguen pidiendo permiso a la persona cada vez.",
@@ -4062,7 +4052,7 @@ const translations = {
     codingRepoInvalid:
       "Usa una dirección de GitHub o Gitea, como https://github.com/dueño/nombre.",
     codingRepoForbidden:
-      "Este Pim no deja que los hilos de programación usen ese repositorio.",
+      "Ningún permiso de código cubre ese repositorio. Pide acceso a un admin.",
     codingRef: "Rama, etiqueta o commit",
     codingRefHint: "Desde dónde empieza; main si está vacío.",
     codingBudget: "Presupuesto (USD)",

@@ -112,13 +112,12 @@ describe("coding REST routes", () => {
 		await s.pool.query("update pim_forge.forge_pools set enabled = true");
 	});
 
-	it("keeps a person's setup script per repository, refuses an oversized one and a repository the deployment doesn't allow", async () => {
+	it("keeps a person's setup script per repository and refuses an oversized one", async () => {
 		expect((await call("ada", "GET", "/api/coding/repos/acme/app/settings")).body).toMatchObject({ repo: "acme/app", setupScript: "" });
 		expect((await call("ada", "PUT", "/api/coding/repos/acme/app/settings", { setupScript: "pnpm i" })).body.setupScript).toBe("pnpm i");
 		expect((await call("ada", "GET", "/api/coding/repos/acme/app/settings")).body.setupScript).toBe("pnpm i");
 		expect((await call("eve", "GET", "/api/coding/repos/acme/app/settings")).status).toBe(403);
 		expect((await call("ada", "PUT", "/api/coding/repos/acme/app/settings", { setupScript: "x".repeat(70_000) })).status).toBe(400);
-		expect((await call("ada", "GET", "/api/coding/repos/evil/repo/settings")).status).toBe(403);
 	});
 
 	it("manages pools for an admin's browser session only, and records who changed them", async () => {

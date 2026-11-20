@@ -130,7 +130,7 @@ async function admit(deps: GitBrokerDeps, params: Readonly<Record<string, string
 	const instance = params.instance ?? GITHUB_INSTANCE_ID;
 	if (claims.instance !== instance) throw new GitBrokerError(403, "This broker token is for another repository");
 	const provider = providerOf(deps, instance);
-	const repo = instance === GITHUB_INSTANCE_ID ? repoRef(params.owner!, params.repo!, deps.policy) : provider.parseRepoUrl(`${provider.instance.baseUrl}/${params.owner}/${params.repo}`, deps.policy);
+	const repo = instance === GITHUB_INSTANCE_ID ? repoRef(params.owner!, params.repo!) : provider.parseRepoUrl(`${provider.instance.baseUrl}/${params.owner}/${params.repo}`);
 	if (claims.repo !== repo.fullName.toLowerCase()) throw new GitBrokerError(403, "This broker token is for another repository");
 	return { repo, claims, provider };
 }

@@ -1,4 +1,3 @@
-import { type BrokerPolicy } from "./config";
 import type { RepoRef } from "./broker";
 import { GitBrokerError } from "./broker";
 
@@ -45,7 +44,7 @@ export type PullRequestInput = { readonly repo: RepoRef; readonly head: string; 
 export interface GitProvider {
 	readonly instance: ProviderInstance;
 	/** The repository a URL on this provider's host names, if the policy lets it be used; throws `GitBrokerError` otherwise. */
-	parseRepoUrl(input: string, policy?: Pick<BrokerPolicy, "repos">): RepoRef;
+	parseRepoUrl(input: string): RepoRef;
 	/** The repository's canonical web URL, which threads store. */
 	repoUrl(repo: RepoRef): string;
 	/** The URL git clones, fetches and pushes: the repository's smart HTTP endpoint, ending in `.git`. */
@@ -110,9 +109,9 @@ export class ProviderRegistry {
 	 * The provider whose host `input` is a URL on, and the repository it names.
 	 * A URL on no known host is held to GitHub's rules, which refuse it.
 	 */
-	resolveUrl(input: string, policy?: Pick<BrokerPolicy, "repos">): { readonly provider: GitProvider; readonly repo: RepoRef } {
+	resolveUrl(input: string): { readonly provider: GitProvider; readonly repo: RepoRef } {
 		const host = typeof input === "string" ? URL.parse(input)?.hostname : undefined;
 		const provider = (host && [...this.#providers.values()].find((candidate) => URL.parse(candidate.instance.baseUrl)?.hostname === host)) || this.get(GITHUB_INSTANCE_ID);
-		return { provider, repo: provider.parseRepoUrl(input, policy) };
+		return { provider, repo: provider.parseRepoUrl(input) };
 	}
 }

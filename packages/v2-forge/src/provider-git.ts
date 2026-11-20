@@ -1,13 +1,12 @@
 // The real GitHost: `@pim/coding`'s GitProvider (the GitHub App or Gitea) behind Forge's port, and the broker's upstream resolver over the same providers.
 import { basicAuth, type GitProvider, type ProviderRegistry } from "@pim/coding/git-broker/provider";
-import { type BrokerPolicy } from "@pim/coding/git-broker/config";
 import { type ComputeHandle, type ComputeProvider } from "./compute";
 import { deleteBranch, mergeBranch, pushBundle, type Remote } from "./gitops";
 import { ForgeError } from "./errors";
 import { type GitHost, type MergeOutcome, type PushOutcome } from "./ports";
 import { type GitUpstream } from "./http/git-broker";
 
-export type ProviderGitDeps = { registry: ProviderRegistry; policy?: Pick<BrokerPolicy, "repos">; compute?: ComputeProvider; /** Where the checkout is in a sandbox, and where a push's bundle is staged. */ repoDir?: string; scratchDir?: string };
+export type ProviderGitDeps = { registry: ProviderRegistry; compute?: ComputeProvider; /** Where the checkout is in a sandbox, and where a push's bundle is staged. */ repoDir?: string; scratchDir?: string };
 
 async function remoteOf(provider: GitProvider, repo: ReturnType<GitProvider["parseRepoUrl"]>, access: "read" | "write"): Promise<Remote> {
 	const cred = await provider.credential(repo, access);
@@ -17,7 +16,7 @@ async function remoteOf(provider: GitProvider, repo: ReturnType<GitProvider["par
 /** The broker's upstream: the host's smart HTTP endpoint and the deployment's credential for it, which never reaches a sandbox. */
 export function providerUpstream(d: ProviderGitDeps): GitUpstream {
 	return async (repoUrl, access) => {
-		const { provider, repo } = d.registry.resolveUrl(repoUrl, d.policy);
+		const { provider, repo } = d.registry.resolveUrl(repoUrl);
 		const r = await remoteOf(provider, repo, access);
 		return { url: r.url, authorization: r.authorization ?? null };
 	};
@@ -27,7 +26,7 @@ export class ProviderGitHost implements GitHost {
 	constructor(private readonly d: ProviderGitDeps) {}
 
 	private resolve(repoUrl: string) {
-		return this.d.registry.resolveUrl(repoUrl, this.d.policy);
+		return this.d.registry.resolveUrl(repoUrl);
 	}
 
 	defaultBranch(repoUrl: string) {

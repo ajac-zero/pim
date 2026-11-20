@@ -18,11 +18,11 @@ export class GitHubProvider implements GitProvider {
 	constructor(app: GitHubApp | null, options: { fetch?: Fetch; policy?: BrokerPolicy } = {}) {
 		this.#app = app;
 		this.#fetch = options.fetch ?? ((input, init) => fetch(input, init));
-		this.#policy = options.policy ?? { branchPrefix: null, repos: null };
+		this.#policy = options.policy ?? { branchPrefix: null };
 	}
 
-	parseRepoUrl(input: string, policy: Pick<BrokerPolicy, "repos"> = { repos: null }): RepoRef {
-		return parseRepoUrl(input, policy);
+	parseRepoUrl(input: string): RepoRef {
+		return parseRepoUrl(input);
 	}
 
 	repoUrl(repo: RepoRef): string {

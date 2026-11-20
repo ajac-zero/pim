@@ -46,9 +46,9 @@ describe("coding authorization", () => {
 		await expect(s.forge.status({ ownerId: "eve", role: "member" }, a.threadId)).rejects.toMatchObject({ code: "not_found" });
 	});
 
-	it("refuses guests, unknown repositories and repositories outside the deployment's allow-list", async () => {
+	it("refuses guests and unknown repositories, and lets a grant with no repositories named reach any repository: the deployment has no allow-list of its own", async () => {
 		await expect(s.forge.start({ ownerId: "ada", role: "guest" }, startReq("g"))).rejects.toBeInstanceOf(ForbiddenError);
-		await expect(s.forge.start(ada, startReq("other", { repo: "https://github.com/evil/repo" }))).rejects.toMatchObject({ code: "forbidden" });
+		await expect(s.forge.start(ada, startReq("other", { repo: "https://github.com/evil/repo" }))).resolves.toMatchObject({ created: true });
 		await expect(s.forge.start(ada, startReq("bad", { repo: "not a repo" }))).rejects.toMatchObject({ code: "invalid" });
 	});
 

@@ -77,7 +77,7 @@ real("the default agent host", () => {
 		const stack = await createStack();
 		d = { stack, nats: await startNats(), s3: await startS3(), gatePort: await freePort(), ingressSecret: "ingress" };
 		app = new App(connectApp(stack.url("gate"), 4), new MemoryObjectStore());
-		gate = await start(d, "gate", {}, { PIM_CODING_ALLOWED_REPOS: "acme/*", ...KEK });
+		gate = await start(d, "gate", {}, KEK);
 		web = new Client(base(gate), d.ingressSecret);
 		const claim = await app.identity.issueClaim("bootstrap", null, 3_600_000);
 		const registered = await web.call("POST", "/auth/register", { username: "anibal", bootstrap: claim, session: true });
@@ -113,7 +113,7 @@ real("the default agent host", () => {
 					return new Response('{"ok":true}', { status: 201, headers: { "content-type": "application/json" } });
 				}) as typeof fetch,
 			},
-			{ PIM_DEFAULT_MODEL: "faux/m", PIM_APP_DATABASE_URL: stack.url("gate"), PIM_FORGE_DATABASE_URL: stack.url("forge"), PIM_CODING_ALLOWED_REPOS: "acme/*", ...KEK },
+			{ PIM_DEFAULT_MODEL: "faux/m", PIM_APP_DATABASE_URL: stack.url("gate"), PIM_FORGE_DATABASE_URL: stack.url("forge"), ...KEK },
 		);
 		// Maintenance applies approval timeouts, as the auto policy needs.
 		maintenance = await start(d, "maintenance", { pollMs: 100 });
@@ -455,7 +455,6 @@ real("the default agent host", () => {
 	it("lets an admin list, give and revoke coding access, and an amp thread needs no pool", async () => {
 		const forgeDb = d.stack.admin as unknown as ForgeDb;
 		const access = (await web.call("GET", "/api/admin/coding-access")).json;
-		expect(access.allowedRepositories).toEqual(["acme/*"]);
 		expect(access.harnesses.find((h: { id: string }) => h.id === "amp")).toMatchObject({ available: true, runsIn: "orb" });
 		expect(access.harnesses.find((h: { id: string }) => h.id === "pi")).toMatchObject({ available: true, runsIn: "sandbox" });
 		// The grant the earlier test made by hand is listed, with its holder.

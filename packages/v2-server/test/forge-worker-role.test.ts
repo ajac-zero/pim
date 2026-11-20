@@ -104,7 +104,7 @@ real("Forge's worker role with the Gate and Maintenance", () => {
 		return { harnessOptions: (): HarnessOptions => ({ models, registry: createRegistry() }), homeRoot: () => ({ agent }), chatAgent: () => agent, pollMs: 40 };
 	};
 	const go = async (role: Parameters<typeof start>[1], h = {}, extra: Record<string, string> = {}) => {
-		const p = await start(d, role, h, { PIM_KEK_K1: KEK, PIM_KEK_CURRENT: "k1", PIM_CODING_ALLOWED_REPOS: "acme/*", PIM_CODING_SIGNING_KEY: "role-test-signing-key", PIM_CODING_MANAGER_URL: `http://127.0.0.1:${(managerServer.address() as AddressInfo).port}`, PIM_CODING_MANAGER_TOKEN: TOKEN, PIM_AMP_BASE_URL: amp.baseUrl, PIM_FORGE_ORB_POLL_MS: "150", PIM_CODING_DEFAULT_MODEL: "codefaux/m", ...extra });
+		const p = await start(d, role, h, { PIM_KEK_K1: KEK, PIM_KEK_CURRENT: "k1", PIM_CODING_SIGNING_KEY: "role-test-signing-key", PIM_CODING_MANAGER_URL: `http://127.0.0.1:${(managerServer.address() as AddressInfo).port}`, PIM_CODING_MANAGER_TOKEN: TOKEN, PIM_AMP_BASE_URL: amp.baseUrl, PIM_FORGE_ORB_POLL_MS: "150", PIM_CODING_DEFAULT_MODEL: "codefaux/m", ...extra });
 		everyone.push(p);
 		return p;
 	};

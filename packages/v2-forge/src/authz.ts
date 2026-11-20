@@ -1,4 +1,4 @@
-// Coding authorization. Chatting with a normal agent grants nothing here: running code needs an admin-issued grant, a repository the deployment and the grant both allow, and (where policy says so) a person's approval.
+// Coding authorization. Chatting with a normal agent grants nothing here: running code needs an admin-issued grant, a grant that covers the repository, and (where policy says so) a person's approval.
 // REST routes and agent tools both call `check`, at start and again before every privileged action, so they cannot drift apart.
 import { type Db, type Row, tx } from "./db";
 import { effectivePrincipal, type Principal } from "@pim/v2-contracts/identity";
@@ -20,13 +20,11 @@ export type Actor = {
 export type Decision = { readonly grantId: number; readonly standing: boolean; readonly requiresApproval: boolean; /** The standing approval that stood in for a person's yes. */ readonly viaStandingApproval?: string };
 
 export type Policy = {
-	/** Repositories (`owner/name`, `owner/*`, `*`) this deployment lets coding touch at all. Empty denies every repository. */
-	readonly allowedRepos: readonly string[];
 	/** Pushes are confined to this prefix; the default branch is only ever reached by coding_merge. */
 	readonly branchPrefix: string;
 };
 
-export const DEFAULT_POLICY: Policy = { allowedRepos: [], branchPrefix: "pim/" };
+export const DEFAULT_POLICY: Policy = { branchPrefix: "pim/" };
 
 const URL_REPO = /^https?:\/\/([^/\s]+)\/([^/\s]+)\/([^/\s?#]+?)(?:\.git)?\/?(?:[?#].*)?$/;
 
@@ -65,7 +63,6 @@ export class Authz {
 		if (actor.role === "guest") throw new ForbiddenError(permission, "guests can't use coding threads");
 		const owner = (await this.db.query<Row>("select suspended_at from pim_forge.forge_owners where owner_id = $1", [actor.ownerId])).rows[0];
 		if (owner?.suspended_at) throw new ForbiddenError(permission, "this account is suspended");
-		if (!repoMatches(this.policy.allowedRepos, target.repo)) throw new ForbiddenError(permission, `the deployment doesn't allow coding on ${target.repo}`);
 		const subjects: [string, string][] = [["user", actor.ownerId]];
 		if (actor.tenantId) subjects.push(["tenant", actor.tenantId]);
 		if (actor.agent) subjects.push(["agent", actor.agent]);

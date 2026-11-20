@@ -513,7 +513,7 @@ describe("the start form", () => {
     );
   });
 
-  it("says when the deployment doesn't allow the repository", async () => {
+  it("says when no grant covers the repository", async () => {
     const { api } = fakeApi();
     api.start.mockRejectedValue(
       new ApiError(403, "Not allowed", { code: "forbidden" }),
@@ -528,7 +528,7 @@ describe("the start form", () => {
     fireEvent.change(field(/Task/), { target: { value: "Fix it" } });
     fireEvent.click(screen.getByRole("button", { name: "Start" }));
     expect((await screen.findByRole("alert")).textContent).toBe(
-      "This Pim doesn't let coding threads use that repository.",
+      "No coding grant covers that repository. Ask an admin for access.",
     );
   });
 });

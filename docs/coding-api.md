@@ -17,7 +17,7 @@ Every error is JSON with the HTTP status:
 | `code` | Status | When |
 | --- | --- | --- |
 | `invalid` | 400 | The body or query is wrong: a missing `task`, a repository not on GitHub, a budget that isn't a positive number |
-| `forbidden` | 403 | The deployment doesn't let coding threads use that repository (`PIM_GIT_REPOS`), or a guest asked |
+| `forbidden` | 403 | No coding grant covers that repository, or a guest asked |
 | `not_found` | 404 | No such thread in this space |
 | `archived` | 409 | The thread is archived: only reading it works |
 | `budget_spent` | 409 | Steering a thread that spent its budget, or continuing it without a bigger `budgetUsd` |

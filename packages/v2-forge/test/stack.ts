@@ -25,7 +25,7 @@ const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-c", "user
 export const REPO = "https://github.com/acme/app";
 export const ada: Actor = { ownerId: "ada", role: "member" };
 
-export async function stack(o: { allowedRepos?: string[]; ampConfigured?: boolean } = {}) {
+export async function stack(o: { ampConfigured?: boolean } = {}) {
 	const admin = new pg.Client(inject("pgUrl" as never) as string);
 	await admin.connect();
 	const name = `t_${process.pid}_${++seq}_${Date.now()}`;
@@ -51,7 +51,7 @@ export async function stack(o: { allowedRepos?: string[]; ampConfigured?: boolea
 	const sandboxes = new LocalSandboxProvider(join(dir, "sandboxes"));
 	const gitHost = new LocalGitHost(sandboxes, { "acme/app": bare });
 	const store = new ForgeStore(db);
-	const authz = new Authz(db, { allowedRepos: o.allowedRepos ?? ["acme/*"], branchPrefix: "pim/" });
+	const authz = new Authz(db, { branchPrefix: "pim/" });
 	const scheduler = new ForgeScheduler(db, store, clock);
 	const credentials = new Credentials(db, "test-signing-key", authz.policy, clock);
 	const objects = new MemoryObjects();

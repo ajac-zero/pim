@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useState } from "react";
 import { toast } from "sonner";
-import { CopyButton, Section } from "~/components/account-settings";
+import { Section } from "~/components/account-settings";
 import { type TranslationKey, useI18n } from "~/components/i18n";
 import { Loader2, Plus } from "~/components/icons";
 import { Badge } from "~/components/ui/badge";
@@ -37,7 +37,7 @@ const DEFAULT_PERMISSIONS: CodingPermission[] = [
 
 /**
  * Coding access, the admin's: what this deployment can run coding threads on,
- * the repositories it allows, and who may start threads, on which repositories.
+ * and who may start threads, on which repositories.
  * A grant only permits; pushing, opening a pull request and merging still wait
  * for a person's yes each time.
  */
@@ -46,12 +46,6 @@ export function CodingAccessSection() {
   const { data } = useQuery(codingAccessQuery());
   const { data: grants } = useQuery(codingGrantsQuery());
   if (!data || !grants) return null;
-  const variable = `${data.allowedRepositoriesVariable}=${
-    grants
-      .flatMap((grant) => grant.repositories)
-      .filter((repository, i, all) => all.indexOf(repository) === i)
-      .join(",") || "owner/*"
-  }`;
   return (
     <div className="space-y-10">
       <Section
@@ -91,32 +85,6 @@ export function CodingAccessSection() {
         </ul>
       </Section>
       <Section
-        title={t("codingAccessRepositories")}
-        description={t("codingAccessRepositoriesBody")}
-      >
-        {data.allowedRepositories.length === 0 ? (
-          <div className="space-y-3 rounded-xl border border-dashed p-4 text-sm">
-            <p className="text-muted-foreground">
-              {t("codingAccessNoRepositories")}
-            </p>
-            <div className="flex items-center gap-2">
-              <code className="min-w-0 flex-1 truncate rounded-md bg-muted px-2 py-1 font-mono text-xs">
-                {variable}
-              </code>
-              <CopyButton text={variable} />
-            </div>
-          </div>
-        ) : (
-          <div className="flex flex-wrap gap-2">
-            {data.allowedRepositories.map((repository) => (
-              <Badge key={repository} variant="secondary" className="font-mono">
-                {repository}
-              </Badge>
-            ))}
-          </div>
-        )}
-      </Section>
-      <Section
         title={t("codingAccessGrants")}
         description={t("codingAccessGrantsBody")}
       >
@@ -136,7 +104,7 @@ export function CodingAccessSection() {
             ))}
           </ul>
         )}
-        <GrantForm defaultRepository={data.allowedRepositories[0] ?? ""} />
+        <GrantForm />
       </Section>
     </div>
   );
@@ -183,13 +151,13 @@ function GrantRow({ grant }: { grant: CodingGrant }) {
   );
 }
 
-function GrantForm({ defaultRepository }: { defaultRepository: string }) {
+function GrantForm() {
   const { t } = useI18n();
   const queryClient = useQueryClient();
   const { data: members } = useQuery(membersQuery());
   const [open, setOpen] = useState(false);
   const [person, setPerson] = useState("");
-  const [repository, setRepository] = useState(defaultRepository);
+  const [repository, setRepository] = useState("");
   const [permissions, setPermissions] =
     useState<CodingPermission[]>(DEFAULT_PERMISSIONS);
   // A guest is never given coding access.

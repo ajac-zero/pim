@@ -64,19 +64,11 @@ function concat(...parts: Uint8Array[]): Uint8Array {
 const OWNER = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/;
 const NAME = /^[A-Za-z0-9._-]{1,100}$/;
 
-/** Whether the policy lets coding threads use `repo`. */
-export function repoAllowed(repo: RepoRef, repos: BrokerPolicy["repos"]): boolean {
-	if (repos === null) return true;
-	const [owner, name] = [repo.owner.toLowerCase(), repo.name.toLowerCase()];
-	return repos.some((pattern) => pattern === `${owner}/${name}` || pattern === `${owner}/*`);
-}
-
-/** A repository on github.com by its owner and name (`.git` optional), if both are names GitHub allows and the policy lets it be used. */
-export function repoRef(owner: string, name: string, policy: Pick<BrokerPolicy, "repos"> = { repos: null }): RepoRef {
+/** A repository on github.com by its owner and name (`.git` optional), if both are names GitHub allows. */
+export function repoRef(owner: string, name: string): RepoRef {
 	const bare = name.endsWith(".git") ? name.slice(0, -4) : name;
 	if (!OWNER.test(owner) || !NAME.test(bare) || bare === "." || bare === "..") throw new GitBrokerError(400, "That isn't a GitHub repository's owner and name");
 	const repo = { owner, name: bare, fullName: `${owner}/${bare}` };
-	if (!repoAllowed(repo, policy.repos)) throw new GitBrokerError(403, `This Pim doesn't let coding threads use ${repo.fullName}`);
 	return repo;
 }
 
@@ -85,7 +77,7 @@ export function repoRef(owner: string, name: string, policy: Pick<BrokerPolicy, 
  * with `.git` and a trailing slash optional, and nothing else: no other
  * host or address, no port, no credentials, no query, no escapes.
  */
-export function parseRepoUrl(input: string, policy: Pick<BrokerPolicy, "repos"> = { repos: null }): RepoRef {
+export function parseRepoUrl(input: string): RepoRef {
 	const refuse = () => new GitBrokerError(400, "A repository must be https://github.com/<owner>/<name>");
 	if (typeof input !== "string" || input.length > 300 || !/^[A-Za-z0-9:/._-]+$/.test(input)) throw refuse();
 	const url = URL.parse(input);
@@ -94,7 +86,7 @@ export function parseRepoUrl(input: string, policy: Pick<BrokerPolicy, "repos"> 
 	}
 	const parts = url.pathname.replace(/^\//, "").replace(/\/$/, "").split("/");
 	if (parts.length !== 2) throw refuse();
-	return repoRef(parts[0]!, parts[1]!, policy);
+	return repoRef(parts[0]!, parts[1]!);
 }
 
 // Branches
@@ -422,11 +414,11 @@ const size = (bytes: number) => (bytes < 1024 * 1024 ? `${Math.max(1, Math.round
 
 /** Checks a push without reaching GitHub: the App, the session, the repository, the branch (but for the default one, which GitHub knows), the size and the bundle. */
 export function preparePush(deps: PushDeps, request: PushRequest): PreparedPush {
-	const resolved = deps.providers?.resolveUrl(request.repo, deps.policy);
+	const resolved = deps.providers?.resolveUrl(request.repo);
 	const instance = resolved?.provider.instance ?? GITHUB_INSTANCE;
 	if (instance.kind === "github" && !deps.app) throw new GitBrokerNotConfiguredError();
 	if (!SESSION_ID.test(request.sessionId)) throw new GitBrokerError(400, "That isn't a coding session's ID");
-	const repo = resolved?.repo ?? parseRepoUrl(request.repo, deps.policy);
+	const repo = resolved?.repo ?? parseRepoUrl(request.repo);
 	const branch = request.toDefault ? checkBranchName(request.branch) : checkBranch(request.branch, deps.policy);
 	const max = deps.maxBundleBytes ?? MAX_PUSH_BYTES;
 	if (request.bundle.length > max) throw new GitBrokerError(413, `The push is ${size(request.bundle.length)}; Pim pushes at most ${size(max)} at once`);
@@ -624,7 +616,7 @@ async function pushToGitProvider(deps: PushDeps, push: PreparedPush): Promise<Pu
 /** The name of the repository's default branch, from GitHub, for a merge. */
 export async function repoDefaultBranch(deps: PushDeps, repoUrl: string): Promise<string> {
 	if (!deps.app) throw new GitBrokerNotConfiguredError();
-	const repo = parseRepoUrl(repoUrl, deps.policy);
+	const repo = parseRepoUrl(repoUrl);
 	const { token } = await deps.app.installationToken(repo, "write");
 	const send = deps.fetch ?? ((input, init) => fetch(input, init));
 	let about: Response;

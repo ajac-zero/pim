@@ -1,5 +1,4 @@
-import { type RepoRef, GitBrokerError, listBranchesOverGit, readCapped, repoAllowed } from "./broker";
-import { type BrokerPolicy } from "./config";
+import { type RepoRef, GitBrokerError, listBranchesOverGit, readCapped } from "./broker";
 import { GiteaConnection } from "./gitea-connection";
 import type { Fetch } from "./github-app";
 import { MAX_COMPARE_CHARS, type GitAccess, type GitCredential, type GitProvider, type ProviderInstance, type PullRequestInput } from "./provider";
@@ -31,7 +30,7 @@ export class GiteaProvider implements GitProvider {
 	}
 
 	/** A repository by its URL on this instance: `<base>/<owner>/<name>`, `.git` and a trailing slash optional, and nothing else. */
-	parseRepoUrl(input: string, policy: Pick<BrokerPolicy, "repos"> = { repos: null }): RepoRef {
+	parseRepoUrl(input: string): RepoRef {
 		const refuse = () => new GitBrokerError(400, `A repository must be ${this.instance.baseUrl}/<owner>/<name>`);
 		if (typeof input !== "string" || input.length > 300 || !/^[A-Za-z0-9:/._-]+$/.test(input)) throw refuse();
 		const url = URL.parse(input);
@@ -43,7 +42,6 @@ export class GiteaProvider implements GitProvider {
 		const name = given.endsWith(".git") ? given.slice(0, -4) : given;
 		if (!OWNER.test(owner) || !NAME.test(name) || name === "." || name === "..") throw refuse();
 		const repo = { owner, name, fullName: `${owner}/${name}` };
-		if (!repoAllowed(repo, policy.repos)) throw new GitBrokerError(403, `This Pim doesn't let coding threads use ${repo.fullName}`);
 		return repo;
 	}
 

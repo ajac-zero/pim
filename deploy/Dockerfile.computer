@@ -1,6 +1,7 @@
-# The `local-computer` Compose profile's pim-computer: Node, the computer's own sources, Chromium for the agents' browser, and displayd with a virtual display (Xvnc, openbox, an accessibility bus)
-# for each chat, so a person can watch and take over a chat's browser (docs/v2-operations.md "A computer on the same machine"). Cua's own binaries (cua-spacesd, cua-env-driver) are not shipped,
-# so the desktop tools (`desktop_look`, `desktop_read`, `desktop_act`) are not served here; displayd runs its displays without the driver. It carries no Pim server code,
+# The `local-computer` Compose profile's pim-computer: Node, the computer's own sources, Chromium for the agents' browser (one headless Chromium, a context for each agent), and displayd
+# with a virtual display (Xvnc, openbox, an accessibility bus) for each chat that uses the desktop (docs/v2-operations.md "A computer on the same machine"). Cua's own binaries (cua-spacesd, cua-env-driver) are not shipped:
+# each display's desktop tools (`desktop_look`, `desktop_read`, `desktop_act`) are served by Pim's own driver (computer/desktop-driver.ts, with wmctrl, xdotool and the accessibility bus
+# read through python3-gi), which displayd starts on each display in its place (`DISPLAYD_DRIVER_BIN`). It carries no Pim server code,
 # no dependencies from the workspace and no credentials; it dials out to the stack with the `pimc_` token a person paired (docs/v2-operations.md "A computer on the same machine").
 #
 #   docker build -f deploy/Dockerfile.computer -t pim-computer:local .
@@ -8,9 +9,12 @@ FROM node:26-bookworm-slim
 RUN apt-get update \
 	&& apt-get install -y --no-install-recommends chromium fonts-noto-color-emoji ca-certificates \
 		tigervnc-standalone-server openbox dbus at-spi2-core xauth xdotool xclip \
+		wmctrl python3-gi gir1.2-atspi-2.0 gir1.2-gtk-3.0 \
 	&& rm -rf /var/lib/apt/lists/*
 # Chromium's own sandbox needs user namespaces, which the container's dropped capabilities and seccomp profile deny; the container is the boundary here (and is not a sandbox for agent code).
 RUN printf '#!/bin/sh\nexec /usr/bin/chromium --no-sandbox --disable-dev-shm-usage "$@"\n' > /usr/local/bin/pim-chromium && chmod +x /usr/local/bin/pim-chromium
+# The same for Chromium opened as an app on a display (the desktop tools' `launch_app`), through Debian's own flags.
+RUN printf 'export CHROMIUM_FLAGS="$CHROMIUM_FLAGS --no-sandbox --disable-dev-shm-usage"\n' > /etc/chromium.d/pim
 COPY computer /app/computer
 # displayd (displayd/README.md): pim-computer starts it itself where PIM_DISPLAYD_EMBEDDED=1, with its token in the home and its displays' files in /tmp (a read-only root has no other place).
 COPY displayd/package.json /app/displayd/package.json
@@ -18,7 +22,7 @@ COPY displayd/src /app/displayd/src
 RUN mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix
 # A named volume mounted here takes this owner on first use, so the unprivileged user can write its files.
 RUN mkdir /workspace && chown node:node /workspace
-ENV PIM_CHROME=/usr/local/bin/pim-chromium PIM_DISPLAYD_EMBEDDED=1
+ENV PIM_CHROME=/usr/local/bin/pim-chromium PIM_DISPLAYD_EMBEDDED=1 DISPLAYD_DRIVER_BIN=/app/computer/desktop-driver.ts
 USER node
 WORKDIR /workspace
 ENTRYPOINT ["node", "/app/computer/pim-computer.ts"]

@@ -76,6 +76,23 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm exec vitest run --maxWorkers=4
 
+  # Pim's desktop driver on a real display: displayd starts Xvnc, openbox, the accessibility bus and the driver, as in the computer image (deploy/Dockerfile.computer),
+  # and the test drives a GTK app with it. The node job skips the file, which has no display there.
+  desktop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends tigervnc-standalone-server openbox dbus at-spi2-core xauth xdotool wmctrl python3-gi gir1.2-atspi-2.0 gir1.2-gtk-3.0
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec vitest run computer/test/desktop-driver.test.ts
+        env:
+          PIM_REQUIRE_DESKTOP: "1"
+
   # Every package's own tests but @pim/v2-server's, all packages at once rather than in dependency order (their tests don't depend on each other's).
   packages:
     runs-on: ubuntu-latest

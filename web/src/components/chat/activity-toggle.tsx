@@ -1,9 +1,9 @@
 import { useQuery } from "@tanstack/react-query";
-import { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
+import { useMemo, useSyncExternalStore } from "react";
 import { useI18n } from "~/components/i18n";
 import { SlidersHorizontal } from "~/components/icons";
 import { Button } from "~/components/ui/button";
-import { approvalsQuery, browserQuery } from "~/lib/queries";
+import { approvalsQuery } from "~/lib/queries";
 import { cn } from "~/lib/utils";
 
 /** Whether the options box is open: one setting for every chat, but always closed when a chat opens, and not kept across visits. */
@@ -44,12 +44,7 @@ export function usePendingApprovals(sessionId: string) {
   );
 }
 
-/**
- * The header button that shows or hides the chat's options box; a dot says the chat's
- * browser window is open in it, or an approval waits. The box opens by itself
- * when the browser opens while the person is in the chat, not
- * for ones the chat already had.
- */
+/** The header button that shows or hides the chat's options box; a dot says an approval waits. */
 export function ActivityToggle({
   sessionId,
   className,
@@ -59,20 +54,7 @@ export function ActivityToggle({
 }) {
   const { t } = useI18n();
   const [open, setOpen] = useSummaryOpen();
-  const { data: browser } = useQuery(browserQuery(sessionId));
   const waiting = usePendingApprovals(sessionId).length > 0;
-  // What the chat had when its data first arrived; only a change from it opens the box.
-  const seen = useRef<{ session: string; browser: boolean }>(undefined);
-  const hasBrowser = !!browser?.page;
-  const loaded = browser !== undefined;
-  useEffect(() => {
-    if (!loaded) return;
-    const now = { session: sessionId, browser: hasBrowser };
-    const before = seen.current;
-    seen.current = now;
-    if (before?.session !== sessionId) return;
-    if (now.browser && !before.browser) writeSummaryOpen(true);
-  }, [loaded, sessionId, hasBrowser]);
   const label = t("options");
   return (
     <Button
@@ -90,7 +72,7 @@ export function ActivityToggle({
       )}
     >
       <SlidersHorizontal className="size-4.5" />
-      {(browser?.page || waiting) && (
+      {waiting && (
         <span className="absolute top-1.5 right-1.5 size-2 rounded-full bg-primary" />
       )}
     </Button>

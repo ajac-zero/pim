@@ -1,5 +1,7 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { Dialog } from "radix-ui";
 import {
+  type CSSProperties,
   type FormEvent,
   type KeyboardEvent,
   type PointerEvent,
@@ -8,27 +10,24 @@ import {
   useState,
   type WheelEvent,
 } from "react";
+import { toast } from "sonner";
 import { useI18n } from "~/components/i18n";
 import {
   ChevronLeft,
   ChevronRight,
   Loader2,
+  Power,
   RefreshCw,
+  X,
 } from "~/components/icons";
+import { Action } from "~/components/ui/actions";
 import { Button } from "~/components/ui/button";
 import {
   BROWSER_LIVE_PATH,
   type BrowserInput,
   type BrowserLiveMessage,
+  pim,
 } from "~/lib/pim-api";
-
-export const Route = createFileRoute("/browser")({
-  // The chat whose window this takes over.
-  validateSearch: (search: Record<string, unknown>): { session?: string } => ({
-    ...(typeof search.session === "string" && { session: search.session }),
-  }),
-  component: BrowserPage,
-});
 
 type Frame = { url: string; width: number; height: number };
 type Status = "connecting" | "live" | "closed";
@@ -51,16 +50,70 @@ function modifiers(event: {
 const BUTTONS = ["left", "middle", "right"] as const;
 
 /**
- * Taking a chat's window in the agents' browser over (`?session=`), in a
- * tab of its own: the page it shows, streamed from the person's computer
- * as pictures, with their mouse, keyboard and address bar going to it, to
- * sign in or get past a check. The chat's agent goes on in the same page
- * after. A hidden text field takes the
- * keyboard, so phones bring theirs up when the page is tapped.
+ * The chat's window in its agent's browser, over the page as the Computer
+ * dialog is: the page it shows, streamed live from the person's computer as
+ * pictures, to watch the agent work, with the person's mouse, keyboard and
+ * address bar going to it, to sign in or get past a check. The agent goes on
+ * in the same page after. A hidden text field takes the keyboard, so phones
+ * bring theirs up when the page is tapped; while it has the keyboard, Escape
+ * is the page's, and the close button closes the dialog. It streams only
+ * while open.
  */
-function BrowserPage() {
+export function BrowserDialog({
+  session,
+  open,
+  onOpenChange,
+}: {
+  session: string;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
   const { t } = useI18n();
-  const { session } = Route.useSearch();
+  return (
+    <Dialog.Root open={open} onOpenChange={onOpenChange}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="fixed inset-0 z-50 bg-black/30 data-[state=open]:animate-in data-[state=open]:fade-in-0" />
+        <Dialog.Content
+          aria-describedby={undefined}
+          // Nothing is focused as it opens, so no button's tooltip shows over the page.
+          onOpenAutoFocus={(event) => event.preventDefault()}
+          onEscapeKeyDown={(event) => {
+            if (document.activeElement instanceof HTMLTextAreaElement)
+              event.preventDefault();
+          }}
+          className="fixed inset-0 z-50 flex flex-col overflow-hidden bg-background outline-none data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95 sm:inset-auto sm:top-1/2 sm:left-1/2 sm:-translate-x-1/2 sm:-translate-y-1/2 sm:rounded-t-2xl sm:border sm:shadow-xl"
+        >
+          <Dialog.Title className="sr-only">{t("browser")}</Dialog.Title>
+          {open && (
+            <LiveBrowser
+              session={session}
+              onClosed={() => onOpenChange(false)}
+            />
+          )}
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  );
+}
+
+function LiveBrowser({
+  session,
+  onClosed,
+}: {
+  session: string;
+  onClosed: () => void;
+}) {
+  const { t } = useI18n();
+  const queryClient = useQueryClient();
+  const turnOff = useMutation({
+    mutationFn: () => pim.closeBrowser(session),
+    onSuccess: () => {
+      toast.success(t("browserClosed"));
+      onClosed();
+    },
+    onError: (error) => toast.error(error.message),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ["browser"] }),
+  });
   const socket = useRef<WebSocket | null>(null);
   const keys = useRef<HTMLTextAreaElement | null>(null);
   const [frame, setFrame] = useState<Frame | null>(null);
@@ -74,7 +127,7 @@ function BrowserPage() {
   useEffect(() => {
     const scheme = location.protocol === "https:" ? "wss" : "ws";
     const live = new WebSocket(
-      `${scheme}://${location.host}${BROWSER_LIVE_PATH}${session ? `?session=${encodeURIComponent(session)}` : ""}`,
+      `${scheme}://${location.host}${BROWSER_LIVE_PATH}?session=${encodeURIComponent(session)}`,
     );
     socket.current = live;
     live.addEventListener("message", (event) => {
@@ -105,10 +158,7 @@ function BrowserPage() {
   useEffect(() => {
     if (!editing)
       setAddress(page?.url.startsWith("data:") ? "" : (page?.url ?? ""));
-    document.title = page?.title
-      ? t("browserTabTitle", { title: page.title })
-      : t("browser");
-  }, [page, editing, t]);
+  }, [page, editing]);
 
   const send = (input: BrowserInput) => {
     if (socket.current?.readyState === WebSocket.OPEN)
@@ -201,8 +251,8 @@ function BrowserPage() {
   };
 
   return (
-    <div className="flex h-dvh flex-col bg-background text-foreground">
-      <header className="flex items-center gap-1.5 border-b px-3 py-2">
+    <>
+      <header className="flex h-11 shrink-0 items-center gap-1.5 border-b pr-1.5 pl-3">
         <Button
           variant="ghost"
           size="icon"
@@ -253,25 +303,37 @@ function BrowserPage() {
             onChange={(event) => setAddress(event.target.value)}
           />
         </form>
-        <Button
-          className="ml-1.5"
-          onClick={() => {
-            // A tab the app opened closes; one opened some other way goes back to the app.
-            window.close();
-            setTimeout(() => location.assign("/"), 200);
-          }}
+        <Action
+          tooltip={t("closeBrowser")}
+          className="size-8 rounded-full text-muted-foreground hover:text-destructive"
+          disabled={turnOff.isPending}
+          onClick={() => turnOff.mutate()}
         >
-          {t("browserDone")}
-        </Button>
+          <Power className="size-4" />
+        </Action>
+        <Dialog.Close className="rounded-full p-2 text-muted-foreground hover:bg-accent hover:text-foreground">
+          <X className="size-4" />
+          <span className="sr-only">{t("close")}</span>
+        </Dialog.Close>
       </header>
-      <main className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden bg-muted/40 p-3">
+      <main
+        // The page fills the window edge to edge: on a wider screen the dialog takes the page's own shape (its window's, 1280 by 800, until the first
+        // picture says), as large as the screen allows below the 45px toolbar; a phone's whole screen shows it as large as it fits.
+        style={
+          {
+            "--page-aspect": `${frame?.width ?? 1280} / ${frame?.height ?? 800}`,
+            "--page-width": `min(calc(100vw - 4rem), calc((100dvh - 4rem - 45px) * ${(frame?.width ?? 1280) / (frame?.height ?? 800)}))`,
+          } as CSSProperties
+        }
+        className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden bg-muted/40 sm:aspect-(--page-aspect) sm:w-(--page-width) sm:flex-none"
+      >
         {frame && status !== "closed" ? (
           <>
             <img
               src={frame.url}
               alt={t("browserPicture", { title: page?.title || "" })}
               draggable={false}
-              className="max-h-full max-w-full cursor-default touch-none select-none rounded-lg border bg-background"
+              className="max-h-full max-w-full cursor-default touch-none select-none bg-background sm:size-full"
               onPointerDown={pointer("mousePressed")}
               onPointerUp={pointer("mouseReleased")}
               onPointerMove={move}
@@ -319,6 +381,6 @@ function BrowserPage() {
           </p>
         )}
       </main>
-    </div>
+    </>
   );
 }

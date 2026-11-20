@@ -25,6 +25,7 @@ import {
 import { CanvasTabs } from "~/components/chat/canvas-tabs";
 import { Composer } from "~/components/chat/composer";
 import { ChatHeader } from "~/components/chat/header";
+import { LiveButtons } from "~/components/chat/live-buttons";
 import { QueuedMessages } from "~/components/chat/queued-messages";
 import { ChatTabs, ChatTitle, useChatDrop } from "~/components/chat/tabs";
 import { TaskView } from "~/components/chat/tasks";
@@ -492,6 +493,12 @@ function ChatPage() {
                 ref={composerCardRef}
                 className="pointer-events-auto relative w-full max-w-4xl px-4"
               >
+                {ready && (
+                  <LiveButtons
+                    sessionId={sessionId}
+                    working={view.running || roomBusy}
+                  />
+                )}
                 <QueuedMessages sessionId={sessionId} queue={view.queue} />
                 <Composer
                   key={sessionId}

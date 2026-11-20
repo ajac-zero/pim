@@ -918,6 +918,27 @@ export type HostOpsAuditRow = {
   detail: string | null;
 };
 
+/** One command a chat's agents ran in the shell on the computer, with what it has printed so far (the end of it). */
+export type TerminalCommand = {
+  id: number;
+  command: string;
+  cwd: string;
+  startedAt: number;
+  /** Null while it runs. */
+  endedAt: number | null;
+  exitCode: number | null;
+  signal: string | null;
+  timedOut: boolean;
+  output: string;
+};
+
+/** A chat's commands, oldest first; `commands` is left out when nothing changed since the `version` asked with. */
+export type TerminalStatus = {
+  available: boolean;
+  version: number;
+  commands?: TerminalCommand[];
+};
+
 /** The browser your agents share: whether this Pim has one, and the page a chat's window shows when it's open. */
 export type BrowserStatus = {
   available: boolean;
@@ -2001,6 +2022,10 @@ export const pim = {
     }),
   browser: (sessionId: string) =>
     call<BrowserStatus>(`/browser?session=${encodeURIComponent(sessionId)}`),
+  terminal: (sessionId: string, version?: number) =>
+    call<TerminalStatus>(
+      `/terminal?session=${encodeURIComponent(sessionId)}${version ? `&version=${version}` : ""}`,
+    ),
   closeBrowser: (sessionId: string) =>
     call<{ closed: boolean }>(
       `/browser?session=${encodeURIComponent(sessionId)}`,

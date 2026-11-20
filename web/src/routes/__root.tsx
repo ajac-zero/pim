@@ -165,9 +165,8 @@ function Root() {
   const pathname = useRouterState({
     select: (state) => state.location.pathname,
   });
-  // Letting an MCP client in is a page of its own, between the client and the person,
-  // and so is taking the agents' browser over.
-  const alone = pathname === "/authorize" || pathname === "/browser";
+  // Letting an MCP client in is a page of its own, between the client and the person.
+  const alone = pathname === "/authorize";
   return (
     <I18nProvider>
       <ThemeProvider>
@@ -280,6 +279,7 @@ function usePimEvents() {
         queryClient.invalidateQueries({ queryKey: ["agents"] });
         queryClient.invalidateQueries({ queryKey: ["files"] });
         queryClient.invalidateQueries({ queryKey: ["browser"] });
+        queryClient.invalidateQueries({ queryKey: ["terminal"] });
         queryClient.invalidateQueries({ queryKey: ["skills"] });
         // Or made or changed a trigger, such as by scheduling work, or taken one of its runs; whether triggers exist doesn't change.
         for (const part of ["list", "one", "runs"]) {

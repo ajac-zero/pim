@@ -5,7 +5,6 @@ import {
   useSummaryOpen,
 } from "~/components/chat/activity-toggle";
 import { BoxSection } from "~/components/chat/box-section";
-import { BrowserView } from "~/components/chat/browser-view";
 import { ChatLinkMenu } from "~/components/chat/chat-link";
 import {
   CopyChatId,
@@ -19,16 +18,12 @@ import { SessionCostMenu } from "~/components/chat/session-cost";
 import { useI18n } from "~/components/i18n";
 import { AlertCircle, FileText, Loader2 } from "~/components/icons";
 import { pim } from "~/lib/pim-api";
-import { browserQuery } from "~/lib/queries";
-
-/** How often the open box looks at the agents' browser again. */
-const BROWSER_REFRESH_MS = 4_000;
 
 /**
  * The chat's options, in a popup floating over its top right corner: the agents in
  * the chat, copying the conversation or its id, its public link, and what it
  * has cost; then a quick summary of it and its next steps, from the utility
- * model; below that, while it's open, the browser the person's agents share. Approvals the chat
+ * model. Approvals the chat
  * is waiting on come first, and open the box even when it's closed. Nothing is
  * written until the summary dropdown is open. While open, it asks again only
  * when the chat has settled with new entries (`entries`),
@@ -56,11 +51,6 @@ export function ActivityBox({
     placeholderData: keepPreviousData,
     retry: false,
   });
-  const browser = useQuery({
-    ...browserQuery(sessionId),
-    enabled: open,
-    refetchInterval: BROWSER_REFRESH_MS,
-  });
   // A press outside the popup closes it. The header button toggles it itself, and
   // the menus the popup opens render outside it, so they count as inside.
   useEffect(() => {
@@ -80,7 +70,6 @@ export function ActivityBox({
     return () => document.removeEventListener("pointerdown", close);
   }, [open, setOpen]);
   if (!open && approvals.length === 0) return null;
-  const page = browser.data?.page;
 
   return (
     <aside
@@ -149,13 +138,6 @@ export function ActivityBox({
               )}
             </BoxSection>
           </>
-        )}
-        {open && page && (
-          <BrowserView
-            sessionId={sessionId}
-            page={page}
-            updatedAt={browser.dataUpdatedAt}
-          />
         )}
       </div>
     </aside>

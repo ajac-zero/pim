@@ -29,6 +29,7 @@ import { createAgentHost, type AgentHostOptions } from "./agent-host.ts";
 import { CommandRelay } from "./command-relay.ts";
 import { deliverCosts } from "./deliveries.ts";
 import { assembleForge, forgeHttp, startForgeLoops } from "./forge-assembly.ts";
+import { chatFeedSource } from "./chat-feed-source.ts";
 import { combineSources, forgeOutboxSource } from "./forge-source.ts";
 import { deliverForgeWakes } from "./forge-wakes.ts";
 import { codingAdminRoutes, forgeAuthenticator, forgeRoutes, projectedTranscripts, snapshotRoutes } from "./gate-extras.ts";
@@ -214,7 +215,7 @@ export async function startLive(config: ProcessConfig, env: Env, host: Host, hoo
 		return true;
 	});
 	host.upgrade((req, socket, head) => endpoint.upgrade(req, socket, head));
-	const projector = new Projector(live, { pulse, source: combineSources(runtimeOutboxSource(live), forgeOutboxSource(live)) });
+	const projector = new Projector(live, { pulse, source: combineSources(runtimeOutboxSource(live), forgeOutboxSource(live), chatFeedSource(live)) });
 	const stopLoop = projectorLoop(projector, config.databaseUrl, hooks.pollMs ?? 500);
 	metrics.websockets.collect(() => metrics.websockets.set(hub.connections, { service: "live" }));
 	metrics.projectionLag.collect(async () => {

@@ -112,6 +112,28 @@ real("a chat over its life", () => {
 		expect((await web.call("POST", `/api/sessions/00000000-0000-4000-8000-000000000000/read`)).status).toBe(404);
 	}, 160_000);
 
+	it("tells the sidebar, as it happens, of a chat's title and whether the person archived it", async () => {
+		const chat = (await web.call("POST", "/api/sessions", { title: "Shelved" })).json.id;
+		await say(chat, "hello", reply("Hi there."));
+		// The newest sidebar row Live sent for the chat, which is what the app puts in its list whatever else it knew of the chat before.
+		const sent = async (until: (row: { title: string | null; summary: { archived?: boolean; agent: unknown } }) => boolean) =>
+			waitFor("the sidebar row", async () => {
+				const { rows } = await d.stack.admin.query("SELECT payload AS data FROM pim_projection.live_event_log WHERE topic = 'sidebar' AND event_kind = 'sidebar.summary' AND payload->>'chatId' = $1 ORDER BY stream_seq DESC LIMIT 1", [chat]);
+				return rows[0] && until(rows[0].data) ? rows[0].data : undefined;
+			}, 30_000);
+		expect(await sent((row) => row.title === "Shelved")).toMatchObject({ summary: { archived: false } });
+		expect((await web.call("PUT", `/api/sessions/${chat}`, { title: "Renamed" })).status).toBe(200);
+		expect(await sent((row) => row.title === "Renamed")).toMatchObject({ summary: { archived: false } });
+		expect((await web.call("POST", `/api/sessions/${chat}/archive`)).status).toBe(200);
+		await sent((row) => row.summary.archived === true);
+		// The snapshot says the same, and archived chats come back when unarchived.
+		const snapshot = async () => (await web.call("GET", "/api/snapshot/sidebar")).json.sessions.find((s: { chatId: string }) => s.chatId === chat);
+		expect(await snapshot()).toMatchObject({ title: "Renamed", summary: { archived: true } });
+		expect((await web.call("POST", `/api/sessions/${chat}/unarchive`)).status).toBe(200);
+		expect(await sent((row) => row.summary.archived === false && row.title === "Renamed")).toBeTruthy();
+		expect(await snapshot()).toMatchObject({ summary: { archived: false } });
+	});
+
 	it("compacts a chat that outgrew the model's context in place, and the next turn runs on the summary", async () => {
 		const chat = (await web.call("POST", "/api/sessions", { title: "Long" })).json.id;
 		const filler = (word: string) => Array.from({ length: 15_000 }, (_, i) => `${word}${i}`).join(" ");

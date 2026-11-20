@@ -26,7 +26,8 @@ A v2 package imports `@pim/v2-contracts` and npm packages. It does not import an
 `@pim/v2-server` holds what connects workstreams, so none of them imports another's internals:
 
 - **Runtime to Live:** `runtimeOutboxSource` turns the runtime's commits (receipts and outbox references) into the events Live projects.
-- **Forge to Live:** `forgeOutboxSource` reads Forge's outbox, which migration 0601 numbers per owner without gaps, as a stream with a stable pseudo-partition id (`forgePartitionId`). `combineSources` gives the projector both.
+- **Forge to Live:** `forgeOutboxSource` reads Forge's outbox, which migration 0601 numbers per owner without gaps, as a stream with a stable pseudo-partition id (`forgePartitionId`).
+- **The application to Live:** `chatFeedSource` reads the feed that migration 0711 keeps of changes to a chat's title, archived and read state, agent and model (the runtime knows none of them), numbered per owner as Forge's is, through functions that return the chat as it is then (`chatFeedPartitionId`). It projects them as `chat.meta`, so the sidebar's live rows say what its snapshot says. `combineSources` gives the projector all three.
 - **Forge to the runtime:** `deliverForgeWakes` turns each `wake` row of Forge's outbox into a `coding_wake` command in the partition that holds the chat; the wake id is the command id.
 - Forge's `cost_ledger` rows are left for the application ledger's consumer.
 

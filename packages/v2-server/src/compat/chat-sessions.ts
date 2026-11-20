@@ -287,6 +287,11 @@ export function sessionRoutes(env: Record<string, string | undefined> = process.
 			await app.conversations.admit(p, { commandId, kind: "user_message", chatId: id, payload: { text, retry: true } });
 			return ok({ session: id });
 		}),
+		// Lists an archived chat again; the web sends no command id, so one is made here.
+		route("POST", "/api/sessions/:id/unarchive", async ({ app, principal, params }) => {
+			await app.conversations.admit(await principal(), { commandId: `unarchive-${randomUUID()}`, kind: "unarchive", chatId: chatId(params[0]!), payload: {} });
+			return ok({ ok: true });
+		}),
 		// A new chat with what was said in this one: through an agent's message (`at`), or up to one of the person's (`before`), to send it again changed.
 		route("POST", "/api/sessions/:id/fork", async ({ app, principal, params, json }) => {
 			const p = await principal();

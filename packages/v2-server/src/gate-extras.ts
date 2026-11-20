@@ -8,6 +8,7 @@ import type { App } from "@pim/v2-app/app";
 import { bearerOf, ok, type Reply, type Route } from "@pim/v2-app/http";
 import { principalId } from "@pim/v2-app/authz";
 import type { TranscriptSource } from "@pim/v2-app/sharing";
+import { chatSummary } from "./chat-summary.ts";
 import { roomViews } from "./rooms.ts";
 import { MAX_PAGE, sidebarPage, transcriptPage } from "@pim/v2-live/projections/snapshots";
 import { sharedMessages } from "./shared-chat.ts";
@@ -36,9 +37,6 @@ export function projectedTranscripts(pool: Pool): TranscriptSource {
 	return { ...source, shared: async (ownerId, chatId) => sharedMessages((await source.readAll!(ownerId, chatId)) as TranscriptMessage[]) };
 }
 
-/** A chat's own model as the app's `Session.model`; the app finds the rest of it (name, images) among the choices. */
-const chosenModel = (m: { provider: string; id: string }) => ({ model: { provider: m.provider, id: m.id, name: m.id, images: false }, override: true });
-
 /** `GET /api/snapshot/sidebar`, `/api/snapshot/chat/:id` and `/api/snapshot/coding/:id`: bounded, paginated, read as the caller. */
 export function snapshotRoutes(pool: Pool): Route[] {
 	const limit = (url: URL) => (url.searchParams.has("limit") ? Number(url.searchParams.get("limit")) : undefined);
@@ -55,16 +53,10 @@ export function snapshotRoutes(pool: Pool): Route[] {
 				// where the app reads them from.
 				const chats = (where: string, params: unknown[]) =>
 					app.db.owner(p.ownerId, async (tx) => (await tx.query(
-						`SELECT c.public_chat_id::text AS id, c.title, c.deleted_at, c.room_of IS NOT NULL AS seat, (c.response_at IS NOT NULL AND (c.read_at IS NULL OR c.read_at < c.response_at)) AS unread, c.model, c.created_at, c.updated_at, c.response_at, a.id AS agent_id, a.name AS agent_name
+						`SELECT c.public_chat_id::text AS id, c.title, c.deleted_at, c.room_of IS NOT NULL AS seat, (c.response_at IS NOT NULL AND (c.read_at IS NULL OR c.read_at < c.response_at)) AS unread, c.model, c.archived_at IS NOT NULL AS archived, c.created_at, c.updated_at, c.response_at, a.id AS agent_id, a.name AS agent_name
 						 FROM pim_app.conversations c LEFT JOIN pim_app.agents a ON a.id = coalesce(c.agent_id, (SELECT value #>> '{}' FROM pim_app.owner_settings WHERE key = 'majordomo')) AND a.deleted_at IS NULL
 						 WHERE ${where}`, params)).rows);
-				const summaryOf = (r: any, own: unknown) => ({
-					...(own as Record<string, unknown> | null),
-					createdAt: new Date(r.created_at).getTime(),
-					...(r.response_at ? { responseAt: new Date(r.response_at).getTime() } : {}),
-					...(r.agent_id ? { agent: { id: r.agent_id, name: r.agent_name } } : {}),
-					...(r.model ? { model: chosenModel(r.model) } : {}),
-				});
+				const summaryOf = (r: any, own: unknown) => ({ ...(own as Record<string, unknown> | null), ...chatSummary(r) });
 				const kept = new Map((await chats("c.public_chat_id::text = ANY($1)", [page.sessions.map((s) => s.chatId)])).map((r) => [r.id as string, r]));
 				// A room member's seat is not a chat the person opens; a room's members ride in the host chat's summary.
 				const rooms = await roomViews(app, p.ownerId, page.sessions.map((s) => s.chatId));

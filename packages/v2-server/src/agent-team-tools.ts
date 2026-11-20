@@ -2,6 +2,7 @@
  * The tools with which an agent works with the person's other agents, ported from v1 (`src/tasks.ts`, `src/extensions/agents.ts`): `delegate` hands tasks to others, `create_agent` makes
  * a new agent and `update_agent` changes one. Whom an agent may hand a task to, and who the person's agents are, is `pim_app.runner_agents` (migration 0690), which the prompt reads too.
  */
+import { createHash } from "node:crypto";
 import { Type } from "typebox";
 import type { ToolRegistration } from "@earendil-works/pi-durable";
 import type { App } from "@pim/v2-app/app";
@@ -108,7 +109,8 @@ export function teamTools(deps: TeamDeps): ToolRegistration[] {
 				given.push({ agent, task, continues: earlier || undefined });
 			}
 			if (problems.length > 0) return text(problems.join("\n"), true);
-			const batch = `delegate:${ownerId}:${call.api.taskId}:${call.api.callId}`;
+			// Hashed, because a model provider's call id can be hundreds of characters (OpenAI's are) and a command id may not be longer than 128.
+			const batch = `delegate:${createHash("sha256").update(`${ownerId}\n${call.api.taskId}\n${call.api.callId}`).digest("hex").slice(0, 32)}`;
 			const from = roster.agents.find((x) => x.id === roster.self)?.name;
 			// The command is the call's: a rerun after an eviction, or the wake of a call that waited, finds the tasks it gave and gives none twice.
 			const admission = await app.conversations.admit(call.p, {

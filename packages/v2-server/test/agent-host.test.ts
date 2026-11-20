@@ -580,7 +580,8 @@ const agentId = (await d.stack.admin.query("SELECT id FROM pim_app.agents WHERE 
 	}, 180_000);
 
 	it("waits for the answers of the tasks it hands out when asked to, and gets them as the call's result instead of an update", async () => {
-		const answer = team([fauxToolCall("delegate", { tasks: [{ to: "Researcher", task: "Find C" }], wait: true })], { wait: true });
+		// A call id as long as OpenAI's (`call_…|fc_…`) must not make the batch's command id too long to accept.
+		const answer = team([fauxToolCall("delegate", { tasks: [{ to: "Researcher", task: "Find C" }], wait: true }, { id: `call_${"a".repeat(60)}|fc_${"b".repeat(400)}` })], { wait: true });
 		faux.setResponses(Array(8).fill(answer) as never);
 		const chat = (await web.call("POST", "/api/sessions", { title: "Waiter" })).json.id as string;
 		expect((await message(chat, "please hand it off")).status).toBe(202);

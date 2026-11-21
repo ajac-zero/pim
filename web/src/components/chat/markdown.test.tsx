@@ -15,7 +15,11 @@ import {
   UNTRUSTED_SCHEMA,
 } from "~/components/chat/markdown";
 import { ReplyImages } from "~/components/chat/reply-blocks";
-import { embedAddress, youtubeId } from "~/components/chat/video-block";
+import {
+  embedAddress,
+  videoFileAddress,
+  youtubeId,
+} from "~/components/chat/video-block";
 import { agentsQuery, sessionsQuery } from "~/lib/queries";
 import { resetThemes } from "~/lib/themes";
 
@@ -326,6 +330,26 @@ describe("an agent's Markdown", () => {
     ]);
     expect(shown).toContain("[notes]");
     expect(shown).toContain("[etc]");
+  });
+
+  it("plays video files in the workspace, with controls and never by themselves", () => {
+    const html = renderToStaticMarkup(
+      <Markdown text="![Demo](/workspace/clips/demo%20one.mp4) ![Etc](/etc/a.mp4) ![Elsewhere](https://evil.example/v.mp4)" />,
+    );
+    const videos = elements(html).filter((element) => element.tag === "video");
+    expect(videos).toHaveLength(1);
+    const video = videos[0];
+    const names = (video?.attributes ?? []).map((a) => a.name.toLowerCase());
+    expect(names).toEqual(expect.arrayContaining(["controls", "preload"]));
+    expect(names).not.toContain("autoplay");
+    const src = video?.attributes.find((a) => a.name === "src")?.value ?? "";
+    const url = new URL(src, "https://pim.example");
+    expect([url.pathname, url.searchParams.get("path")]).toEqual([
+      "/api/files/content",
+      "/workspace/clips/demo one.mp4",
+    ]);
+    expect(html).toContain("[Etc]");
+    expect(html).toContain("[Elsewhere]");
   });
 
   it("draws cards with Pim's copies of their images, and never the images' own addresses", () => {
@@ -709,6 +733,44 @@ describe("videos an agent shows", () => {
       "not a url",
     ]) {
       expect(youtubeId(bad), bad).toBeNull();
+    }
+  });
+
+  it("draws a video file on the web as a poster, and loads nothing from its site", () => {
+    const html = renderToStaticMarkup(
+      <Markdown
+        text={fence([
+          { url: "https://cdn.example/clips/Squat.MP4?x=1", title: "Squat" },
+        ])}
+      />,
+    );
+    expect(html).toContain("Play video: Squat");
+    expect(html).toContain("cdn.example, which can see your address");
+    expect(html).toContain('href="https://cdn.example/clips/Squat.MP4?x=1"');
+    expect(html).not.toContain("<video");
+    expect(html).not.toContain("<iframe");
+  });
+
+  it("recognises https addresses of video files, and nothing else", () => {
+    for (const ok of [
+      "https://cdn.example/a.mp4",
+      "https://cdn.example/a/b.webm?token=1",
+      "https://cdn.example/a.MOV",
+      "https://cdn.example:8443/a.m4v",
+    ]) {
+      expect(videoFileAddress(ok), ok).not.toBeNull();
+    }
+    for (const bad of [
+      "http://cdn.example/a.mp4",
+      "https://cdn.example/a.mp4/more",
+      "https://cdn.example/?f=a.mp4",
+      "https://cdn.example/a.png#.mp4",
+      "https://user:pw@cdn.example/a.mp4",
+      "javascript:alert(1)//a.mp4",
+      "/workspace/a.mp4",
+      "not a url",
+    ]) {
+      expect(videoFileAddress(bad), bad).toBeNull();
     }
   });
 

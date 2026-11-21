@@ -595,6 +595,17 @@ function ownImage(src: string): string | null {
   }
 }
 
+/** Where the app loads a video file in the person's workspace from, which the agent names by its path; null for anything else. */
+function ownVideo(src: string): string | null {
+  if (!src.startsWith(`${FILES_ROOT}/`)) return null;
+  try {
+    const path = decodeURIComponent(src);
+    return previewOf(path).kind === "video" ? fileContentUrl(path) : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * An agent's message shows only Pim's own images. One from elsewhere would be
  * fetched as soon as the message shows, and its address could carry what the
@@ -608,6 +619,8 @@ const agentComponents = {
     if (typeof src === "string" && OWN_VIDEO.test(src)) {
       return <OwnVideo src={src} label={label} />;
     }
+    const video = typeof src === "string" ? ownVideo(src) : null;
+    if (video) return <OwnVideo src={video} label={label} />;
     const shown = typeof src === "string" ? ownImage(src) : null;
     return shown ? (
       <img src={shown} alt={label} className="my-3 max-w-full rounded-xl" />

@@ -1,6 +1,6 @@
 /**
  * What `send_to_user` checks in a reply's Markdown besides its ```ui blocks (`./agent-widgets.ts`), ported from v1 (`src/extensions/messaging.ts`): the fenced blocks the web app draws itself,
- * `cards` (things the agent found, as rows with their images), `gallery` (images in a grid) and `videos` (YouTube videos that play in the chat once the person chooses), each a JSON array
+ * `cards` (things the agent found, as rows with their images), `gallery` (images in a grid) and `videos` (YouTube videos and video files that play in the chat once the person chooses), each a JSON array
  * of items; the images they show, which must have come from a tool's result in the chat; and the copies Pim keeps of them (`keepImages`), so a reply never loads from a third party.
  * It also reads which ```ui blocks a message holds, for `ui_state` and the route that keeps a block's state.
  */
@@ -39,10 +39,20 @@ export function youtubeId(address: string): string | null {
 	return id !== null && YOUTUBE_ID.test(id) ? id : null;
 }
 
+/** Whether an address is an `https` one of a video file, by its extension, which the app plays once the person chooses. */
+export function isVideoFile(address: string): boolean {
+	try {
+		const url = new URL(address);
+		return url.protocol === "https:" && !url.username && !url.password && /\.(?:mp4|webm|m4v|mov)$/i.test(url.pathname);
+	} catch {
+		return false;
+	}
+}
+
 const KINDS = {
 	cards: { fields: ["title", "url", "image", "meta", "text"], required: "title", max: 10, shape: "{ title, url?, image?, meta?, text? }" },
 	gallery: { fields: ["image", "caption", "url"], required: "image", max: 8, shape: "{ image, caption?, url? }" },
-	videos: { fields: ["url", "title"], required: "url", max: 6, shape: "{ url, title? }, where url is a YouTube watch, youtu.be or shorts address" },
+	videos: { fields: ["url", "title"], required: "url", max: 6, shape: "{ url, title? }, where url is a YouTube watch, youtu.be or shorts address, or an https address of an .mp4, .webm, .m4v or .mov file" },
 } as const;
 type ReplyKind = keyof typeof KINDS;
 export type ReplyBlock = { kind: ReplyKind; items: ReplyItem[] };
@@ -64,7 +74,7 @@ function readItem(kind: ReplyKind, value: unknown): ReplyItem | string {
 		if (typeof field !== "string" || field.trim() === "") return `an item's ${key} must be text`;
 		if (key === "url" || key === "image") {
 			if (!WEB_ADDRESS.test(field)) return `an item's ${key} must be an http(s) address`;
-			if (kind === "videos" && youtubeId(field) === null) return "an item's url must be a YouTube watch, youtu.be or shorts address with a valid video id";
+			if (kind === "videos" && youtubeId(field) === null && !isVideoFile(field)) return "an item's url must be a YouTube watch, youtu.be or shorts address with a valid video id, or an https address of an .mp4, .webm, .m4v or .mov file";
 		} else if (field.length > TEXT_LIMITS[key]!) return `an item's ${key} must be at most ${TEXT_LIMITS[key]} characters`;
 	}
 	return item as ReplyItem;
@@ -119,7 +129,8 @@ export const blockImages = (blocks: readonly ReplyBlock[]): string[] => [...new 
 export const REPLY_BLOCKS_GUIDANCE =
 	"To show things you found, such as products, places or pages, put a ```cards block in it, alone on its lines: a JSON array of { title, url?, image?, meta?, text? }, where meta is a short line such as its maker and price. " +
 	"To show pictures, such as an image search's results, put a ```gallery block: a JSON array of { image, caption?, url? }, where url is the page it's from. " +
-	"To show a video, such as an exercise demonstration, put a ```videos block: a JSON array of { url, title? } of YouTube watch, youtu.be or shorts addresses of real videos a tool's result gave you, never made up; it plays in the chat only when the person chooses, and other links stay ordinary Markdown links. " +
+	"To show a video, such as an exercise demonstration, put a ```videos block: a JSON array of { url, title? } of YouTube watch, youtu.be or shorts addresses, or https addresses of .mp4, .webm, .m4v or .mov files, of real videos a tool's result gave you, never made up; it plays in the chat only when the person chooses, and other links stay ordinary Markdown links. " +
+	"To show a video file in the person's files, such as one you made or downloaded on their computer, write it as an image by its path, such as ![Demo](/workspace/demo.mp4); it plays in the chat. " +
 	"To draw a diagram, such as a flowchart, a sequence or a timeline, put a ```mermaid block of Mermaid source in it; the person sees it drawn. " +
 	"An image must be an address a tool's result in this chat gave you, such as a page's image from fetch_url, never one you made up; Pim shows a copy of it.";
 

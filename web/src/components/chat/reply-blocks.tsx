@@ -10,13 +10,13 @@ import {
 } from "react";
 import { useTheme } from "~/components/theme";
 import { cn } from "~/lib/utils";
-import { Video, youtubeId } from "./video-block";
+import { FileVideo, Video, videoFileAddress, youtubeId } from "./video-block";
 
 /**
  * Blocks an agent's message draws instead of showing as code. ```cards,
  * ```gallery and ```videos fences are JSON arrays, drawn with the app's own
  * components: things it found, as rows with their images, and images in a
- * grid, and YouTube players that load only when played. A ```mermaid fence is a
+ * grid, and players for YouTube and video files that load only when played. A ```mermaid fence is a
  * diagram, drawn in a sandboxed frame. Pim checks each block when the
  * message is sent and keeps copies of its images; the send's result maps
  * each image's address on the web to its copy here.
@@ -162,18 +162,22 @@ export function ReplyBlock({
   );
 }
 
-/** Players for the videos whose addresses name a YouTube video; any other item is left out. */
+/** Players for the videos whose addresses name a YouTube video or a video file; any other item is left out. */
 function Videos({ items, fallback }: { items: Item[]; fallback: ReactNode }) {
   const videos = items.flatMap((item) => {
     const id = item.url ? youtubeId(item.url) : null;
-    return id ? [{ id, title: item.title }] : [];
+    if (id) return [{ key: id, player: <Video id={id} title={item.title} /> }];
+    const file = item.url ? videoFileAddress(item.url) : null;
+    return file
+      ? [{ key: file, player: <FileVideo address={file} title={item.title} /> }]
+      : [];
   });
   if (videos.length === 0) return fallback;
   return (
     <div className="my-4 grid gap-4">
       {videos.map((video, index) => (
         // biome-ignore lint/suspicious/noArrayIndexKey: as for cards
-        <Video key={`${index}-${video.id}`} {...video} />
+        <div key={`${index}-${video.key}`}>{video.player}</div>
       ))}
     </div>
   );

@@ -693,6 +693,26 @@ describe("a chat's own model", () => {
 	});
 });
 
+describe("a chat an agent started for a task", () => {
+	it("says in the sidebar who started it, so the app lists it under that chat, and is announced again when its task ends", async () => {
+		const owner = (await stack.admin.query("SELECT owner_id FROM pim_app.accounts WHERE username = 'ada'")).rows[0].owner_id as string;
+		const worker = (await call(ada, "POST", "/api/agents", { name: "Worker", role: "Worker", description: "Works" })).body;
+		const from = (await call(ada, "POST", "/api/sessions", { agentId: agent, title: "Starter" })).body.id as string;
+		const chat = (await call(ada, "POST", "/api/sessions", { agentId: worker.id, title: "Task chat" })).body.id as string;
+		const row = async (id: string) => ((await call(ada, "GET", "/api/snapshot/sidebar")).body.sessions as { chatId: string; summary: any }[]).find((s) => s.chatId === id);
+		expect((await row(chat))?.summary.startedBy).toBeNull();
+		const before = Number((await stack.admin.query("SELECT last_seq FROM pim_app.chat_feed_counters WHERE owner_id = $1", [owner])).rows[0].last_seq);
+		await stack.admin.query("INSERT INTO pim_app.tasks (task_id, owner_id, started_by, task_chat, origin_principal, title) VALUES ('t_started', $1, $2, $3, '{}', 'do it')", [owner, from, chat]);
+		expect((await row(chat))?.summary.startedBy).toEqual({ session: from, agent: { id: agent, name: expect.any(String) }, task: "t_started", state: "working" });
+		expect((await row(from))?.summary.startedBy).toBeNull();
+		// The chat is announced when its task is made and when the task ends, and each time the row Live builds says who started it.
+		await stack.admin.query("UPDATE pim_app.tasks SET status = 'completed' WHERE task_id = 't_started'");
+		const feed = (await stack.admin.query("SELECT chat_id, started_by FROM pim_app.live_chat_feed($1, $2, 10)", [owner, before])).rows;
+		expect(feed.map((r) => r.chat_id)).toEqual([chat, chat]);
+		expect(feed[1].started_by).toMatchObject({ session: from, task: "t_started", state: "completed" });
+	});
+});
+
 describe("a group chat's room", () => {
 	it("takes its mode from the person, and runs each agent besides the host on a model chosen for its seat alone", async () => {
 		const owner = (await stack.admin.query("SELECT owner_id FROM pim_app.accounts WHERE username = 'ada'")).rows[0].owner_id as string;

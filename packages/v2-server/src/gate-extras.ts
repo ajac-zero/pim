@@ -53,7 +53,7 @@ export function snapshotRoutes(pool: Pool): Route[] {
 				// where the app reads them from.
 				const chats = (where: string, params: unknown[]) =>
 					app.db.owner(p.ownerId, async (tx) => (await tx.query(
-						`SELECT c.public_chat_id::text AS id, c.title, c.deleted_at, c.room_of IS NOT NULL AS seat, (c.response_at IS NOT NULL AND (c.read_at IS NULL OR c.read_at < c.response_at)) AS unread, c.model, c.archived_at IS NOT NULL AS archived, c.created_at, c.updated_at, c.response_at, a.id AS agent_id, a.name AS agent_name
+						`SELECT c.public_chat_id::text AS id, c.title, c.deleted_at, c.room_of IS NOT NULL AS seat, (c.response_at IS NOT NULL AND (c.read_at IS NULL OR c.read_at < c.response_at)) AS unread, c.model, c.archived_at IS NOT NULL AS archived, c.created_at, c.updated_at, c.response_at, a.id AS agent_id, a.name AS agent_name, pim_app.task_started_by(c.owner_id, c.public_chat_id) AS started_by
 						 FROM pim_app.conversations c LEFT JOIN pim_app.agents a ON a.id = coalesce(c.agent_id, (SELECT value #>> '{}' FROM pim_app.owner_settings WHERE key = 'majordomo')) AND a.deleted_at IS NULL
 						 WHERE ${where}`, params)).rows);
 				const summaryOf = (r: any, own: unknown) => ({ ...(own as Record<string, unknown> | null), ...chatSummary(r) });

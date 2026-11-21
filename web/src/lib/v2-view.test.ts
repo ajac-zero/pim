@@ -274,6 +274,28 @@ describe("a v2 chat drawn by the same reducer as v1's", () => {
     ]);
   });
 
+  it("reads who started a chat made for a task from its summary", () => {
+    const startedBy = {
+      session: "a",
+      agent: { id: "m", name: "Majordomo" },
+      task: "t1",
+      state: "working",
+    };
+    const row = {
+      chatId: "b",
+      title: "B",
+      busy: false,
+      unread: false,
+      updatedAt: 5,
+    };
+    expect(sessionOf({ ...row, summary: { startedBy } }).startedBy).toEqual(
+      startedBy,
+    );
+    expect(
+      sessionOf({ ...row, summary: { startedBy: null } }),
+    ).not.toHaveProperty("startedBy");
+  });
+
   it("keeps a chat's own model and agent when a live row, which carries neither, replaces its row", () => {
     const pinned = sessionOf({
       chatId: "a",

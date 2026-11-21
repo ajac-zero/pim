@@ -229,6 +229,10 @@ export function sessionOf(row: SidebarRow): Session {
       typeof agent === "object" && agent !== null
         ? (agent as { id: string; name: string })
         : null,
+    // A chat an agent started for a task says who started it, so the sidebar lists it under that chat.
+    ...(typeof summary.startedBy === "object" && summary.startedBy !== null
+      ? { startedBy: summary.startedBy as Session["startedBy"] }
+      : {}),
     // A group chat's room rides in the row's summary, like its agent.
     ...(typeof summary.room === "object" && summary.room !== null
       ? { room: summary.room as Session["room"] }

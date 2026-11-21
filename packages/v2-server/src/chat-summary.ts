@@ -1,6 +1,6 @@
 /**
  * What a sidebar row says of a chat beyond what the runtime knows: when it began and was last answered, whether it was archived by hand, and the
- * agent and model it answers as. The application's table holds them; the Gate adds them to the sidebar snapshot (`gate-extras.ts`) and the chat feed
+ * agent and model it answers as, and, for a chat an agent started for a task, who started it. The application's table holds them; the Gate adds them to the sidebar snapshot (`gate-extras.ts`) and the chat feed
  * (`chat-feed-source.ts`) puts them in the projection, so a row read from the snapshot and a row heard live say the same.
  */
 
@@ -12,6 +12,8 @@ export type ChatColumns = {
 	agent_id: string | null;
 	agent_name: string | null;
 	model: { provider: string; id: string } | null;
+	/** The chat, agent, task and task state that started a chat made for a task (`pim_app.task_started_by`, migration 0713); null for a chat no task made. */
+	started_by: { session: string; agent: { id: string; name: string }; task: string; state: string } | null;
 };
 
 /** A chat's own model as the app's `Session.model`; the app finds the rest of it (name, images) among the choices. */
@@ -25,5 +27,6 @@ export function chatSummary(r: ChatColumns) {
 		archived: r.archived,
 		agent: r.agent_id ? { id: r.agent_id, name: r.agent_name } : null,
 		model: r.model ? chosenModel(r.model) : null,
+		startedBy: r.started_by,
 	};
 }

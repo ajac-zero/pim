@@ -21,7 +21,7 @@ const liveButton = (visible: boolean) =>
 
 /**
  * What the chat's agents are using on the person's computer, as buttons
- * floating in the row of the scroll to bottom button, each its icon alone
+ * floating over the thread in the row of the scroll to bottom button, at the composer's left corner, each its icon alone
  * (what it shows is its tooltip): the chat's browser window while it's open,
  * and the terminal once they have run a command, with a dot while one runs.
  * Each opens over the page, as the Computer dialog does: the browser live, to
@@ -52,7 +52,9 @@ export function LiveButtons({
   );
   const title = shownPage ? shownPage.title || hostOf(shownPage.url) : "";
   return (
-    <>
+    // Floats over the thread above the composer's left corner, in the row of
+    // the scroll to bottom button, so it doesn't make the composer taller.
+    <div className="pointer-events-none absolute bottom-full left-3 mb-2 flex">
       {shownPage && (
         <Action
           tooltip={t("openBrowser", { title })}
@@ -98,7 +100,7 @@ export function LiveButtons({
         open={shown === "terminal"}
         onOpenChange={(open) => setShown(open ? "terminal" : null)}
       />
-    </>
+    </div>
   );
 }
 

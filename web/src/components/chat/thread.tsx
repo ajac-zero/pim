@@ -249,7 +249,6 @@ export const Thread = memo(function Thread({
   composerHeight,
   composerCardHeight,
   footer,
-  live,
 }: {
   sessionId: string;
   /** Whether `view` is current, rather than the chat as it was last left. */
@@ -274,8 +273,6 @@ export const Thread = memo(function Thread({
   composerCardHeight?: number;
   /** Shown under the last message, such as suggested replies. */
   footer?: ReactNode;
-  /** Buttons floating beside the scroll to bottom button. */
-  live?: ReactNode;
 }) {
   const { t } = useI18n();
 
@@ -832,13 +829,10 @@ export const Thread = memo(function Thread({
           SCROLL_BUTTON_GAP
         }
         mention={
-          <>
-            {live}
-            <ConversationMentionButton
-              label={t("scrollToMention")}
-              changes={rows.length}
-            />
-          </>
+          <ConversationMentionButton
+            label={t("scrollToMention")}
+            changes={rows.length}
+          />
         }
       />
     </Conversation>

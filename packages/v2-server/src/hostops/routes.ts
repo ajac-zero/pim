@@ -5,7 +5,7 @@
  *   GET / POST / DELETE /api/admin/computer-host   the admin pairing the host and seeing it
  *   GET /pim-host.ts                        what installs and updates the host
  *   /api/hostops/{status,audit,credential,ops}      the admin reading, and the refusal of everyone who is not the majordomo
- *   GET /api/admin/release, POST /api/hostops/update   the admin's view of the version and the update check, and the button that updates the stack
+ *   GET /api/admin/release, POST /api/admin/release/check, POST /api/hostops/update   the admin's view of the version and the update check, the button that checks now, and the button that updates the stack
  *   POST /api/hostops/agent/{enroll,poll,result}    the daemon, with its `pimhostops_` credential
  *
  * and what a person's `/api/computer` answers where a host keeps their computer (`managedComputerRoutes`, which wraps `compat/computer.ts`'s routes and leaves them as they are
@@ -17,7 +17,7 @@ import type { App } from "@pim/v2-app/app";
 import { BadRequestError, ForbiddenError, NotFoundError, PimError, UnauthorizedError } from "@pim/v2-app/errors";
 import { type Ctx, ok, type Reply, type Route, route } from "@pim/v2-app/http";
 import { ComputerHost, readSync } from "./computer-host.ts";
-import { readRecord, releaseView } from "../update-check.ts";
+import { checkForUpdate, readRecord, releaseView } from "../update-check.ts";
 import { AUDIT_ROWS, type HostdResult, type HostOpData, HostOps, MAX_DATA_BYTES, MAX_POLL_WAIT_MS, MAX_SUMMARY } from "./service.ts";
 
 const noStore = { "cache-control": "no-store, private" };
@@ -53,6 +53,12 @@ export function hostRoutes(options: { hostSource?: string; env?: Readonly<Record
 		if (p.kind !== "user") throw new ForbiddenError("hostops", "session-only");
 		return p;
 	};
+	/** What runs, what the last check found, whether a daemon is there to update the stack, and the newest update (while it runs, and for an hour after). */
+	const releaseOf = async (ctx: Ctx) => {
+		const { hostops } = hostServices(ctx.app);
+		const status = await hostops.status();
+		return ok({ ...releaseView(env, await readRecord(ctx.app.db)), daemon: { online: status.credential.present && status.agent.lastSeenAt !== null && Date.now() - status.agent.lastSeenAt < 60_000 }, update: await hostops.latestUpdate() }, 200, noStore);
+	};
 	return [
 		// ---- the computer host ----
 		route("POST", "/api/computer-host/sync", async (ctx) => {
@@ -83,12 +89,12 @@ export function hostRoutes(options: { hostSource?: string; env?: Readonly<Record
 			await hostops.enqueue(p ? { kind: p.kind === "user" ? "session" : "token", ownerId: p.ownerId } : { kind: "anonymous", address: addressOf(ctx) }, body.op, body.args);
 			throw new PimError(403, "forbidden", "Only the admin's majordomo or Pimbot can run operations on this Pim's host.");
 		}),
-		// What runs, what the last check found, whether a daemon is there to update the stack, and the newest update (while it runs, and for an hour after).
-		route("GET", "/api/admin/release", async (ctx) => {
+		route("GET", "/api/admin/release", async (ctx) => (await adminSession(ctx), releaseOf(ctx))),
+		// The admin pressing "Check now": the registry is asked again whatever the age of the last answer (never with the check off), and the view that follows is the answer.
+		route("POST", "/api/admin/release/check", async (ctx) => {
 			await adminSession(ctx);
-			const { hostops } = hostServices(ctx.app);
-			const status = await hostops.status();
-			return ok({ ...releaseView(env, await readRecord(ctx.app.db)), daemon: { online: status.credential.present && status.agent.lastSeenAt !== null && Date.now() - status.agent.lastSeenAt < 60_000 }, update: await hostops.latestUpdate() }, 200, noStore);
+			await checkForUpdate(ctx.app.db, env, { force: true });
+			return releaseOf(ctx);
 		}),
 		// The admin pressing "Update": the press is the approval for this one operation.
 		route("POST", "/api/hostops/update", async (ctx) => {

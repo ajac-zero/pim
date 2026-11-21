@@ -187,6 +187,9 @@ describe("host operations", () => {
 		await call(cred, "POST", "/api/hostops/agent/result", { id: polled.id, ok: true, state: "succeeded", summary: "Updated.", data: { from: "sha256:a", to: "sha256:b", result: "updated" } });
 		expect((await as("ada", "GET", "/api/admin/release")).json.update).toMatchObject({ state: "succeeded", summary: "Updated." });
 		expect((await as("bob", "GET", "/api/admin/release")).status).toBe(403);
+		// "Check now" is the admin's too, and answers with the same view (a test build is never looked up, so no request goes out here).
+		expect((await as("bob", "POST", "/api/admin/release/check")).status).toBe(403);
+		expect((await as("ada", "POST", "/api/admin/release/check")).json).toMatchObject({ daemon: { online: true }, available: false });
 		expect((await audit()).some((r) => r.actorKind === "admin" && r.action === "enqueue" && r.outcome === "queued")).toBe(true);
 	});
 

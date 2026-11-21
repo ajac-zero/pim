@@ -91,14 +91,14 @@ export async function readRecord(db: Db): Promise<CheckRecord | null> {
 
 /**
  * One look at the registry, if one is due: never with the check off, never for a local build, and not before the last answer is `CHECK_EVERY_MS` old (or `RETRY_AFTER_MS` for a failure,
- * or at once when the channel changed). Returns the record when it asked.
+ * or at once when the channel changed, or when `force` is set, as when the admin presses "Check now"). Returns the record when it asked.
  */
-export async function checkForUpdate(db: Db, env: Env, { now = Date.now(), fetcher = fetch }: { now?: number; fetcher?: typeof fetch } = {}): Promise<CheckRecord | null> {
+export async function checkForUpdate(db: Db, env: Env, { now = Date.now(), fetcher = fetch, force = false }: { now?: number; fetcher?: typeof fetch; force?: boolean } = {}): Promise<CheckRecord | null> {
 	if (!checkEnabled(env)) return null;
 	const running = runningRelease(env);
 	if (!known(running.revision) && !semver(running.version)) return null;
 	const last = await readRecord(db);
-	if (last && last.channel === running.channel && now - last.checkedAt < (last.error ? RETRY_AFTER_MS : CHECK_EVERY_MS)) return null;
+	if (!force && last && last.channel === running.channel && now - last.checkedAt < (last.error ? RETRY_AFTER_MS : CHECK_EVERY_MS)) return null;
 	let record: CheckRecord;
 	try {
 		record = { channel: running.channel, checkedAt: now, latest: await fetchChannel(env, fetcher), error: null };

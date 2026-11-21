@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { CopyButton, Section } from "~/components/account-settings";
 import { useI18n } from "~/components/i18n";
-import { ExternalLink, Loader2, Package } from "~/components/icons";
+import { ExternalLink, Loader2, Package, RefreshCw } from "~/components/icons";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { admin, type Release } from "~/lib/pim-api";
@@ -32,6 +32,12 @@ export function ReleaseSection() {
     mutationFn: () => admin.updateHost(),
     onSuccess: () =>
       queryClient.invalidateQueries({ queryKey: ["hostops", "release"] }),
+    onError: (error) => toast.error(error.message),
+  });
+  const check = useMutation({
+    mutationFn: () => admin.checkRelease(),
+    onSuccess: (release) =>
+      queryClient.setQueryData(releaseQuery().queryKey, release),
     onError: (error) => toast.error(error.message),
   });
   if (!data) return null;
@@ -84,6 +90,21 @@ export function ReleaseSection() {
           </span>
           <span className="block text-muted-foreground text-xs">{meta}</span>
         </span>
+        {data.check === "on" && !updating && (
+          <Button
+            variant="secondary"
+            size="sm"
+            disabled={check.isPending}
+            onClick={() => check.mutate()}
+          >
+            {check.isPending ? (
+              <Loader2 className="animate-spin" />
+            ) : (
+              <RefreshCw />
+            )}
+            {t("releaseCheckNow")}
+          </Button>
+        )}
       </div>
       {offer && (
         <div className="space-y-3 rounded-2xl border border-primary/40 bg-primary/5 px-4 py-4">

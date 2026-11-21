@@ -40,6 +40,9 @@ describe("update check", () => {
 		expect(await checkForUpdate(db, env, { now: 1_000 + CHECK_EVERY_MS - 1, fetcher: registry(labels, calls) })).toBeNull();
 		expect(calls.length).toBe(asked);
 		expect(await checkForUpdate(db, env, { now: 1_000 + CHECK_EVERY_MS, fetcher: registry(labels, calls) })).not.toBeNull();
+		// "Check now" asks whatever the age of the answer.
+		expect(await checkForUpdate(db, env, { now: 2_000, fetcher: registry(labels, calls), force: true })).toMatchObject({ checkedAt: 2_000 });
+		expect(calls.length).toBeGreaterThan(asked);
 		// Another channel is asked at once.
 		expect(await checkForUpdate(db, { ...env, PIM_CHANNEL: "edge" }, { now: 1_001 + CHECK_EVERY_MS, fetcher: registry(labels, calls) })).toMatchObject({ channel: "edge" });
 	});

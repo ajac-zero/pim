@@ -2738,6 +2738,8 @@ export const admin = {
     ),
   /** The version this Pim runs, whether a newer image is published, and the latest update. */
   release: () => call<Release>("/admin/release"),
+  /** Asks the registry again, whatever the age of the last answer, and returns the view that follows. */
+  checkRelease: () => call<Release>("/admin/release/check", { method: "POST" }),
   /** Updates the stack to the newest image on its channel (or on `tag`), through the host daemon. */
   updateHost: (tag?: string) =>
     call<HostOpUpdate>("/hostops/update", {

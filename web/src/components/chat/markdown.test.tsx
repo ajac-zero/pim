@@ -871,6 +871,15 @@ describe("untrusted Markdown that may show Pim's own images", () => {
     expect(srcs(html)).toEqual([]);
   });
 
+  it("shows a coding thread's copy of an attachment, and no other path of the API", () => {
+    const attachment =
+      "/api/coding/bd5b2da5-c48f-42d4-3c96-bc506960f7f3/attachments/9d4c2c0bfd4b7be280d06c1e2b73dbbc";
+    const html = shown(
+      `![Clip](${attachment})\n\n![x](${attachment}/../../export)\n\n![y](${attachment}?x=1)\n\n![z](/api/coding/threads/abc)`,
+    );
+    expect(srcs(html)).toEqual([attachment]);
+  });
+
   it("shows a kept video with controls, never playing by itself", () => {
     const html = shown(
       `![Wave](${own}.mp4)\n\n![Clip](${own}.webm)\n\n![Light](${own})`,

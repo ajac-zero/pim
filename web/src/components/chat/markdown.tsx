@@ -537,7 +537,10 @@ export const UNTRUSTED_SCHEMA = {
 const OWN_IMAGE = /^\/api\/images\/[\w-]+$/;
 /** A video Pim kept, which an agent's reply shows with the browser's own controls. */
 const OWN_VIDEO = /^\/api\/images\/[\w-]+\.(?:mp4|webm)$/;
-const OWN_MEDIA = /^\/api\/images\/[\w-]+(?:\.(?:mp4|webm))?$/;
+/** The copy a coding thread keeps of an attachment in an agent's reply: an image or a video, which its address doesn't say. */
+const OWN_ATTACHMENT = /^\/api\/coding\/[\w-]+\/attachments\/[\w-]+$/;
+const OWN_MEDIA =
+  /^(?:\/api\/coding\/[\w-]+\/attachments\/[\w-]+|\/api\/images\/[\w-]+(?:\.(?:mp4|webm))?)$/;
 
 /**
  * `UNTRUSTED_SCHEMA` for text shown to the signed-in person that may show Pim's own stored images, such as
@@ -647,6 +650,24 @@ function OwnVideo({ src, label }: { src: string; label: string }) {
   );
 }
 
+/**
+ * A thread's copy of an attachment, shown as an image and, when the browser
+ * can't draw it as one, as the video it must be: the address has no extension.
+ */
+function OwnAttachment({ src, label }: { src: string; label: string }) {
+  const [video, setVideo] = useState(false);
+  return video ? (
+    <OwnVideo src={src} label={label} />
+  ) : (
+    <img
+      src={src}
+      alt={label}
+      onError={() => setVideo(true)}
+      className="my-3 max-w-full rounded-xl"
+    />
+  );
+}
+
 /** `untrustedComponents`, but Pim's own stored images and videos are shown. */
 const ownImagesComponents = {
   img: (props: object) => {
@@ -654,6 +675,9 @@ const ownImagesComponents = {
     const label = typeof alt === "string" ? alt : "";
     if (typeof src === "string" && OWN_VIDEO.test(src)) {
       return <OwnVideo src={src} label={label} />;
+    }
+    if (typeof src === "string" && OWN_ATTACHMENT.test(src)) {
+      return <OwnAttachment src={src} label={label} />;
     }
     return typeof src === "string" && OWN_IMAGE.test(src) ? (
       <img src={src} alt={label} className="my-3 max-w-full rounded-xl" />

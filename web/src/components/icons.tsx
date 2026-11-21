@@ -57,6 +57,7 @@ function pixelPath(d: string) {
   };
 }
 
+export const Activity = themedIcon(Lucide.Activity, Pixel.ChartLine);
 export const AlertCircle = themedIcon(Lucide.AlertCircle, Pixel.WarningDiamond);
 export const AppWindow = themedIcon(Lucide.AppWindow, Pixel.AppWindows);
 export const Archive = themedIcon(Lucide.Archive, Pixel.Archive);

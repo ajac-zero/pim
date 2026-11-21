@@ -16,13 +16,14 @@ import { Markdown } from "~/components/chat/markdown";
 import { RoomMenu } from "~/components/chat/room";
 import { SessionCostMenu } from "~/components/chat/session-cost";
 import { useI18n } from "~/components/i18n";
-import { AlertCircle, FileText, Loader2 } from "~/components/icons";
+import { Activity, AlertCircle, FileText, Loader2 } from "~/components/icons";
+import { ChatRunActivity } from "~/components/run-activity";
 import { pim } from "~/lib/pim-api";
 
 /**
  * The chat's options, in a popup floating over its top right corner: the agents in
  * the chat, copying the conversation or its id, its public link, and what it
- * has cost; then a quick summary of it and its next steps, from the utility
+ * has cost; then what the agent is doing now, and a quick summary of it and its next steps, from the utility
  * model. Approvals the chat
  * is waiting on come first, and open the box even when it's closed. Nothing is
  * written until the summary dropdown is open. While open, it asks again only
@@ -43,6 +44,7 @@ export function ActivityBox({
   const box = useRef<HTMLElement>(null);
   const approvals = usePendingApprovals(sessionId);
   const [summaryOpen, setSummaryOpen] = useState(false);
+  const [activityOpen, setActivityOpen] = useState(false);
   const summary = useQuery({
     queryKey: ["summary", sessionId, entries],
     queryFn: () => pim.summary(sessionId),
@@ -99,6 +101,19 @@ export function ActivityBox({
                 <SessionCostMenu sessionId={sessionId} />
               </span>
             </div>
+            {/* The section's content mounts only while it's open, so the chat's activity is fetched only then. */}
+            <BoxSection
+              open={activityOpen}
+              onOpenChange={setActivityOpen}
+              label={
+                <>
+                  <Activity />
+                  {t("activitySection")}
+                </>
+              }
+            >
+              <ChatRunActivity key={sessionId} chat={sessionId} />
+            </BoxSection>
             <BoxSection
               open={summaryOpen}
               onOpenChange={setSummaryOpen}

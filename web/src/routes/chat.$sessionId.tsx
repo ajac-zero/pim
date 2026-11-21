@@ -447,6 +447,13 @@ function ChatPage() {
                 sendTurn={(text) => pimClient.send(text)}
                 composerHeight={composerHeight}
                 composerCardHeight={composerCardHeight}
+                live={
+                  <LiveButtons
+                    key={sessionId}
+                    sessionId={sessionId}
+                    working={view.running || roomBusy}
+                  />
+                }
                 footer={
                   settled && suggestions?.length ? (
                     <Suggestions className="animate-in duration-700 fade-in">
@@ -493,12 +500,6 @@ function ChatPage() {
                 ref={composerCardRef}
                 className="pointer-events-auto relative w-full max-w-4xl px-4"
               >
-                {ready && (
-                  <LiveButtons
-                    sessionId={sessionId}
-                    working={view.running || roomBusy}
-                  />
-                )}
                 <QueuedMessages sessionId={sessionId} queue={view.queue} />
                 <Composer
                   key={sessionId}

@@ -1,25 +1,31 @@
 import { useQuery } from "@tanstack/react-query";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { BrowserDialog } from "~/components/chat/browser-dialog";
 import { TerminalDialog, useTerminal } from "~/components/chat/terminal-dialog";
 import { useI18n } from "~/components/i18n";
 import { AppWindow, Terminal } from "~/components/icons";
 import { Action } from "~/components/ui/actions";
+import { floatingButtonClass } from "~/components/ui/conversation";
 import { browserQuery } from "~/lib/queries";
+import { cn } from "~/lib/utils";
 
 /** How often the chat looks at its browser while it works, for a window that opened or a page that changed. */
 const BROWSER_REFRESH_MS = 4_000;
 
-/** The classes of a button floating above the composer. */
-const LIVE_BUTTON =
-  "relative size-9 animate-in rounded-full border bg-background text-muted-foreground shadow-[0_2px_10px_-4px_rgb(0_0_0/0.18)] duration-150 fade-in hover:bg-accent hover:text-foreground [&_svg]:size-4";
+/** A live button, which fades in when it first has something to open, as the scroll to bottom button does. */
+const liveButton = (visible: boolean) =>
+  cn(
+    floatingButtonClass(visible),
+    "relative animate-in bg-background fade-in text-muted-foreground hover:text-foreground [&_svg]:size-4",
+  );
 
 /**
  * What the chat's agents are using on the person's computer, as buttons
- * floating above the composer, each its icon alone (what it shows is its
- * tooltip): the chat's browser window while it's open, and the terminal once
- * they have run a command, with a dot while one runs. Each opens over the page, as the Computer dialog
- * does: the browser live, to watch or take over, and the terminal's output.
+ * floating in the row of the scroll to bottom button, each its icon alone
+ * (what it shows is its tooltip): the chat's browser window while it's open,
+ * and the terminal once they have run a command, with a dot while one runs.
+ * Each opens over the page, as the Computer dialog does: the browser live, to
+ * watch or take over, and the terminal's output.
  */
 export function LiveButtons({
   sessionId,
@@ -36,18 +42,24 @@ export function LiveButtons({
     refetchInterval: working ? BROWSER_REFRESH_MS : false,
   });
   const terminal = useTerminal(sessionId, working);
+  // The last page stays while its button fades out.
+  const lastPage = useRef(browser?.page);
+  if (browser?.page) lastPage.current = browser.page;
   const page = browser?.page;
+  const shownPage = lastPage.current;
   const current = terminal.commands.findLast(
     (command) => command.endedAt === null,
   );
-  if (!page && terminal.commands.length === 0) return null;
-  const title = page ? page.title || hostOf(page.url) : "";
+  const title = shownPage ? shownPage.title || hostOf(shownPage.url) : "";
   return (
-    <div className="flex gap-2 px-3 pb-2">
-      {page && (
+    <>
+      {shownPage && (
         <Action
           tooltip={t("openBrowser", { title })}
-          className={LIVE_BUTTON}
+          className={liveButton(!!page)}
+          variant="outline"
+          aria-hidden={!page}
+          tabIndex={page ? 0 : -1}
           onClick={() => setShown("browser")}
         >
           <AppWindow />
@@ -65,7 +77,8 @@ export function LiveButtons({
                 })
               : t("openTerminal")
           }
-          className={LIVE_BUTTON}
+          className={liveButton(true)}
+          variant="outline"
           onClick={() => setShown("terminal")}
         >
           <Terminal />
@@ -85,7 +98,7 @@ export function LiveButtons({
         open={shown === "terminal"}
         onOpenChange={(open) => setShown(open ? "terminal" : null)}
       />
-    </div>
+    </>
   );
 }
 

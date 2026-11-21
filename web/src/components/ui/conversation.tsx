@@ -81,6 +81,19 @@ export const ConversationEmptyState = ({
   </div>
 );
 
+/**
+ * How a round button floating over the conversation shows and hides: it fades
+ * and shrinks away while its width and margin collapse, so the buttons beside
+ * it glide to the center instead of jumping.
+ */
+export const floatingButtonClass = (visible: boolean) =>
+  cn(
+    "h-8 shrink-0 overflow-hidden rounded-full shadow-md transition-all duration-200 ease-out",
+    visible
+      ? "pointer-events-auto mx-1 w-8 translate-y-0 scale-100 opacity-100"
+      : "pointer-events-none mx-0 w-0 translate-y-2 scale-90 border-transparent opacity-0",
+  );
+
 export type ConversationScrollButtonProps = ComponentProps<typeof Button> & {
   /**
    * Bottom offset in px, e.g. to clear a floating composer that overlaps
@@ -88,7 +101,7 @@ export type ConversationScrollButtonProps = ComponentProps<typeof Button> & {
    * omitted.
    */
   bottomOffset?: number;
-  /** A button beside this one, shown only while it has somewhere to go. */
+  /** Buttons beside this one, such as the mention button and the chat's browser. */
   mention?: ReactNode;
 };
 
@@ -115,15 +128,7 @@ export const ConversationScrollButton = ({
     >
       {mention}
       <Button
-        className={cn(
-          "h-8 shrink-0 overflow-hidden rounded-full shadow-md transition-all duration-200 ease-out",
-          // Collapses its width and margin while hidden, so a mention button
-          // beside it glides to the center instead of jumping.
-          isAtBottom
-            ? "pointer-events-none ml-0 w-0 translate-y-2 scale-90 border-transparent opacity-0"
-            : "pointer-events-auto ml-2 first:ml-0 w-8 translate-y-0 scale-100 opacity-100",
-          className,
-        )}
+        className={cn(floatingButtonClass(!isAtBottom), className)}
         style={style}
         onClick={handleScrollToBottom}
         size="icon"
@@ -194,7 +199,7 @@ export const ConversationMentionButton = ({
   if (!target) return null;
   return (
     <Button
-      className="pointer-events-auto size-8 rounded-full shadow-md"
+      className="pointer-events-auto mx-1 size-8 rounded-full shadow-md"
       onClick={() => target.scrollIntoView({ behavior: "smooth", block: "center" })}
       size="icon"
       type="button"

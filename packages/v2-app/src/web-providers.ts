@@ -11,7 +11,7 @@ const BUILTIN_NAMES: Record<string, string> = { anthropic: "Anthropic", openai: 
 export const isWebProviderInput = (body: Record<string, any>) => ["builtin", "url", "key", "models"].some((k) => k in body) && !("kind" in body) && !("apiKey" in body);
 
 type ListedModel = { id: string; name?: string; contextWindow?: number; maxTokens?: number; reasoning?: boolean; images?: boolean };
-type Overrides = Record<string, { contextWindow?: number; maxTokens?: number; cost?: Record<"input" | "output" | "cacheRead" | "cacheWrite", number> }>;
+type Overrides = Record<string, { contextWindow?: number; maxTokens?: number; images?: boolean; cost?: Record<"input" | "output" | "cacheRead" | "cacheWrite", number> }>;
 
 /** What pi-ai's catalog knows of a model by its id. */
 export type KnownModel = { contextWindow: number; maxTokens: number; images: boolean; reasoning: boolean };
@@ -70,15 +70,16 @@ async function listed(url: string, key: string | undefined, api: unknown, fetche
 	});
 }
 
-/** What a person set for a custom endpoint's models where the server cannot say: a context window, a longest answer, prices that are never negative (v1's `readOverrides`). */
+/** What a person set for a custom endpoint's models where the server cannot say: a context window, a longest answer, whether it reads images, prices that are never negative (v1's `readOverrides`). */
 function readOverrides(value: unknown): Overrides {
 	if (!isObject(value)) throw new BadRequestError("overrides must be an object of settings by model id");
 	const overrides: Overrides = {};
 	for (const [id, entry] of Object.entries(value)) {
 		if (!MODEL_ID.test(id) || !isObject(entry)) throw new BadRequestError("overrides must be an object of settings by model id");
-		const { contextWindow, maxTokens, cost } = entry;
+		const { contextWindow, maxTokens, images, cost } = entry;
 		if (contextWindow !== undefined && !count(contextWindow)) throw new BadRequestError(`${id}'s contextWindow must be a whole number of tokens`);
 		if (maxTokens !== undefined && !count(maxTokens)) throw new BadRequestError(`${id}'s maxTokens must be a whole number of tokens`);
+		if (images !== undefined && typeof images !== "boolean") throw new BadRequestError(`${id}'s images must be true or false`);
 		let price: Overrides[string]["cost"];
 		if (cost !== undefined) {
 			if (!isObject(cost)) throw new BadRequestError(`${id}'s cost must be an object`);
@@ -89,7 +90,7 @@ function readOverrides(value: unknown): Overrides {
 			};
 			price = { input: dollars("input"), output: dollars("output"), cacheRead: dollars("cacheRead"), cacheWrite: dollars("cacheWrite") };
 		}
-		if (contextWindow !== undefined || maxTokens !== undefined || price) overrides[id] = { ...(contextWindow !== undefined && { contextWindow: contextWindow as number }), ...(maxTokens !== undefined && { maxTokens: maxTokens as number }), ...(price && { cost: price }) };
+		if (contextWindow !== undefined || maxTokens !== undefined || images !== undefined || price) overrides[id] = { ...(contextWindow !== undefined && { contextWindow: contextWindow as number }), ...(maxTokens !== undefined && { maxTokens: maxTokens as number }), ...(images !== undefined && { images }), ...(price && { cost: price }) };
 	}
 	return overrides;
 }

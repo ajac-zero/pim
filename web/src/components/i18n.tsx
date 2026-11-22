@@ -688,12 +688,16 @@ const translations = {
     providerModelsHint:
       "Separate them with commas. Leave empty to offer every model it lists.",
     providerModelsAll: "Every model it lists",
-    providerLimits: "Context window and prices",
+    providerLimits: "Context window, images and prices",
     providerLimitsHint:
       "Set them where the server can't say. Prices are dollars per million tokens, and chats' costs use them. Leave a field empty to use what the server says, or free.",
     providerLimitsNone:
       "Name the models above to set theirs. To set the ones it lists, save first and edit it.",
     providerContextWindow: "Context window",
+    providerImages: "Can see images",
+    providerImagesAuto: "As the server says",
+    providerImagesYes: "Yes",
+    providerImagesNo: "No",
     providerMaxTokens: "Longest answer",
     providerMaxTokensListing: "from provider listing",
     providerMaxTokensCatalog: "from catalog",
@@ -2824,12 +2828,16 @@ const translations = {
     providerModelsHint:
       "Sepáralos con comas. Déjalo vacío para ofrecer todos los modelos que lista.",
     providerModelsAll: "Todos los modelos que lista",
-    providerLimits: "Ventana de contexto y precios",
+    providerLimits: "Ventana de contexto, imágenes y precios",
     providerLimitsHint:
       "Indícalos donde el servidor no lo dice. Los precios son dólares por millón de tokens, y el costo de los chats los usa. Deja un campo vacío para usar lo que dice el servidor, o gratis.",
     providerLimitsNone:
       "Nombra los modelos arriba para indicar los suyos. Para los que lista, guarda primero y edítalo.",
     providerContextWindow: "Ventana de contexto",
+    providerImages: "Puede ver imágenes",
+    providerImagesAuto: "Según el servidor",
+    providerImagesYes: "Sí",
+    providerImagesNo: "No",
     providerMaxTokens: "Respuesta más larga",
     providerMaxTokensListing: "de la lista del proveedor",
     providerMaxTokensCatalog: "del catálogo",

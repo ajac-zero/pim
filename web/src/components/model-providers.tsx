@@ -285,14 +285,17 @@ const SOURCES = {
 const PRICES = ["input", "output", "cacheRead", "cacheWrite"] as const;
 
 /** A custom endpoint's model settings as the form edits them: text, so a field can be empty. */
-type Limits = { contextWindow: string; maxTokens: string } & Record<
-  (typeof PRICES)[number],
-  string
->;
+type Limits = {
+  contextWindow: string;
+  maxTokens: string;
+  images: "auto" | "yes" | "no";
+} & Record<(typeof PRICES)[number], string>;
 
 const limitsOf = (override?: ModelOverride): Limits => ({
   contextWindow: override?.contextWindow?.toString() ?? "",
   maxTokens: override?.maxTokens?.toString() ?? "",
+  images:
+    override?.images === undefined ? "auto" : override.images ? "yes" : "no",
   input: override?.cost?.input.toString() ?? "",
   output: override?.cost?.output.toString() ?? "",
   cacheRead: override?.cost?.cacheRead.toString() ?? "",
@@ -309,6 +312,7 @@ function overridesOf(limits: Record<string, Limits>) {
         contextWindow: Number(entry.contextWindow),
       }),
       ...(entry.maxTokens.trim() && { maxTokens: Number(entry.maxTokens) }),
+      ...(entry.images !== "auto" && { images: entry.images === "yes" }),
       ...(priced && {
         cost: {
           input: Number(entry.input) || 0,
@@ -321,6 +325,7 @@ function overridesOf(limits: Record<string, Limits>) {
     if (
       override.contextWindow !== undefined ||
       override.maxTokens !== undefined ||
+      override.images !== undefined ||
       override.cost
     )
       overrides[id] = override;
@@ -712,6 +717,35 @@ function ProviderForm({
                       </label>
                     ))}
                   </div>
+                  <label className="flex items-center justify-between gap-3">
+                    <span className="text-muted-foreground text-xs">
+                      {t("providerImages")}
+                    </span>
+                    <Select
+                      value={entry.images}
+                      onValueChange={(value) =>
+                        set("images", value as Limits["images"])
+                      }
+                    >
+                      <SelectTrigger
+                        className="h-8 w-48 text-xs"
+                        aria-label={`${model.id}: ${t("providerImages")}`}
+                      >
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="auto">
+                          {t("providerImagesAuto")}
+                        </SelectItem>
+                        <SelectItem value="yes">
+                          {t("providerImagesYes")}
+                        </SelectItem>
+                        <SelectItem value="no">
+                          {t("providerImagesNo")}
+                        </SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </label>
                   {shown && (
                     <p className="text-muted-foreground text-xs">
                       {t("providerMaxTokens")}: {t(SOURCES[shown])}

@@ -64,6 +64,12 @@ describe("a provider's form", () => {
 		expect(seen.at(-1)).toMatchObject({ authorization: "Bearer kept" });
 		expect((set.config.models as any[])[1]).toEqual({ id: "vllm", contextWindow: 20_000, maxTokens: 9_000, cost: { input: 3, output: 0, cacheRead: 0, cacheWrite: 0 } });
 		expect(toWebProvider(stored(set.config)).models[1]).toMatchObject({ contextWindow: 20_000, maxTokens: 9_000, maxTokensSource: "override", cost: { input: 3 } });
+		// Whether a model reads images can be set either way, against what the listing says.
+		const sees = await toServiceInput({ overrides: { vllm: { images: true }, "or/model": { images: false } } }, stored(made.config), { existingKey: "kept", fetcher });
+		const seesCard = toWebProvider(stored(sees.config)).models;
+		expect(seesCard[0]).toMatchObject({ id: "or/model", images: false });
+		expect(seesCard[1]).toMatchObject({ id: "vllm", images: true });
+		expect(await rejected({ name: "Home", url: "http://localhost:1234/v1", models: ["vllm"], overrides: { vllm: { images: "yes" } } }, undefined, { fetcher })).toBe("vllm's images must be true or false");
 		// What pi-ai's catalog knows of a model the server did not describe fills the card.
 		providerCatalog.known = (id) => (id === "gemini" ? { contextWindow: 1_000_000, maxTokens: 65_536, images: true, reasoning: true } : undefined);
 		try {

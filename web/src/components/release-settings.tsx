@@ -8,6 +8,9 @@ import { Button } from "~/components/ui/button";
 import { admin, type Release } from "~/lib/pim-api";
 import { releaseQuery } from "~/lib/queries";
 
+/** The update whose success the admin has reloaded for, so its notice goes away: the server reports an update for an hour. */
+const RELOADED_KEY = "pim-update-reloaded";
+
 /** What a person runs on the host to update, where Pim has no daemon to do it. */
 export const updateCommand = (channel: string) =>
   `./deploy/compose/pim.sh update${channel === "stable" ? "" : ` ${channel}`}`;
@@ -43,7 +46,8 @@ export function ReleaseSection() {
   if (!data) return null;
   const { latest, update: op } = data;
   const updating = op?.state === "queued" || op?.state === "running";
-  const ended = op && !updating ? op : null;
+  const ended =
+    op && !updating && localStorage.getItem(RELOADED_KEY) !== op.id ? op : null;
   const offer = data.available && latest && !updating;
   const meta = [
     t("releaseChannel", { channel: data.channel }),
@@ -181,7 +185,10 @@ export function ReleaseSection() {
           {ended.state === "succeeded" && (
             <Button
               variant="secondary"
-              onClick={() => window.location.reload()}
+              onClick={() => {
+                localStorage.setItem(RELOADED_KEY, ended.id);
+                window.location.reload();
+              }}
             >
               {t("releaseReload")}
             </Button>

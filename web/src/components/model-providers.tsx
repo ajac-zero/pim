@@ -142,6 +142,7 @@ function CustomProvider({
   const { t } = useI18n();
   const queryClient = useQueryClient();
   const [editing, setEditing] = useState(false);
+  const [addingModel, setAddingModel] = useState(false);
   const editable = !provider.shared || admin;
   const remove = useMutation({
     mutationFn: () =>
@@ -172,6 +173,15 @@ function CustomProvider({
             <Button
               variant="ghost"
               size="sm"
+              onClick={() => setAddingModel(true)}
+              disabled={addingModel}
+              aria-label={t("addModelNamed", { name: provider.name })}
+            >
+              {t("addModel")}
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
               onClick={() => setEditing(true)}
               aria-label={t("editProviderNamed", { name: provider.name })}
             >
@@ -197,7 +207,71 @@ function CustomProvider({
           onDone={() => setEditing(false)}
         />
       )}
+      {addingModel && !editing && (
+        <AddModelForm
+          provider={provider}
+          onDone={() => setAddingModel(false)}
+        />
+      )}
     </Row>
+  );
+}
+
+/**
+ * Names one more model of a custom endpoint. A provider that offers every
+ * model it lists gets that list named first, so adding one doesn't drop the rest.
+ */
+function AddModelForm({
+  provider,
+  onDone,
+}: {
+  provider: ModelProvider;
+  onDone: () => void;
+}) {
+  const { t } = useI18n();
+  const queryClient = useQueryClient();
+  const [id, setId] = useState("");
+  const add = useMutation({
+    mutationFn: () => {
+      const named = provider.chosen ?? provider.models.map((m) => m.id);
+      const input: ProviderInput = {
+        models: [...new Set([...named, id.trim()])],
+      };
+      return provider.shared
+        ? adminApi.updateProvider(provider.id, input)
+        : pim.updateProvider(provider.id, input);
+    },
+    onSuccess: ({ provider: saved }) => {
+      queryClient.invalidateQueries({ queryKey: ["model"] });
+      toast.success(t("providerSaved", { name: saved.name }));
+      onDone();
+    },
+    onError: (error) => toast.error(error.message),
+  });
+  return (
+    <form
+      className="mt-3 flex items-center gap-2"
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (id.trim()) add.mutate();
+      }}
+    >
+      <Input
+        value={id}
+        onChange={(event) => setId(event.target.value)}
+        aria-label={t("modelId")}
+        placeholder={t("modelId")}
+        className="h-9"
+        autoFocus
+      />
+      <Button type="submit" size="sm" disabled={!id.trim() || add.isPending}>
+        {add.isPending && <Loader2 className="size-4 animate-spin" />}
+        {t("addModel")}
+      </Button>
+      <Button type="button" variant="ghost" size="sm" onClick={onDone}>
+        {t("cancel")}
+      </Button>
+    </form>
   );
 }
 

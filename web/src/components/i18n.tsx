@@ -712,6 +712,9 @@ const translations = {
     providerRemoved: "Removed {name}.",
     removeProviderNamed: "Remove {name}",
     editProviderNamed: "Edit {name}",
+    addModel: "Add model",
+    addModelNamed: "Add a model to {name}",
+    modelId: "Model ID",
     settings: "Settings",
     artifacts: "Apps",
     noArtifacts:
@@ -2845,6 +2848,9 @@ const translations = {
     providerRemoved: "{name} eliminado.",
     removeProviderNamed: "Eliminar {name}",
     editProviderNamed: "Editar {name}",
+    addModel: "Añadir modelo",
+    addModelNamed: "Añadir un modelo a {name}",
+    modelId: "ID del modelo",
     settings: "Configuración",
     artifacts: "Apps",
     noArtifacts:

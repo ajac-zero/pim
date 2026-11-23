@@ -3,8 +3,8 @@
 -- is written down as its own choice: for every agent that lists a connector, each tool that was On or Ask for it, as the old rules decided (the person's choice, else the
 -- connector's default for an enabled tool that is not destructive; a tool its connector changed since the choice, or that the agent's own switch turned off, is off).
 -- The person's own rows for connector tools are then gone. Rows for Pim's own tools (an empty `app`), circles and bots stay as they are.
-CREATE TEMP TABLE agent_connector_permissions ON COMMIT DROP AS
-SELECT o.owner_id, o.agent_id, o.app, o.tool, o.definition,
+WITH converted AS (
+SELECT DISTINCT ON (o.owner_id, o.agent_id, o.app, o.tool) o.owner_id, o.agent_id, o.app, o.tool, o.definition,
 	CASE WHEN o.agent_permission = 'off' OR o.agent_changed THEN 'off' WHEN o.owner_changed THEN 'ask' ELSE coalesce(o.owner_permission, o.fallback) END AS permission
 FROM (
 	SELECT c.owner_id, a.id AS agent_id, c.id AS app, t.value ->> 'name' AS tool, t.value ->> 'definition' AS definition,
@@ -19,9 +19,14 @@ FROM (
 	LEFT JOIN pim_app.tool_permissions owner_row ON owner_row.owner_id = c.owner_id AND owner_row.audience = 'owner' AND owner_row.app = c.id AND owner_row.tool = t.value ->> 'name'
 	LEFT JOIN pim_app.tool_permissions agent_row ON agent_row.owner_id = c.owner_id AND agent_row.audience = 'agent:' || a.id AND agent_row.app = c.id AND agent_row.tool = t.value ->> 'name'
 	WHERE c.url IS NOT NULL OR c.kind = 'native'
-) o;
-
-DELETE FROM pim_app.tool_permissions WHERE app <> '' AND (audience = 'owner' OR audience LIKE 'agent:%');
-
+) o
+),
+kept AS (SELECT * FROM converted WHERE permission <> 'off'),
+-- What was there is replaced by what is kept: the rows that are not kept are Off, which is no row.
+removed AS (
+	DELETE FROM pim_app.tool_permissions t WHERE t.app <> '' AND (t.audience = 'owner' OR t.audience LIKE 'agent:%')
+		AND NOT EXISTS (SELECT 1 FROM kept k WHERE k.owner_id = t.owner_id AND 'agent:' || k.agent_id = t.audience AND k.app = t.app AND k.tool = t.tool)
+)
 INSERT INTO pim_app.tool_permissions (owner_id, audience, app, tool, permission, definition)
-SELECT owner_id, 'agent:' || agent_id, app, tool, permission, definition FROM agent_connector_permissions WHERE permission <> 'off';
+SELECT owner_id, 'agent:' || agent_id, app, tool, permission, definition FROM kept
+ON CONFLICT (owner_id, audience, app, tool) DO UPDATE SET permission = excluded.permission, definition = excluded.definition, updated_at = now();

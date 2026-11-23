@@ -357,6 +357,9 @@ const translations = {
     copyResponse: "Copy response",
     forkChat: "Fork from here",
     editMessage: "Edit message",
+    retryFromHere: "Retry from here",
+    retryFromHereConfirm:
+      "Retry from here? Later messages in this chat will be removed.",
     sendEdited: "Send",
     darkTheme: "Dark mode",
     denied: "Denied",
@@ -2490,6 +2493,9 @@ const translations = {
     copyResponse: "Copiar respuesta",
     forkChat: "Bifurcar desde aquí",
     editMessage: "Editar mensaje",
+    retryFromHere: "Reintentar desde aquí",
+    retryFromHereConfirm:
+      "¿Reintentar desde aquí? Los mensajes posteriores de este chat se quitarán.",
     sendEdited: "Enviar",
     darkTheme: "Modo oscuro",
     denied: "Denegado",

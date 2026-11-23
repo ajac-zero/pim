@@ -335,6 +335,75 @@ real("the default agent host", () => {
 		expect(JSON.stringify(sent)).toContain("anyone there?");
 	}, 180_000);
 
+	it("retries from a message in place: later messages leave the chat and the model's context, and the message is answered again", async () => {
+		const chat = (await web.call("POST", "/api/sessions", { title: "Retry here" })).json.id as string;
+		const shown = async () => (await d.stack.admin.query("SELECT entry_id, message FROM pim_projection.chat_transcript_projection WHERE chat_id = $1 AND NOT partial ORDER BY position", [chat])).rows as { entry_id: string; message: { role: string; parts: { text?: string; arguments?: { message?: string } }[] } }[];
+		const words = async () => JSON.stringify((await shown()).map((r) => r.message));
+		const turn = async (text: string, answer: string) => {
+			faux.setResponses([toolUse(fauxToolCall("send_to_user", { message: answer }))] as never);
+			expect((await web.call("POST", `/api/sessions/${chat}/messages`, { commandId: `retry-turn-${answer}`, text })).status).toBe(202);
+			await waitFor(`the answer ${answer}`, async () => {
+				const rows = await shown();
+				return (await words()).includes(answer) && rows.at(-1)?.message.role === "tool" ? true : undefined;
+			}, 60_000);
+		};
+		await turn("one", "A1");
+		await turn("two", "A2");
+		await turn("three", "A3");
+		const user = async (text: string) => (await shown()).find((r) => r.message.role === "user" && r.message.parts[0]?.text === text)!.entry_id;
+		const two = await user("two");
+		// Not a message to retry from: an answer, a message that is not there, a chat that is not the person's, and a caller that has not signed in.
+		const answerId = (await shown()).find((r) => r.message.role === "assistant")!.entry_id;
+		expect((await web.call("POST", `/api/sessions/${chat}/messages/${answerId}/retry`, {})).status).toBe(400);
+		expect((await web.call("POST", `/api/sessions/${chat}/messages/999999/retry`, {})).status).toBe(400);
+		expect((await web.call("POST", `/api/sessions/00000000-0000-4000-8000-000000000000/messages/${two}/retry`, {})).status).toBe(404);
+		expect((await new Client(web.base, d.ingressSecret).call("POST", `/api/sessions/${chat}/messages/${two}/retry`, {})).status).toBe(401);
+		expect(await words()).toContain("A3");
+		// The model is asked again with what it had been given up to the message: not its own first answer to it, and nothing the person said after.
+		const asked: string[] = [];
+		faux.setResponses([(ctx: { messages: unknown[] }) => (asked.push(JSON.stringify(ctx.messages)), toolUse(fauxToolCall("send_to_user", { message: "A2 again" })))] as never);
+		expect((await web.call("POST", `/api/sessions/${chat}/messages/${two}/retry`, {})).status).toBe(202);
+		await waitFor("the answer again", async () => ((await words()).includes("A2 again") && (await shown()).at(-1)?.message.role === "tool" ? true : undefined), 60_000);
+		expect(asked).toHaveLength(1);
+		expect(asked[0]).toContain("A1");
+		expect(asked[0]).toContain('"two"');
+		for (const gone of ["A2\"", "three", "A3"]) expect(asked[0]).not.toContain(gone);
+		// The chat shows the message once, with the answer again after it, and the chat's own record of the messages says the same.
+		const after = (await shown()).filter((r) => r.message.role === "user").map((r) => r.message.parts[0]?.text);
+		expect(after).toEqual(["one", "two"]);
+		expect((await shown()).find((r) => r.message.role === "user" && r.message.parts[0]?.text === "two")?.entry_id).toBe(two);
+		const listed = await web.call("GET", `/api/sessions/${chat}/messages`);
+		expect(JSON.stringify(listed.json.messages)).not.toContain("A3");
+		// Open apps are told which messages went, and the chat goes on from there.
+		expect((await d.stack.admin.query("SELECT 1 FROM pim_projection.live_event_log WHERE topic = $1 AND event_kind = 'message.removed'", [`chat:${chat}`])).rowCount).toBeGreaterThan(0);
+		await turn("four", "A4");
+		// A chat at work is refused, and nothing leaves it: the person stops it first.
+		let release!: () => void;
+		const held = new Promise<void>((resolve) => (release = resolve));
+		faux.setResponses([(async () => (await held, toolUse(fauxToolCall("send_to_user", { message: "A5" }))))] as never);
+		expect((await web.call("POST", `/api/sessions/${chat}/messages`, { commandId: "retry-turn-five", text: "five" })).status).toBe(202);
+		const refused = await web.call("POST", `/api/sessions/${chat}/messages/${two}/retry`, {});
+		expect(refused).toMatchObject({ status: 409, json: { error: "busy" } });
+		release();
+		await waitFor("the answer A5", async () => ((await words()).includes("A5") && (await shown()).at(-1)?.message.role === "tool" ? true : undefined), 60_000);
+		expect(await words()).toContain("A4");
+	}, 180_000);
+
+	it("retries from a message in a chat whose request failed and is held, which ends the held run", async () => {
+		const chat = (await web.call("POST", "/api/sessions", { title: "Held" })).json.id as string;
+		const shown = async () => (await d.stack.admin.query("SELECT entry_id, message FROM pim_projection.chat_transcript_projection WHERE chat_id = $1 AND NOT partial ORDER BY position", [chat])).rows as { entry_id: string; message: { role: string; stopReason?: string; parts: { text?: string }[] } }[];
+		faux.setResponses([fauxAssistantMessage([], { stopReason: "error", errorMessage: "the provider crashed" })] as never);
+		expect((await web.call("POST", `/api/sessions/${chat}/messages`, { commandId: "held-1", text: "what is 2+2" })).status).toBe(202);
+		await waitFor("the error as the chat's last message", async () => ((await shown()).at(-1)?.message.stopReason === "error" ? true : undefined), 60_000);
+		const asked = (await shown()).find((r) => r.message.role === "user")!.entry_id;
+		faux.setResponses([toolUse(fauxToolCall("send_to_user", { message: "Four." }))] as never);
+		expect((await web.call("POST", `/api/sessions/${chat}/messages/${asked}/retry`, {})).status).toBe(202);
+		await waitFor("the answer", async () => ((await shown()).at(-1)?.message.role === "tool" ? true : undefined), 60_000);
+		// The error is gone with the rest that came after the message, and the chat is not at work.
+		expect((await shown()).map((r) => r.message.role)).toEqual(["user", "assistant", "tool"]);
+		await waitFor("the chat to be idle", async () => ((await d.stack.admin.query("SELECT busy FROM pim_projection.sidebar_session_projection WHERE chat_id = $1", [chat])).rows[0]?.busy === false ? true : undefined), 60_000);
+	}, 180_000);
+
 	it("forks a chat at a message of the agent's, or before one of the person's so it can be sent again changed", async () => {
 		const shown = async (chat: string) => (await d.stack.admin.query("SELECT entry_id, message FROM pim_projection.chat_transcript_projection WHERE chat_id = $1 AND NOT partial ORDER BY position", [chat])).rows as { entry_id: string; message: { role: string; parts: { text?: string }[] } }[];
 		const texts = async (chat: string) => JSON.stringify((await shown(chat)).map((r) => r.message));

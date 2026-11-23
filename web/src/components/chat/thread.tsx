@@ -5,6 +5,7 @@ import {
   Fragment,
   memo,
   type ReactNode,
+  useCallback,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -295,6 +296,19 @@ export const Thread = memo(function Thread({
   });
   const queryClient = useQueryClient();
   const { fork, edit } = useForkChat(sessionId);
+  const { mutateAsync: retryFrom } = useMutation({
+    mutationFn: (message: string) => pim.retryFrom(sessionId, message),
+    onError: (error) => toast.error(error.message),
+  });
+  // Stable, so the messages that take it don't draw again with every change to the chat.
+  const retryFromMessage = useCallback(
+    (message: string) =>
+      retryFrom(message).then(
+        () => undefined,
+        () => undefined,
+      ),
+    [retryFrom],
+  );
   const retryMember = useMutation({
     mutationFn: (agent: string) => pim.retryInRoom(sessionId, agent),
     onSettled: () => queryClient.invalidateQueries({ queryKey: ["sessions"] }),
@@ -703,6 +717,12 @@ export const Thread = memo(function Thread({
                   onEdit={
                     forkable && !liveKeys.has(entry.key) ? edit : undefined
                   }
+                  onRetry={
+                    forkable && !liveKeys.has(entry.key)
+                      ? retryFromMessage
+                      : undefined
+                  }
+                  busy={view.running && !held}
                   status={
                     send && send.status !== "sent" ? (
                       <SendStatus send={send} onDiscard={onDiscard} />

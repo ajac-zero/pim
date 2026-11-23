@@ -263,7 +263,8 @@ export function projectEntries(entries: readonly EntryRecord[]): TranscriptMessa
 			return [{ id: String(entry.id), role: "notice" as const, parts: [{ type: "text" as const, text: compactionText(entry.model?.[0]) }], timestamp: entry.model?.[0]?.timestamp ?? 0, compaction: true as const }];
 		}
 		const message = entry.model?.[0];
-		if (entry.kind === "pi.system" || message === undefined) return [];
+		// The entry of a retry from a message (`pim.retry`) only leaves entries out; any messages it carries are the context it restores, which are not said again.
+		if (entry.kind === "pi.system" || entry.kind === "pim.retry" || message === undefined) return [];
 		const projected = projectMessage(message, String(entry.id));
 		return projected ? [projected] : [];
 	});

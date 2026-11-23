@@ -2246,6 +2246,17 @@ export const pim = {
     call<{ session: string }>(`/sessions/${session}/retry`, {
       method: "POST",
     }),
+  /**
+   * Asks the model again from one of the user's messages, in place: the chat's
+   * later messages are removed and the message is answered again.
+   */
+  retryFrom: (session: string, message: string) =>
+    call<{ session: string }>(
+      `/sessions/${session}/messages/${message}/retry`,
+      {
+        method: "POST",
+      },
+    ),
   approvals: (status?: ApprovalStatus) =>
     call<{ approvals: Approval[] }>(
       `/approvals${status ? `?status=${status}` : ""}`,

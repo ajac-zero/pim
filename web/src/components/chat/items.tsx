@@ -33,6 +33,7 @@ import {
   Mail,
   Monitor,
   Pencil,
+  RefreshCw,
   RotateCcw,
   Search,
   Shapes,
@@ -251,6 +252,8 @@ export const UserMessage = memo(function UserMessage({
   item,
   at,
   onEdit,
+  onRetry,
+  busy,
   status,
 }: {
   item: MessageItem;
@@ -258,11 +261,19 @@ export const UserMessage = memo(function UserMessage({
   at?: number;
   /** Sends the message again changed, in a fork of the chat up to it (by the message's id); without it, it can't be edited. */
   onEdit?: (id: string, content: UserContent) => Promise<void>;
+  /**
+   * Asks again from this message in the same chat, once the user agrees that
+   * the messages after it go (by the message's id); without it, no Retry shows.
+   */
+  onRetry?: (id: string) => Promise<void>;
+  /** The agent is at work in the chat, which Retry would cut off. */
+  busy?: boolean;
   /** For a message not in the transcript yet, how sending it goes, in place of its time. */
   status?: ReactNode;
 }) {
   const { t } = useI18n();
   const [editing, setEditing] = useState(false);
+  const [retrying, setRetrying] = useState(false);
   const text = messageText(item);
   const id = item.id;
   const images =
@@ -353,6 +364,19 @@ export const UserMessage = memo(function UserMessage({
                 onClick={() => setEditing(true)}
               >
                 <Pencil className="size-3.5" />
+              </MessageAction>
+            )}
+            {onRetry && id && (
+              <MessageAction
+                label={t("retryFromHere")}
+                disabled={busy || retrying}
+                onClick={() => {
+                  if (!window.confirm(t("retryFromHereConfirm"))) return;
+                  setRetrying(true);
+                  onRetry(id).finally(() => setRetrying(false));
+                }}
+              >
+                <RefreshCw className="size-3.5" />
               </MessageAction>
             )}
           </MessageActions>

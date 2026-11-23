@@ -555,7 +555,7 @@ function AppearanceSection() {
   );
 }
 
-/** What Pim may do with each tool that acts on the world or comes from a connector. */
+/** What Pim may do with each of its own tools that act on the world. A connector's tools are set for each agent. */
 function ToolPermissionsSection() {
   const { t } = useI18n();
   return (

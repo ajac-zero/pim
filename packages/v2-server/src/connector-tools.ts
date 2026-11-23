@@ -1,9 +1,9 @@
 /**
  * What an agent can do with its owner's connected MCP servers on the portable stack. The Runner reads the owner's connectors and their tool permissions through the
  * application's SECURITY DEFINER functions (migration 0620), opens the sealed credential with the deployment's keys (refreshing an OAuth one when it has expired), lists
- * a server's tools over streamable HTTP, and offers the agent the tools its owner has not switched off: `connector_tools` shows them with their inputs, and
- * `connector_call` calls one. A tool set to On runs; a tool set to Ask files an approval and parks until a person decides (as `http_request` does); a tool set to Off is
- * neither offered nor callable. A call that is not read-only is sent once: its outcome is on an external operation, so a replay does not send it again.
+ * a server's tools over streamable HTTP, and offers the agent the tools its person has not left off for it: `connector_tools` shows them with their inputs, and
+ * `connector_call` calls one. A tool set to On runs; a tool set to Ask files an approval and parks until a person decides (as `http_request` does); a tool set to Off, as every
+ * tool is until the person sets it for that agent, is neither offered to the model nor callable. A call that is not read-only is sent once: its outcome is on an external operation, so a replay does not send it again.
  */
 import { Type } from "typebox";
 import { validateToolArguments } from "@earendil-works/pi-ai";
@@ -22,8 +22,7 @@ import { endpointsOf, type Env, nativeApp } from "./native/native.ts";
 import type { Db as RuntimeDb } from "@pim/v2-runtime/db";
 
 export type McpTool = { name: string; description?: string; inputSchema?: Record<string, unknown>; annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean; title?: string }; /** A digest of the tool as the server describes it (`toolDefinition`), kept when the Gate discovers it. */ definition?: string };
-export type Approval = "writes" | "all" | "none";
-export type ConnectorRow = { id: string; kind: string; name: string; url: string | null; status: string; credential: string | null; enabledTools: string[]; approval: Approval; /** The directory entry it connects, for a native connector (`google/gmail`). */ appRef?: string | null };
+export type ConnectorRow = { id: string; kind: string; name: string; url: string | null; status: string; credential: string | null; /** The directory entry it connects, for a native connector (`google/gmail`). */ appRef?: string | null };
 export type Permission = "off" | "ask" | "on";
 export type PermissionRow = { audience: string; app: string; tool: string; permission: Permission; /** The tool's definition when the choice was made. */ definition?: string | null };
 
@@ -37,28 +36,15 @@ export async function chatApps(runtime: RuntimeDb, ownerId: string, chat: string
 /** Whether an agent lists a connector: by its id, by the directory entry it connects (`google/gmail`), or by its name, as the Connectors screen shows which agents have it. */
 export const listsConnector = (apps: readonly string[], c: Pick<ConnectorRow, "id" | "name" | "appRef">): boolean => apps.includes(c.id) || (c.appRef != null && apps.includes(c.appRef)) || apps.includes(c.name);
 
-/** Whether a tool must ask first under its connector's approval policy: only `all` asks. Connecting a service is consent to use its tools, so `writes` (the old default) and `none` both let them run. */
-export function needsApproval(approval: Approval): boolean {
-	return approval === "all";
-}
-
 /**
- * A tool's permission for an owner: their choice, or else off until the tool is enabled, then the connector's policy (every tool runs, unless the policy is `all`). A tool
- * the connector marks destructive is off until the person switches it On (or Ask), and then runs as they said, as in v1. One agent's switch can only turn it off. A choice is tied to the tool's definition when it was made: a connector
- * that changed a tool the person let run gets it asked about again (`changed`), and an agent's switch for it is off, until they choose anew.
+ * A tool's permission for one agent: what the person chose for that agent, or else Off, as every tool of a connector is until they set it. There is nothing account-wide to
+ * lock it: the choice is the agent's alone. A choice is tied to the tool's definition when it was made: a connector that changed a tool the person let run gets it asked about
+ * again (`changed`: On becomes Ask) until they choose anew.
  */
-export function resolvePermission(connector: Pick<ConnectorRow, "id" | "enabledTools" | "approval">, tool: McpTool, permissions: readonly PermissionRow[], agentId?: string, definition: string | null = toolDefinition(tool)) {
-	const row = (audience: string) => permissions.find((p) => p.audience === audience && p.app === connector.id && p.tool === tool.name) ?? null;
-	const fallback: Permission = connector.enabledTools.includes(tool.name) && tool.annotations?.destructiveHint !== true ? (needsApproval(connector.approval) ? "ask" : "on") : "off";
-	const owner = row("owner");
-	const agent = agentId ? row(agentAudience(agentId)) : null;
-	const ownerChanged = choiceChanged(owner, definition, true);
-	const agentChanged = choiceChanged(agent, definition, false);
-	const chosen = owner?.permission ?? null;
-	const agentChosen = agent?.permission ?? null;
-	const base: Permission = ownerChanged ? "ask" : (chosen ?? fallback);
-	const permission: Permission = agentChosen === "off" || agentChanged ? "off" : base;
-	return { permission, default: fallback, chosen, agentChosen, changed: ownerChanged || agentChanged };
+export function resolvePermission(connectorId: string, tool: McpTool, permissions: readonly PermissionRow[], agentId: string | undefined, definition: string | null = toolDefinition(tool)): { permission: Permission; chosen: Permission | null; changed: boolean } {
+	const row = agentId ? (permissions.find((p) => p.audience === agentAudience(agentId) && p.app === connectorId && p.tool === tool.name) ?? null) : null;
+	const changed = choiceChanged(row, definition, true);
+	return { permission: changed ? "ask" : (row?.permission ?? "off"), chosen: row?.permission ?? null, changed };
 }
 
 // ---- credentials ----
@@ -360,7 +346,7 @@ export function connectorToolset(deps: ConnectorToolsDeps): { tools: ToolRegistr
 	}
 
 	type Offered = { connector: ConnectorRow; tool: McpTool; permission: Permission };
-	/** Every tool of the connectors the agent lists that the owner has not switched off. A server that cannot be reached offers nothing this time. */
+	/** Every tool of the connectors the agent lists that the person has not left off for it. A server that cannot be reached offers nothing this time. */
 	async function offered(agentId: string | undefined, apps: readonly string[]): Promise<{ offered: Offered[]; unreachable: string[] }> {
 		const [cs, perms] = await Promise.all([connectors().then((all) => all.filter((c) => listsConnector(apps, c))), permissions()]);
 		const unreachable: string[] = [];
@@ -368,7 +354,7 @@ export function connectorToolset(deps: ConnectorToolsDeps): { tools: ToolRegistr
 		await Promise.all(cs.map(async (c) => {
 			try {
 				for (const tool of await toolsOf(c)) {
-					const { permission } = resolvePermission(c, tool, perms, agentId);
+					const { permission } = resolvePermission(c.id, tool, perms, agentId);
 					if (permission !== "off") out.push({ connector: c, tool, permission });
 				}
 			} catch {
@@ -378,12 +364,10 @@ export function connectorToolset(deps: ConnectorToolsDeps): { tools: ToolRegistr
 		out.sort((a, b) => a.connector.name.localeCompare(b.connector.name) || a.tool.name.localeCompare(b.tool.name));
 		return { offered: out, unreachable };
 	}
-	/** The connectors the chat's agent lists. */
-	const appsOf = async (conversationId: number | string): Promise<string[]> => (await chatApps(runtime, ownerId, await deps.chatOf(conversationId))).apps;
-	const agentOf = async (conversationId: number | string): Promise<string | undefined> => {
-		if (!deps.app) return undefined;
-		const p = await deps.principalOf(deps.app, await deps.chatOf(conversationId));
-		return p.kind === "agent" && p.agentId !== "pim" ? p.agentId : undefined;
+	/** The agent that answers the chat (the majordomo when it has none of its own) and the connectors it lists: its permissions are the ones that count. */
+	const scopeOf = async (conversationId: number | string) => {
+		const { agent, apps } = await chatApps(runtime, ownerId, await deps.chatOf(conversationId));
+		return { agentId: agent ?? undefined, apps };
 	};
 
 	const PAGE = 25;
@@ -393,8 +377,9 @@ export function connectorToolset(deps: ConnectorToolsDeps): { tools: ToolRegistr
 		parameters: Type.Object({ connector: Type.Optional(Type.String()), query: Type.Optional(Type.String()), offset: Type.Optional(Type.Integer({ minimum: 0 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50 })) }),
 		replay: "safe",
 		async execute(args: { connector?: string; query?: string; offset?: number; limit?: number }, api: any) {
-			const { offered: all, unreachable } = await offered(await agentOf(api.conversationId), await appsOf(api.conversationId));
-			if (all.length === 0) return text(unreachable.length ? `No tools are available: ${unreachable.join(", ")} could not be reached.` : "You have no connector tools. The person can connect a service and switch its tools on in Settings, or you can find one with find_connector.");
+			const { agentId, apps } = await scopeOf(api.conversationId);
+			const { offered: all, unreachable } = await offered(agentId, apps);
+			if (all.length === 0) return text(unreachable.length ? `No tools are available: ${unreachable.join(", ")} could not be reached.` : "You have no connector tools. The person can connect a service and switch its tools on for you on your page in Agents, or you can find one with find_connector.");
 			const wanted = (args.query ?? "").toLowerCase().split(/\s+/).filter(Boolean);
 			const tools = all.filter((o) => (!args.connector || o.connector.id === args.connector || o.connector.name.toLowerCase() === args.connector.toLowerCase()) && wanted.every((w) => `${o.connector.name} ${o.tool.name} ${o.tool.description ?? ""}`.toLowerCase().includes(w)));
 			if (tools.length === 0) return text(`None of the ${all.length} tools matches${args.connector ? ` in ${args.connector}` : ""}${args.query ? ` "${args.query}"` : ""}. Leave connector or query out to see them all.`);
@@ -414,15 +399,14 @@ export function connectorToolset(deps: ConnectorToolsDeps): { tools: ToolRegistr
 		replay: "safe",
 		async execute(args: { connector: string; tool: string; arguments?: Record<string, unknown> }, api: any) {
 			try {
-				const agentId = await agentOf(api.conversationId);
-				const [cs, perms, apps] = await Promise.all([connectors(), permissions(), appsOf(api.conversationId)]);
+				const [cs, perms, { agentId, apps }] = await Promise.all([connectors(), permissions(), scopeOf(api.conversationId)]);
 				const c = cs.find((x) => x.id === args.connector);
 				if (!c) return text(`There is no connected service ${args.connector}.`, true);
 				if (!listsConnector(apps, c)) return text(`You don't work with ${c.name}: it is not one of your connectors.`, true);
 				const tool = (await toolsOf(c)).find((t) => t.name === args.tool);
 				if (!tool) return text(`${c.name} has no tool ${args.tool}.`, true);
-				const { permission } = resolvePermission(c, tool, perms, agentId);
-				if (permission === "off") return text(`The tool ${args.tool} of ${c.name} is switched off, so it was not called.`, true);
+				const { permission } = resolvePermission(c.id, tool, perms, agentId);
+				if (permission === "off") return text(`The tool ${args.tool} of ${c.name} is switched off for you, so it was not called.`, true);
 				const readOnly = tool.annotations?.readOnlyHint === true;
 				// Checked before anyone is asked: a call the tool would refuse for its arguments is not worth a person's approval.
 				const checked = checkArguments(tool, String(api.callId), args.arguments ?? {});
@@ -441,7 +425,7 @@ export function connectorToolset(deps: ConnectorToolsDeps): { tools: ToolRegistr
 						const waiting = { output: [{ type: "text", text: "Waiting for a person's approval." }], control: { suspend: true } } as never;
 						const filed = await app.db.owner(ownerId, async (tx) => (await tx.query("SELECT id FROM pim_app.approvals WHERE tool = 'connector:call' AND args->>'taskId' = $1 LIMIT 1", [taskId])).rows[0]?.id as string | undefined);
 						if (filed) return waiting;
-						const gate = await app.approvals.gate(p, { action: "connector:call", resource: { connector: c.id, tool: tool.name }, ...(chat ? { chatId: chat } : {}), args: { taskId, callId: api.callId, connector: c.id, service: c.name, tool: tool.name, readOnly, arguments: redact(args.arguments) }, timeoutMs: 24 * 3600_000, onTimeout: "deny", explicit: tool.annotations?.destructiveHint === true });
+						const gate = await app.approvals.gate(p, { action: "connector:call", resource: { connector: c.id, tool: tool.name }, ...(chat ? { chatId: chat } : {}), args: { taskId, callId: api.callId, ...(agentId ? { agentId } : {}), connector: c.id, service: c.name, tool: tool.name, readOnly, arguments: redact(args.arguments) }, timeoutMs: 24 * 3600_000, onTimeout: "deny", explicit: tool.annotations?.destructiveHint === true });
 						if (gate.outcome === "waiting") return waiting;
 					}
 				}
@@ -483,8 +467,7 @@ export function connectorToolset(deps: ConnectorToolsDeps): { tools: ToolRegistr
 	const section = {
 		key: "connectors",
 		async render(input: { conversationId: number | string }) {
-			const agentId = await agentOf(input.conversationId).catch(() => undefined);
-			const apps = await appsOf(input.conversationId).catch(() => [] as string[]);
+			const { agentId, apps } = await scopeOf(input.conversationId).catch(() => ({ agentId: undefined, apps: [] as string[] }));
 			const { offered: tools } = await offered(agentId, apps).catch(() => ({ offered: [] as Offered[] }));
 			// Skills a connector publishes are listed under it, untrusted like its instructions, and loaded with read_skill.
 			const skills = (await Promise.all((await connectors().catch(() => [] as ConnectorRow[])).filter((c) => listsConnector(apps, c)).map(async (c) => skillLines(c.name, await skillsOf(c).catch(() => []))))).flat();

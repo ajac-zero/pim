@@ -44,7 +44,7 @@ export type Boundary = {
 	memoryScopes: string[];
 };
 
-export type GuestConnector = { id: string; kind: string; name: string; url: string; status: string; credential: string | null; enabledTools: string[]; approval: "writes" | "all" | "none" };
+export type GuestConnector = { id: string; kind: string; name: string; url: string; status: string; credential: string | null; enabledTools: string[] };
 export type GuestPermission = { app: string; tool: string; permission: "off" | "ask" | "on"; definition?: string | null };
 
 export class Guests {
@@ -132,9 +132,9 @@ export class Guests {
 	/** The host's connectors (their credentials still sealed) and what the host decided for this audience: the rows a guest's tool call is judged against. */
 	async hostConnectors(b: Boundary): Promise<{ connectors: GuestConnector[]; permissions: GuestPermission[] }> {
 		return this.db.owner(b.host, async (tx) => ({
-			connectors: (await tx.query("SELECT id, kind, name, url, status, credential, enabled_tools, approval FROM pim_app.connectors WHERE url IS NOT NULL ORDER BY created_at")).rows
+			connectors: (await tx.query("SELECT id, kind, name, url, status, credential, enabled_tools FROM pim_app.connectors WHERE url IS NOT NULL ORDER BY created_at")).rows
 				.filter((r) => r.status === "connected" || r.credential === null)
-				.map((r): GuestConnector => ({ id: r.id, kind: r.kind, name: r.name, url: r.url, status: r.status, credential: r.credential, enabledTools: r.enabled_tools, approval: r.approval })),
+				.map((r): GuestConnector => ({ id: r.id, kind: r.kind, name: r.name, url: r.url, status: r.status, credential: r.credential, enabledTools: r.enabled_tools })),
 			permissions: (await tx.query("SELECT app, tool, permission, definition FROM pim_app.tool_permissions WHERE audience = $1", [b.audience])).rows as GuestPermission[],
 		}));
 	}

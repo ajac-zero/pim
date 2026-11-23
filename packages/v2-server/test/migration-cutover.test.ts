@@ -50,7 +50,7 @@ async function legacyDomain(admin: Pool, objects: FsObjectStore, conversation: s
 	await admin.query("INSERT INTO pim_ops.objects (bucket, key, owner_id, size_bytes, sha256, content_type) VALUES ('BLOBS', $1, $2, 4, $3, 'application/pdf')", [`${legacy}/files/f1`, ADA, createHash("sha256").update(bytes).digest("hex")]);
 	const rows: [string, string, unknown][] = [
 		["pim_stored_files", "notes/old.pdf", { path: "notes/old.pdf", id: "f1", type: "application/pdf", bytes: 4, updated_at: at }],
-		["pim_agents", "ag_poet", { id: "ag_poet", name: "Poet", instructions: "Answer in verse.", model: "faux/m", fallbacks: "[]", skills: "[\"Haiku\"]", apps: "[]", contacts: "[]", role: null, description: "", is_default: 0, symbol: "P", color: "blue", memory_scope: "private", memory_scopes: "[\"s_career\"]", created_at: at }],
+		["pim_agents", "ag_poet", { id: "ag_poet", name: "Poet", instructions: "Answer in verse.", model: "faux/m", fallbacks: "[]", skills: "[\"Haiku\"]", apps: "[\"conn_gmail\"]", contacts: "[]", role: null, description: "", is_default: 0, symbol: "P", color: "blue", memory_scope: "private", memory_scopes: "[\"s_career\"]", created_at: at }],
 		["pim_agent_icons", "icon1", { agent: "ag_poet", type: "image/png", data: { $b64: PNG.toString("base64") }, updated_at: at }],
 		["pim_skills", "Haiku", { name: "Haiku", created_at: at }],
 		["pim_skill_versions", "Haiku:1", { name: "Haiku", version: 1, description: "Write haiku", instructions: "Five, seven, five.", created_at: at }],
@@ -94,6 +94,9 @@ async function legacyDomain(admin: Pool, objects: FsObjectStore, conversation: s
 		["pim_tool_permissions", ":shell", { audience: "", app: "", tool: "shell", permission: "ask" }],
 		["pim_tool_permissions", ":install_skill", { audience: "", app: "", tool: "install_skill", permission: "on" }],
 		["pim_tool_permissions", "agent:ag_1:write_skill", { audience: "agent:ag_1", app: "", tool: "write_skill", permission: "off" }],
+		// A connector's tools are each agent's now: the person's choice goes to the agents that list the connector, unless the agent's own switch was off.
+		["pim_tool_permissions", ":conn_gmail:search", { audience: "", app: "conn_gmail", tool: "search", permission: "on" }],
+		["pim_tool_permissions", "agent:ag_poet:conn_gmail:search", { audience: "agent:ag_poet", app: "conn_gmail", tool: "search", permission: "off" }],
 		["pim_rooms", session, { session, mode: "open", created_at: at }],
 		["pim_room_seats", "seat1", { conversation: "seat-conv", room: session, agent: "ag_poet", depth: 0, joined_at: at }],
 		["pim_model_calls", "1", { id: 1, ts: at, chat_id: session, run_kind: "chat", provider: "faux", model: "m", input: 100, output: 20, cache_read: 5, cache_write_5m: 0, cache_write_1h: 0, cost_usd: 0.0125 }],
@@ -208,9 +211,8 @@ real("a cutover rehearsal", () => {
 		// The person's named memory scopes keep their names, and a circle keeps the scopes it reads.
 		expect(await as("SELECT key, name FROM pim_app.memory_scopes WHERE owner_id = $1", [ADA])).toEqual([{ key: "s_career", name: "Career" }]);
 		expect((await as("SELECT memory_scopes FROM pim_app.circles WHERE owner_id = $1", [ADA]))[0]).toEqual({ memory_scopes: ["everyone"] });
-		// What the person chose for a connector's tool is carried: their own choice as it was, an agent's as on or off (asking meant off), a circle's as it was; the connector keeps its approval policy.
-		expect(await as("SELECT audience, app, tool, permission FROM pim_app.tool_permissions WHERE owner_id = $1 ORDER BY audience, app, tool", [ADA])).toEqual([{ audience: "agent:ag_1", app: "", tool: "write_skill", permission: "off" }, { audience: "agent:ag_1", app: "conn_gmail", tool: "send_email", permission: "off" }, { audience: "circle:c_friends", app: "conn_gmail", tool: "send_email", permission: "on" }, { audience: "owner", app: "", tool: "install_skill", permission: "ask" }, { audience: "owner", app: "", tool: "shell", permission: "ask" }, { audience: "owner", app: "conn_gmail", tool: "send_email", permission: "ask" }]);
-		expect(await as("SELECT approval FROM pim_app.connectors WHERE owner_id = $1 AND id = 'conn_gmail'", [ADA])).toEqual([{ approval: "all" }]);
+		// What the person chose for a connector's tool is carried: their own choice goes to each agent that lists the connector (the poet, whose own switch for search was off, so it gets no search), an agent's own switch carries nothing, a circle's choice stays as it was.
+		expect(await as("SELECT audience, app, tool, permission FROM pim_app.tool_permissions WHERE owner_id = $1 ORDER BY audience, app, tool", [ADA])).toEqual([{ audience: "agent:ag_1", app: "", tool: "write_skill", permission: "off" }, { audience: "agent:ag_poet", app: "conn_gmail", tool: "send_email", permission: "ask" }, { audience: "circle:c_friends", app: "conn_gmail", tool: "send_email", permission: "on" }, { audience: "owner", app: "", tool: "install_skill", permission: "ask" }, { audience: "owner", app: "", tool: "shell", permission: "ask" }]);
 		expect(await count(`SELECT count(*) n FROM pim_app.conversations WHERE owner_id = '${ADA}' AND agent_id = 'ag_poet'`)).toBeGreaterThan(0);
 		expect((await as("SELECT body, files, version FROM pim_app.skills WHERE owner_id = $1 AND name = 'Haiku'", [ADA]))[0]).toMatchObject({ body: "Five, seven, five.", files: { "ref.md": "# reference\n" }, version: 1 });
 		expect((await as("SELECT title, body FROM pim_app.memories WHERE owner_id = $1", [ADA]))[0]).toMatchObject({ title: "Ada likes tea", body: "Ada likes tea\nblack, no sugar" });
@@ -242,8 +244,8 @@ real("a cutover rehearsal", () => {
 		expect(JSON.parse(await openString(appKeys, plan.secret, `chatgpt:${ADA}`))).toMatchObject({ type: "oauth", access: "chatgpt-access-example", refresh: "chatgpt-refresh-example", clientId: "client-example" });
 		expect(await as("SELECT 1 FROM pim_app.providers WHERE owner_id = $1 AND kind = 'openai'", [ADA])).toHaveLength(0);
 		// A connected MCP server comes across with its address and its tokens, and a native connector with its tokens converted to v2's bundle, all sealed under the application's keys.
-		const mcp = (await as<{ kind: string; url: string; status: string; credential: string; approval: string }>("SELECT kind, url, status, credential, approval FROM pim_app.connectors WHERE owner_id = $1 AND id = 'mcp_notes'", [ADA]))[0]!;
-		expect(mcp).toMatchObject({ kind: "custom_mcp", url: "https://mcp.example.test/mcp", status: "connected", approval: "none" });
+		const mcp = (await as<{ kind: string; url: string; status: string; credential: string }>("SELECT kind, url, status, credential FROM pim_app.connectors WHERE owner_id = $1 AND id = 'mcp_notes'", [ADA]))[0]!;
+		expect(mcp).toMatchObject({ kind: "custom_mcp", url: "https://mcp.example.test/mcp", status: "connected" });
 		expect(JSON.parse(await openString(appKeys, mcp.credential, `connector:${ADA}/mcp_notes`))).toEqual({ access_token: "mcp-oauth-notes-access-example", refresh_token: "mcp-oauth-notes-refresh-example", client_id: "client_9", client_secret: "mcp-client-secret-notes-example" });
 expect(await as("SELECT kind, app_ref, status FROM pim_app.connectors WHERE owner_id = $1 AND id = 'conn_gmail'", [ADA])).toEqual([{ kind: "native", app_ref: "google/gmail", status: "connected" }]);
 		const gmail = (await as<{ credential: string }>("SELECT credential FROM pim_app.connectors WHERE owner_id = $1 AND id = 'conn_gmail'", [ADA]))[0]!;

@@ -44,7 +44,7 @@ export type GuestToolsDeps = {
  */
 export const IMAGES_CONNECTOR = "pim";
 const GENERATE_IMAGE = "generate_image";
-const IMAGE_CONNECTOR: GuestConnector = { id: IMAGES_CONNECTOR, kind: "pim", name: "Pim", url: "", status: "connected", credential: null, enabledTools: [GENERATE_IMAGE], approval: "none" };
+const IMAGE_CONNECTOR: GuestConnector = { id: IMAGES_CONNECTOR, kind: "pim", name: "Pim", url: "", status: "connected", credential: null, enabledTools: [GENERATE_IMAGE] };
 const IMAGE_TOOL: McpTool = {
 	name: GENERATE_IMAGE,
 	description: "Make an image from a description; the chat shows it to the person as soon as it's made, so don't link or describe it again. Describe what to draw in detail, in English: the subject, the setting, the style, composition, lighting and colors, and any words it should show, in quotes. Make one image unless they ask for more: each one costs.",

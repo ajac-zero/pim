@@ -35,6 +35,7 @@ import {
   WriteYourOwn,
 } from "~/components/majordomo-setup";
 import { AgentMemoryField } from "~/components/memory-settings";
+import { PermissionChoice } from "~/components/tool-permissions";
 import { Button } from "~/components/ui/button";
 import {
   Collapsible,
@@ -64,6 +65,7 @@ import {
   type ModelInfo,
   type ModelSettings,
   pim,
+  type ToolPermission,
   type ToolPermissionInfo,
 } from "~/lib/pim-api";
 import {
@@ -358,8 +360,10 @@ function MajordomoPreferencesSection({ agent }: { agent: Agent }) {
 /**
  * The connectors an agent works with, which can be taken off. Connectors are added from those already
  * connected, and connected in Connectors; one listed but not connected yet
- * connects from here. A connected connector's tools each have a switch: on, the
- * agent uses the tool without asking; off, it can't use it.
+ * connects from here. A connected connector's tools are each Off, Ask or On for
+ * this agent, and every one is Off until you choose: on, the agent uses the
+ * tool without asking; ask, it asks you first; off, it can't use it, and the
+ * model isn't told it exists.
  */
 function AgentApps({ agent }: { agent: Agent }) {
   const { t } = useI18n();
@@ -381,13 +385,14 @@ function AgentApps({ agent }: { agent: Agent }) {
     onError: (error) => toast.error(error.message),
   });
   const set = useMutation({
-    mutationFn: ({ info, on }: { info: ToolPermissionInfo; on: boolean }) =>
-      pim.setAgentPermission(
-        agent.id,
-        info.app ?? "",
-        info.tool,
-        on ? "on" : "off",
-      ),
+    mutationFn: ({
+      info,
+      permission,
+    }: {
+      info: ToolPermissionInfo;
+      permission: ToolPermission;
+    }) =>
+      pim.setAgentPermission(agent.id, info.app ?? "", info.tool, permission),
     onSuccess: (next) =>
       queryClient.setQueryData(
         agentPermissionsQuery(agent.id).queryKey,
@@ -445,8 +450,8 @@ function AgentApps({ agent }: { agent: Agent }) {
                     </span>
                     {ready ? (
                       <CollapsibleTrigger className="group flex items-center gap-1 rounded-md text-[13px] text-muted-foreground hover:text-foreground">
-                        {t("toolsOn", {
-                          on: own.filter((info) => info.permission === "on")
+                        {t("toolsAllowed", {
+                          on: own.filter((info) => info.permission !== "off")
                             .length,
                           count: own.length,
                         })}
@@ -494,7 +499,9 @@ function AgentApps({ agent }: { agent: Agent }) {
                             set.variables?.info.app === info.app &&
                             set.variables.info.tool === info.tool
                           }
-                          onChange={(on) => set.mutate({ info, on })}
+                          onChange={(permission) =>
+                            set.mutate({ info, permission })
+                          }
                         />
                       ))}
                     </ul>
@@ -691,20 +698,20 @@ function AddApp({
   );
 }
 
-/** One of a connector's tools, with its switch for the agent. */
-function AgentToolRow({
+/** One of a connector's tools, with Off, Ask and On for the agent. */
+export function AgentToolRow({
   info,
   pending,
   onChange,
 }: {
   info: ToolPermissionInfo;
   pending: boolean;
-  onChange: (on: boolean) => void;
+  onChange: (permission: ToolPermission) => void;
 }) {
   const { t } = useI18n();
   return (
-    <li className="flex items-center gap-3 py-2.5 pr-3 pl-12">
-      <span className="min-w-0 flex-1">
+    <li className="flex flex-wrap items-center gap-x-3 gap-y-2 py-2.5 pr-3 pl-12">
+      <span className="min-w-0 flex-1 basis-48">
         <span className="flex items-center gap-2">
           <span className="truncate font-mono text-[13px]">{info.tool}</span>
           {info.destructive && (
@@ -728,11 +735,15 @@ function AgentToolRow({
           </span>
         )}
       </span>
-      <Switch
-        checked={info.permission === "on"}
-        onCheckedChange={onChange}
-        disabled={pending}
-        aria-label={t("useTool", { tool: info.tool })}
+      <PermissionChoice
+        tool={info.tool}
+        selected={info.permission}
+        choices={info.choices}
+        pending={pending}
+        onChoose={(choice) =>
+          // Choosing the setting already shown confirms it: after a change, it trusts the new version.
+          (info.permission !== choice || info.changed) && onChange(choice)
+        }
       />
     </li>
   );

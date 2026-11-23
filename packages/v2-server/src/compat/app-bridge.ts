@@ -4,17 +4,17 @@
  *
  * The boundaries are v1's: an app reaches only its viewer's space and, for `shared.*`, the app owner's, and only through what the viewer may already see of the
  * app (their own, shared with a circle they are in, or published). What it keeps for the viewer (`storage.*`) needs no permission; the model and a connector's
- * tool need a grant; a tool is callable only when its owner switched it On (one that asks first, or is off, is refused, since a page can't show the person
- * what it is about to do); a call is made as the person, never with the app's own authority.
+ * tool need a grant, which is the person's permission for that version of the app and that tool (the tool's per-agent Off, Ask and On are for agents, not apps); a call is
+ * made as the person, never with the app's own authority.
  */
 import type { App } from "@pim/v2-app/app";
 import type { Tx } from "@pim/v2-app/db";
 import { openString } from "@pim/v2-app/crypto";
-import { BadRequestError, NotFoundError, PimError, RefusedError } from "@pim/v2-app/errors";
+import { BadRequestError, NotFoundError, PimError } from "@pim/v2-app/errors";
 import { type Route, route } from "@pim/v2-app/http";
 import type { Principal } from "@pim/v2-contracts/identity";
 import { publicUrl } from "../agent-tools.ts";
-import { type ConnectorRow, McpAuthError, type McpTool, type PermissionRow, parseCredential, resolvePermission, resultText, type Transport, withSession } from "../connector-tools.ts";
+import { type ConnectorRow, McpAuthError, type McpTool, parseCredential, resultText, type Transport, withSession } from "../connector-tools.ts";
 import { digestOf, ok } from "./admin-util.ts";
 import { askModel } from "./app-model.ts";
 import { ConnectorService } from "../connector-service.ts";
@@ -76,16 +76,13 @@ async function dataCall(tx: Tx, ownerId: string, appKey: string, scope: Scope, o
 
 type ToolFound = { connector: ConnectorRow; tool: McpTool; capability: string; label: string };
 
-/** The connector tools the person has switched On: `name` is `<connector id>/<tool>`, or a bare tool name that only one connector has. */
+/** The connector tools an app may ask to use: `name` is `<connector id>/<tool>`, or a bare tool name that only one connector has. */
 async function toolFor(app: App, ownerId: string, name: unknown): Promise<ToolFound> {
 	if (typeof name !== "string" || name === "") throw new BadRequestError("pim.tools.call needs a tool name");
-	const { rows, perms } = await app.db.owner(ownerId, async (tx) => ({
-		rows: (await tx.query("SELECT id, kind, name, url, status, credential, discovered_tools, enabled_tools, approval FROM pim_app.connectors WHERE url IS NOT NULL OR kind = 'native'")).rows,
-		perms: (await tx.query("SELECT audience, app, tool, permission FROM pim_app.tool_permissions WHERE audience = 'owner'")).rows as PermissionRow[],
-	}));
+	const rows = await app.db.owner(ownerId, async (tx) => (await tx.query("SELECT id, kind, name, url, status, credential, discovered_tools FROM pim_app.connectors WHERE url IS NOT NULL OR kind = 'native'")).rows);
 	const found: ToolFound[] = [];
 	for (const r of rows) {
-		const connector: ConnectorRow = { id: r.id, kind: r.kind, name: r.name, url: r.url, status: r.status, credential: r.credential, enabledTools: r.enabled_tools, approval: r.approval };
+		const connector: ConnectorRow = { id: r.id, kind: r.kind, name: r.name, url: r.url, status: r.status, credential: r.credential };
 		for (const tool of r.discovered_tools as McpTool[]) {
 			if (name !== `${connector.id}/${tool.name}` && name !== tool.name) continue;
 			found.push({ connector, tool, capability: `tool:${connector.id}/${tool.name}`, label: `${connector.name}: ${tool.annotations?.title ?? tool.name}` });
@@ -95,7 +92,6 @@ async function toolFor(app: App, ownerId: string, name: unknown): Promise<ToolFo
 	if (found.length > 1) throw new BadRequestError(`More than one connector has ${name}: name it <connector id>/<tool>`);
 	const one = found[0]!;
 	if (one.connector.credential !== null && one.connector.status !== "connected") throw new PimError(503, "unavailable", `${one.connector.name} isn't connected right now.`);
-	if (resolvePermission(one.connector, one.tool, perms).permission !== "on") throw new RefusedError(`${one.connector.name}'s ${one.tool.name} asks you before it runs, or is off, so an app can't use it.`, "tool_not_on");
 	return one;
 }
 
@@ -147,7 +143,7 @@ export function createBridge(app: App, env: Env, fetcher: typeof fetch = fetch):
 			await app.identity.authz.enforce(p, "api:write");
 			if (capability !== "model") {
 				if (typeof capability !== "string" || !capability.startsWith("tool:")) throw new BadRequestError("capability must be model or tool:<name>");
-				// A tool that isn't On can't be granted, so a grant is never kept for something the page could not use.
+				// A tool that isn't there can't be granted, so a grant is never kept for something the page could not use.
 				if ((await toolFor(app, p.ownerId, capability.slice("tool:".length))).capability !== capability) throw new BadRequestError("Name the tool as tool:<connector id>/<tool>");
 			}
 			await app.db.owner(p.ownerId, (tx) => tx.query("INSERT INTO pim_app.app_grants (owner_id, app_key, sha256, capability) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING", [p.ownerId, s.key, s.sha, capability]));

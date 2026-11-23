@@ -1270,10 +1270,10 @@ export type ToolPermissionInfo = {
   /** The connector says the tool may delete or overwrite things. */
   destructive: boolean;
   permission: ToolPermission;
-  /** What applies when you haven't chosen. */
+  /** What applies when you haven't chosen: off for a connector's tool on an agent. */
   default: ToolPermission;
   chosen: ToolPermission | null;
-  /** The connector changed the tool since you chose to let it run: Pim asks again, and circles lose it. */
+  /** The connector changed the tool since you chose to let it run: it asks again for an agent, and circles lose it. */
   changed: boolean;
   /** The permissions it can have. */
   choices: ToolPermission[];
@@ -2257,12 +2257,12 @@ export const pim = {
       method: "POST",
       body: JSON.stringify(always ? { always } : {}),
     }),
-  /** Your own tools' permissions, or a circle's. */
+  /** Pim's own tools' permissions, or a circle's tools'. */
   permissions: (circle?: string) =>
     call<{ tools: ToolPermissionInfo[] }>(
       `/permissions${circle ? `?circle=${encodeURIComponent(circle)}` : ""}`,
     ).then((body) => body.tools),
-  /** Whether an agent may use each tool of the connectors it works with: on or off. */
+  /** Whether an agent may use each tool of the connectors it works with: off until chosen, then off, ask or on. */
   agentPermissions: (agent: string) =>
     call<{ tools: ToolPermissionInfo[] }>(
       `/permissions?agent=${encodeURIComponent(agent)}`,
@@ -2276,7 +2276,7 @@ export const pim = {
     agent: string,
     app: string,
     tool: string,
-    permission: "on" | "off" | null,
+    permission: ToolPermission | null,
   ) =>
     call<ToolPermissionInfo>("/permissions", {
       method: "PUT",

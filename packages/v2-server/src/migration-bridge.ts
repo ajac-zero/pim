@@ -446,7 +446,6 @@ async function promoteDomain(pool: Pool, owner: string, options: PromoteOptions,
 	const goals = await rows("pim_goals");
 	const connections = await rows("pim_app_connections");
 	const toolPermissions = await rows("pim_tool_permissions");
-	const mcpServers = await rows("pim_mcp_servers");
 	const mcpConnections = await rows("cf_agents_mcp_servers");
 	const kv = await rows("$kv");
 	const credentials = await rows("pim_credentials");
@@ -677,10 +676,10 @@ async function promoteDomain(pool: Pool, owner: string, options: PromoteOptions,
 			if (!credential) d.skipped.push(`MCP server ${m.id}: signed in again by its owner (${options.crypto ? "it held no tokens" : "no keys were given"})`);
 			else d.skipped.push(`MCP server ${m.id}: its tools are not switched on until its owner enables them (the old Pim did not keep the list)`);
 		}
-		// What the person chose for each connector tool (Off, Ask, On), and each connector's approval policy, for themselves, for each agent, and for each circle (the audience `circle:<id>`).
-				for (const m of mcpServers) {
-			if (["writes", "all", "none"].includes(String(m.approval))) await c.query("UPDATE pim_app.connectors SET approval = $2 WHERE id = $1", [m.id, m.approval]);
-		}
+		// What the person chose for each connector tool (Off, Ask, On) is each agent's now: their own choice goes to every agent that lists the connector, unless that agent's own switch
+		// was off; an agent's own On meant only that nothing narrowed it, so it carries nothing. A circle's choice stays the circle's (the audience `circle:<id>`).
+		const promoted = (await c.query("SELECT id, config -> 'apps' AS apps FROM pim_app.agents WHERE owner_id = $1 AND deleted_at IS NULL", [owner])).rows as { id: string; apps: unknown }[];
+		const connectorNames = (await c.query("SELECT id, name, app_ref FROM pim_app.connectors WHERE owner_id = $1", [owner])).rows as { id: string; name: string; app_ref: string | null }[];
 		for (const t of toolPermissions) {
 			const circle = circles.find((ci) => ci.id === t.audience);
 			const audience = t.audience === "" ? "owner" : String(t.audience).startsWith("agent:") ? String(t.audience) : circle ? `circle:${circle.id}` : null;
@@ -696,10 +695,19 @@ async function promoteDomain(pool: Pool, owner: string, options: PromoteOptions,
 				d.skipped.push(`tool permission ${t.audience || "owner"}/${t.app || "pim"}/${t.tool}: ${audience && t.app ? "unknown choice" : t.app ? "its audience is neither the owner, an agent nor a circle" : "that tool of Pim's has no switch here"}`);
 				continue;
 			}
-			// An agent's switch is on or off; asking meant off there.
-			const permission = audience === "owner" || audience.startsWith("circle:") ? t.permission : t.permission === "on" ? "on" : "off";
-			const r = await c.query("INSERT INTO pim_app.tool_permissions (owner_id, audience, app, tool, permission) VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING", [owner, audience, t.app, t.tool, permission]);
-			bump(d, "tool permissions", r.rowCount ?? 0);
+			if (audience.startsWith("agent:")) continue;
+			if (audience.startsWith("circle:")) {
+				const r = await c.query("INSERT INTO pim_app.tool_permissions (owner_id, audience, app, tool, permission) VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING", [owner, audience, t.app, t.tool, t.permission]);
+				bump(d, "tool permissions", r.rowCount ?? 0);
+				continue;
+			}
+			const known = connectorNames.find((k) => k.id === t.app);
+			const lists = promoted.filter((a) => Array.isArray(a.apps) && (a.apps.includes(t.app) || (known && (a.apps.includes(known.name) || (known.app_ref && a.apps.includes(known.app_ref))))) && !toolPermissions.some((o) => o.audience === `agent:${a.id}` && o.app === t.app && o.tool === t.tool && o.permission === "off"));
+			if (lists.length === 0) d.skipped.push(`tool permission owner/${t.app}/${t.tool}: no agent works with that connector, and a connector's tools are set for each agent`);
+			for (const a of lists) {
+				const r = await c.query("INSERT INTO pim_app.tool_permissions (owner_id, audience, app, tool, permission) VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING", [owner, `agent:${a.id}`, t.app, t.tool, t.permission]);
+				bump(d, "tool permissions", r.rowCount ?? 0);
+			}
 		}
 		// Triggers. A time trigger is counted from the later of the cutover's skip guard and the activation, so what the cutover missed never fires.
 		const activated = options.activatedAt ?? Date.now();

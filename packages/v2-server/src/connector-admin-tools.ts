@@ -139,7 +139,7 @@ export function connectorAdminTools(deps: { ownerId: string; runtime: RuntimeDb;
 			if ((a.add?.length ?? 0) > 0 && !origin()) return noAddress;
 			await app.agents.update(call.p, id, { apps: next });
 			const added = directory.filter((d) => a.add?.includes(d.ref));
-			const done = [`${agent.name}'s connectors are updated. Shared connections and their tool permissions are unchanged.`, ...(await connectAll(app, added, directory))].join("\n");
+			const done = [`${agent.name}'s connectors are updated. Shared connections are unchanged, and each tool of a connector stays off for this agent until the person turns it on, Ask or On, on this agent's page in Agents.`, ...(await connectAll(app, added, directory))].join("\n");
 			await recordResult(app, ownerId, "connector:manage", String(call.api.taskId), done);
 			return text(done);
 		}),

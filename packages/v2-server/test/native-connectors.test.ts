@@ -138,6 +138,7 @@ real("native and OAuth connectors", () => {
 	let app: App;
 	let ownerId: string;
 	let chatId: string;
+	let majordomo: string;
 	let n = 0;
 	let origin = "";
 	let standOrigin = "";
@@ -163,6 +164,11 @@ real("native and OAuth connectors", () => {
 		const back = new URL(sent.headers.get("location")!);
 		lastReturn = back.pathname + back.search;
 		return web.call("GET", lastReturn);
+	};
+	/** What the majordomo may do with a connector's tools, as its page lists them (every tool is off until the person sets it), and sets them to `permission`. */
+	const toolsOf = async (connector: string) => ((await web.call("GET", `/api/permissions?agent=${majordomo}`)).json.tools as { app: string; tool: string; permission: string; readOnly: boolean }[]).filter((t) => t.app === connector);
+	const allow = async (connector: string, tools: string[], permission = "on") => {
+		for (const tool of tools) expect((await web.call("PUT", "/api/permissions", { agent: majordomo, app: connector, tool, permission })).status).toBe(200);
 	};
 	const directory = async () => ((await web.call("GET", "/api/app-directory")).json.apps as { ref: string; name: string; url: string | null }[]);
 	const connection = async (ref: string) => ((await web.call("GET", "/api/mcp")).json.servers as { id: string; app: string | null; state: string; error: string | null; authUrl: string | null; tools: { name: string }[] }[]).find((s) => s.app === ref);
@@ -197,7 +203,7 @@ real("native and OAuth connectors", () => {
 		process.env.PIM_PUBLIC_URL = origin;
 		chatId = (await web.call("POST", "/api/sessions", { title: "Work" })).json.id;
 		// The majordomo answers this chat, and works with the directory's connectors these tests connect.
-		const majordomo = (await web.call("GET", "/api/majordomo")).json.agent.id as string;
+		majordomo = (await web.call("GET", "/api/majordomo")).json.agent.id as string;
 		expect((await web.call("PUT", `/api/agents/${majordomo}`, { apps: ["google/gmail", "google/drive", "spotify/spotify"] })).status).toBe(200);
 		runner = await start(d, "runner", { pollMs: 40, providers: () => [faux.provider] }, { PIM_DEFAULT_MODEL: "faux/m", PIM_APP_DATABASE_URL: stack.url("gate"), ...keys });
 	}, 180_000);
@@ -241,9 +247,9 @@ real("native and OAuth connectors", () => {
 		expect(stored).toMatchObject({ status: "connected", kind: "native", app_ref: "google/gmail" });
 		expect(stored.credential).not.toContain("gmail-secret");
 		expect(stored.credential).not.toContain("rt-google");
-		// All three are read-only, so they run without asking.
-		const perms = (await web.call("GET", "/api/permissions")).json.tools as { app: string; tool: string; permission: string; readOnly: boolean }[];
-		expect(perms.filter((t) => t.app === connected!.id).map((t) => [t.tool, t.permission, t.readOnly])).toEqual([["search", "on", true], ["get_message", "on", true], ["get_thread", "on", true]]);
+		// All three are read-only, and still off for the majordomo until the person turns them on.
+		expect((await toolsOf(connected!.id)).map((t) => [t.tool, t.permission, t.readOnly])).toEqual([["search", "off", true], ["get_message", "off", true], ["get_thread", "off", true]]);
+		await allow(connected!.id, ["search", "get_message", "get_thread"]);
 
 		await send("find the plan mail", toolUse(fauxToolCall("connector_call", { connector: connected!.id, tool: "search", arguments: { query: "plan" } })));
 		const result = (await results("connector_call"))[0]!;
@@ -262,8 +268,9 @@ real("native and OAuth connectors", () => {
 		expect((await signIn(started.authUrl)).json).toContain("Spotify is connected");
 		const c = (await connection("spotify/spotify"))!;
 		expect(c.tools.map((t) => t.name)).toEqual(["now_playing", "search", "play", "pause"]);
-		const perms = (await web.call("GET", "/api/permissions")).json.tools as { app: string; tool: string; permission: string }[];
-		expect(Object.fromEntries(perms.filter((t) => t.app === c.id).map((t) => [t.tool, t.permission]))).toEqual({ now_playing: "on", search: "on", play: "on", pause: "on" });
+		expect(Object.fromEntries((await toolsOf(c.id)).map((t) => [t.tool, t.permission]))).toEqual({ now_playing: "off", search: "off", play: "off", pause: "off" });
+		await allow(c.id, ["now_playing", "play"]);
+		expect(Object.fromEntries((await toolsOf(c.id)).map((t) => [t.tool, t.permission]))).toEqual({ now_playing: "on", search: "off", play: "on", pause: "off" });
 		await send("what is playing?", toolUse(fauxToolCall("connector_call", { connector: c.id, tool: "now_playing" })));
 		expect((await results("connector_call")).at(-1)).toContain("Playing: Song by Band · Album (61s of 180s)");
 	}, 120_000);
@@ -283,6 +290,7 @@ real("native and OAuth connectors", () => {
 		expect((await web.call("POST", "/api/app-actions/google/drive/files", {})).json.result.files).toHaveLength(1);
 		expect((await web.call("POST", "/api/app-actions/google/drive/nothing", {})).status).toBe(404);
 		const c = (await connection("google/drive"))!;
+		await allow(c.id, ["list_files"]);
 		await send("what files?", toolUse(fauxToolCall("connector_call", { connector: c.id, tool: "list_files" })));
 		expect((await results("connector_call")).at(-1)).toContain("Notes.txt [abcdefghij1]");
 		expect((await web.call("POST", "/api/app-actions/google/drive/forget", { id: "abcdefghij1" })).json.result.files).toEqual([]);
@@ -327,6 +335,7 @@ real("native and OAuth connectors", () => {
 		expect(page.json).toContain("Lookup is connected");
 		const listed = (await web.call("GET", "/api/mcp")).json.servers.find((s: { id: string }) => s.id === started.id);
 		expect(listed).toMatchObject({ state: "ready", authUrl: null, tools: [{ name: "lookup" }] });
+		await allow(started.id, ["lookup"]);
 		await send("look it up", toolUse(fauxToolCall("connector_call", { connector: started.id, tool: "lookup", arguments: { q: "widgets" } })));
 		expect((await results("connector_call")).at(-1)).toBe("found widgets");
 		// The token expired in a second: the Runner renewed it at the server's own token endpoint with the refresh token and the registered client.

@@ -56,11 +56,10 @@ const translations = {
     searchYourApps: "Search your connectors",
     connectMoreApps: "Connect more connectors",
     allAppsAdded: "It already works with every connector you connected.",
-    toolsOn: "{on} of {count} on",
+    toolsAllowed: "{on} of {count} allowed",
     toolsOf: "{name}'s tools",
     agentToolsHint:
-      "{name} uses the tools that are on without asking you first, and can't use those that are off.",
-    useTool: "Let it use {tool}",
+      "Every tool starts off. {name} uses a tool that is On without asking you, asks you first for one set to Ask, and can't use one that is Off, which isn't even shown to its model.",
     agentSkills: "Skills",
     writeSkills: "Write and install skills",
     writeSkillsHint:
@@ -71,7 +70,7 @@ const translations = {
       "Couldn't load whether {name} can write skills: {error}",
     destructiveTool: "Can delete",
     agentToolChanged:
-      "The connector changed this tool since you turned it on, so it's off until you turn it on again.",
+      "The connector changed this tool since you set it to On, so it asks first until you choose again.",
     majordomoPreferences: "How {name} works with you",
     appName: "Connector",
     appUrl: "MCP server URL",
@@ -273,7 +272,7 @@ const translations = {
     appRemoved: "Disconnected {name}.",
     toolPermissions: "Tool permissions",
     toolPermissionsDescription:
-      "What Pim may do with each tool. Off: Pim can't use it. Ask: Pim waits for your approval. On: Pim uses it without asking.",
+      "What Pim may do with each of its own tools. Off: Pim can't use it. Ask: Pim waits for your approval. On: Pim uses it without asking. A connector's tools are set for each agent, on its page in Agents.",
     pimTools: "Pim",
     permissionOff: "Off",
     permissionAsk: "Ask",
@@ -2188,11 +2187,10 @@ const translations = {
     searchYourApps: "Busca entre tus conectores",
     connectMoreApps: "Conectar más conectores",
     allAppsAdded: "Ya trabaja con todos los conectores que conectaste.",
-    toolsOn: "{on} de {count} activadas",
+    toolsAllowed: "{on} de {count} permitidas",
     toolsOf: "Herramientas de {name}",
     agentToolsHint:
-      "{name} usa sin preguntarte las herramientas activadas, y no puede usar las desactivadas.",
-    useTool: "Permitir usar {tool}",
+      "Todas las herramientas empiezan desactivadas. {name} usa sin preguntarte una herramienta Activada, te pregunta antes en una en Preguntar, y no puede usar una Desactivada, que ni siquiera se muestra a su modelo.",
     agentSkills: "Habilidades",
     writeSkills: "Escribir e instalar habilidades",
     writeSkillsHint:
@@ -2203,7 +2201,7 @@ const translations = {
       "No se pudo cargar si {name} puede escribir habilidades: {error}",
     destructiveTool: "Puede borrar",
     agentToolChanged:
-      "El conector cambió esta herramienta desde que la activaste, así que está desactivada hasta que la actives de nuevo.",
+      "El conector cambió esta herramienta desde que elegiste Activada, así que pregunta antes hasta que elijas de nuevo.",
     majordomoPreferences: "Cómo trabaja {name} contigo",
     appName: "Conector",
     appUrl: "URL del servidor MCP",
@@ -2405,7 +2403,7 @@ const translations = {
     appRemoved: "{name} desconectada.",
     toolPermissions: "Permisos de herramientas",
     toolPermissionsDescription:
-      "Lo que Pim puede hacer con cada herramienta. Desactivada: Pim no puede usarla. Preguntar: Pim espera tu aprobación. Activada: Pim la usa sin preguntar.",
+      "Lo que Pim puede hacer con cada una de sus herramientas. Desactivada: Pim no puede usarla. Preguntar: Pim espera tu aprobación. Activada: Pim la usa sin preguntar. Las herramientas de un conector se eligen para cada agente, en su página de Agentes.",
     pimTools: "Pim",
     permissionOff: "Desactivada",
     permissionAsk: "Preguntar",

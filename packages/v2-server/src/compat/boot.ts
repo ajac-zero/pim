@@ -223,7 +223,7 @@ async function readSettings(app: App, ownerId: string) {
 const STATUS: Record<string, "pending" | "approved" | "denied"> = { waiting: "pending", approved: "approved", timed_out_approved: "approved", denied: "denied", timed_out_denied: "denied" };
 export const webApproval = (r: any) => {
 	// The runtime's bookkeeping (task, call, policy resource) is not what the person reads.
-	const { taskId: _task, callId, resource: _resource, review, explicit, requestedBy, guestOwner: _g, guestChat: _c, note, result, ...args } = (r.args ?? {}) as Record<string, unknown>;
+	const { taskId: _task, agentId: _agent, callId, resource: _resource, review, explicit, requestedBy, guestOwner: _g, guestChat: _c, note, result, ...args } = (r.args ?? {}) as Record<string, unknown>;
 	const reviewed = review as { status?: string; note?: string } | undefined;
 	const brief = typeof args.summary === "string" ? args.summary : Object.entries(args).slice(0, 3).map(([k, v]) => `${k}: ${typeof v === "string" ? v : JSON.stringify(v)}`.slice(0, 120)).join(", ");
 	return {

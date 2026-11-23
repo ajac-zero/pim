@@ -93,6 +93,53 @@ export function ToolPermissionList({ circle }: { circle?: string }) {
   );
 }
 
+/** Off, Ask and On side by side for one tool, the one that applies pressed. */
+export function PermissionChoice({
+  tool,
+  selected,
+  choices,
+  pending,
+  onChoose,
+}: {
+  tool: string;
+  selected: ToolPermission;
+  choices: ToolPermission[];
+  pending: boolean;
+  onChoose: (permission: ToolPermission) => void;
+}) {
+  const { t } = useI18n();
+  const labels: Record<ToolPermission, string> = {
+    off: t("permissionOff"),
+    ask: t("permissionAsk"),
+    on: t("permissionOn"),
+  };
+  return (
+    <span
+      role="group"
+      aria-label={t("permissionFor", { tool })}
+      className="inline-flex shrink-0 rounded-full border bg-background p-0.5"
+    >
+      {choices.map((choice) => (
+        <button
+          key={choice}
+          type="button"
+          aria-pressed={selected === choice}
+          disabled={pending}
+          onClick={() => onChoose(choice)}
+          className={cn(
+            "rounded-full px-3 py-1.5 text-[13px] transition-colors disabled:opacity-60",
+            selected === choice
+              ? "bg-muted text-foreground"
+              : "text-muted-foreground hover:bg-accent hover:text-foreground",
+          )}
+        >
+          {labels[choice]}
+        </button>
+      ))}
+    </span>
+  );
+}
+
 function ToolPermissionRow({
   info,
   forCircle,
@@ -105,11 +152,6 @@ function ToolPermissionRow({
   onChoose: (permission: ToolPermission | null) => void;
 }) {
   const { t } = useI18n();
-  const labels: Record<ToolPermission, string> = {
-    off: t("permissionOff"),
-    ask: t("permissionAsk"),
-    on: t("permissionOn"),
-  };
   const label = info.tool;
   return (
     <li className="flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-3">
@@ -151,35 +193,16 @@ function ToolPermissionRow({
             <RotateCcw />
           </Button>
         )}
-        <span
-          role="group"
-          aria-label={t("permissionFor", { tool: label })}
-          className="inline-flex rounded-full border bg-background p-0.5"
-        >
-          {info.choices.map((choice) => {
-            const selected = info.permission === choice;
-            return (
-              <button
-                key={choice}
-                type="button"
-                aria-pressed={selected}
-                disabled={pending}
-                onClick={() =>
-                  // Choosing the setting already shown confirms it: after a change, it trusts the new version.
-                  (!selected || info.changed) && onChoose(choice)
-                }
-                className={cn(
-                  "rounded-full px-3 py-1.5 text-[13px] transition-colors disabled:opacity-60",
-                  selected
-                    ? "bg-muted text-foreground"
-                    : "text-muted-foreground hover:bg-accent hover:text-foreground",
-                )}
-              >
-                {labels[choice]}
-              </button>
-            );
-          })}
-        </span>
+        <PermissionChoice
+          tool={label}
+          selected={info.permission}
+          choices={info.choices}
+          pending={pending}
+          onChoose={(choice) =>
+            // Choosing the setting already shown confirms it: after a change, it trusts the new version.
+            (info.permission !== choice || info.changed) && onChoose(choice)
+          }
+        />
       </span>
     </li>
   );

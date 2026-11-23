@@ -1,10 +1,10 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
 import { expect, it } from "vitest";
-import { AgentSkills } from "~/components/agent-settings";
+import { AgentSkills, AgentToolRow } from "~/components/agent-settings";
 import { ContactMap } from "~/components/contact-map";
 import { WorkspaceFallbacks } from "~/components/settings-dialog";
-import type { Agent, ModelSettings } from "~/lib/pim-api";
+import type { Agent, ModelSettings, ToolPermissionInfo } from "~/lib/pim-api";
 import {
   agentSkillsPermissionQuery,
   agentsQuery,
@@ -114,4 +114,36 @@ it("draws the space's fallback models in order, each with a way to move or remov
   // Only Gamma is left to add, and nothing is marked as the default.
   expect(html).toContain('aria-label="Add a fallback model"');
   expect(html).not.toContain("Default");
+});
+
+it("gives a connector's tool Off, Ask and On for the agent, with what applies pressed and what it can do labelled", () => {
+  const info: ToolPermissionInfo = {
+    app: "cn_1",
+    appName: "Tickets",
+    tool: "delete_all",
+    name: "cn_1_delete_all",
+    description: "Delete every ticket",
+    readOnly: false,
+    destructive: true,
+    permission: "ask",
+    default: "off",
+    chosen: "ask",
+    changed: true,
+    choices: ["off", "ask", "on"],
+  };
+  const html = renderToStaticMarkup(
+    <AgentToolRow info={info} pending={false} onChange={() => {}} />,
+  );
+  expect(html).toContain("Can delete");
+  expect(html).toContain("Permission for delete_all");
+  expect(
+    [...html.matchAll(/aria-pressed="(true|false)"[^>]*>(Off|Ask|On)</g)].map(
+      (m) => [m[2], m[1]],
+    ),
+  ).toEqual([
+    ["Off", "false"],
+    ["Ask", "true"],
+    ["On", "false"],
+  ]);
+  expect(html).toContain("asks first until you choose again");
 });

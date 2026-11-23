@@ -87,9 +87,6 @@ describe("an app's bridge and its page", () => {
 		await stack?.drop();
 	});
 
-	/** The person's own choice of Ask for a connector's tool, as Settings makes it. */
-	const setToAsk = (connector: string, tool: string) => app.db.owner(people.ada!.ownerId, (tx) => tx.query("INSERT INTO pim_app.tool_permissions (owner_id, audience, app, tool, permission) VALUES ($1, 'owner', $2, $3, 'ask')", [people.ada!.ownerId, connector, tool]));
-
 	const html = (n: string) => ({ "index.html": `<!doctype html><p>${n}</p>` });
 
 	it("keeps text per person and per app, within limits, and lets a circle's members share one scope", async () => {
@@ -152,17 +149,17 @@ describe("an app's bridge and its page", () => {
 		expect((await call("ada", "POST", `/api/artifacts/${id}/versions/2/grants`, { capability: "bogus" })).status).toBe(400);
 	});
 
-	it("calls only a connector tool the person switched on, after a grant, and never one that asks first", async () => {
+	it("calls a connector tool only after the person grants it to this version of the app, whatever agents may do with it", async () => {
 		const id = (await call("ada", "POST", "/api/apps", { title: "Tool", kind: "html", files: html("t") })).json.id;
 		const c = connectorId;
 		expect((await bridge("ada", id, 1, "tools.call", { name: `${c}/read`, input: { q: 1 } })).json).toEqual({ needs: { capability: `tool:${c}/read`, label: "Notes: read" } });
-		// `write` runs by default like every tool, but once the person sets it to Ask a page can't use it, nor be granted it.
-		await setToAsk(c, "write");
-		expect((await bridge("ada", id, 1, "tools.call", { name: "write" })).json).toMatchObject({ error: "tool_not_on" });
-		expect((await call("ada", "POST", `/api/artifacts/${id}/versions/1/grants`, { capability: `tool:${c}/write` })).status).toBe(403);
+		// No agent has the tool, and the person's grant is what an app needs: it asks for a tool with effects as it does for any other.
+		expect((await bridge("ada", id, 1, "tools.call", { name: "write" })).json).toEqual({ needs: { capability: `tool:${c}/write`, label: "Notes: write" } });
 		expect((await bridge("ada", id, 1, "tools.call", { name: "missing" })).status).toBe(404);
 		await call("ada", "POST", `/api/artifacts/${id}/versions/1/grants`, { capability: `tool:${c}/read` });
 		expect((await bridge("ada", id, 1, "tools.call", { name: "read", input: { q: 1 } })).json).toEqual({ value: 'ran read {"q":1}' });
+		await call("ada", "POST", `/api/artifacts/${id}/versions/1/grants`, { capability: `tool:${c}/write` });
+		expect((await bridge("ada", id, 1, "tools.call", { name: "write", input: { q: 2 } })).json).toEqual({ value: 'ran write {"q":2}' });
 		// Bob has no connectors, so he finds nothing to call.
 		const mine = (await call("bob", "POST", "/api/apps", { title: "Mine", kind: "html", files: html("b") })).json.id;
 		expect((await bridge("bob", mine, 1, "tools.call", { name: "read" })).status).toBe(404);
@@ -172,9 +169,6 @@ describe("an app's bridge and its page", () => {
 		const id = (await call("ada", "POST", "/api/apps", { title: "Songs", kind: "html", files: html("s") })).json.id;
 		const name = `${spotifyId}/search`;
 		expect((await bridge("ada", id, 1, "tools.call", { name, input: { query: "fado" } })).json).toEqual({ needs: { capability: `tool:${name}`, label: "Spotify: search" } });
-		// `play` is set to Ask, so a page can't use it.
-		await setToAsk(spotifyId, "play");
-		expect((await bridge("ada", id, 1, "tools.call", { name: `${spotifyId}/play` })).json).toMatchObject({ error: "tool_not_on" });
 		await call("ada", "POST", `/api/artifacts/${id}/versions/1/grants`, { capability: `tool:${name}` });
 		expect((await bridge("ada", id, 1, "tools.call", { name, input: { query: "fado" } })).json).toEqual({ value: "- Fado by Ana · Lisboa [spotify:track:1]" });
 	});

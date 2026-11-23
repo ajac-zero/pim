@@ -48,16 +48,7 @@ export function connectorScreens(env: Env = process.env): Route[] {
 				if (!url) throw new BadRequestError(typeof b.app === "string" ? (s.notOffered(b.app) ?? "app must be the id of a connector this Pim offers") : "Give the connector's id (app), or a server's address (url).");
 				result = await s.connect(p, origin, { url, ...(typeof b.name === "string" && b.name.trim() ? { name: b.name.trim() } : {}), ...(typeof b.credential === "string" && b.credential ? { credential: b.credential } : {}) });
 			}
-			if (typeof b.approval === "string" && chosen) await s.setApproval(p, result.id, b.approval);
 			return ok(result, 201);
-		}),
-		route("PUT", "/api/mcp/:id", async ({ app, principal, params, json }) => {
-			const p = await principal();
-			const s = service(app);
-			await s.setApproval(p, params[0]!, String((await json()).approval));
-			const found = (await s.list(p, s.directory(await customApps(app)))).find((c) => c.id === params[0]);
-			if (!found) throw new NotFoundError(`No connector ${params[0]}`);
-			return ok(found);
 		}),
 		route("DELETE", "/api/mcp/:id", async ({ app, principal, params }) => (await service(app).disconnect(await principal(), params[0]!), ok({ deleted: true }))),
 		// The skills a connector publishes (the MCP Skills extension), as v1 listed them: the SKILL.md's address, its name and description, and the manifest of its files. Events are the watch tools' (`../watch-tools.ts`).

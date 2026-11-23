@@ -29,7 +29,7 @@ export const fetchTools: ToolFetcher = async (url, credential) => {
 
 /**
  * Connectors: the built-in and native (Google, Gmail, Drive) ones and custom MCP servers. Credentials and webhook secrets are sealed. Tool discovery is
- * default-off: tools a server reports land in `discovered_tools`, and nothing reaches an agent until `enableTools` names it. Webhook events arrive at
+ * default-off: tools a server reports land in `discovered_tools`, and an agent gets one only when its person sets it for that agent (`pim_app.tool_permissions`); `enableTools` is what a shared bot may offer. Webhook events arrive at
  * `/mcp/events/<owner>/<key>`, signed with HMAC-SHA256 under the connector's own secret, and fire the triggers watching that connector.
  */
 export class Connectors {

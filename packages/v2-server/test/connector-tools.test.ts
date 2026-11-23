@@ -1,6 +1,6 @@
-// An owner's MCP connector on the real stack, against a local fake streamable-HTTP MCP server: its tools are discovered and enabled, the agent is offered the ones that are not
-// off, a read-only tool runs, a tool that asks first parks for approval and is called once after a person says yes, an off tool is neither offered nor callable, the
-// approval policies (auto, majordomo, explicit) decide what asks, the permissions screen's API sets Off / Ask / On, and "always approve" turns Ask into On.
+// An owner's MCP connector on the real stack, against a local fake streamable-HTTP MCP server: its tools are discovered, every one off until the person sets it for an agent, the agent
+// is offered the ones that are not off, a read-only tool runs, a tool that asks first parks for approval and is called once after a person says yes, an off tool is neither offered
+// to the model nor callable, the approval policies (auto, majordomo, explicit) decide what asks, an agent's page sets Off / Ask / On, and "always approve" turns Ask into On for that agent.
 import { createServer, type Server } from "node:http";
 import { createHash, randomBytes } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -78,6 +78,7 @@ real("connector tools", () => {
 	let ownerId: string;
 	let chatId: string;
 	let connector: string;
+	let majordomo: string;
 	let n = 0;
 	const mcp = fakeMcp();
 	const faux = fauxProvider({ provider: "faux", models: [{ id: "m" }] });
@@ -98,6 +99,9 @@ real("connector tools", () => {
 	const waiting = () => waitFor("an approval to be filed", async () => (await d.stack.admin.query("SELECT id, tool, args FROM pim_app.approvals WHERE state = 'waiting'")).rows[0], 60_000);
 	const finish = () => waitFor("the turn to end", async () => (sentAndAnswered(await transcript(), `done ${n}`) ? true : undefined), 60_000);
 	const callNames = () => mcp.calls.map((c) => c.name);
+	/** One agent's permission for a connector's tool, as its page sets it. */
+	const setFor = (agent: string, tool: string, permission: string | null, app = connector) => web.call("PUT", "/api/permissions", { agent, app, tool, permission });
+	const toolsOf = async (agent: string) => (await web.call("GET", `/api/permissions?agent=${agent}`)).json.tools as { app: string | null; tool: string; permission: string; default: string; chosen: string | null; changed: boolean; choices: string[]; readOnly: boolean; destructive: boolean }[];
 
 	beforeAll(async () => {
 		await new Promise<void>((r) => mcp.server.listen(0, "127.0.0.1", r));
@@ -116,14 +120,13 @@ real("connector tools", () => {
 		runner = await start(d, "runner", { pollMs: 40, providers: () => [faux.provider] }, { PIM_DEFAULT_MODEL: "faux/m", PIM_APP_DATABASE_URL: stack.url("gate"), ...keys });
 		// Maintenance applies approval timeouts, as the auto policy needs.
 		maintenance = await start(d, "maintenance", { pollMs: 100 });
-		// The person connects the server, finds its tools, and switches two on; the destructive one is left off.
+		// The person connects the server and finds its tools; every one is off until they set it for an agent.
 		const made = await web.call("POST", "/api/connectors", { kind: "custom_mcp", name: "Tickets", url, credential: TOKEN });
 		expect(made.status).toBe(201);
 		connector = made.json.connector.id;
 		expect((await web.call("POST", `/api/connectors/${connector}/discover`)).json.discovered).toBe(3);
-		expect((await web.call("PUT", `/api/connectors/${connector}/tools`, { tools: ["search", "create_ticket"] })).status).toBe(200);
 		// The majordomo answers the chats made without an agent, and works with this connector: an agent offers only the connectors it lists.
-		const majordomo = (await web.call("GET", "/api/majordomo")).json.agent.id as string;
+		majordomo = (await web.call("GET", "/api/majordomo")).json.agent.id as string;
 		expect((await web.call("PUT", `/api/agents/${majordomo}`, { apps: [connector] })).status).toBe(200);
 	}, 180_000);
 	afterAll(async () => {
@@ -135,26 +138,42 @@ real("connector tools", () => {
 		await d?.stack.drop();
 	}, 60_000);
 
-	it("keeps the credential sealed and shows each tool's default permission", async () => {
+	it("keeps the credential sealed, leaves every tool off for an agent until it is set, and sets nothing for the account as a whole", async () => {
 		expect((await d.stack.admin.query("SELECT credential FROM pim_app.connectors")).rows[0].credential).not.toContain(TOKEN);
-		const tools = ((await web.call("GET", "/api/permissions")).json.tools as { app: string | null; tool: string; permission: string; default: string; readOnly: boolean; destructive: boolean }[]).filter((t) => t.app !== null);
-		expect(Object.fromEntries(tools.map((t) => [t.tool, t.permission]))).toEqual({ search: "on", create_ticket: "on", delete_all: "off" });
+		const tools = await toolsOf(majordomo);
+		expect(Object.fromEntries(tools.map((t) => [t.tool, t.permission]))).toEqual({ search: "off", create_ticket: "off", delete_all: "off" });
+		expect(tools.every((t) => t.default === "off" && t.chosen === null && t.choices.join() === "off,ask,on")).toBe(true);
 		expect(tools.find((t) => t.tool === "search")).toMatchObject({ readOnly: true });
 		expect(tools.find((t) => t.tool === "delete_all")).toMatchObject({ destructive: true });
-		// Connecting is consent, so a tool with effects runs too; the tests that follow need one that asks first, which only the person's own choice makes.
-		expect((await web.call("PUT", "/api/permissions", { app: connector, tool: "create_ticket", permission: "ask" })).json).toMatchObject({ permission: "ask", chosen: "ask" });
+		// The account's own list has Pim's tools only, and a connector's tool is not set without saying for which agent.
+		expect(((await web.call("GET", "/api/permissions")).json.tools as { app: string | null }[]).filter((t) => t.app !== null)).toEqual([]);
+		expect((await web.call("PUT", "/api/permissions", { app: connector, tool: "search", permission: "on" })).status).toBe(400);
+		expect((await setFor(majordomo, "search", "maybe")).status).toBe(400);
+		// Nothing is offered or callable yet, and the model's prompt does not list the tools.
+		await send("anything yet?", false, toolUse(fauxToolCall("connector_tools", {})), toolUse(fauxToolCall("connector_call", { connector, tool: "search", arguments: { q: "x" } })));
+		expect((await results("connector_tools"))[0]).toMatch(/no connector tools/i);
+		expect((await results("connector_call"))[0]).toMatch(/switched off/);
+		expect(await transcript()).not.toContain(`Tickets (${connector}) search`);
+		expect(callNames()).toEqual([]);
+		// The person sets the majordomo's tools: the read-only one runs, the one with effects asks first, and the destructive one stays off.
+		expect((await setFor(majordomo, "search", "on")).json).toMatchObject({ permission: "on", chosen: "on", default: "off" });
+		expect((await setFor(majordomo, "create_ticket", "ask")).json).toMatchObject({ permission: "ask", chosen: "ask" });
 	});
 
 	it("offers the tools that are not off and runs a read-only one", async () => {
 		await send("what can you reach?", false, toolUse(fauxToolCall("connector_tools", {})), toolUse(fauxToolCall("connector_call", { connector, tool: "search", arguments: { q: "printer" } })), toolUse(fauxToolCall("connector_call", { connector, tool: "delete_all" })));
-		const listed = (await results("connector_tools"))[0]!;
+		const listed = (await results("connector_tools")).at(-1)!;
 		expect(listed).toContain("create_ticket");
 		expect(listed).toContain('"asksFirst": true');
 		expect(listed).not.toContain("delete_all");
-		expect((await results("connector_call"))[0]).toContain('search ok {"q":"printer"}');
+		// What is off is not in the prompt either, and what asks says so.
+		const prompt = await transcript();
+		expect(prompt).toContain(`Tickets (${connector}) create_ticket [asks first]: Open a ticket`);
+		expect(prompt).not.toContain(`Tickets (${connector}) delete_all`);
+		expect((await results("connector_call")).at(-2)).toContain('search ok {"q":"printer"}');
 		expect(mcp.calls).toEqual([{ name: "search", arguments: { q: "printer" }, authorization: `Bearer ${TOKEN}` }]);
 		// An off tool is not callable even when asked for by name.
-		expect((await results("connector_call"))[1]).toMatch(/no tool delete_all|switched off/);
+		expect((await results("connector_call")).at(-1)).toMatch(/no tool delete_all|switched off/);
 		expect(callNames()).toEqual(["search"]);
 	}, 120_000);
 
@@ -261,9 +280,13 @@ real("connector tools", () => {
 			expect((await results("connector_call"))[0]).toContain("You don't work with Tickets");
 			expect((await results("watch_connector_event"))[0]).toContain(`No connector named ${connector} among the connectors you work with`);
 			expect(mcp.calls.length).toBe(before);
-			// Listing it is what gives the agent its tools.
+			// Listing it makes its tools the agent's to be given, each off until its person sets it for that agent alone: the majordomo's choices are not its own.
 			expect((await web.call("PUT", `/api/agents/${narrow}`, { apps: [connector] })).status).toBe(200);
 			await send("now?", false, toolUse(fauxToolCall("connector_call", { connector, tool: "search", arguments: { q: "y" } })));
+			expect((await results("connector_call")).at(-1)).toMatch(/switched off for you/);
+			expect(mcp.calls.length).toBe(before);
+			expect((await setFor(narrow, "search", "on")).json).toMatchObject({ permission: "on" });
+			await send("and now?", false, toolUse(fauxToolCall("connector_call", { connector, tool: "search", arguments: { q: "y" } })));
 			expect((await results("connector_call")).at(-1)).toContain('search ok {"q":"y"}');
 			expect(mcp.calls.length).toBe(before + 1);
 		} finally {
@@ -271,28 +294,24 @@ real("connector tools", () => {
 		}
 	}, 120_000);
 
-	it("keeps a tool its connector marks destructive off until the person switches it on, and then runs it without asking", async () => {
-		const put = (permission: string | null) => web.call("PUT", "/api/permissions", { app: connector, tool: "delete_all", permission });
-		const info = async () => ((await web.call("GET", "/api/permissions")).json.tools as { app: string | null; tool: string; permission: string; default: string }[]).find((t) => t.app === connector && t.tool === "delete_all")!;
+	it("keeps a tool its connector marks destructive off until the person switches it on for the agent, and then runs it without asking", async () => {
+		const info = async () => (await toolsOf(majordomo)).find((t) => t.tool === "delete_all")!;
 		const approvals = async () => (await d.stack.admin.query("SELECT count(*)::int AS n FROM pim_app.approvals")).rows[0].n as number;
-		// Enabled with the rest, it is still off.
-		expect((await web.call("PUT", `/api/connectors/${connector}/tools`, { tools: ["search", "create_ticket", "delete_all"] })).status).toBe(200);
 		expect(await info()).toMatchObject({ permission: "off", default: "off" });
 		const filed = await approvals();
 		try {
-			expect((await put("on")).json).toMatchObject({ permission: "on", chosen: "on" });
+			expect((await setFor(majordomo, "delete_all", "on")).json).toMatchObject({ permission: "on", chosen: "on" });
 			const before = mcp.calls.length;
 			await send("wipe it", false, toolUse(fauxToolCall("connector_call", { connector, tool: "delete_all" })));
 			expect(callNames().slice(before)).toEqual(["delete_all"]);
 			expect(await approvals()).toBe(filed);
 		} finally {
-			await put(null);
-			await web.call("PUT", `/api/connectors/${connector}/tools`, { tools: ["search", "create_ticket"] });
+			await setFor(majordomo, "delete_all", null);
 		}
 	}, 120_000);
 
-	it("follows the person's Off / Ask / On, and always approve turns Ask into On", async () => {
-		const put = (tool: string, permission: string | null, extra: object = {}) => web.call("PUT", "/api/permissions", { app: connector, tool, permission, ...extra });
+	it("follows the person's Off / Ask / On for the agent, and always approve turns Ask into On for that agent alone", async () => {
+		const put = (tool: string, permission: string | null) => setFor(majordomo, tool, permission);
 		const approvals = async () => (await d.stack.admin.query("SELECT count(*)::int AS n FROM pim_app.approvals")).rows[0].n as number;
 		const filed = await approvals();
 		expect((await put("create_ticket", "on")).json).toMatchObject({ permission: "on", chosen: "on" });
@@ -306,18 +325,19 @@ real("connector tools", () => {
 		expect(mcp.calls.length).toBe(before);
 		expect((await results("connector_call")).at(-1)).toMatch(/switched off|no tool/);
 
-		// One agent's switch can only turn a tool off; a bad choice is refused.
-		expect((await put("search", "ask", { agent: "someone" })).status).toBe(400);
+		// A tool that is not there is refused, and an agent's switch for skills is only On or Off.
 		expect((await put("nothing", "on")).status).toBe(404);
+		expect((await web.call("PUT", "/api/permissions", { agent: majordomo, app: "", tool: "write_skill", permission: "ask" })).status).toBe(400);
 
-		expect((await put("create_ticket", null)).json).toMatchObject({ permission: "on", chosen: null });
+		// Taken back to its default, a tool is off, as every tool is until it is set.
+		expect((await put("create_ticket", null)).json).toMatchObject({ permission: "off", chosen: null });
 		expect((await put("create_ticket", "ask")).json).toMatchObject({ permission: "ask", chosen: "ask" });
 		await send("ask again", true, toolUse(fauxToolCall("connector_call", { connector, tool: "create_ticket", arguments: { title: "Always" } })));
 		const approval = await waiting();
 		expect((await web.call("POST", `/api/approvals/${approval.id}/approve`, { always: true })).status).toBe(200);
 		await finish();
 		expect(callNames().at(-1)).toBe("create_ticket");
-		expect((await d.stack.admin.query("SELECT permission FROM pim_app.tool_permissions WHERE tool = 'create_ticket'")).rows).toEqual([{ permission: "on" }]);
+		expect((await d.stack.admin.query("SELECT audience, permission FROM pim_app.tool_permissions WHERE tool = 'create_ticket'")).rows).toEqual([{ audience: `agent:${majordomo}`, permission: "on" }]);
 		const count = mcp.calls.length;
 		await send("no asking now", false, toolUse(fauxToolCall("connector_call", { connector, tool: "create_ticket", arguments: { title: "Quiet" } })));
 		expect(mcp.calls.length).toBe(count + 1);
@@ -403,8 +423,8 @@ real("connector tools", () => {
 	}, 60_000);
 
 	it("asks again about a tool its connector changed since the person let it run, and says so", async () => {
-		const put = (tool: string, permission: string | null) => web.call("PUT", "/api/permissions", { app: connector, tool, permission });
-		const info = async () => ((await web.call("GET", "/api/permissions")).json.tools as { app: string | null; tool: string; permission: string; changed: boolean }[]).find((t) => t.app === connector && t.tool === "create_ticket")!;
+		const put = (tool: string, permission: string | null) => setFor(majordomo, tool, permission);
+		const info = async () => (await toolsOf(majordomo)).find((t) => t.tool === "create_ticket")!;
 		expect((await put("create_ticket", "on")).json).toMatchObject({ permission: "on", changed: false });
 		const tool = mcp.tools.find((t) => t.name === "create_ticket")!;
 		const was = tool.description;
@@ -444,7 +464,9 @@ real("connector tools", () => {
 		// The agent of this chat works with both.
 		const answering = (await d.stack.admin.query("SELECT agent_id FROM pim_app.conversations WHERE public_chat_id = $1", [chatId])).rows[0].agent_id ?? ((await web.call("GET", "/api/majordomo")).json.agent.id as string);
 		expect((await web.call("PUT", `/api/agents/${answering}`, { apps: [connector, gallery] })).status).toBe(200);
-		expect((await web.call("PUT", `/api/connectors/${gallery}/tools`, { tools: ["shot", ...bulk] })).status).toBe(200);
+		for (const tool of ["shot", ...bulk]) expect((await setFor(answering, tool, "on", gallery)).status).toBe(200);
+		await setFor(answering, "search", "on");
+		await setFor(answering, "create_ticket", "ask");
 		const filed = (await d.stack.admin.query("SELECT count(*)::int AS n FROM pim_app.approvals")).rows[0].n as number;
 		const before = mcp.calls.length;
 		await send("try these", false,

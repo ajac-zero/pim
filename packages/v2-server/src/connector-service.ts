@@ -26,12 +26,12 @@ export const SIGN_IN_MS = 15 * 60_000;
 export const NATIVE_CALLBACK = "/mcp/callback/apps";
 
 export type DirectoryApp = { ref: string; name: string; description: string; url: string | null; custom: boolean; icon: string | null; category: string | null; page?: { url: string; label: { en: string; es: string } } };
-export type ConnectedApp = { id: string; app: string | null; name: string; url: string; state: "ready" | "authenticating" | "failed"; error: string | null; authUrl: string | null; approval: string; agents: string[]; tools: { name: string }[] };
+export type ConnectedApp = { id: string; app: string | null; name: string; url: string; state: "ready" | "authenticating" | "failed"; error: string | null; authUrl: string | null; agents: string[]; tools: { name: string }[] };
 
 /** What a flow in `auth_flows` holds while a person signs in. */
 type Pending = { mode: "native" | "mcp"; owner: string; connector: string; verifier: string; redirectUri: string; tokenEndpoint: string; clientId: string; clientSecret?: string; resource?: string };
 
-type Row = { id: string; kind: string; name: string; url: string | null; status: string; app_ref: string | null; auth_url: string | null; error: string | null; credential: string | null; enabled_tools: string[]; discovered_tools: Tool[]; approval: string };
+type Row = { id: string; kind: string; name: string; url: string | null; status: string; app_ref: string | null; auth_url: string | null; error: string | null; credential: string | null; enabled_tools: string[]; discovered_tools: Tool[] };
 
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
@@ -60,7 +60,7 @@ export class ConnectorService {
 	// ---- the connections ----
 
 	async #rows(ownerId: string): Promise<Row[]> {
-		return this.app.db.owner(ownerId, async (tx) => (await tx.query("SELECT id, kind, name, url, status, app_ref, auth_url, error, credential, enabled_tools, discovered_tools, approval FROM pim_app.connectors ORDER BY created_at")).rows as Row[]);
+		return this.app.db.owner(ownerId, async (tx) => (await tx.query("SELECT id, kind, name, url, status, app_ref, auth_url, error, credential, enabled_tools, discovered_tools FROM pim_app.connectors ORDER BY created_at")).rows as Row[]);
 	}
 
 	async list(p: Principal, directory: readonly DirectoryApp[]): Promise<ConnectedApp[]> {
@@ -75,7 +75,6 @@ export class ConnectorService {
 			state: r.status === "auth_required" ? (r.auth_url ? "authenticating" : "failed") : r.status === "connected" ? "ready" : r.error ? "failed" : "ready",
 			error: r.error ?? (r.app_ref && !directory.some((d) => d.ref === r.app_ref) ? "This Pim no longer offers it." : null),
 			authUrl: r.status === "auth_required" ? r.auth_url : null,
-			approval: r.approval,
 			agents: agents.filter((a) => a.apps.includes(r.id) || (r.app_ref !== null && a.apps.includes(r.app_ref)) || a.apps.includes(r.name)).map((a) => a.id),
 			tools: r.discovered_tools.map((t) => ({ name: t.name })),
 		}));
@@ -148,7 +147,7 @@ export class ConnectorService {
 		await this.app.db.owner(ownerId, (tx) => tx.query("UPDATE pim_app.connectors SET status = $2, auth_url = $3, error = $4 WHERE id = $1", [id, state.status, state.authUrl ?? null, state.error ?? null]));
 	}
 
-	/** Records a connector's tools and switches them on at its approval policy: a person who connects a service means to use it, and each tool is still Off, Ask or On from Settings. */
+	/** Records a connector's tools. Each is off for every agent until the person sets it, Off, Ask or On, on the agent's page (the list of enabled tools is what a bot may share). */
 	async #discoverAll(ownerId: string, id: string): Promise<{ error?: string }> {
 		const row = (await this.#rows(ownerId)).find((r) => r.id === id);
 		if (!row) throw new NotFoundError("No such connector");
@@ -287,14 +286,6 @@ export class ConnectorService {
 		} catch {
 			return [];
 		}
-	}
-
-	/** Whether tools ask first by default: every tool does under `all`; under `writes` and `none` none does, since connecting a service is consent to use its tools. */
-	async setApproval(p: Principal, id: string, approval: string): Promise<void> {
-		await this.app.identity.authz.enforce(p, "api:write");
-		if (!["writes", "all", "none"].includes(approval)) throw new BadRequestError("approval must be one of writes, all, none");
-		const n = await this.app.db.owner(p.ownerId, async (tx) => (await tx.query("UPDATE pim_app.connectors SET approval = $2 WHERE id = $1", [id, approval])).rowCount);
-		if (!n) throw new NotFoundError("No such connector");
 	}
 }
 

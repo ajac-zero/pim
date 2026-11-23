@@ -307,9 +307,10 @@ real("guests, circles and the admin's majordomo", () => {
 		expect((await results(visitor, "guest_call")).at(-1)).toMatch(/doesn't share a tool create_ticket/);
 		expect(mcp.calls.length).toBe(before + 1);
 		// The host's own agents never see a circle's choices.
-		const own = (await host.web.call("GET", "/api/permissions")).json.tools as { tool: string; permission: string }[];
-		expect(own.find((t) => t.tool === "search")!.permission).toBe("on");
-		expect(own.find((t) => t.tool === "create_ticket")!.permission).toBe("on");
+		const majordomo = (await host.web.call("GET", "/api/majordomo")).json.agent.id as string;
+		const own = (await host.web.call("GET", `/api/permissions?agent=${majordomo}`)).json.tools as { tool: string; permission: string }[];
+		expect(own.find((t) => t.tool === "search")!.permission).toBe("off");
+		expect(own.find((t) => t.tool === "create_ticket")!.permission).toBe("off");
 
 		// The host's time zone and the memory its circle may read are the visit's, and no other: the circle reads nothing until it is given a scope.
 		const hostP = { kind: "user", ownerId: host.ownerId, role: "admin", sessionId: "s" } as never;

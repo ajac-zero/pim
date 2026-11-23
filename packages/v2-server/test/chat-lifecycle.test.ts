@@ -57,6 +57,12 @@ real("a chat over its life", () => {
 		expect((await web.call("POST", `/api/sessions/${chat}/messages`, { commandId: `m-${id}`, text: words })).status).toBe(202);
 		await waitFor(`the turn "${words.slice(0, 20)}" to end`, async () => ((background ? JSON.stringify(await transcript(chat)).includes(`ended ${id}`) : sentAndAnswered(await transcript(chat), `done ${id}`)) ? true : undefined), 60_000);
 	};
+	/** How full the chat's context is, once Live has projected what the runtime counted. */
+	const contextOf = async (chat: string, until: (tokens: number) => boolean = () => true) =>
+		waitFor("the chat's context size", async () => {
+			const { context } = (await web.call("GET", `/api/sessions/${chat}/context`)).json;
+			return context && until(context.tokens) ? (context as { tokens: number; window: number; model: string }) : undefined;
+		}, 30_000);
 	const listed = async (chat: string) => (await web.call("GET", "/api/sessions")).json.sessions.find((s: { id: string }) => s.id === chat);
 
 	beforeAll(async () => {
@@ -137,9 +143,14 @@ real("a chat over its life", () => {
 	it("compacts a chat that outgrew the model's context in place, and the next turn runs on the summary", async () => {
 		const chat = (await web.call("POST", "/api/sessions", { title: "Long" })).json.id;
 		const filler = (word: string) => Array.from({ length: 15_000 }, (_, i) => `${word}${i}`).join(" ");
+		expect((await web.call("GET", `/api/sessions/${chat}/context`)).json).toEqual({ context: null });
 		await say(chat, `first: ${filler("alpha")}`, reply("Noted the first."));
+		// The meter counts what the model was asked with and answered, as pi does: the chat's prompt and the first message. The window is 128,000 here, the fallback for a model no provider lists, and pi-durable compacts 16,384 tokens short of it.
+		expect(await contextOf(chat, (tokens) => tokens > 60_000)).toMatchObject({ window: 128_000, compactAt: 128_000 - 16_384, model: "m" });
 		// The second message is over the threshold: pi summarises before answering, with the model.
 		await say(chat, `second: ${filler("beta")}`, reply("Noted the second."));
+		// Left whole, the chat would now hold both messages, about 104,000 tokens, past pi's threshold; compacted, only the second and the summary.
+		expect((await contextOf(chat, (tokens) => tokens < 116_000 - 16_384)).tokens).toBeGreaterThan(40_000);
 		const entries = await transcript(chat);
 		const kinds = entries.map((e) => e.kind);
 		expect(kinds.some((k) => k.includes("compaction"))).toBe(true);

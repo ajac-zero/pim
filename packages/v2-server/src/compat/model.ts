@@ -36,6 +36,17 @@ let knownById: Map<string, Model<Api>> | undefined;
 const knownModel = (id: string) => (knownById ??= new Map([anthropicProvider(), openaiProvider(), googleProvider()].flatMap((p) => (p.getModels() as unknown as Model<Api>[]).map((m) => [m.id, m] as const)).reverse())).get(id);
 
 /**
+ * How many tokens a model's context holds: what the person set for it, or its server listed (the card of its provider, `toWebProvider`), else what pi-ai's catalog knows of its id, else
+ * 128,000 as the Runner's catalog does (`described` in `agent-host.ts`). `provider` is the Runner's id for it, as an answer records it, not `own:<id>`.
+ */
+export async function contextWindowOf(app: any, p: any, ref: ModelRef): Promise<number> {
+	const rows = [...(await app.providers.list(p)), ...(await app.providers.shared(p))];
+	const row = rows.find((r: any) => r.id === ref.provider);
+	const listed = row && toWebProvider(row).models.find((m) => m.id === ref.id);
+	return listed?.contextWindow ?? knownModel(ref.id)?.contextWindow ?? 128_000;
+}
+
+/**
  * The models this Pim offers everyone, which an admin may give a bot's guests: the deployment's default and its gateway's models, and the providers the admin shared
  * with everyone. Never the admin's own ChatGPT plan or providers, nor the services only their own key opens.
  */

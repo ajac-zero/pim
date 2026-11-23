@@ -27,6 +27,14 @@ export const sessionCostQuery = (session: string) =>
     queryFn: () => pim.sessionCost(session),
   });
 
+/** `tokens` is in the key so the meter asks again when the chat's context changes. */
+export const sessionContextQuery = (session: string, tokens?: number) =>
+  queryOptions({
+    queryKey: ["session-context", session, tokens ?? null],
+    queryFn: () => pim.sessionContext(session),
+    staleTime: Number.POSITIVE_INFINITY,
+  });
+
 export const approvalsQuery = () =>
   queryOptions({ queryKey: ["approvals"], queryFn: () => pim.approvals() });
 

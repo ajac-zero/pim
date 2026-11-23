@@ -7,13 +7,16 @@
  * - a committed entry becomes `chat.entry`, and an assistant entry replaces the partial that showed it streaming;
  * - a change of the conversation's live document becomes the in-flight answer as a partial `chat.entry`, and `chat.meta` with `busy`;
  * - a forked conversation's first commit adds the entries it inherits from its parent as `chat.entry` too;
- * - every conversation a commit touched gets `chat.meta` with when it last changed.
+ * - every conversation a commit touched gets `chat.meta` with when it last changed;
+ * - a commit that answers, compacts or resets a conversation says in `chat.meta` how many tokens its context holds now (`contextTokens`), and which model answered (`contextModel`).
  *
  * A commit is a row of `pim_runtime.commit_receipts`, which every commit writes, so commits are gapless even when one
  * changed no conversation and has no outbox row: it is returned with no events and the watermark still moves.
  */
 import type { EntryRecord } from "@earendil-works/pi-durable";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import type { Message } from "@earendil-works/pi-ai";
+import { calculateContextTokens, estimateMessageTokens } from "@earendil-works/pi-ai/utils/estimate";
 import { OwnerId, type PartitionId, type PublicChatId } from "@pim/v2-contracts/identity";
 import type { RuntimeOutboxEvent } from "@pim/v2-contracts/runtime-seam";
 import { Db } from "@pim/v2-runtime/db";
@@ -29,6 +32,26 @@ type Change = { type: string; id: number; conversationId?: number; kind?: string
 export const partialId = (conversationId: number) => -conversationId;
 
 const isAssistant = (entry: EntryRecord) => (entry.model?.[0] as { role?: string } | undefined)?.role === "assistant";
+
+/** Messages that pi-durable leaves out of the context a model is sent: an answer that failed or was cut off. */
+const counts = (message: Message) => !(message.role === "assistant" && (message.stopReason === "error" || message.stopReason === "aborted" || message.stopReason === "deferred"));
+
+/**
+ * How many tokens a request over these entries would hold, as pi-durable counts them when it decides to compact (`estimateContext`): what the newest answer after `after` reported
+ * as the size of its request and its reply, plus an estimate of what was added since. Without such an answer, an estimate of every message, when `entries` are the whole context;
+ * otherwise (a few entries of a commit) undefined, since what came before them is not known.
+ */
+export function contextTokens(entries: readonly EntryRecord[], { after = Number.NEGATIVE_INFINITY, whole = false } = {}): number | undefined {
+	let trailing = 0;
+	for (let index = entries.length - 1; index >= 0; index--) {
+		const messages = (entries[index]!.model ?? []).filter(counts);
+		const measured = entries[index]!.id > after ? messages.findLastIndex((m) => m.role === "assistant" && calculateContextTokens(m.usage) > 0) : -1;
+		const estimate = (list: readonly Message[]) => list.reduce((sum, m) => sum + estimateMessageTokens(m), 0);
+		if (measured >= 0) return calculateContextTokens((messages[measured] as Extract<Message, { role: "assistant" }>).usage) + estimate(messages.slice(measured + 1)) + trailing;
+		trailing += estimate(messages);
+	}
+	return whole ? trailing : undefined;
+}
 
 /** The runtime source over a pool that connects as a member of `pim_live`. */
 export function runtimeOutboxSource(pool: Pool): OutboxSource {
@@ -116,12 +139,14 @@ async function translate(pool: Pool, storage: PgPiStorage, ownerId: OwnerId, par
 		}
 	}
 	const entryIds = changes.filter((c) => c.type === "entry").map((c) => c.id);
+	const written: EntryRecord[] = [];
 	if (entryIds.length > 0) {
 		const records = await withOwner(pool, ownerId, (client) =>
 			client.query<{ record: string }>("SELECT record FROM pim_runtime.entries WHERE owner_id = $1 AND partition_id = $2 AND id = ANY($3::bigint[]) ORDER BY id", [ownerId, partitionId, entryIds]),
 		);
 		for (const { record } of records.rows) {
 			const entry = JSON.parse(record) as EntryRecord;
+			written.push(entry);
 			events.push(event("chat.entry", { entry, ...(isAssistant(entry) ? { replaces: String(partialId(conversationId)) } : {}) }));
 		}
 	}
@@ -145,10 +170,34 @@ async function translate(pool: Pool, storage: PgPiStorage, ownerId: OwnerId, par
 			events.push(event("chat.entry", { entry: { id: partialId(conversationId), kind: "pi.assistant", model: [message] }, partial: true, position: Number(top.rows[0]?.top ?? 0) + 1 }));
 		}
 	}
+	const context = await contextOf(storage, conversationId, written);
+	const summary = { ...(queue === undefined ? {} : { queued: queue.length }), ...context };
 	if (events.length > 0 || busy !== undefined || queue !== undefined) {
-		events.push(event("chat.meta", { updatedAt: committedAt.getTime(), ...(busy === undefined ? {} : { busy }), ...(queue === undefined ? {} : { queue, summary: { queued: queue.length } }) }));
+		events.push(event("chat.meta", { updatedAt: committedAt.getTime(), ...(busy === undefined ? {} : { busy }), ...(queue === undefined ? {} : { queue }), ...(Object.keys(summary).length === 0 ? {} : { summary }) }));
 	}
 	return events;
+}
+
+/**
+ * What a commit's entries say of the conversation's context: its size, and which model answered last. An answer says how large its request was; a compaction or a reset (an entry that
+ * names the first entry of the context, its `head`) changes what the context holds, so the context is read again from there.
+ */
+async function contextOf(storage: PgPiStorage, conversationId: number, written: readonly EntryRecord[]): Promise<{ contextTokens: number; contextModel?: { provider: string; id: string } } | undefined> {
+	const marker = written.findLast((entry) => entry.head !== undefined);
+	let tokens: number | undefined;
+	if (marker) {
+		const entries: EntryRecord[] = [];
+		let cursor: never | undefined;
+		do {
+			const page = await storage.scanEntries({ conversationId: conversationId as never, order: "ascending", minEntryId: marker.head as never }, 500, cursor, BACKGROUND_CONTEXT);
+			entries.push(...page.items.filter((entry) => entry.head === undefined || entry.id === marker.id));
+			cursor = page.next as never;
+		} while (cursor !== undefined);
+		tokens = contextTokens(entries, { after: marker.id, whole: true });
+	} else tokens = contextTokens(written);
+	if (tokens === undefined) return undefined;
+	const answer = written.flatMap((entry) => entry.model ?? []).findLast((m): m is Extract<Message, { role: "assistant" }> => m.role === "assistant" && counts(m) && calculateContextTokens(m.usage) > 0);
+	return { contextTokens: tokens, ...(answer ? { contextModel: { provider: answer.provider, id: answer.model } } : {}) };
 }
 
 type LiveState = { run?: unknown; generation?: { message?: unknown } };

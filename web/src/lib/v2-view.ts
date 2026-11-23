@@ -222,6 +222,9 @@ export function sessionOf(row: SidebarRow): Session {
       typeof summary.responseAt === "number" ? summary.responseAt : null,
     unread: row.unread,
     archived: summary.archived === true,
+    ...(typeof summary.contextTokens === "number"
+      ? { contextTokens: summary.contextTokens }
+      : {}),
     ...(typeof summary.model === "object" && summary.model !== null
       ? { model: summary.model as Session["model"] }
       : {}),

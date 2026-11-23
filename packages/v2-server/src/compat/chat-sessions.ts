@@ -6,6 +6,7 @@
  * The utility model's side jobs (a title, a summary, an improved prompt, suggestions) are in ./utility.ts and are off until one is chosen. The queue behind
  * a running turn lives in the runtime's inbox; the chat's projection shows it, and a change to a queued message goes to the runtime as a command.
  */
+import { DEFAULT_COMPACTION_POLICY } from "@earendil-works/pi-durable";
 import { fromPerson, isDeliveryReminder, withoutFileChanges } from "@pim/shared/transcript";
 import { checkUiState } from "@pim/ui-lang";
 import { uiProgramsOf } from "../reply-blocks.ts";
@@ -17,6 +18,7 @@ import { ok, type Route, route } from "@pim/v2-app/http";
 import type { Principal } from "@pim/v2-contracts/identity";
 import { transcriptPage } from "@pim/v2-live/projections/snapshots";
 import { chatActivity } from "./activity.ts";
+import { contextWindowOf } from "./model.ts";
 import { chatConversation, IMPROVE_PROMPT, runUtility, SUGGEST_PROMPTS, suggestionsIn, nameOneUntitled, SUMMARIZE_CHAT, titleChat } from "./utility.ts";
 
 const ms = (value: Date | string | null | undefined): number | null => (value ? new Date(value).getTime() : null);
@@ -184,6 +186,19 @@ export function sessionRoutes(env: Record<string, string | undefined> = process.
 			)).rows);
 			const models = rows.map((r) => ({ provider: r.provider as string, model: r.model as string, input: Number(r.input), output: Number(r.output), cacheRead: Number(r.cache_read), cacheWrite: Number(r.cache_write), cost: Number(r.cost) / 1e6 }));
 			return ok({ total: models.reduce((sum, m) => sum + m.cost, 0), models });
+		}),
+		// How full the chat's context is: the tokens the runtime counted (pi-durable's own measure, projected with the chat's line), out of what its model's context holds. Null until the chat has an answer.
+		route("GET", "/api/sessions/:id/context", async ({ app, principal, params }) => {
+			const p = await principal();
+			await app.identity.authz.enforce(p, "api:read");
+			const id = chatId(params[0]!);
+			await sessionView(app, p, id);
+			const summary = await app.db.owner(p.ownerId, async (tx) => (await tx.query("SELECT summary FROM pim_projection.sidebar_session_projection WHERE chat_id = $1", [id])).rows[0]?.summary as { contextTokens?: number; contextModel?: { provider: string; id: string } } | undefined);
+			if (summary?.contextTokens === undefined || !summary.contextModel) return ok({ context: null });
+			const window = await contextWindowOf(app, p, summary.contextModel);
+			// pi-durable compacts a conversation once its context passes the window less the room it keeps for the answer; Pim leaves that policy as it is.
+			const compactAt = window - DEFAULT_COMPACTION_POLICY.reserveTokens;
+			return ok({ context: { tokens: summary.contextTokens, window, compactAt: compactAt > 0 ? compactAt : null, model: summary.contextModel.id } });
 		}),
 		// The summary is written by the utility model once the chat has something in it, and again only when more has been said since.
 		route("GET", "/api/sessions/:id/summary", async ({ app, principal, params }) => {

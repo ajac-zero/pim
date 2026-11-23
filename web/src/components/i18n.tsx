@@ -333,6 +333,11 @@ const translations = {
     sessionCostTotal: "Total: {amount}",
     sessionCostNone: "Nothing has been used in this chat yet.",
     sessionCostTokens: "{input} in, {output} out, {cached} cached",
+    contextMeterUsed: "{percent} of the context used",
+    contextMeterTokens:
+      "{used} of {window} tokens, as of the last answer from {model}.",
+    contextMeterCompacts:
+      "Past {compactAt} tokens, marked on the ring, the conversation is summarized to make room.",
     couldNotCopyChatId: "Couldn't copy the chat ID. Try again.",
     chatLink: "Public link",
     chatLinkOn: "Public link: on",
@@ -2466,6 +2471,11 @@ const translations = {
     sessionCostNone: "Aún no se ha usado nada en este chat.",
     sessionCostTokens:
       "{input} de entrada, {output} de salida, {cached} en caché",
+    contextMeterUsed: "{percent} del contexto usado",
+    contextMeterTokens:
+      "{used} de {window} tokens, según la última respuesta de {model}.",
+    contextMeterCompacts:
+      "Pasados {compactAt} tokens, marcados en el anillo, la conversación se resume para hacer espacio.",
     couldNotCopyChatId: "No se pudo copiar el ID del chat. Inténtalo de nuevo.",
     chatLink: "Enlace público",
     chatLinkOn: "Enlace público: activado",

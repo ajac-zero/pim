@@ -25,6 +25,8 @@ export type Session = {
   model?: { model: ModelInfo; override: boolean };
   /** Archived by hand, or two weeks without activity with nothing unread or running: listed apart until it is active again. */
   archived?: boolean;
+  /** How many tokens the chat's context holds, as of its last answer; the sidebar's rows carry it so a meter follows the chat live. */
+  contextTokens?: number;
   /** A conversation with someone else's space, shared with you; null for your own chats. */
   visit?: { username: string; available: boolean } | null;
   /** The agent of yours it talks with: the one it was started with, or your default one. Null in a visit. */
@@ -303,6 +305,17 @@ export type SessionCost = {
     cacheWrite: number;
     cost: number;
   }[];
+};
+
+/** How full a chat's context is (`GET /sessions/:id/context`): the tokens it holds, as pi-durable counts them, out of what its model's context holds; null before an answer. */
+export type SessionContext = {
+  context: {
+    tokens: number;
+    window: number;
+    /** The size past which pi-durable compacts the conversation; null when the window leaves no room for it. */
+    compactAt: number | null;
+    model: string;
+  } | null;
 };
 
 export type ChatLink = {
@@ -2152,6 +2165,10 @@ export const pim = {
     call<{ deleted: boolean }>(`/sessions/${id}`, { method: "DELETE" }),
   /** What the model requests in a chat have cost, by model. */
   sessionCost: (id: string) => call<SessionCost>(`/sessions/${id}/cost`),
+  sessionContext: (id: string) =>
+    call<SessionContext>(`/sessions/${id}/context`).then(
+      (body) => body.context,
+    ),
   chatLink: (id: string) =>
     call<{ link: ChatLink | null }>(`/sessions/${id}/link`).then(
       (body) => body.link,

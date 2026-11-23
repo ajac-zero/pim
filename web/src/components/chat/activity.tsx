@@ -6,6 +6,7 @@ import {
 } from "~/components/chat/activity-toggle";
 import { BoxSection } from "~/components/chat/box-section";
 import { ChatLinkMenu } from "~/components/chat/chat-link";
+import { ContextMeter } from "~/components/chat/context-meter";
 import {
   CopyChatId,
   CopyConversation,
@@ -23,7 +24,7 @@ import { pim } from "~/lib/pim-api";
 /**
  * The chat's options, in a popup floating over its top right corner: the agents in
  * the chat, copying the conversation or its id, its public link, and what it
- * has cost; then what the agent is doing now, and a quick summary of it and its next steps, from the utility
+ * has cost, and how full its context is; then what the agent is doing now, and a quick summary of it and its next steps, from the utility
  * model. Approvals the chat
  * is waiting on come first, and open the box even when it's closed. Nothing is
  * written until the summary dropdown is open. While open, it asks again only
@@ -98,6 +99,7 @@ export function ActivityBox({
                 <PinChat sessionId={sessionId} />
                 <CopyChatId sessionId={sessionId} />
                 <ChatLinkMenu sessionId={sessionId} />
+                <ContextMeter sessionId={sessionId} />
                 <SessionCostMenu sessionId={sessionId} />
               </span>
             </div>

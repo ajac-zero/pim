@@ -274,6 +274,22 @@ describe("a v2 chat drawn by the same reducer as v1's", () => {
     ]);
   });
 
+  it("reads how many tokens a chat's context holds from its summary", () => {
+    const row = {
+      chatId: "a",
+      title: "A",
+      busy: false,
+      unread: false,
+      updatedAt: 5,
+    };
+    expect(
+      sessionOf({ ...row, summary: { contextTokens: 61_000 } }),
+    ).toMatchObject({
+      contextTokens: 61_000,
+    });
+    expect(sessionOf(row)).not.toHaveProperty("contextTokens");
+  });
+
   it("reads who started a chat made for a task from its summary", () => {
     const startedBy = {
       session: "a",

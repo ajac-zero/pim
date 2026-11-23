@@ -192,6 +192,8 @@ function projectMessage(message: Message, id: string): TranscriptMessage | undef
 				timestamp: message.timestamp,
 			};
 		case "assistant":
+			// An answer that stopped with nothing in it (a lone newline, an empty thinking block, as a model leaves after `send_to_user`) says nothing, so it is not shown.
+			if (message.stopReason === "stop" && message.content.every((part) => (part.type === "text" ? part.text.trim() === "" : part.type === "thinking" && part.thinking.trim() === ""))) return undefined;
 			return {
 				id,
 				role: "assistant",

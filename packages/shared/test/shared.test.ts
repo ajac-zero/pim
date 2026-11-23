@@ -6,7 +6,7 @@ import { dispatch, HttpError, match, type Route, routeOf } from "../src/http";
 import { maskCode } from "../src/markdown-code";
 import { redact, redactSecrets } from "../src/redact";
 import { pimThemes } from "../src/theme-data/index";
-import { fromPerson } from "../src/transcript";
+import { fromPerson, projectEntries } from "../src/transcript";
 
 describe("base64url", () => {
 	it("round-trips bytes that base64 would pad and escape", () => {
@@ -64,6 +64,18 @@ describe("transcript", () => {
 	it("tells a person's message from Pim's own notices", () => {
 		expect(fromPerson("hello")).toBe(true);
 		expect(fromPerson("[Introduction]")).toBe(false);
+	});
+
+	it("does not show an answer that stopped with nothing in it, but shows an error or an aborted answer that has none", () => {
+		const answer = (id: number, stopReason: string, content: unknown[]) => ({ id, kind: "pi.assistant", model: [{ role: "assistant", content, stopReason, timestamp: id }] }) as never;
+		const shown = projectEntries([
+			answer(1, "stop", [{ type: "text", text: "\n" }, { type: "thinking", thinking: "" }]),
+			answer(2, "stop", []),
+			answer(3, "stop", [{ type: "text", text: "Hi" }]),
+			answer(4, "error", []),
+			answer(5, "aborted", []),
+		]);
+		expect(shown.map((m) => m.id)).toEqual(["3", "4", "5"]);
 	});
 });
 

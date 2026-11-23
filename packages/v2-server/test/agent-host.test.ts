@@ -261,10 +261,10 @@ real("the default agent host", () => {
 			return c ? readTranscript(d.stack.runtime, ownerId, c.partition_id, Number(c.conversation_id)) : [];
 		};
 		const said = async (words: string) => (await entries()).some((e) => JSON.stringify(e).includes(words));
-		// A request the provider refuses outright is not retried by the Runner's failover or by pi: the chat ends with the error.
-		faux.setResponses([fauxAssistantMessage([], { stopReason: "error", errorMessage: "400 invalid request body" })] as never);
+		// A request that fails for a reason of the provider's, which neither the Runner's failover nor pi retries, ends the turn with the error and holds the run.
+		faux.setResponses([fauxAssistantMessage([], { stopReason: "error", errorMessage: "the provider crashed" })] as never);
 		expect((await web.call("POST", `/api/sessions/${chat}/messages`, { commandId: "retry-1", text: "what is 2+2" })).status).toBe(202);
-		await waitFor("the failed request", async () => ((await said("invalid request body")) ? true : undefined), 60_000);
+		await waitFor("the failed request", async () => ((await said("the provider crashed")) ? true : undefined), 60_000);
 		// The runtime's transcript is ahead of Live's projection, which a retry reads: wait until the error is the last message the Gate would see.
 		await waitFor("the error projected as the chat's last message", async () => {
 			const last = (await d.stack.admin.query("SELECT message FROM pim_projection.chat_transcript_projection WHERE chat_id = $1 AND NOT partial ORDER BY position DESC LIMIT 1", [chat])).rows[0]?.message;
@@ -288,6 +288,51 @@ real("the default agent host", () => {
 		faux.setResponses([toolUse(fauxToolCall("send_to_user", { message: "Six." }))] as never);
 		expect((await web.call("POST", `/api/sessions/${chat}/messages`, { commandId: "retry-2", text: "and 3+3" })).status).toBe(202);
 		await waitFor("the answer in the new context", async () => ((await said("Six.")) ? true : undefined), 60_000);
+	}, 180_000);
+
+	it("ends a turn the provider refused as invalid, instead of holding it, and does not keep an answer that stopped with nothing in it", async () => {
+		const chat = (await web.call("POST", "/api/sessions", { title: "Refused" })).json.id as string;
+		const busy = async () => (await d.stack.admin.query("SELECT busy FROM pim_projection.sidebar_session_projection WHERE chat_id = $1", [chat])).rows[0]?.busy as boolean | undefined;
+		const lastShown = async () => (await d.stack.admin.query("SELECT message FROM pim_projection.chat_transcript_projection WHERE chat_id = $1 AND NOT partial ORDER BY position DESC LIMIT 1", [chat])).rows[0]?.message;
+		const entries = async () => {
+			const c = (await d.stack.admin.query("SELECT partition_id, conversation_id FROM pim_runtime.conversation_partitions WHERE public_chat_id = $1", [chat])).rows[0];
+			return readTranscript(d.stack.runtime, ownerId, c.partition_id, Number(c.conversation_id));
+		};
+		// Vertex's refusal of a message without parts: asking again fails the same way, so the chat is not left at work, and the error is the last thing in it.
+		faux.setResponses([fauxAssistantMessage([], { stopReason: "error", errorMessage: "400 INVALID_ARGUMENT: Unable to submit request because it must include at least one parts field" })] as never);
+		expect((await web.call("POST", `/api/sessions/${chat}/messages`, { commandId: "refused-1", text: "hello" })).status).toBe(202);
+		await waitFor("the refused turn to end", async () => ((await lastShown())?.stopReason === "error" && (await busy()) === false ? true : undefined), 60_000);
+		// A later message is a new turn: the model answers with send_to_user, then stops with a lone newline and an empty thought, as in the incident (a send finishes the turn only when no other call is made in its round).
+		faux.setResponses([toolUse(fauxToolCall("send_to_user", { message: "Hello!" }), fauxToolCall("list_triggers", {})), fauxAssistantMessage([{ type: "text", text: "\n" }, { type: "thinking", thinking: "" }] as never)] as never);
+		expect((await web.call("POST", `/api/sessions/${chat}/messages`, { commandId: "refused-2", text: "hello again" })).status).toBe(202);
+		await waitFor("the turn after the refusal", async () => ((await entries()).some((e) => JSON.stringify(e).includes("Hello!")) && (await busy()) === false ? true : undefined), 60_000);
+		// The blank stop is stored with no content, and the chat shows nothing for it.
+		const answers = (await entries()).flatMap((e) => ((e as { model?: { role: string; stopReason?: string; content: unknown[] }[] }).model ?? []).filter((m) => m.role === "assistant" && m.stopReason === "stop"));
+		expect(answers).toEqual([expect.objectContaining({ content: [] })]);
+		const shown = (await d.stack.admin.query("SELECT message FROM pim_projection.chat_transcript_projection WHERE chat_id = $1 AND NOT partial ORDER BY position", [chat])).rows.map((r) => r.message as { role: string; stopReason?: string });
+		expect(shown.filter((m) => m.role === "assistant" && m.stopReason === "stop")).toEqual([]);
+	}, 180_000);
+
+	it("ends the turn when the agent keeps stopping without delivering, and the empty answers do not poison the next request", async () => {
+		const chat = (await web.call("POST", "/api/sessions", { title: "Silent" })).json.id as string;
+		const busy = async () => (await d.stack.admin.query("SELECT busy FROM pim_projection.sidebar_session_projection WHERE chat_id = $1", [chat])).rows[0]?.busy as boolean | undefined;
+		const lastShown = async () => (await d.stack.admin.query("SELECT message FROM pim_projection.chat_transcript_projection WHERE chat_id = $1 AND NOT partial ORDER BY position DESC LIMIT 1", [chat])).rows[0]?.message;
+		const blank = () => fauxAssistantMessage([{ type: "text", text: "\n" }, { type: "thinking", thinking: "" }] as never);
+		// The answer, and the two reminders that follow it, are empty: the third stop fails the run.
+		faux.setResponses([blank(), blank(), blank()] as never);
+		expect((await web.call("POST", `/api/sessions/${chat}/messages`, { commandId: "silent-1", text: "hello" })).status).toBe(202);
+		await waitFor("the failed turn to end", async () => ((await lastShown())?.error?.includes("did not deliver") && (await busy()) === false ? true : undefined), 60_000);
+		const stored = (await d.stack.admin.query("SELECT message FROM pim_projection.chat_transcript_projection WHERE chat_id = $1 AND NOT partial", [chat])).rows.map((r) => r.message as { role: string; parts: unknown[] });
+		// Nothing the model said is shown but the error, which has no parts.
+		expect(stored.filter((m) => m.role === "assistant")).toEqual([expect.objectContaining({ stopReason: "error", parts: [] })]);
+		const asked: string[] = [];
+		faux.setResponses([(ctx: { messages: unknown[] }) => (asked.push(JSON.stringify(ctx.messages)), toolUse(fauxToolCall("send_to_user", { message: "Hi!" })))] as never);
+		expect((await web.call("POST", `/api/sessions/${chat}/messages`, { commandId: "silent-2", text: "anyone there?" })).status).toBe(202);
+		await waitFor("the next turn", async () => ((await lastShown())?.role === "tool" && (await busy()) === false ? true : undefined), 60_000);
+		// The request had no assistant message with nothing in it, and the person's messages and the reminders were sent together.
+		const sent = JSON.parse(asked[0]!) as { role: string; content: unknown }[];
+		expect(sent.filter((m) => m.role === "assistant")).toEqual([]);
+		expect(JSON.stringify(sent)).toContain("anyone there?");
 	}, 180_000);
 
 	it("forks a chat at a message of the agent's, or before one of the person's so it can be sent again changed", async () => {

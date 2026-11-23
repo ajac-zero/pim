@@ -8,7 +8,7 @@ import { effectivePrincipal, OwnerId, type Principal } from "@pim/v2-contracts/i
 
 /** What a client can submit: the runtime's commands, and two application operations that only change metadata here (unarchive, delegate). */
 export type AdmitKind = CommandKind | "unarchive" | "delegate";
-const RUNTIME_KINDS = new Set<string>(["user_message", "approval_decision", "task_wake", "trigger_fire", "coding_wake", "compaction_handoff", "abort", "fork", "queue_change"]);
+const RUNTIME_KINDS = new Set<string>(["user_message", "approval_decision", "task_wake", "trigger_fire", "coding_wake", "compaction_handoff", "abort", "fork", "queue_change", "retry_from"]);
 export type Admission = { commandId: string; piRequestId: string; duplicate: boolean; state: "inbox_accepted" | "runtime_committed" | "rejected"; chatId: string | null; result?: Record<string, unknown> };
 
 const uuidFrom = (seed: string): string => {
@@ -80,7 +80,7 @@ export class Conversations {
 				return { commandId: input.commandId, piRequestId, duplicate: true, state: rows[0].state, chatId: rows[0].public_chat_id, result: rows[0].payload._result };
 			}
 			// A message or a firing trigger starts a run: it counts against the day, and a space that has used its day's allowance is refused.
-			if (input.kind === "user_message" || input.kind === "trigger_fire") await this.quota?.admitRun(tx, p.ownerId);
+			if (input.kind === "user_message" || input.kind === "trigger_fire" || input.kind === "retry_from") await this.quota?.admitRun(tx, p.ownerId);
 			let chatId = input.chatId ?? null;
 			let result: Record<string, unknown> | undefined;
 			if (chatId) await requireChat(tx, chatId);
@@ -95,7 +95,7 @@ export class Conversations {
 				await resume(tx, chatId!);
 				// Listed again by hand: it is not archived again by age for two weeks.
 				await tx.query("UPDATE pim_app.conversations SET updated_at = now() WHERE public_chat_id = $1", [chatId]);
-			} else if (input.kind === "user_message" && chatId) {
+			} else if ((input.kind === "user_message" || input.kind === "retry_from") && chatId) {
 				await resume(tx, chatId);
 				await tx.query("UPDATE pim_app.conversations SET updated_at = now() WHERE public_chat_id = $1", [chatId]);
 			} else if (input.kind === "trigger_fire" && chatId) {

@@ -325,6 +325,11 @@ export class V2Link {
       if (event.kind === "queue") {
         chat.queue = (event.data as { items?: V2Queued[] }).items ?? [];
         chat.stream = applyQueue(chat.stream, chat.queue);
+      } else if (event.kind === "message.removed") {
+        // A retry from a message took the chat back to it: what came after is no longer in the chat, whoever asked.
+        const gone = new Set((event.data as { ids?: string[] }).ids ?? []);
+        chat.messages = chat.messages.filter((known) => !gone.has(known.id));
+        chat.stream = this.#drawn(chat);
       } else if (event.kind === "message" || event.kind === "message.partial") {
         const { message, partial } = event.data as {
           message: V2Message;

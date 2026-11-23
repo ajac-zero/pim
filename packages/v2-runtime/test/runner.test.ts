@@ -400,3 +400,90 @@ describe("a retry after a model error", () => {
 		await runner.stop();
 	});
 });
+
+describe("retry from a message", () => {
+	const said = (messages: { role: string; content: unknown }[]) => messages.filter((m) => m.role !== "system").map((m) => `${m.role}:${typeof m.content === "string" ? m.content : JSON.stringify(m.content).match(/"text":"([^"]*)"/)?.[1] ?? ""}`);
+
+	it("takes the chat back to the message in place, leaves what came after out of the model's context, and answers it again", async () => {
+		const ownerId = uniqueOwner();
+		const rig = createRig(database.db, ownerId);
+		const home = await new PartitionDirectory(database.db).createPartition(ownerId, { kind: "home" });
+		const seen: string[][] = [];
+		const answer = (text: string) => (ctx: { messages: { role: string; content: unknown }[] }) => (seen.push(said(ctx.messages)), fauxAssistantMessage(text));
+		rig.faux.setResponses([answer("a1"), answer("a2"), answer("a3"), answer("a2 again")] as never);
+		const runner = rig.runner({ idleUnloadMs: 60_000 });
+		await runner.start();
+		const entries = () => readTranscript(database.db, ownerId, home, 1);
+		const done = async (id: string) => (await database.db.read(ownerId, "SELECT 1 FROM pim_runtime.command_inbox WHERE owner_id = $1 AND command_id = $2 AND done_at IS NOT NULL", [ownerId, id])).rowCount === 1 || undefined;
+		for (const [id, text, reply] of [["m1", "one", "a1"], ["m2", "two", "a2"], ["m3", "three", "a3"]] as const) {
+			await command(runner.inbox, ownerId, home, id, 1, { content: text });
+			await waitFor(`${reply}`, async () => (await entries()).some((e) => textOf(e) === reply) || undefined);
+		}
+		const two = (await entries()).find((e) => e.kind === "pi.user" && textOf(e) === "two")!;
+		// A message that is not the person's is refused, and so is one of another conversation's; neither changes anything.
+		await command(runner.inbox, ownerId, home, "bad", 1, { entry: String(two.id + 1) }, "retry_from");
+		await waitFor("the refusal", () => done("bad"));
+		expect((await entries()).some((e) => e.kind === "pim.retry")).toBe(false);
+		await command(runner.inbox, ownerId, home, "retry", 1, { entry: String(two.id) }, "retry_from");
+		await waitFor("the answer again", async () => (await entries()).some((e) => textOf(e) === "a2 again") || undefined);
+		// The model was asked again with what it had been given up to the message, and nothing of what came after.
+		expect(seen.at(-1)).toEqual(["user:one", "assistant:a1", "user:two"]);
+		const log = await entries();
+		const retry = log.find((e) => e.kind === "pim.retry")!;
+		// Nothing is deleted: the later entries are all there, and the one entry says they are left out. The message itself stays, once.
+		expect(retry.edits?.map((edit) => edit.target)).toEqual(log.filter((e) => e.id > two.id && e.id < retry.id).map((e) => e.id));
+		expect(log.filter((e) => e.kind === "pi.user" && textOf(e) === "two")).toHaveLength(1);
+		// The chat goes on from there, and a command that is delivered again leaves nothing out twice.
+		rig.faux.setResponses([answer("a4")] as never);
+		await command(runner.inbox, ownerId, home, "m4", 1, { content: "four" });
+		await waitFor("a4", async () => (await entries()).some((e) => textOf(e) === "a4") || undefined);
+		expect(seen.at(-1)).toEqual(["user:one", "assistant:a1", "user:two", "assistant:a2 again", "user:four"]);
+		await runner.stop();
+	});
+	it("undoes a new context begun after the message, with the context the message had", async () => {
+		const ownerId = uniqueOwner();
+		const rig = createRig(database.db, ownerId);
+		const home = await new PartitionDirectory(database.db).createPartition(ownerId, { kind: "home" });
+		const seen: string[][] = [];
+		const answer = (text: string) => (ctx: { messages: { role: string; content: unknown }[] }) => (seen.push(said(ctx.messages)), fauxAssistantMessage(text));
+		rig.faux.setResponses([answer("a1"), answer("a2"), answer("a3"), answer("a2 again")] as never);
+		const runner = rig.runner({ idleUnloadMs: 60_000 });
+		await runner.start();
+		const entries = () => readTranscript(database.db, ownerId, home, 1);
+		const sent = async (id: string, text: string, reply: string) => {
+			await command(runner.inbox, ownerId, home, id, 1, { content: text });
+			await waitFor(reply, async () => (await entries()).some((e) => textOf(e) === reply) || undefined);
+		};
+		await sent("m1", "one", "a1");
+		await sent("m2", "two", "a2");
+		await command(runner.inbox, ownerId, home, "new-context", 1, { handoff: "We spoke of one and two." }, "compaction_handoff");
+		await waitFor("the new context", async () => ((await entries()).some((e) => e.kind === "pi.reset") ? true : undefined));
+		await sent("m3", "three", "a3");
+		expect(seen.at(-1)).toEqual(["user:We spoke of one and two.", "user:three"]);
+		const two = (await entries()).find((e) => e.kind === "pi.user" && textOf(e) === "two")!;
+		await command(runner.inbox, ownerId, home, "retry", 1, { entry: String(two.id) }, "retry_from");
+		await waitFor("the answer again", async () => (await entries()).some((e) => textOf(e) === "a2 again") || undefined);
+		// The model reads what it read at the message, not the new context that came after it.
+		expect(seen.at(-1)).toEqual(["user:one", "assistant:a1", "user:two"]);
+		await runner.stop();
+	});
+	it("does not cut off a run at work", async () => {
+		const ownerId = uniqueOwner();
+		const rig = createRig(database.db, ownerId);
+		const home = await new PartitionDirectory(database.db).createPartition(ownerId, { kind: "home" });
+		rig.faux.setResponses([fauxAssistantMessage(fauxToolCall("hang", {}), { stopReason: "toolUse" }), fauxAssistantMessage("after the stop")]);
+		const runner = rig.runner({ idleUnloadMs: 60_000, abortGraceMs: 500 });
+		await runner.start();
+		const entries = () => readTranscript(database.db, ownerId, home, 1);
+		await command(runner.inbox, ownerId, home, "m1", 1, { content: "go" });
+		await waitFor("the tool to hang", () => rig.state.hangs > 0 || undefined);
+		const go = (await entries()).find((e) => e.kind === "pi.user")!;
+		await command(runner.inbox, ownerId, home, "retry", 1, { entry: String(go.id) }, "retry_from");
+		await waitFor("the retry to be refused", async () => (await database.db.read(ownerId, "SELECT 1 FROM pim_runtime.command_inbox WHERE owner_id = $1 AND command_id = 'retry' AND done_at IS NOT NULL", [ownerId])).rowCount === 1 || undefined);
+		expect((await entries()).some((e) => e.kind === "pim.retry")).toBe(false);
+		expect(rig.state.hangs).toBe(1);
+		await command(runner.inbox, ownerId, home, "stop", 1, {}, "abort");
+		await waitFor("the stop to complete", async () => (await database.db.read(ownerId, "SELECT 1 FROM pim_runtime.command_inbox WHERE owner_id = $1 AND command_id = 'stop' AND done_at IS NOT NULL", [ownerId])).rowCount === 1 || undefined);
+		await runner.stop();
+	});
+});

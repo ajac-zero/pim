@@ -21,7 +21,7 @@ import { createProvider } from "@earendil-works/pi-ai/models";
 import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
 import { googleProvider } from "@earendil-works/pi-ai/providers/google";
 import { createRegistry, defineExtension, GenerationTask, hook, section, type HarnessOptions } from "@earendil-works/pi-durable";
-import { deliveryOwed, DELIVERY_REMINDER, enforceDelivery, LENGTH_REMINDER, ROOM_POST } from "@pim/shared/transcript";
+import { deliveryOwed, DELIVERY_REMINDER, enforceDelivery, LENGTH_REMINDER, NOT_DELIVERED, ROOM_POST } from "@pim/shared/transcript";
 import type { App } from "@pim/v2-app/app";
 import { deploymentLimits, QUOTA_MESSAGE } from "@pim/v2-app/quota";
 import { acquireRemote, type RelayBus } from "@pim/v2-app/relay";
@@ -156,20 +156,20 @@ export async function ownerCatalog(deps: CatalogDeps, ownerId: string): Promise<
 		async delete() {},
 	};
 	const models: MutableModels = createModels({ credentials: credentials as never });
-	models.setProvider(anthropicProvider() as never);
-	models.setProvider((plan ? chatgptProvider(chatgpt) : openaiProvider()) as never);
-	models.setProvider(googleProvider() as never);
+	models.setProvider(withCleanHistory(anthropicProvider() as never) as never);
+	models.setProvider(withCleanHistory((plan ? chatgptProvider(chatgpt) : openaiProvider()) as never) as never);
+	models.setProvider(withCleanHistory(googleProvider() as never) as never);
 	if (env.PIM_AI_GATEWAY_URL) {
 		const listed = offeredModels(env);
-		if (listed.length > 0) models.setProvider(compatibleProvider("gateway", "AI gateway", env.PIM_AI_GATEWAY_URL, listed.map((id) => ({ id })), () => env.PIM_AI_GATEWAY_KEY) as never);
+		if (listed.length > 0) models.setProvider(withCleanHistory(compatibleProvider("gateway", "AI gateway", env.PIM_AI_GATEWAY_URL, listed.map((id) => ({ id })), () => env.PIM_AI_GATEWAY_KEY)) as never);
 	}
 	for (const row of rows) {
 		const url = row.config.baseUrl ?? row.config.url;
 		if (["openai_compatible", "custom"].includes(row.kind) && typeof url === "string" && Array.isArray(row.config.models)) {
-			models.setProvider(compatibleProvider(row.id, String(row.config.name ?? row.id), url, row.config.models.filter((m: any) => typeof m?.id === "string"), () => keys.get(row.id), row.config.api === "anthropic-messages" ? "anthropic-messages" : "openai-completions") as never);
+			models.setProvider(withCleanHistory(compatibleProvider(row.id, String(row.config.name ?? row.id), url, row.config.models.filter((m: any) => typeof m?.id === "string"), () => keys.get(row.id), row.config.api === "anthropic-messages" ? "anthropic-messages" : "openai-completions")) as never);
 		}
 	}
-	for (const extra of (await deps.providers?.(ownerId)) ?? []) models.setProvider(extra as never);
+	for (const extra of (await deps.providers?.(ownerId)) ?? []) models.setProvider(withCleanHistory(extra as never) as never);
 	return { models, plan: plan !== undefined };
 }
 
@@ -251,19 +251,54 @@ function messagesProvider(id: string, name: string, baseUrl: string, models: Con
 		}),
 		api: { "anthropic-messages": anthropicMessagesApi() },
 	} as never) as any;
-	// Requests are the ones v1 sent such an endpoint: no empty answers in the history (Claude refuses the system message they displace), and no thinking
-	// asked for in the middle of a tool round that began without it.
-	const wrap = (stream: (model: any, context: any, options?: any) => any) => (model: any, context: any, options?: any) => stream(model, withTypedTools(withoutToolErrorFlag(withoutEmptyAnswers(context, model), model), model), withoutThinkingMidToolRound(context, options));
+	// Requests are the ones v1 sent such an endpoint: no thinking asked for in the middle of a tool round that began without it (empty answers are left out of every provider's history).
+	const wrap = (stream: (model: any, context: any, options?: any) => any) => (model: any, context: any, options?: any) => stream(model, withTypedTools(withoutToolErrorFlag(context, model), model), withoutThinkingMidToolRound(context, options));
 	return { ...configured, stream: wrap(configured.stream), streamSimple: wrap(configured.streamSimple) } as Provider;
 }
 
-function withoutEmptyAnswers(context: { messages: any[] }, model: any) {
-	const says = (message: any) => {
-		if (message.role !== "assistant") return true;
-		const same = message.provider === model.provider && message.api === model.api && message.model === model.id;
-		return message.content.some((block: any) => block.type === "toolCall" || (block.type === "text" ? block.text.trim() !== "" : block.type === "thinking" ? (same && (block.redacted === true || !!block.thinkingSignature?.trim())) || block.thinking.trim() !== "" : true));
-	};
-	return context.messages.every(says) ? context : { ...context, messages: context.messages.filter(says) };
+/**
+ * A history as every provider can take it: an assistant message with nothing to say (a lone newline after `send_to_user`, an empty thinking block) is left out, since Vertex refuses a
+ * message without parts ("must include at least one parts field") and Claude refuses the system message such an answer displaces. This runs when a request is built, so a chat that
+ * already stored such a message works again and nothing stored is changed. Whitespace-only text and empty thinking go from every assistant message; a message that makes tool calls stays
+ * (so every `tool_result` keeps its `tool_use`) with any signed thinking, which Claude wants back in a tool round. User messages left next to each other by a dropped answer become one.
+ */
+export function withoutEmptyAssistants<C extends { messages: any[] }>(context: C): C {
+	const blank = (block: any) => (block.type === "text" ? block.text.trim() === "" : block.type === "thinking" && block.thinking.trim() === "");
+	const kept: any[] = [];
+	let dropped = false;
+	for (const message of context.messages) {
+		if (message.role !== "assistant") {
+			const before = kept[kept.length - 1];
+			if (dropped && message.role === "user" && before?.role === "user") kept[kept.length - 1] = { ...before, content: [...asBlocks(before.content), ...asBlocks(message.content)] };
+			else kept.push(message);
+			dropped = false;
+			continue;
+		}
+		// A failed or stopped answer is never replayed (pi leaves it out of the context too), and one stored with no parts must not become an empty message.
+		if (message.stopReason === "error" || message.stopReason === "aborted") {
+			dropped = true;
+			continue;
+		}
+		const tools = message.content.some((block: any) => block.type === "toolCall");
+		const content = message.content.filter((block: any) => !blank(block) || (tools && block.type === "thinking" && (block.redacted === true || !!block.thinkingSignature?.trim())));
+		if (content.length > 0 && (tools || content.some((block: any) => block.type !== "thinking"))) kept.push(content.length === message.content.length ? message : { ...message, content });
+		else dropped = true;
+	}
+	return kept.length === context.messages.length && kept.every((m, i) => m === context.messages[i]) ? context : { ...context, messages: kept };
+}
+
+const asBlocks = (content: string | any[]) => (typeof content === "string" ? [{ type: "text", text: content }] : content);
+
+/** A provider whose requests are built from a history with `withoutEmptyAssistants` applied, whichever API it speaks. */
+function withCleanHistory(provider: Provider): Provider {
+	const wrap = (stream: (model: any, context: any, options?: any) => any) => (model: any, context: any, options?: any) => stream(model, withoutEmptyAssistants(context), options);
+	return new Proxy(provider, {
+		get(target, property) {
+			const value = Reflect.get(target, property, target) as unknown;
+			if (property === "stream" || property === "streamSimple") return wrap((value as (...args: unknown[]) => any).bind(target));
+			return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+		},
+	});
 }
 
 /**
@@ -380,6 +415,8 @@ export function createAgentHost(options: AgentHostOptions) {
 	};
 	/** The conversations that are chats of tasks, as far as this process has seen them run: a model that fails for good ends such a run instead of holding it. */
 	const taskConversations = new Set<string>();
+	/** A request the provider refused as malformed or too large, which asking again does not change; a refused credential or a limit is not, and is left to the person's Try again. */
+	const rejectedAsInvalid = (message: FailedAnswer): boolean => failureKind(message as never) === null && (message.errorMessage === NOT_DELIVERED || /\b(400|413|422)\b|INVALID_ARGUMENT|invalid_request_error/i.test(message.errorMessage ?? ""));
 	const chatgptOptions: ChatGPTRunnerOptions = options.chatgpt ?? {};
 	/** The reads of one request's sections share one query; the next request reads again, so what an agent just saved is in its next prompt. */
 	const contexts = new Map<string, Promise<RunnerContext>>();
@@ -465,6 +502,8 @@ export function createAgentHost(options: AgentHostOptions) {
 			async afterResponse(answer: any, api: any, context: any) {
 				const state = await api.memo("delivery", context);
 				if (state?.required) enforceDelivery(answer, state);
+				// An answer that stops with nothing in it (a lone newline after `send_to_user`, or the empty answers that end in a failure to deliver) is stored with no content, not as parts a provider would refuse.
+				if ((answer.stopReason === "stop" || answer.errorMessage === NOT_DELIVERED) && answer.content.every((part: any) => (part.type === "text" ? part.text.trim() === "" : part.type === "thinking" && part.thinking.trim() === ""))) answer.content = [];
 			},
 			async onYield(answer: any, api: any, context: any) {
 				const state = await api.memo("delivery", context);
@@ -678,9 +717,10 @@ export function createAgentHost(options: AgentHostOptions) {
 		const hostops = await hostopsExtension({ ownerId, partitionId: partition.partitionId, app: options.app, chatOf: deps.chatOf });
 		if (hostops) registry.install(hostops);
 		// A request that failed for good, with nothing left to retry or fail over to, holds the run where it stopped: the person's Try again on the error card asks the model again (`POST /api/sessions/:id/retry`), so they need not say it twice.
+		// A request the provider rejected as invalid (a 400), or an agent that would not deliver its reply after two reminders, fails the same way when asked again, so such a run ends instead: the chat is not at work, and Try again sends the message again.
 		// pi 1.5 stores a streamed answer and running tool output up to a second late; the live projector reads them from PostgreSQL, so each is stored as it is committed, as in pi 1.1.
 		return { models: metered, registry, settings: { retry: { suspend: (message: unknown, conversationId: unknown) => {
-			if (taskConversations.has(`${ownerId}\u0000${conversationId}`)) return false;
+			if (taskConversations.has(`${ownerId}\u0000${conversationId}`) || rejectedAsInvalid(message as FailedAnswer)) return false;
 			holdUntilReset(ownerId, message as FailedAnswer, conversationId);
 			return true;
 		} }, progress: { persistWithinMs: 0 } } } as HarnessOptions;

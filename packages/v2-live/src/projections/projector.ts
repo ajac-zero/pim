@@ -153,6 +153,12 @@ export class Projector {
 					// Streaming partials of one message replace each other; the committed message is canonical.
 					await emit(stream === "chat" ? chatTopic(id) : codingTopic(id), partial ? "message.partial" : "message", { message, partial, ...(payload.replaces === undefined ? {} : { replaces: payload.replaces }) } as unknown as JsonValue, partial ? `entry:${message.id}` : null);
 				}
+				// An entry that takes the chat back (a retry from a message) leaves later messages out: they are no longer in the transcript, and the chat's open apps are told which.
+				const omitted = (payload.entry?.edits ?? []).flatMap((edit) => (edit.action === "omit" ? [String(edit.target)] : []));
+				if (omitted.length > 0) {
+					await client.query("DELETE FROM pim_projection.chat_transcript_projection WHERE owner_id = $1 AND stream_kind = $2 AND chat_id = $3 AND entry_id = ANY($4::text[])", [ownerId, stream, id, omitted]);
+					await emit(stream === "chat" ? chatTopic(id) : codingTopic(id), "message.removed", { ids: omitted } as unknown as JsonValue, null);
+				}
 				return;
 			}
 			case "chat.ui_state": {

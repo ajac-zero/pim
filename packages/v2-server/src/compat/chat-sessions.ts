@@ -302,6 +302,29 @@ export function sessionRoutes(env: Record<string, string | undefined> = process.
 			await app.conversations.admit(p, { commandId, kind: "user_message", chatId: id, payload: { text, retry: true } });
 			return ok({ session: id });
 		}),
+		// Asks the model again from one of the person's messages, in place: this chat's later messages (the agent's replies, tools, errors, the person's later messages) leave it, and the
+		// message stays and is answered again. It is a command of the runtime (`retry_from`), which leaves the entries out of the model's context without deleting them, so nothing is
+		// rebuilt. What tools did meanwhile is not undone. A chat at work is refused (the person stops it first); one held after a failed request is not at work, so its run is ended.
+		route("POST", "/api/sessions/:id/messages/:message/retry", async ({ app, principal, params, json }) => {
+			const p = await principal();
+			const id = chatId(params[0]!);
+			const view = await sessionView(app, p, id);
+			const chat = (await app.db.owner(p.ownerId, async (tx) => (await tx.query("SELECT kind, room_of FROM pim_app.conversations WHERE public_chat_id = $1 AND deleted_at IS NULL", [id])).rows))[0];
+			if (chat.kind === "visit" || chat.kind === "group" || chat.room_of !== null) throw new BadRequestError("A chat with someone else's agent, or with several agents, can't be retried from a message");
+			const messages = (await transcriptPage(app.db.pool, p.ownerId, id)).messages.filter((m) => !m.partial);
+			const message = messages.find((m) => m.id === params[1]);
+			const said = message?.parts.map((part) => (part.type === "text" ? part.text : "")).join("");
+			if (message?.role !== "user" || !/^\d+$/.test(message.id) || !fromPerson(said ?? "")) throw new BadRequestError("Retry from one of your own messages in this chat");
+			const pending = await app.db.owner(p.ownerId, async (tx) => (await tx.query("SELECT 1 FROM pim_app.accepted_commands WHERE public_chat_id = $1 AND kind IN ('user_message', 'retry_from') AND state = 'inbox_accepted'", [id])).rowCount);
+			const last = messages.at(-1);
+			if (pending || (view.busy && !(last?.role === "assistant" && last.stopReason === "error"))) throw new ConflictError("The agent is at work in this chat; stop it first", "busy");
+			const commandId = String(((await json().catch(() => ({}))) as Record<string, unknown>).commandId ?? `retry-${randomUUID()}`);
+			await app.conversations.admit(p, { commandId, kind: "retry_from", chatId: id, payload: { entry: message.id } });
+			// What was written of the chat from messages that are gone is written again when it is next asked for, even if the chat is as long as before.
+			summarized.delete(id);
+			suggested.delete(id);
+			return ok({ session: id }, 202);
+		}),
 		// Lists an archived chat again; the web sends no command id, so one is made here.
 		route("POST", "/api/sessions/:id/unarchive", async ({ app, principal, params }) => {
 			await app.conversations.admit(await principal(), { commandId: `unarchive-${randomUUID()}`, kind: "unarchive", chatId: chatId(params[0]!), payload: {} });

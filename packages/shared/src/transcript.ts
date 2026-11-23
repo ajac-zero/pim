@@ -192,6 +192,8 @@ function projectMessage(message: Message, id: string): TranscriptMessage | undef
 				timestamp: message.timestamp,
 			};
 		case "assistant":
+			// An answer that stopped with nothing in it (a lone newline, an empty thinking block, as a model leaves after `send_to_user`) says nothing, so it is not shown.
+			if (message.stopReason === "stop" && message.content.every((part) => (part.type === "text" ? part.text.trim() === "" : part.type === "thinking" && part.thinking.trim() === ""))) return undefined;
 			return {
 				id,
 				role: "assistant",
@@ -261,7 +263,8 @@ export function projectEntries(entries: readonly EntryRecord[]): TranscriptMessa
 			return [{ id: String(entry.id), role: "notice" as const, parts: [{ type: "text" as const, text: compactionText(entry.model?.[0]) }], timestamp: entry.model?.[0]?.timestamp ?? 0, compaction: true as const }];
 		}
 		const message = entry.model?.[0];
-		if (entry.kind === "pi.system" || message === undefined) return [];
+		// The entry of a retry from a message (`pim.retry`) only leaves entries out; any messages it carries are the context it restores, which are not said again.
+		if (entry.kind === "pi.system" || entry.kind === "pim.retry" || message === undefined) return [];
 		const projected = projectMessage(message, String(entry.id));
 		return projected ? [projected] : [];
 	});

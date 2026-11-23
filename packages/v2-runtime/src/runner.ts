@@ -5,7 +5,10 @@ import {
 	type Conversation,
 	type ConversationId,
 	type EntryId,
+	type Cursor,
+	type EntryRecord,
 	ConversationBusy,
+	defineEntry,
 	Harness,
 	type HarnessOptions,
 	InboxDoc,
@@ -473,6 +476,10 @@ export class CommandRejected extends Error {
 	}
 }
 
+/** The entry that takes a conversation back to a person's message (`retryFromCommand`): what it omits is the retried turn and what came after it. */
+const RETRY_KIND = "pim.retry"; // also named in `projectEntries` (@pim/shared), which hides it
+const RetryEntry = defineEntry<{ from: number; request: string }>(RETRY_KIND);
+
 type Input = Extract<SubmissionDraft, { type: "input" }>["content"];
 
 const conversationOf = async (resident: ResidentPartition, command: Command, context: Context): Promise<Conversation> => {
@@ -480,6 +487,26 @@ const conversationOf = async (resident: ResidentPartition, command: Command, con
 	const conversation = await resident.harness.conversation(command.conversationId as ConversationId, context);
 	if (conversation === undefined) throw new CommandRejected(`Conversation ${command.conversationId} is not in partition ${resident.partitionId}`);
 	return conversation;
+};
+
+/**
+ * The chat's model is read again before each message, so a model chosen for this chat alone (or the agent's, or Settings') is the next turn's, and so is the reasoning effort the
+ * application chose, for a chat that was made before it chose one as for a new one.
+ */
+const refreshAgent = async (resident: ResidentPartition, conversation: Conversation, command: Command, context: Context): Promise<void> => {
+	if (command.publicChatId === undefined || resident.runner.chatAgent === undefined) return;
+	try {
+		const chosen = await resident.runner.chatAgent(resident.ownerId, command.publicChatId);
+		const wanted = chosen.explicit === false ? undefined : chosen.model;
+		const current = await conversation.agent(context);
+		const change = {
+			...(wanted != null && (wanted.provider !== current.model?.provider || wanted.modelId !== current.model?.modelId) ? { model: wanted } : {}),
+			...(chosen.thinkingLevel !== undefined && chosen.thinkingLevel !== current.thinkingLevel ? { thinkingLevel: chosen.thinkingLevel } : {}),
+		};
+		if (Object.keys(change).length > 0) await conversation.configure(change, context);
+	} catch (error) {
+		resident.runner.report(error);
+	}
 };
 
 /** user_message, trigger_fire and coding_wake each put input in front of a conversation; the contract's `piRequestId` deduplicates a redelivery. */
@@ -496,22 +523,7 @@ const inputCommand: CommandHandler = async (resident, command, context) => {
 	const held = command.kind === "user_message" ? await resident.heldGeneration(conversation, context) : undefined;
 	// A retry the system asks for (a usage limit that reset) changes nothing for a chat that is no longer held: the person went on, or tried again, in the meantime.
 	if (held === undefined && command.payload.retry === true && command.payload.onlyIfHeld === true) return;
-	// The chat's model is read again before each message, so a model chosen for this chat alone (or the agent's, or Settings') is the next turn's.
-	if (command.kind === "user_message" && command.publicChatId !== undefined && resident.runner.chatAgent !== undefined) {
-		try {
-			const chosen = await resident.runner.chatAgent(resident.ownerId, command.publicChatId);
-			const wanted = chosen.explicit === false ? undefined : chosen.model;
-			const current = await conversation.agent(context);
-			const change = {
-				...(wanted != null && (wanted.provider !== current.model?.provider || wanted.modelId !== current.model?.modelId) ? { model: wanted } : {}),
-				// The reasoning effort the application chose, for a chat that was made before it chose one as for a new one.
-				...(chosen.thinkingLevel !== undefined && chosen.thinkingLevel !== current.thinkingLevel ? { thinkingLevel: chosen.thinkingLevel } : {}),
-			};
-			if (Object.keys(change).length > 0) await conversation.configure(change, context);
-		} catch (error) {
-			resident.runner.report(error);
-		}
-	}
+	if (command.kind === "user_message") await refreshAgent(resident, conversation, command, context);
 	if (held !== undefined && command.payload.retry === true) return resident.resumeHeld(command, held);
 	const whenBusy = command.payload.whenBusy as "steer" | "followUp" | "reject" | undefined;
 	// What the host wants the agent to know before the person's words (the files that changed since it last saw them) goes first, in the same message.
@@ -536,6 +548,53 @@ const inputCommand: CommandHandler = async (resident, command, context) => {
 	}
 	if (told !== undefined) await told().catch((error) => resident.runner.report(error));
 	if (held !== undefined) await resident.resumeHeld(command, held);
+};
+
+/**
+ * Takes the conversation back to just after the person's message in entry `from` and asks the model again, in place: every later entry is left out of what the model reads
+ * (pi's `omit` edit, so the entries stay and the prompt up to the message is exactly what it was, which keeps the provider's cache), and the Live projection hides them. A compaction
+ * or a new context after the message is undone with it: the head marker in effect at the message is written again, so the context is what it was then, not what the
+ * compaction made of it. A run at work is not cut off; one held after its request failed is the person's to end, which withdraws the messages queued behind it.
+ * Redelivered, it does nothing the first time did not: the entry it wrote says which command wrote it.
+ */
+const retryFromCommand: CommandHandler = async (resident, command, context) => {
+	const conversation = await conversationOf(resident, command, context);
+	const from = Number(command.payload.entry);
+	if (!Number.isSafeInteger(from)) throw new CommandRejected(`Command ${command.commandId} names no message to retry from`);
+	const live = await resident.harness.snapshot(LiveDoc, conversation.id, context);
+	if (live?.run !== undefined) {
+		if ((await resident.heldGeneration(conversation, context)) === undefined) throw new CommandRejected(`Conversation ${command.conversationId} is at work`);
+		await resident.stopRun(conversation, context);
+	}
+	await refreshAgent(resident, conversation, command, context);
+	await conversation.commit(async (tx) => {
+		const message = await tx.entry(from as EntryId);
+		if (message?.conversationId !== conversation.id || message.kind !== "pi.user") throw new CommandRejected(`Entry ${from} is not a message of conversation ${command.conversationId}`);
+		const later: EntryRecord[] = [];
+		for (let cursor: Cursor | undefined; ; ) {
+			const page = await tx.scanEntries({ conversationId: conversation.id, minEntryId: (from + 1) as EntryId, order: "ascending" }, 500, cursor);
+			later.push(...page.items);
+			if (page.next === undefined) break;
+			cursor = page.next;
+		}
+		if (later.some((entry) => entry.kind === RETRY_KIND && (entry.data as { request?: string } | undefined)?.request === command.piRequestId)) return;
+		// What a compaction or a reset after the message did to the context is undone by the marker that was in effect at it, or by the start of the conversation.
+		let restore: { head: EntryId; model?: EntryRecord["model"] } | undefined;
+		if (later.some((entry) => entry.head !== undefined)) {
+			let found: EntryRecord | undefined;
+			for (let cursor: Cursor | undefined; found === undefined; ) {
+				const page = await tx.scanEntries({ conversationId: conversation.id, maxEntryId: from as EntryId, order: "descending" }, 200, cursor);
+				found = page.items.find((entry) => entry.head !== undefined);
+				if (page.next === undefined) break;
+				cursor = page.next;
+			}
+			const first = found === undefined ? (await tx.scanEntries({ conversationId: conversation.id, order: "ascending" }, 1)).items[0] : undefined;
+			restore = found !== undefined ? { head: found.head!, ...(found.model === undefined ? {} : { model: found.model }) } : { head: first!.id };
+		}
+		if (later.length === 0 && restore === undefined) return;
+		await tx.appendEntry(RetryEntry, conversation.id, { edits: later.map((entry) => ({ target: entry.id, action: "omit" as const })), data: { from, request: command.piRequestId }, ...restore });
+	}, context);
+	await conversation.submit({ type: "continue", requestId: command.piRequestId }, context);
 };
 
 /** approval_decision and task_wake become durable signals: the decision is in PostgreSQL before anything acts on it, and is applied now and at every later activation. */
@@ -610,6 +669,7 @@ const BUILTIN_COMMANDS: Readonly<Record<string, CommandHandler>> = {
 	compaction_handoff: handoffCommand,
 	fork: forkCommand,
 	queue_change: queueChangeCommand,
+	retry_from: retryFromCommand,
 };
 
 /**

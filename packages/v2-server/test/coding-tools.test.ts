@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { BRANCH_OR_COMMIT, MAX_DIFF_CHARS, MAX_LISTED, MAX_TEST_OUTPUT_CHARS, MAX_TEST_RUNS, brief, diffText, latestTests, listing, pushedMessage, threadArg } from "../src/coding-tools.ts";
+import { BRANCH_OR_COMMIT, MAX_DIFF_CHARS, MAX_LISTED, MAX_TEST_OUTPUT_CHARS, MAX_TEST_RUNS, brief, diffText, latestTests, listing, threadArg } from "../src/coding-tools.ts";
 
 const thread = { threadId: "t1", ownerId: "ada", harness: "pi", state: "idle", stateReason: null, stateDetail: null, task: "x".repeat(400), repo: "https://github.com/acme/app", branch: "pim/x-t1", placement: { pool: "default" }, workspaceRef: { provider: "compose" }, orb: null, provisioning: { environment: { state: "ready" } }, spentUsd: 1.23456789, budgetUsd: 5, capabilities: { cost: "per-call" } } as never;
 
@@ -51,9 +51,7 @@ describe("what an agent reads of a coding thread", () => {
 		expect(latestTests([run(1)], 3, { output: false })).toEqual([{ command: "run 1", exit_code: 1, passed: 1, failed: 0, skipped: 1 }]);
 	});
 
-	it("says where a push went", () => {
-		expect(pushedMessage("https://github.com/acme/app", "acme/app", "pushed", "a".repeat(40), "pim/x")).toBe(`Pushed pim/x (${"a".repeat(12)}) to github.com/acme/app: https://github.com/acme/app/compare/pim%2Fx?expand=1 Open a pull request with coding_open_pull_request.`);
-		expect(pushedMessage("https://gitea.example.test/acme/app", "acme/app", "unchanged", "b".repeat(40), "pim/x")).toBe(`pim/x on gitea.example.test/acme/app was already at ${"b".repeat(12)}.`);
+	it("names a branch or a commit as git does", () => {
 		expect(BRANCH_OR_COMMIT.test("pim/x-1")).toBe(true);
 		expect(BRANCH_OR_COMMIT.test("a b")).toBe(false);
 	});

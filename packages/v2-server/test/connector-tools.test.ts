@@ -276,10 +276,10 @@ real("connector tools", () => {
 		chatId = narrowChat;
 		try {
 			const before = mcp.calls.length;
-			await send("what can you reach?", false, toolUse(fauxToolCall("connector_tools", {})), toolUse(fauxToolCall("connector_call", { connector, tool: "search", arguments: { q: "x" } })), toolUse(fauxToolCall("watch_connector_event", { connector, event: "ticket.created", instruction: "tell me" })));
+			await send("what can you reach?", false, toolUse(fauxToolCall("connector_tools", {})), toolUse(fauxToolCall("connector_call", { connector, tool: "search", arguments: { q: "x" } })), toolUse(fauxToolCall("trigger", { action: "create", source: { kind: "connector_event", connectorId: connector, event: "ticket.created" }, instruction: "tell me" })));
 			expect((await results("connector_tools"))[0]).toMatch(/no connector tools/i);
 			expect((await results("connector_call"))[0]).toContain("You don't work with Tickets");
-			expect((await results("watch_connector_event"))[0]).toContain(`No connector named ${connector} among the connectors you work with`);
+			expect((await results("trigger"))[0]).toContain(`No connector named ${connector} among the connectors you work with`);
 			expect(mcp.calls.length).toBe(before);
 			// Listing it makes its tools the agent's to be given, each off until its person sets it for that agent alone: the majordomo's choices are not its own.
 			expect((await web.call("PUT", `/api/agents/${narrow}`, { apps: [connector] })).status).toBe(200);

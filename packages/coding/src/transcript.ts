@@ -3,8 +3,8 @@ import { redact } from "@pim/shared/redact";
 
 /**
  * A coding thread's transcript as an agent reads it (../extensions/coding.ts):
- * the page `coding_transcript` cuts out of it, and the whole of one message
- * `coding_transcript_output` reads back. Everything these return is redacted,
+ * the page `coding_inspect` (view transcript) cuts out of it, and the whole of one message
+ * `coding_inspect` (view transcript_output) reads back. Everything these return is redacted,
  * as the thread's own tools' output is (./tools/output.ts): a transcript can
  * hold anything a command printed, and it leaves the thread's workspace to
  * reach an agent's chat.
@@ -16,10 +16,10 @@ export const TRANSCRIPT_MAX_PAGE = 50;
 /** How much of one message a page shows, and of the first line of it in a summary. */
 export const MESSAGE_CHARS = 400;
 export const SUMMARY_CHARS = 80;
-/** How many lines of one message `coding_transcript_output` shows at once, and the most a line of it may hold. */
+/** How many lines of one message `coding_inspect` (view transcript_output) shows at once, and the most a line of it may hold. */
 export const OUTPUT_LINES = 2_000;
 export const OUTPUT_LINE_CHARS = 2_000;
-/** How much of one message `coding_transcript_output` shows at once. */
+/** How much of one message `coding_inspect` (view transcript_output) shows at once. */
 export const OUTPUT_CHARS = 30_000;
 
 /** A message as a page shows it: its id, for reading it whole, and text cut to what fits. */
@@ -66,7 +66,7 @@ export function transcriptText(message: TranscriptMessage): string {
 /** `text` cut to `max` characters, with a note of what was left out when something was. */
 function cut(text: string, max: number): string {
 	if (text.length <= max) return text;
-	return `${text.slice(0, max)}… [${text.length - max} more characters, coding_transcript_output reads the whole message]`;
+	return `${text.slice(0, max)}… [${text.length - max} more characters, coding_inspect with view transcript_output reads the whole message]`;
 }
 
 /**

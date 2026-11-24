@@ -83,8 +83,8 @@ async function awaitOutcome(app: App, ownerId: string, chat: string, command: st
 /** The tools an agent can have, by name and description, as `GET /api` lists them. The Runner builds each chat's own from these, so the list is what it can offer, not what one chat has. */
 let catalog: Promise<{ name: string; description: string }[]> | undefined;
 const listTools = () => (catalog ??= import("../agent-tools.ts").then(({ pimExtension }) => (pimExtension({ ownerId: "o_".padEnd(28, "0"), partitionId: "", runtime: {} } as never, []).tools as unknown as { name: string; description: string }[]).map(({ name, description }) => ({ name, description }))).catch(() => (catalog = undefined, [])));
-/** What asks the person first, whatever a person's tool permissions say for connectors: pushing, pull requests, merging, adding a skill from outside Pim, a connector's tool that asks, an admin change. */
-const NEEDS_APPROVAL = new Set(["coding_push", "coding_open_pull_request", "coding_merge", "install_skill", "connector_call", "admin_write_approved"]);
+/** What asks the person first, whatever a person's tool permissions say for connectors: adding a skill from outside Pim, a connector's tool that asks, an admin change. */
+const NEEDS_APPROVAL = new Set(["install_skill", "connector_call", "admin_write_approved"]);
 
 /** How long a message sent with `wait` is held for its turn to end before it answers `pending`. */
 const waitMs = () => Number(process.env.PIM_API_WAIT_MS) || 110_000;

@@ -13,8 +13,8 @@ import type { App } from "@pim/v2-app/app";
 import { OwnerId, PartitionId, type Principal } from "@pim/v2-contracts/identity";
 import { ExternalOperations } from "@pim/v2-runtime/external";
 import type { Db as RuntimeDb } from "@pim/v2-runtime/db";
-import { type Actor, repoName } from "@pim/v2-forge/authz";
-import { BRANCH_OR_COMMIT, COMMIT, MAX_DIFF_CHARS, MAX_TEST_RUNS, brief, diffText, latestTests, listing, pushedMessage, testRun, threadArg } from "./coding-tools.ts";
+import type { Actor } from "@pim/v2-forge/authz";
+import { BRANCH_OR_COMMIT, COMMIT, MAX_DIFF_CHARS, MAX_TEST_RUNS, brief, diffText, latestTests, listing, testRun, threadArg } from "./coding-tools.ts";
 import type { RelayBus } from "@pim/v2-app/relay";
 import { hostSpeaks, postToRoom } from "./rooms.ts";
 import { computerTools, filesPath } from "./computer-tools.ts";
@@ -24,7 +24,7 @@ import type { EnvelopeCrypto } from "@pim/v2-contracts/platform";
 import { uiBlockReference } from "@pim/ui-lang";
 import { loadWidgets, MAX_WIDGETS, type ShownWidget, uiDiagnostics, widgetRefs } from "./agent-widgets.ts";
 import { chatApps, connectorToolset, type Transport } from "./connector-tools.ts";
-import { watchTools } from "./watch-tools.ts";
+import { watchOps } from "./watch-tools.ts";
 import { canvasTools } from "./canvas-tools.ts";
 import { connectorAdminTools } from "./connector-admin-tools.ts";
 import { builtinSkill } from "./builtin-skills.ts";
@@ -185,22 +185,30 @@ export function stoppable(tool: ToolRegistration, timeoutMs = 600_000): ToolRegi
 /** What a guest's agent, and a bot's visitor's chat in the host's space, may use: its own memory and the clock, and a guest's calls to the host's shared tools. */
 const GUEST_TOOLS = new Set(["send_to_user", "current_time", "note", "recall", "zoom", "forget", "move_memory", "read_skill", "read_skill_file", "guest_tools", "guest_call"]);
 const VISIT_TOOLS = new Set(["send_to_user", "current_time"]);
-const kinds = new Map<string, { at: number; allowed: Set<string> | null }>();
+/**
+ * What an agent that was handed a task (a chat of kind `task`) never has: it does the work it was given with the person's tools, and does not set up triggers or schedules of its own, hand
+ * its work on, or make and change agents. The model is not offered these (`chatToolLimits` reaches the Runner through `chatAgent`), and a call that gets here anyway is refused.
+ */
+export const WORKER_HIDDEN: readonly string[] = ["trigger", "trigger_computer_grant", "delegate", "archive_task_chats", "create_agent", "update_agent"];
+const kinds = new Map<string, { at: number; limits: ToolLimits }>();
+type ToolLimits = { /** The only tools the chat has, or null when it has all of its owner's. */ allowed: Set<string> | null; /** Tools it never has. */ hidden: readonly string[] };
 
-/** The tools a chat is limited to, or null when it has all of its owner's. Read fresh each half minute, so a role change or a deleted chat takes effect soon. */
-async function toolsAllowed(app: App, ownerId: string, chat: string | null): Promise<Set<string> | null> {
+/** The tools a chat is limited to, or has none of. Read fresh each half minute, so a role change or a deleted chat takes effect soon. */
+export async function chatToolLimits(app: App, ownerId: string, chat: string | null): Promise<ToolLimits> {
 	const key = `${ownerId}\u0000${chat ?? ""}`;
 	const held = kinds.get(key);
-	if (held && Date.now() - held.at < 30_000) return held.allowed;
+	if (held && Date.now() - held.at < 30_000) return held.limits;
 	const row = await app.db.owner(ownerId, async (tx) => ({
 		role: (await tx.query("SELECT role FROM pim_app.accounts WHERE owner_id = $1", [ownerId])).rows[0]?.role as string | undefined,
 		kind: chat ? ((await tx.query("SELECT kind FROM pim_app.conversations WHERE public_chat_id = $1", [chat])).rows[0]?.kind as string | undefined) : undefined,
 	}));
-	const allowed = row.role === "guest" ? GUEST_TOOLS : row.kind === "visit" ? VISIT_TOOLS : null;
+	const limits: ToolLimits = { allowed: row.role === "guest" ? GUEST_TOOLS : row.kind === "visit" ? VISIT_TOOLS : null, hidden: row.kind === "task" ? WORKER_HIDDEN : [] };
 	if (kinds.size > 5000) kinds.clear();
-	kinds.set(key, { at: Date.now(), allowed });
-	return allowed;
+	kinds.set(key, { at: Date.now(), limits });
+	return limits;
 }
+
+const toolsAllowed = async (app: App, ownerId: string, chat: string | null) => (await chatToolLimits(app, ownerId, chat)).allowed;
 
 /** The note the person left with their decision on an approval, as a sentence for the agent that waited on it; empty when there is none (v1 passed it on with the decision). */
 async function noteOn(app: App, ownerId: string, payload: object): Promise<string> {
@@ -473,38 +481,6 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 					return text(error instanceof Error ? error.message : String(error), true);
 				}
 			}, "safe"),
-		// Schedules and triggers.
-		read("schedule_task", "Wake yourself up later with an instruction, to follow up, check progress, send a reminder, or do recurring work. Give exactly one of delay_seconds, at (ISO 8601 with offset), or cron (5 fields, UTC). The instruction arrives as a message starting with \"[Scheduled task\": in this conversation, or with new_chat in a new chat each time it fires.", Type.Object({
-			instruction: S({ minLength: 1, description: "What to do when it fires, written to your future self." }),
-			label: O(S({ description: "Short name shown to the user, and the title of each new chat." })),
-			delay_seconds: O(Type.Integer({ minimum: 1 })),
-			at: O(S()),
-			cron: O(S()),
-			new_chat: O(Type.Boolean({ description: "Start a new chat with you each time it fires, instead of continuing this one: for recurring work read on its own, such as a daily briefing. The new chat doesn't see this conversation, so make the instruction complete." })),
-			agent: O(S({ description: "For the majordomo only: the id of another of the person's agents, from your_agents, to do the work. Each firing starts a new chat with that agent, as with new_chat, so write the instruction to it." })),
-		}), async (app, call, a) => {
-			if ([a.delay_seconds, a.at, a.cron].filter((v) => v !== undefined).length !== 1) return text("Give exactly one of delay_seconds, at, or cron.", true);
-			const roster = await rosterOf(runtime, ownerId, call.chat);
-			const other = a.agent === undefined || a.agent === roster.self ? undefined : a.agent;
-			if (other !== undefined) {
-				if (!roster.majordomo) return text("Only the majordomo schedules work for other agents. Leave out agent.", true);
-				if (!roster.agents.some((x) => x.id === other)) return text(`No agent has the id ${other}. Use an id from your_agents.`, true);
-			}
-			let kind: "cron" | "at" | "delay" = "cron";
-			let spec: string = a.cron ?? "";
-			if (a.at !== undefined) {
-				const date = new Date(a.at);
-				if (Number.isNaN(date.getTime())) return text(`Cannot read ${JSON.stringify(a.at)} as a date.`, true);
-				if (date.getTime() <= deps.now()) return text(`${a.at} is in the past.`, true);
-				[kind, spec] = ["at", date.toISOString()];
-			} else if (a.delay_seconds !== undefined) [kind, spec] = ["delay", String(a.delay_seconds * 1000)];
-			const here = !a.new_chat && other === undefined;
-			if (here && !call.chat) return text("Scheduled work can't come back to this conversation. Use new_chat, so each run starts a new chat.", true);
-			// The call's own id makes the schedule's: a rerun after an eviction finds the schedule it made.
-			const id = await app.schedules.create(call.p, { kind, spec, prompt: a.instruction, ...(a.label ? { label: a.label } : {}), target: here ? "same_chat" : "new_chat", ...(here && call.chat ? { chatId: call.chat } : {}), ...((other ?? call.agentId) ? { agentId: (other ?? call.agentId)! } : {}), now: new Date(deps.now()), key: `schedule_task:${call.api.taskId}:${call.api.callId}` });
-			const made = (await app.schedules.list(call.p)).find((s) => s.id === id);
-			return json({ id, type: kind === "cron" ? "cron" : kind === "at" ? "scheduled" : "delayed", next: made?.nextRunAt?.toISOString() ?? null, ...(kind === "cron" ? { cron: spec } : {}), label: a.label ?? null, instruction: a.instruction, newChat: !here, ...(other ? { agent: other } : {}) });
-		}),
 		// Notes and apps.
 		write("note_create", "Create a note a person can open and edit alongside you. The answer is the note's card in the chat, which is how the person sees and opens it; there is no panel for you to open.", Type.Object({ title: S({ minLength: 1, maxLength: 200 }), text: O(S()) }), async (app, call, a) =>
 			noteCard(app, ownerId, await app.canvas.create(call.p, a.title, a.text ?? "", "agent"), "Made it. The person sees it as a card in the chat and opens it beside the chat.")),
@@ -569,7 +545,7 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 	// Group chats and other chats (`./room-tools.ts`).
 	tools.push(...roomTools({ ownerId, runtime, read }));
 	// Triggers, typed, with the person's grant for a computer source (`./trigger-tools.ts`).
-	tools.push(...triggerTools({ ownerId, runtime, read, write }));
+	tools.push(...triggerTools({ ownerId, runtime, read, write, now: deps.now, watch: watchOps({ ownerId, runtime, watch: () => (deps.app && deps.crypto ? { app: deps.app, crypto: deps.crypto, transport, publicUrl: process.env.PIM_PUBLIC_URL, now: deps.now } : undefined) }) }));
 	// Memory (`./memory-tools.ts`), goals (`./goal-tools.ts`), and reading, changing and listing notes (`./note-tools.ts`).
 	tools.push(...webTools({ tool, fetch: deps.fetch, publicUrl }));
 	tools.push(...memoryTools({ ownerId, runtime, read, write }));
@@ -604,16 +580,15 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 			} catch (error) {
 				return text(error instanceof Error ? error.message : String(error), true);
 			}
-		}, action === "coding:start" || action === "coding:push" || action === "coding:merge" || action === "coding:pr" || action === "coding:steer" || action === "coding:abort" ? "unsafe" : "safe");
+		}, action === "coding:start" || action === "coding:steer" ? "unsafe" : "safe");
 	// v1's tool surface (src/extensions/coding.ts): the same names, parameters and answers, with the new spelling `thread` and `budget_usd` accepted beside `thread_id` and `budget`.
-	const ThreadId = Type.String({ description: "The thread's ID, as coding_start or coding_status gave it; also its /coding/<id> page, an Amp thread's ID (T-…) or an https://ampcode.com/threads/T-… URL." });
+	const ThreadId = Type.String({ description: "The thread's ID, as coding_start or coding_inspect gave it; also its /coding/<id> page, an Amp thread's ID (T-…) or an https://ampcode.com/threads/T-… URL." });
 	const thread = O(ThreadId);
 	const named = { thread_id: thread, thread };
 	const link = (id: string) => `${(process.env.PIM_PUBLIC_URL ?? "").replace(/\/$/, "")}/coding/${id}`;
 	const about = async (f: ForgeParts, actor: Actor, ref: string) => brief(await f.forge.status(actor, ref), { link, queue: { position: (await f.forge.progress(actor, ref)).queuePosition }, checkpoint: await f.forge.checkpoint(actor, ref) });
-	const latest = async (f: ForgeParts, actor: Actor, ref: string) => latestTests(await f.forge.tests(actor, ref), 3, { output: false });
 	tools.push(
-		coding("coding_start", "Start a coding thread: a coding agent that works on a Git repository (GitHub or Gitea) in a workspace of its own, on a new branch (pim/…), on the task you give it. Use it for changes to a codebase: fixing a bug, adding a feature, writing tests. Write the task as you would for a capable engineer who knows nothing of this conversation: what to change, why, and how to check it. It returns at once, often queued while a workspace is made ready; don't wait for it. You are told in this chat when each of its turns ends. Then read what it did with coding_transcript (tail=true, or role=\"assistant\" for its replies; coding_transcript_output reads one whole) and its work with coding_diff and coding_tests; never steer it just to ask what it did or to print a diff. Say more with coding_steer, and push it with coding_push or ship it to the default branch with coding_merge (a person may be asked to approve first): check its diff and tests first. After a push, coding_open_pull_request opens a pull request. harness picks what runs it: pi (the default) in a sandbox, or amp in an Amp orb, which needs no sandbox; on a deployment with no sandbox pool where Amp is set up, the default is amp. If a thread fails with a transient error (workspace, manager, harness or provider), retry once by starting a fresh thread with the same task; if that fails too, stop and tell the person what happened.", Type.Object({
+		coding("coding_start", "Start a coding thread: a coding agent that works on a Git repository (GitHub or Gitea) in a workspace of its own, on a new branch (pim/…), on the task you give it. Use it for changes to a codebase: fixing a bug, adding a feature, writing tests. Write the task as you would for a capable engineer who knows nothing of this conversation: what to change, why, and how to check it. It returns at once, often queued while a workspace is made ready; don't wait for it. You are told in this chat when each of its turns ends. Then read what it did with coding_inspect (its transcript, diff and tests) and tell it more with coding_steer; never steer it just to ask what it did. When its work is ready it pushes its own pim/… branch and opens its own pull request, which a person reviews and merges: you can't push or merge for it. harness picks what runs it: pi (the default) in a sandbox, or amp in an Amp orb, which needs no sandbox; on a deployment with no sandbox pool where Amp is set up, the default is amp. If a thread fails with a transient error (workspace, manager, harness or provider), retry once by starting a fresh thread with the same task; if that fails too, stop and tell the person what happened.", Type.Object({
 			repo: S({ minLength: 1, description: "The repository's address, such as https://github.com/<owner>/<name> or the same on the deployment's Gitea." }),
 			ref: O(S({ description: "The branch, tag or commit to start from; main by default." })),
 			task: S({ minLength: 1 }),
@@ -638,13 +613,49 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 			const t = await about(f, actor, started.threadId);
 			return { thread_id: t.thread_id, url: t.url, status: t.status, ...(t.position ? { position: t.position, waiting_for: t.waiting_for } : {}), branch: t.branch, provider: t.provider, pool: t.pool };
 		}),
-		coding("coding_status", "How a coding thread is doing: its state, its harness and, for an Amp Orb thread, its Amp thread (orb.thread_id, orb.url), its latest checkpoint, what its setup script did and what it has spent. Without a thread_id, lists the person's coding threads, newest first. Also reads an Amp thread (T-… or its ampcode.com URL) that Pim didn't start, through the person's Amp login.", Type.Object(named), "coding:read", async (f, actor, _c, a) => {
-			const given = a.thread_id ?? a.thread;
-			if (!given) return listing(await f.forge.list(actor));
-			const outside = await f.forge.external(actor, given);
-			if (outside) return { thread_id: outside.threadId, orb: { thread_id: outside.threadId, url: outside.url }, harness: "amp", provider: "amp-orbs", status: outside.state, external_amp_thread: true };
-			return about(f, actor, given);
-		}),
+		coding(
+			"coding_inspect",
+			`Read a coding thread without changing it, so never steer a thread just to ask what it did or to print its diff. view picks what: status (the default: its state, harness, Amp orb thread, latest checkpoint, what its setup script did and what it has spent; with no thread, your coding threads, newest first; also an Amp thread you didn't start, by its T-… ID or ampcode.com URL), transcript (the task, what its agent answered, the commands it ran and what they printed, and its notices, oldest first, limit from offset; tail=true reads the latest limit instead, where the final answers are; role user, assistant, tool or notice; summary for a line each; long messages are cut), transcript_output (one message whole, by the id transcript gave it, paged by lines with offset and limit), diff (a git diff from where it started, or from since, a commit, to its latest checkpoint, at most ${MAX_DIFF_CHARS} characters; an Amp orb thread's is read from its pushed branch, or the head you give), tests (its latest ${MAX_TEST_RUNS} test runs, newest first; with command, that command is run in its workspace first, which needs the right to steer it).`,
+			Type.Object({
+				...named,
+				view: O(Type.Union(["status", "transcript", "transcript_output", "diff", "tests"].map((v) => Type.Literal(v)))),
+				offset: O(Type.Integer({ minimum: 0, description: "transcript: the first message, counting from 0. transcript_output: the first line." })),
+				limit: O(Type.Integer({ minimum: 1, description: "transcript: at most 100 messages. transcript_output: lines." })),
+				tail: O(Type.Boolean({ description: "transcript: the latest limit messages instead of starting at 0; ignored with offset." })),
+				role: O(S({ description: "transcript: only messages of this kind: user, assistant, tool or notice." })),
+				summary: O(Type.Boolean({ description: "transcript: one line of each message." })),
+				id: O(S({ description: "transcript_output: the message's id, as transcript gave it; the last assistant message by default." })),
+				since: O(S({ description: "diff: a commit to diff from, an earlier checkpoint's sha." })),
+				head: O(S({ description: "diff, Amp orb thread: the branch or commit on the git host to diff to, when it pushed under another name." })),
+				command: O(strings),
+			}),
+			"coding:read",
+			async (f, actor, c, a) => {
+				const view = a.view ?? "status";
+				if (view === "status") {
+					const given = a.thread_id ?? a.thread;
+					if (!given) return listing(await f.forge.list(actor));
+					const outside = await f.forge.external(actor, given);
+					if (outside) return { thread_id: outside.threadId, orb: { thread_id: outside.threadId, url: outside.url }, harness: "amp", provider: "amp-orbs", status: outside.state, external_amp_thread: true };
+					return about(f, actor, given);
+				}
+				const ref = threadArg(a);
+				if (view === "transcript") return f.forge.transcriptPage(actor, ref, { offset: a.offset, limit: a.limit, role: a.role, summary: a.summary, tail: a.tail, external: true });
+				if (view === "transcript_output") return f.forge.transcriptOutput(actor, ref, { id: a.id, offset: a.offset, limit: a.limit, external: true });
+				if (view === "diff") {
+					if (a.since !== undefined && !COMMIT.test(a.since)) throw new Error("since must be a commit's sha");
+					if (a.head !== undefined && !BRANCH_OR_COMMIT.test(a.head)) throw new Error("head must be a branch or a commit");
+					const t = await f.forge.status(actor, ref);
+					return diffText(await f.forge.diff(actor, ref, { since: a.since, head: a.head }), t.branch, link(t.threadId));
+				}
+				// Reading the runs is reading; running a command is what a steer may do.
+				if (a.command) {
+					await deps.app!.identity.authz.authorize({ principal: c.p, ownerId: owner, action: "coding:steer" });
+					return testRun({ command: a.command.join(" "), ...(await f.forge.runTests(actor, ref, a.command)) });
+				}
+				return latestTests(await f.forge.tests(actor, ref));
+			},
+		),
 		coding("coding_steer", "Tell a coding thread something: more to do, a correction, an answer to its question. During a turn it reads it after its current step, or with interrupt stops what it is doing and starts on it; between turns it starts a new turn; a thread that failed goes on with it.", Type.Object({ ...named, text: O(S({ minLength: 1 })), interrupt: O(Type.Boolean()), retry_environment: O(Type.Boolean({ description: "Set the thread's environment up again (its setup script runs once more) between turns; no text is needed." })) }), "coding:steer", async (f, actor, c, a) => {
 			const ref = threadArg(a);
 			if (a.retry_environment === true) {
@@ -656,51 +667,14 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 			const t = await f.forge.status(actor, ref);
 			return { thread_id: t.threadId, status: t.state, turn_under_way: t.state === "running" };
 		}),
-		coding("coding_diff", `What a coding thread changed, as a git diff from where it started (or from \`since\`, a commit) to its latest checkpoint. At most ${MAX_DIFF_CHARS} characters; the thread's page has all of it. An Amp Orb thread runs in Amp's cloud with no workspace of Pim's: its diff is read from the git host, of its pim/ branch (or another branch it says it pushed, or the \`head\` you give) once it is pushed. Never steer a thread just to print its diff.`, Type.Object({ ...named, since: O(S({ description: "A commit to diff from: an earlier checkpoint's sha." })), head: O(S({ description: "For an Amp Orb thread: the branch or commit on the git host to diff to, when it pushed under another name than its own." })) }), "coding:read", async (f, actor, _c, a) => {
-			if (a.since !== undefined && !COMMIT.test(a.since)) throw new Error("since must be a commit's sha");
-			if (a.head !== undefined && !BRANCH_OR_COMMIT.test(a.head)) throw new Error("head must be a branch or a commit");
+		coding("coding_stop", "Stop a coding thread: its turn and every command it runs, and what was waiting for it. It keeps its work and can be steered again. With archive, end it for good instead: its workspace is deleted, and its transcript, diff and tests stay readable.", Type.Object({ ...named, archive: O(Type.Boolean()) }), "coding:steer", async (f, actor, _c, a) => {
 			const ref = threadArg(a);
-			const t = await f.forge.status(actor, ref);
-			return diffText(await f.forge.diff(actor, ref, { since: a.since, head: a.head }), t.branch, link(t.threadId));
-		}),
-		coding("coding_tests", `The latest test runs of a coding thread (up to ${MAX_TEST_RUNS}), newest first: the command, how it exited, the counts when the runner said them, and the end of its output. With \`command\` it runs that command in the thread's workspace first (its tests, say) and answers with that run.`, Type.Object({ ...named, command: O(strings) }), "coding:read", async (f, actor, c, a) => {
-			const ref = threadArg(a);
-			// Reading the runs is reading; running a command is what a steer may do.
-			if (a.command) await deps.app!.identity.authz.authorize({ principal: c.p, ownerId: owner, action: "coding:steer" });
-			if (a.command) return testRun({ command: a.command.join(" "), ...(await f.forge.runTests(actor, ref, a.command)) });
-			return latestTests(await f.forge.tests(actor, ref));
-		}),
-		coding("coding_transcript", "What a coding thread said: the task it was given, what its agent answered, the commands it ran and what they printed, and its notices. It reads the whole conversation of any coding thread, a workspace thread or an Amp Orb thread (also an Amp thread Pim didn't start, by its T-… ID or ampcode.com URL), so never steer a thread just to ask what it did. Messages come oldest first, `limit` from `offset` (0 by default); with `tail` it reads the latest `limit` instead, where a long thread's final answers are. `role` reads only one kind of message (user, assistant, tool or notice), and `summary` one line of each. Long messages are cut; coding_transcript_output reads one whole by its id.", Type.Object({ ...named, offset: O(Type.Integer({ minimum: 0, description: "The first message to show, counting from 0; the oldest by default." })), tail: O(Type.Boolean({ description: "Read the latest `limit` messages instead of starting at 0; ignored when `offset` is given." })), limit: O(Type.Integer({ minimum: 1, maximum: 100 })), role: O(S({ description: "Only messages of this kind: user, assistant, tool or notice." })), summary: O(Type.Boolean({ description: "One line of each message, instead of the whole of each." })) }), "coding:read", (f, actor, _c, a) => f.forge.transcriptPage(actor, threadArg(a), { offset: a.offset, limit: a.limit, role: a.role, summary: a.summary, tail: a.tail, external: true })),
-		coding("coding_transcript_output", "One message of a coding thread's transcript whole, by the id coding_transcript gave it: the whole of what it said, of a command it ran or of what that printed, which the transcript had cut. Paged by lines like read.", Type.Object({ ...named, id: O(S({ description: "The message's id, as coding_transcript gave it." })), offset: O(Type.Integer({ minimum: 0 })), limit: O(Type.Integer({ minimum: 1 })) }), "coding:read", (f, actor, _c, a) => f.forge.transcriptOutput(actor, threadArg(a), { id: a.id, offset: a.offset, limit: a.limit, external: true })),
-		coding("coding_abort", "Stop a coding thread: its turn and every command it runs, and what was waiting for it. It keeps its work, and can be steered again.", Type.Object(named), "coding:steer", async (f, actor, _c, a) => {
-			const ref = threadArg(a);
+			if (a.archive === true) {
+				await f.forge.archive(actor, ref);
+				return { thread_id: (await f.forge.status(actor, ref)).threadId, status: "archived" };
+			}
 			await f.forge.abort(actor, ref);
 			return about(f, actor, ref);
-		}),
-		coding("coding_archive", "End a coding thread for good: it stops and its workspace is deleted. Its transcript, diff and tests stay readable. Push its branch first if its work is wanted.", Type.Object(named), "coding:steer", async (f, actor, _c, a) => {
-			const ref = threadArg(a);
-			await f.forge.archive(actor, ref);
-			return { thread_id: (await f.forge.status(actor, ref)).threadId, status: "archived" };
-		}),
-		coding("coding_push", "Push a coding thread's work to its git host (GitHub or Gitea): its latest checkpoint, to its own branch (pim/…) unless you name another pim/ branch, never main or the default branch (to ship to it, use coding_merge). A person may be asked to approve first. Then open a pull request with coding_open_pull_request. The result includes the thread's latest test runs.", Type.Object({ ...named, branch: O(S({ description: "A branch starting with pim/; the thread's own by default." })) }), "coding:push", async (f, actor, _c, a) => {
-			const ref = threadArg(a);
-			const pushed = await f.forge.push(actor, ref, { branch: a.branch });
-			if (pushed.status !== "done") return pushed;
-			const t = await f.forge.status(actor, ref);
-			return { message: pushedMessage(t.repo, repoName(t.repo) ?? t.repo, pushed.outcome, pushed.sha, pushed.branch), tests: await latest(f, actor, ref) };
-		}),
-		coding("coding_open_pull_request", "Open a pull request on the thread's git host (GitHub or Gitea) from its pushed pim/… branch into the branch it started from (the default branch when it started from a commit). Push the branch first with coding_push. A person may be asked to approve first. The title defaults to the thread's task, and the body to the task with a note that Pim opened it. If a pull request from the branch is open already, that one is the answer. Returns the pull request's URL and number.", Type.Object({ ...named, title: O(S({ description: "The pull request's title; the thread's task by default." })), body: O(S({ description: "The pull request's description; the thread's task by default." })) }), "coding:pr", async (f, actor, _c, a) => {
-			const opened = await f.forge.openPullRequest(actor, threadArg(a), a.title, a.body);
-			if (opened.status !== "done") return opened;
-			return { message: `Pull request #${opened.number} from ${opened.head} into ${opened.base}: ${opened.url}`, url: opened.url, number: opened.number };
-		}),
-		coding("coding_merge", "Ship a coding thread's work: merge its latest checkpoint into the repository's default branch on the git host (fast-forward or rebase, never forced; if it moves meanwhile, the rebase is retried once), so look at coding_diff and coding_tests first. A person may be asked to approve first. If the thread's changes conflict with the default branch, nothing is pushed: coding_steer the thread to rebase onto origin/<default branch> and resolve the conflicts, then merge again after its turn ends. Returns the default branch's new commit and the thread's latest test runs.", Type.Object(named), "coding:merge", async (f, actor, _c, a) => {
-			const ref = threadArg(a);
-			const merged = await f.forge.merge(actor, ref);
-			if (merged.status !== "done") return merged;
-			if (merged.outcome !== "merged") return { error: "merge_failed", message: merged.detail ?? "The merge conflicted", tests: await latest(f, actor, ref) };
-			const t = await f.forge.status(actor, ref);
-			return { message: `Merged into ${merged.base} on ${new URL(t.repo).host}/${repoName(t.repo) ?? t.repo}${merged.method === "rebase" ? " after rebasing onto it" : " as a fast-forward"}: ${merged.base} is now at ${merged.sha}.`, sha: merged.sha, tests: await latest(f, actor, ref) };
 		}),
 	);
 
@@ -718,9 +692,6 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 	tools.push(...canvasTools({ ownerId, read, relay: deps.relay }));
 	// Finding, connecting and managing connectors (`./connector-admin-tools.ts`).
 	tools.push(...connectorAdminTools({ ownerId, runtime, read, write, env: process.env, transport, now: deps.now }));
-	// Watches: events of a connected server, delivered to the chat that asked.
-	tools.push(...watchTools({ ownerId, runtime, watch: () => (deps.app && deps.crypto ? { app: deps.app, crypto: deps.crypto, transport, publicUrl: process.env.PIM_PUBLIC_URL, now: deps.now } : undefined), chatOf: deps.chatOf, principalOf: (chat) => (deps.app ? principalOf(deps.app, chat) : Promise.resolve(undefined)) }));
-
 	// The admin's majordomo runs the deployment (`./admin-tools.ts`); every other agent is refused there.
 	tools.push(...adminTools({ ownerId, app: deps.app, env: process.env, principalOf, chatOf: deps.chatOf, runtime: runtime as never }));
 	// A guest's agent, and a chat that is someone's visit to a bot, work with a short list of tools: nothing of the owner's computer, files, coding or other connectors.
@@ -736,6 +707,7 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 			const allowed = app ? await toolsAllowed(app, ownerId, await deps.chatOf(api.conversationId)) : null;
 			if (app && name.startsWith("note_") && (await disabledBuiltins(app)).includes("notes")) return text("Notes are turned off for everyone by this Pim's admin.", true);
 			if (allowed && !allowed.has(name)) return text(`${name} isn't available here: this chat only has ${[...allowed].join(", ")}.`, true);
+			if (app && WORKER_HIDDEN.includes(name) && (await chatToolLimits(app, ownerId, await deps.chatOf(api.conversationId))).hidden.includes(name)) return text(`${name} isn't available in a chat made for a task you were handed.`, true);
 			if (!(await withinToolCalls())) return text(`${QUOTA_MESSAGE} too many tool calls today. It resets at midnight UTC.`, true);
 			return run(args, api, context);
 		} };

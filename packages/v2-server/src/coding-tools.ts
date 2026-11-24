@@ -68,7 +68,7 @@ export function listing(rows: { threadId: string; harness: string; status: strin
 
 /** A thread's diff as the model reads it: cut at what fits, with where the rest is. */
 export function diffText(d: ThreadDiff, branch: string | null, page: string): string {
-	if (d.unpushedOrb) return `No pushed branch or commit found on the git host yet (checked ${branch ?? "its branch"}). Amp Orb threads run in Amp's cloud without a Pim workspace, so coding_diff only sees changes once pushed to GitHub/Gitea (or pass head=<branch-or-sha> if pushed under another name). Read coding_transcript / coding_transcript_output for what the agent did so far, or coding_steer it to push a pim/* branch.`;
+	if (d.unpushedOrb) return `No pushed branch or commit found on the git host yet (checked ${branch ?? "its branch"}). Amp Orb threads run in Amp's cloud without a Pim workspace, so the diff view only sees changes once pushed to GitHub/Gitea (or pass head=<branch-or-sha> if pushed under another name). Read its transcript with coding_inspect for what the agent did so far, or coding_steer it to push a pim/* branch.`;
 	if (!d.diff) return d.head ? "No changes." : "Nothing committed yet: each turn's changes are committed when it ends.";
 	const clipped = d.diff.length > MAX_DIFF_CHARS;
 	const more = clipped ? `\n[… ${d.diff.length - MAX_DIFF_CHARS} more characters: see ${page}]` : d.truncated ? "\n[The diff was too large to keep whole.]" : "";
@@ -88,10 +88,3 @@ export const testRun = (run: Run, o: { output?: boolean } = {}) => ({
 
 /** The latest test runs, newest first. */
 export const latestTests = (rows: Run[], n = MAX_TEST_RUNS, o: { output?: boolean } = {}) => (rows.length === 0 ? "It hasn't run any tests." : rows.slice(-n).reverse().map((r) => testRun(r, o)));
-
-/** What a push told the model: where the branch is, and on github.com the page that compares it. */
-export function pushedMessage(repoUrl: string, repo: string, outcome: string, sha: string, branch: string): string {
-	const host = new URL(repoUrl).host;
-	if (outcome === "unchanged") return `${branch} on ${host}/${repo} was already at ${sha.slice(0, 12)}.`;
-	return `Pushed ${branch} (${sha.slice(0, 12)}) to ${host}/${repo}${host === "github.com" ? `: https://github.com/${repo}/compare/${encodeURIComponent(branch)}?expand=1` : "."} Open a pull request with coding_open_pull_request.`;
-}

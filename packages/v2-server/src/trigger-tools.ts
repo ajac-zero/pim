@@ -1,13 +1,15 @@
 /**
- * The agent's tools for triggers, ported from v1's `src/triggers/tools.ts` and `grant-action.ts`: the same typed draft (`create_trigger`, `update_trigger` and `test_trigger` take what a
- * trigger is as a record the model can read, not a spec it must learn from refusals), `expectedRevision` so a stale edit is refused, and `trigger_computer_grant`, which asks the person to
- * let a computer source run. An agent works only with its own triggers; the majordomo, with everyone's. What Pim fills in (the spec's version, its owner, its origin chat, its destination)
+ * The agent's tools for triggers, ported from v1's `src/triggers/tools.ts` and `grant-action.ts`: one tool, `trigger`, whose `action` is create, update, pause, resume, delete, get, list,
+ * runs, test or sources, and `trigger_computer_grant`, which asks the person to let a computer source run and stays apart because its approval parks the call until the person decides.
+ * A trigger is typed (what `create`, `update` and `test` take is what a trigger is, as a record the model can read, not a spec it must learn from refusals), with `expectedRevision` so a
+ * stale edit is refused. Two kinds of source that were tools of their own are sources here: a time source given as `delay_seconds`, `at` or `cron` is a scheduled task (v1's
+ * `schedule_task`, kept by the schedule engine, which wakes the chat with a message starting "[Scheduled task"), and a connector event is a watch (v1's `watch_connector_event`,
+ * `./watch-tools.ts`). An agent works only with its own triggers; the majordomo, with everyone's. What Pim fills in (the spec's version, its owner, its origin chat, its destination)
  * is not the agent's to say, so it cannot make a trigger for another agent, or one that reads as another's.
  */
 import { Type } from "typebox";
 import type { ToolRegistration } from "@earendil-works/pi-durable";
 import { FILE_EVENTS, runsOnComputer, type TriggerSpec, TRIGGER_LIFECYCLES } from "@pim/triggers/spec";
-import { previewFirings } from "@pim/triggers/time";
 import type { App } from "@pim/v2-app/app";
 import { BadRequestError, PimError } from "@pim/v2-app/errors";
 import type { Principal } from "@pim/v2-contracts/identity";
@@ -15,6 +17,7 @@ import type { Db as RuntimeDb } from "@pim/v2-runtime/db";
 import { rosterOf } from "./agent-team-tools.ts";
 import { contextOf, instants, load, sourcesOf, viewOf } from "./compat/chat-triggers.ts";
 import { askFirst, recordResult } from "./tool-approval.ts";
+import type { WatchOps } from "./watch-tools.ts";
 import { recordComputerGrant, sourceConfigHash } from "./computer-triggers.ts";
 
 type Result = { output: { type: "text"; text: string }[]; isError?: boolean };
@@ -49,13 +52,17 @@ const Source = Type.Union(
 			anchorAt: Instant,
 			catchUpMs: optionalInteger("How late the latest missed firing may still run; 1 hour by default."),
 		}),
-		Type.Object({ kind: literal("connector_event"), connectorId: Type.String(), event: Type.String(), arguments: Type.Optional(Type.Record(Type.String(), Type.Unknown(), { description: "The event's arguments, a JSON object, as list_connector_events describes the event." })) }),
+		// A scheduled task: exactly one of these, in place of `schedule`. It wakes this chat, or with newChat a new one each time, with a message starting "[Scheduled task".
+		Type.Object({ kind: literal("time"), delay_seconds: Type.Integer({ minimum: 1, description: "Once, this many seconds from now." }) }),
+		Type.Object({ kind: literal("time"), at: Type.String({ description: "Once, at this time: ISO 8601 with an offset." }) }),
+		Type.Object({ kind: literal("time"), cron: Type.String({ description: "Repeatedly: five cron fields, in UTC." }) }),
+		Type.Object({ kind: literal("connector_event"), connectorId: Type.String(), event: Type.String(), arguments: Type.Optional(Type.Record(Type.String(), Type.Unknown(), { description: "The event's arguments, a JSON object, as sources (kind connector_event) describes the event." })) }),
 		Type.Object({ kind: literal("poll"), command: Type.String(), cwd: Type.Optional(Type.Union([Type.String(), Type.Null()])), intervalMs: optionalInteger("1 minute to 1 day; 5 minutes by default."), deadlineMs: optionalInteger("1 to 30 seconds.") }),
 		Type.Object({ kind: literal("stream"), command: Type.String(), cwd: Type.Optional(Type.Union([Type.String(), Type.Null()])) }),
 		Type.Object({ kind: literal("process"), handle: Type.String(), expiresAt: Instant }),
 		Type.Object({ kind: literal("file"), path: Type.String(), events: Type.Array(Type.Union(FILE_EVENTS.map(literal))), recursive: Type.Optional(Type.Boolean()) }),
 	],
-	{ description: "What it watches. Ask list_trigger_sources which kinds this space can run." },
+	{ description: "What it watches. Ask with action sources which kinds this space can run." },
 );
 
 /** A condition is a JSON object, never code; it may also be written out as JSON text. */
@@ -115,34 +122,12 @@ function grantSummary(label: string, source: TriggerSpec["source"]): string {
 	}
 }
 
-/** A scheduled task as the model sees it, in v1's shape: its kind, when it is next due, its chat and what it is to do. */
-function describeTask(t: { id: string; label: string; spec: TriggerSpec }, actor: Actor) {
-	const { source } = t.spec;
-	if (source.kind !== "time") throw new Error("A scheduled task is a time trigger");
-	let next: number | null = null;
-	try {
-		next = previewFirings(source, { now: Date.now(), count: 1 }).firings[0]?.at ?? null;
-	} catch {
-		// A clock outside what the time engine takes in has no next firing to show.
-	}
-	const newChat = t.spec.destination.type === "new_chat";
-	return {
-		id: t.id,
-		type: source.schedule === "once" ? "scheduled" : source.schedule,
-		next: next === null ? null : new Date(next).toISOString(),
-		...(source.schedule === "cron" ? { cron: source.expression, ...(source.timeZone === "UTC" ? {} : { timeZone: source.timeZone }) } : {}),
-		...(source.schedule === "interval" ? { intervalSeconds: source.everyMs / 1000 } : {}),
-		session: t.spec.originChatId === "api" ? null : t.spec.originChatId,
-		label: t.label,
-		instruction: t.spec.instruction,
-		newChat,
-		// Named when its chats are with another agent than the one asking.
-		...(newChat && t.spec.owningAgentId !== actor.self ? { agent: t.spec.owningAgentId } : {}),
-	};
-}
+type TriggerArgs = DraftArgs & { action: (typeof ACTIONS)[number]; id?: string; expectedRevision?: number; lifecycle?: string; sourceKind?: string; cursor?: string; limit?: number; trigger?: DraftArgs; samples?: unknown[]; count?: number; kind?: string };
 
-export function triggerTools(deps: { ownerId: string; runtime: RuntimeDb; read: Define; write: Define }): ToolRegistration[] {
-	const { ownerId, runtime, read, write } = deps;
+const ACTIONS = ["create", "update", "pause", "resume", "delete", "get", "list", "runs", "test", "sources"] as const;
+
+export function triggerTools(deps: { ownerId: string; runtime: RuntimeDb; read: Define; write: Define; watch: WatchOps; now: () => number }): ToolRegistration[] {
+	const { ownerId, runtime, read, watch } = deps;
 	const S = Type.String;
 	const O = Type.Optional;
 
@@ -157,11 +142,17 @@ export function triggerTools(deps: { ownerId: string; runtime: RuntimeDb; read: 
 		if (!actor.majordomo && found.row.spec.owningAgentId !== actor.self) throw new PimError(404, "not_found", "No such trigger");
 		return found;
 	};
+	/** Triggers as the model reads them, a connector event's with how its watch stands at the connector. */
+	const viewsOf = async (app: App, call: Call, rows: Parameters<typeof viewOf>[1][], ctx: Parameters<typeof viewOf>[2]) => {
+		const views = await Promise.all(rows.map((row) => viewOf(app, row, ctx)));
+		const watching = await watch.info(views.filter((v) => v.source.kind === "connector_event").map((v) => v.id));
+		return views.map((v) => (watching.has(v.id) ? { ...v, watch: watching.get(v.id) } : v));
+	};
 	const view = async (app: App, call: Call, id: string) => {
 		const { row, ctx } = await load(app, call.p, id);
-		return viewOf(app, row, ctx);
+		return (await viewsOf(app, call, [row], ctx))[0]!;
 	};
-	const revisionConflict = (row: { updated_at: Date }, expected: number) => (expected === row.updated_at.getTime() ? null : failure(409, "revision_conflict", "The trigger was changed since that revision: read it again", { currentRevision: row.updated_at.getTime() }));
+	const revisionConflict = (row: { updated_at: Date }, expected: number | undefined) => (expected === undefined ? failure(400, "revision_required", "expectedRevision is required: the revision get gave") : expected === row.updated_at.getTime() ? null : failure(409, "revision_conflict", "The trigger was changed since that revision: read it again", { currentRevision: row.updated_at.getTime() }));
 
 	/** Where a trigger's work goes: this chat for the agent's own, a new chat each time for another agent's or when asked. */
 	const destinationOf = (actor: Actor, call: Call, owner: string, newChat: boolean | undefined): TriggerSpec["destination"] => {
@@ -172,8 +163,12 @@ export function triggerTools(deps: { ownerId: string; runtime: RuntimeDb; read: 
 		return { type: "existing_chat", chatId: call.chat };
 	};
 
+	/** A time source given as a scheduled task: `delay_seconds`, `at` or `cron`, with no `schedule`. */
+	const scheduledTask = (source: unknown): boolean => (source as { kind?: string; schedule?: unknown } | undefined)?.kind === "time" && (source as { schedule?: unknown }).schedule === undefined;
+
 	/** A draft as the spec it is: what the model says, and what Pim fills in. */
-	const specOf = (actor: Actor, call: Call, d: DraftArgs): unknown => {
+	const specOf = (actor: Actor, call: Call, d: DraftArgs): TriggerSpec => {
+		if (scheduledTask(d.source)) throw new BadRequestError("A scheduled task (delay_seconds, at or cron) can't be tested or changed: use schedule once, cron or interval for a trigger that can");
 		const owner = d.agentId ?? actor.self;
 		if (owner !== actor.self && !actor.majordomo) throw new PimError(403, "forbidden", "Only the majordomo makes triggers for other agents");
 		if (!actor.agents.has(owner)) throw new PimError(422, "unknown_agent", "No such agent");
@@ -188,8 +183,21 @@ export function triggerTools(deps: { ownerId: string; runtime: RuntimeDb; read: 
 			destination: destinationOf(actor, call, owner, d.newChat),
 			delivery: d.maxPendingEvents === undefined ? undefined : { maxPendingEvents: d.maxPendingEvents },
 			authorizationRef: null,
-		};
+		} as unknown as TriggerSpec;
 	};
+
+	/** A scheduled task as the model sees it, in v1's shape: its kind, when it is next due, its chat and what it is to do. */
+	const taskOf = (s: { id: string; kind: string; spec: string; nextRunAt: Date | null; chatId: string | null; label: string | null; prompt: string; target: string; agentId: string | null }) => ({
+		id: s.id,
+		type: s.kind === "cron" ? "cron" : s.kind === "at" ? "scheduled" : "delayed",
+		next: s.nextRunAt?.toISOString() ?? null,
+		...(s.kind === "cron" ? { cron: s.spec } : {}),
+		session: s.chatId,
+		label: s.label,
+		instruction: s.prompt,
+		newChat: s.target === "new_chat",
+		...(s.target === "new_chat" && s.agentId ? { agent: s.agentId } : {}),
+	});
 
 	/** Runs `work`, answering a trigger's refusals as the structured errors v1's API gave. */
 	const guarded = async (work: () => Promise<Result>): Promise<Result> => {
@@ -203,185 +211,187 @@ export function triggerTools(deps: { ownerId: string; runtime: RuntimeDb; read: 
 		}
 	};
 
-	/** The enabled time triggers the asking agent may see, oldest first. */
-	const timeTriggers = async (app: App, call: Call, actor: Actor) => {
-		const found = [];
-		for (let offset = 0; ; offset += 50) {
-			const page = await app.triggers.list(call.p, { lifecycle: "enabled", sourceKind: "time", limit: 50, offset });
-			found.push(...page);
-			if (page.length < 50) break;
+	const page = (cursor: string | undefined) => {
+		const offset = cursor === undefined ? 0 : Number(cursor);
+		return Number.isInteger(offset) && offset >= 0 ? offset : null;
+	};
+	const needsId = (a: { id?: string }) => (a.id === undefined ? failure(400, "invalid_request", "id is required") : null);
+	const notATrigger = (id: string) => failure(400, "not_a_trigger", `${id} is a scheduled task (made with delay_seconds, at or cron): it can be read, listed and deleted, not paused, resumed or changed. Delete it and make it again to change it.`);
+
+	/** A scheduled task, v1's `schedule_task`: the schedule engine wakes this chat (or a new chat each time, with another agent's work for the majordomo) with the instruction. */
+	const scheduleTask = async (app: App, call: Call, actor: Actor, a: TriggerArgs): Promise<Result> => {
+		const given = a.source as { delay_seconds?: number; at?: string; cron?: string };
+		if ([given.delay_seconds, given.at, given.cron].filter((v) => v !== undefined).length !== 1) return text("Give exactly one of delay_seconds, at, or cron.", true);
+		if (!a.instruction) return text("instruction is required: what to do when it fires, written to your future self.", true);
+		const other = a.agentId === undefined || a.agentId === actor.self ? undefined : a.agentId;
+		if (other !== undefined) {
+			if (!actor.majordomo) return text("Only the majordomo schedules work for other agents. Leave out agentId.", true);
+			if (!actor.agents.has(other)) return text(`No agent has the id ${other}. Use an id from your_agents.`, true);
 		}
-		return found.filter((t) => actor.majordomo || t.spec.owningAgentId === actor.self).sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+		let kind: "cron" | "at" | "delay" = "cron";
+		let spec: string = given.cron ?? "";
+		if (given.at !== undefined) {
+			const date = new Date(given.at);
+			if (Number.isNaN(date.getTime())) return text(`Cannot read ${JSON.stringify(given.at)} as a date.`, true);
+			if (date.getTime() <= deps.now()) return text(`${given.at} is in the past.`, true);
+			[kind, spec] = ["at", date.toISOString()];
+		} else if (given.delay_seconds !== undefined) [kind, spec] = ["delay", String(given.delay_seconds * 1000)];
+		const here = !a.newChat && other === undefined;
+		if (here && !call.chat) return text("Scheduled work can't come back to this conversation. Use newChat, so each run starts a new chat.", true);
+		// The call's own id makes the schedule's: a rerun after an eviction finds the schedule it made.
+		const id = await app.schedules.create(call.p, { kind, spec, prompt: a.instruction, ...(a.label ? { label: a.label } : {}), target: here ? "same_chat" : "new_chat", ...(here && call.chat ? { chatId: call.chat } : {}), ...((other ?? call.agentId) ? { agentId: (other ?? call.agentId)! } : {}), now: new Date(deps.now()), key: `schedule_task:${call.api.taskId}:${call.api.callId}` });
+		const made = (await app.schedules.list(call.p)).find((s) => s.id === id);
+		return json({ id, type: kind === "cron" ? "cron" : kind === "at" ? "scheduled" : "delayed", next: made?.nextRunAt?.toISOString() ?? null, ...(kind === "cron" ? { cron: spec } : {}), label: a.label ?? null, instruction: a.instruction, newChat: !here, ...(other ? { agent: other } : {}) });
 	};
 
+	// What the model calls: replay-safe as a whole, because each action is idempotent or fails closed when run twice: a creation has its call's own key (a scheduled task, a watch and a
+	// trigger each find what the replayed call made), a change is guarded by its revision, and pause, resume and delete reach the same end however often they run.
 	return [
-		write(
-			"create_trigger",
-			`Make a trigger: work you do when something happens, such as at a time. It runs in this chat, or with newChat in a new chat each time. Kept as a draft unless enabled. Calling again after a restart gives the same trigger. ${COMPUTER_GRANT_NOTE}`,
-			Draft,
-			(app, call, a: DraftArgs) =>
-				guarded(async () => {
-					const actor = await actorOf(call.chat);
-					// The tool call's own identity is the creation key, so a replayed call makes nothing new.
-					const made = await app.triggers.create(call.p, { spec: specOf(actor, call, a), key: `tool:${call.api.taskId}:${call.api.callId}` });
-					if (a.enabled === true && !made.replayed) await app.triggers.setLifecycle(call.p, made.id, "enabled");
-					return json({ trigger: await view(app, call, made.id), replayed: made.replayed === true });
-				}),
-		),
-		write(
-			"update_trigger",
-			"Change a trigger's label, instruction, source, condition or chat, only if it is still at expectedRevision (from get_trigger). condition: null takes the condition off. A changed computer source needs the person's grant again.",
+		read(
+			"trigger",
+			`Work you do when something happens, such as at a time or when a connector reports an event. action: create (kept as a draft unless enabled; a scheduled task or a watch is on at once), update, pause, resume, delete, get, list, runs (a trigger's runs), test (a dry run, changing nothing and running nothing), sources (which kinds of source this space can run; with kind connector_event, the events your connectors can notify you about). Work runs in this chat, or with newChat in a new chat each time. A time source given as delay_seconds, at or cron is a scheduled task that wakes you with a message starting "[Scheduled task"; other times use schedule once, cron or interval. A connector_event source is a watch: each event arrives as a message starting "[Connector event]", and subscribing needs no approval. Calling create again after a restart gives the same trigger. ${COMPUTER_GRANT_NOTE}`,
 			Type.Object({
-				id: S(),
-				expectedRevision: Type.Integer({ minimum: 1 }),
+				action: Type.Union(ACTIONS.map(literal)),
+				id: O(S({ description: "The trigger's id, or a scheduled task's: for every action but create, list, test (without one) and sources." })),
+				expectedRevision: optionalInteger("update and resume: the revision get gave; a trigger changed since is refused. delete may give it too."),
 				label: O(draftFields.label),
 				instruction: O(draftFields.instruction),
 				source: O(Source),
-				condition: O(Type.Union([...conditionKinds, Type.Null()], { description: `${conditionNote} null takes it off.` })),
+				condition: O(Type.Union([...conditionKinds, Type.Null()], { description: `${conditionNote} update: null takes it off.` })),
 				newChat: draftFields.newChat,
+				agentId: O(S({ description: "create: for the majordomo only, another of the person's agents, from your_agents, whose work it is. list: only that agent's triggers (the majordomo)." })),
 				maxPendingEvents: draftFields.maxPendingEvents,
-			}),
-			(app, call, a) =>
-				guarded(async () => {
-					const actor = await actorOf(call.chat);
-					const { row } = await visible(app, call, actor, a.id);
-					const stale = revisionConflict(row, a.expectedRevision);
-					if (stale) return stale;
-					const before = row.spec;
-					const changed = a.source !== undefined && (a.source as { kind?: string }).kind !== before.source.kind;
-					const spec: Record<string, unknown> = {
-						...before,
-						...(a.label === undefined ? {} : { label: a.label }),
-						...(a.instruction === undefined ? {} : { instruction: a.instruction }),
-						...(a.source === undefined ? {} : { source: instants(a.source) }),
-						...(a.condition === undefined ? {} : { condition: a.condition === null ? null : conditionOf(a.condition) }),
-						...(a.newChat === undefined ? {} : { destination: destinationOf(actor, call, before.owningAgentId, a.newChat) }),
-						...(a.maxPendingEvents === undefined ? {} : { delivery: { maxPendingEvents: a.maxPendingEvents } }),
-					};
-					// Delivery follows the source's kind: a source of another kind starts from its own defaults, not the old one's.
-					if (changed && a.maxPendingEvents === undefined) delete spec.delivery;
-					await app.triggers.update(call.p, a.id, { spec });
-					return json({ trigger: await view(app, call, a.id) });
-				}),
-		),
-		read(
-			"list_triggers",
-			"List your triggers (the majordomo: everyone's), newest first, a page at a time.",
-			Type.Object({
-				lifecycle: O(Type.Union(TRIGGER_LIFECYCLES.map(literal))),
-				sourceKind: O(S()),
-				agentId: O(S()),
-				cursor: O(S({ description: "nextCursor from the page before." })),
+				enabled: O(Type.Boolean({ description: "create: start it now; otherwise it is kept as a draft. A watch is on at once unless this is false." })),
+				lifecycle: O(Type.Union(TRIGGER_LIFECYCLES.map(literal), { description: "list: only triggers in this state." })),
+				sourceKind: O(S({ description: "list: only triggers with this kind of source." })),
+				cursor: O(S({ description: "list, runs: nextCursor from the page before." })),
 				limit: O(Type.Integer({ minimum: 1, maximum: 50 })),
-			}),
-			(app, call, a) =>
-				guarded(async () => {
-					const actor = await actorOf(call.chat);
-					const limit = a.limit ?? 20;
-					const offset = a.cursor === undefined ? 0 : Number(a.cursor);
-					if (!Number.isInteger(offset) || offset < 0) return failure(400, "invalid_cursor", "cursor is what a page gave as nextCursor");
-					// An agent other than the majordomo sees only its own.
-					if (!actor.majordomo && a.agentId !== undefined && a.agentId !== actor.self) return json({ triggers: [], nextCursor: null });
-					const agentId = actor.majordomo ? a.agentId : actor.self;
-					const rows = await app.triggers.list(call.p, { ...(a.lifecycle ? { lifecycle: a.lifecycle } : {}), ...(a.sourceKind ? { sourceKind: a.sourceKind } : {}), ...(agentId ? { agentId } : {}), limit: limit + 1, offset });
-					const ctx = await app.db.owner(call.p.ownerId, (tx) => contextOf(tx));
-					const page = rows.slice(0, limit);
-					return json({ triggers: await Promise.all(page.map(async (t) => viewOf(app, (await load(app, call.p, t.id)).row, ctx))), nextCursor: rows.length > limit ? String(offset + limit) : null });
-				}),
-		),
-		read("get_trigger", "One trigger, with its revision, lifecycle, next firing and what may stop it, and its latest runs.", Type.Object({ id: S() }), (app, call, a) =>
-			guarded(async () => {
-				const { row, ctx } = await visible(app, call, await actorOf(call.chat), a.id);
-				return json({ trigger: await viewOf(app, row, ctx), runs: (await app.triggers.runs(call.p, a.id, 5)).map((r) => ({ id: r.id, phase: r.phase, at: r.at, detail: r.detail })) });
-			}),
-		),
-		write("pause_trigger", "Pause a trigger: nothing new is handed on until it is resumed. A run already going goes on.", Type.Object({ id: S() }), (app, call, a) =>
-			guarded(async () => {
-				await visible(app, call, await actorOf(call.chat), a.id);
-				await app.triggers.setLifecycle(call.p, a.id, "paused");
-				return json({ trigger: await view(app, call, a.id) });
-			}),
-		),
-		write("resume_trigger", `Enable a draft or paused trigger, exactly as it is at expectedRevision. ${COMPUTER_GRANT_NOTE}`, Type.Object({ id: S(), expectedRevision: Type.Integer({ minimum: 1 }) }), (app, call, a) =>
-			guarded(async () => {
-				const { row } = await visible(app, call, await actorOf(call.chat), a.id);
-				const stale = revisionConflict(row, a.expectedRevision);
-				if (stale) return stale;
-				await app.triggers.setLifecycle(call.p, a.id, "enabled");
-				return json({ trigger: await view(app, call, a.id) });
-			}),
-		),
-		write("delete_trigger", "Delete a trigger for good; its history stays. It doesn't stop a run already going.", Type.Object({ id: S(), expectedRevision: O(Type.Integer({ minimum: 1 })) }), (app, call, a) =>
-			guarded(async () => {
-				const { row } = await visible(app, call, await actorOf(call.chat), a.id);
-				if (a.expectedRevision !== undefined) {
-					const stale = revisionConflict(row, a.expectedRevision);
-					if (stale) return stale;
-				}
-				await app.triggers.setLifecycle(call.p, a.id, "deleted");
-				return json({ deleted: true, id: a.id });
-			}),
-		),
-		// Scheduled tasks are the time triggers that are on, as well as what `schedule_task` made: an agent lists and cancels either, its own (the majordomo, everyone's).
-		read("list_scheduled_tasks", "List your pending scheduled tasks.", Type.Object({}), (app, call) =>
-			guarded(async () => {
-				const actor = await actorOf(call.chat);
-				const schedules = (await app.schedules.list(call.p)).filter((s) => s.enabled && s.nextRunAt).map((s) => ({ id: s.id, type: s.kind === "cron" ? "cron" : s.kind === "at" ? "scheduled" : "delayed", next: s.nextRunAt!.toISOString(), ...(s.kind === "cron" ? { cron: s.spec } : {}), session: s.chatId, label: s.label, instruction: s.prompt, newChat: s.target === "new_chat", ...(s.target === "new_chat" && s.agentId ? { agent: s.agentId } : {}) }));
-				return json([...schedules, ...(await timeTriggers(app, call, actor)).map((t) => describeTask(t, actor))]);
-			}),
-		),
-		write("cancel_scheduled_task", "Cancel a scheduled task by its id.", Type.Object({ id: S() }), (app, call, a) =>
-			guarded(async () => {
-				// A time trigger the agent may see goes; anything else is a schedule `schedule_task` made.
-				if (a.id.startsWith("tg_")) {
-					const { row } = await visible(app, call, await actorOf(call.chat), a.id).catch(() => ({ row: undefined }));
-					if (!row || row.spec.source.kind !== "time") return text(`No scheduled task with id ${a.id}.`, true);
-					await app.triggers.setLifecycle(call.p, a.id, "deleted");
-					return text("Cancelled.");
-				}
-				await app.schedules.remove(call.p, a.id).catch((error) => {
-					if (error instanceof PimError && error.status === 404) throw new PimError(404, "not_found", `No scheduled task with id ${a.id}.`);
-					throw error;
-				});
-				return text("Cancelled.");
-			}),
-		),
-		read("list_trigger_runs", "A trigger's runs, newest first, a page at a time, each with what is known of it.", Type.Object({ id: S(), cursor: O(S()), limit: O(Type.Integer({ minimum: 1, maximum: 50 })) }), (app, call, a) =>
-			guarded(async () => {
-				await visible(app, call, await actorOf(call.chat), a.id);
-				const limit = a.limit ?? 20;
-				const offset = a.cursor === undefined ? 0 : Number(a.cursor);
-				if (!Number.isInteger(offset) || offset < 0) return failure(400, "invalid_cursor", "cursor is what a page gave as nextCursor");
-				const runs = await app.triggers.runs(call.p, a.id, limit + 1, offset);
-				return json({ runs: runs.slice(0, limit), nextCursor: runs.length > limit ? String(offset + limit) : null });
-			}),
-		),
-		read(
-			"test_trigger",
-			"A dry run, changing nothing and running nothing: whether a trigger (by id, or as you would make it) is valid, what would stop it being enabled, a time source's next firings, or what its condition says of each sample.",
-			Type.Object({
-				id: O(S()),
 				trigger: O(Draft),
 				samples: O(Type.Array(Type.Object({ value: JsonValue, observedAt: optionalInteger("Milliseconds; now by default."), gap: O(Type.Boolean()) }), { maxItems: 10 })),
-				count: O(Type.Integer({ minimum: 1, maximum: 10 })),
+				count: O(Type.Integer({ minimum: 1, maximum: 10, description: "test: how many next firings." })),
+				kind: O(S({ description: "sources: connector_event adds the events your connectors can notify you about." })),
 			}),
-			(app, call, a) =>
+			(app, call, a: TriggerArgs) =>
 				guarded(async () => {
 					const actor = await actorOf(call.chat);
-					if (a.id !== undefined) await visible(app, call, actor, a.id);
-					return json(await app.triggers.test(call.p, a.id ?? null, { ...(a.count ? { count: a.count } : {}), ...(a.trigger ? { spec: specOf(actor, call, a.trigger) } : {}), ...(a.samples ? { samples: a.samples } : {}) }));
+					const missing = ["update", "pause", "resume", "delete", "get", "runs"].includes(a.action) ? needsId(a) : null;
+					if (missing) return missing;
+					const tg = a.id?.startsWith("tg_") === true;
+					switch (a.action) {
+						case "create": {
+							if (scheduledTask(a.source)) return scheduleTask(app, call, actor, a);
+							const draft = a as DraftArgs;
+							if (draft.instruction === undefined || (draft.label === undefined && (draft.source as { kind?: string } | undefined)?.kind !== "connector_event")) return failure(400, "invalid_request", "label and instruction are required");
+							const spec = specOf(actor, call, draft);
+							// The tool call's own identity is the creation key, so a replayed call makes nothing new.
+							const key = `tool:${call.api.taskId}:${call.api.callId}`;
+							if (spec.source.kind === "connector_event" && a.enabled !== false) return await watch.start(call.p, call.chat, spec, key);
+							const made = await app.triggers.create(call.p, { spec, key });
+							if (a.enabled === true && !made.replayed) await app.triggers.setLifecycle(call.p, made.id, "enabled");
+							return json({ trigger: await view(app, call, made.id), replayed: made.replayed === true });
+						}
+						case "update": {
+							if (!tg) return notATrigger(a.id!);
+							const { row } = await visible(app, call, actor, a.id!);
+							const stale = revisionConflict(row, a.expectedRevision);
+							if (stale) return stale;
+							const before = row.spec;
+							const changed = a.source !== undefined && (a.source as { kind?: string }).kind !== before.source.kind;
+							if (scheduledTask(a.source)) return failure(400, "invalid_request", "A trigger's time source is schedule once, cron or interval: delay_seconds, at and cron make a scheduled task of their own");
+							const spec: Record<string, unknown> = {
+								...before,
+								...(a.label === undefined ? {} : { label: a.label }),
+								...(a.instruction === undefined ? {} : { instruction: a.instruction }),
+								...(a.source === undefined ? {} : { source: instants(a.source) }),
+								...(a.condition === undefined ? {} : { condition: a.condition === null ? null : conditionOf(a.condition) }),
+								...(a.newChat === undefined ? {} : { destination: destinationOf(actor, call, before.owningAgentId, a.newChat) }),
+								...(a.maxPendingEvents === undefined ? {} : { delivery: { maxPendingEvents: a.maxPendingEvents } }),
+							};
+							// Delivery follows the source's kind: a source of another kind starts from its own defaults, not the old one's.
+							if (changed && a.maxPendingEvents === undefined) delete spec.delivery;
+							await app.triggers.update(call.p, a.id!, { spec });
+							return json({ trigger: await view(app, call, a.id!) });
+						}
+						case "pause":
+							if (!tg) return notATrigger(a.id!);
+							await visible(app, call, actor, a.id!);
+							await app.triggers.setLifecycle(call.p, a.id!, "paused");
+							return json({ trigger: await view(app, call, a.id!) });
+						case "resume": {
+							if (!tg) return notATrigger(a.id!);
+							const { row } = await visible(app, call, actor, a.id!);
+							const stale = revisionConflict(row, a.expectedRevision);
+							if (stale) return stale;
+							await app.triggers.setLifecycle(call.p, a.id!, "enabled");
+							return json({ trigger: await view(app, call, a.id!) });
+						}
+						case "delete": {
+							if (!tg) {
+								// A scheduled task: the schedule engine's own.
+								await app.schedules.remove(call.p, a.id!).catch((error) => {
+									if (error instanceof PimError && error.status === 404) throw new PimError(404, "not_found", `No scheduled task with id ${a.id}.`);
+									throw error;
+								});
+								return json({ deleted: true, id: a.id });
+							}
+							const { row } = await visible(app, call, actor, a.id!);
+							if (a.expectedRevision !== undefined) {
+								const stale = revisionConflict(row, a.expectedRevision);
+								if (stale) return stale;
+							}
+							// A watch is unsubscribed while its connector can still be asked, then the trigger goes.
+							if (row.spec.source.kind === "connector_event") await watch.stop(a.id!);
+							await app.triggers.setLifecycle(call.p, a.id!, "deleted");
+							return json({ deleted: true, id: a.id });
+						}
+						case "get": {
+							if (!tg) {
+								const task = (await app.schedules.list(call.p)).find((s) => s.id === a.id);
+								return task ? json({ scheduled: taskOf(task) }) : failure(404, "not_found", `No trigger or scheduled task with id ${a.id}`);
+							}
+							const { row, ctx } = await visible(app, call, actor, a.id!);
+							return json({ trigger: (await viewsOf(app, call, [row], ctx))[0], runs: (await app.triggers.runs(call.p, a.id!, 5)).map((r) => ({ id: r.id, phase: r.phase, at: r.at, detail: r.detail })) });
+						}
+						case "list": {
+							const limit = a.limit ?? 20;
+							const offset = page(a.cursor);
+							if (offset === null) return failure(400, "invalid_cursor", "cursor is what a page gave as nextCursor");
+							// An agent other than the majordomo sees only its own.
+							if (!actor.majordomo && a.agentId !== undefined && a.agentId !== actor.self) return json({ triggers: [], nextCursor: null });
+							const agentId = actor.majordomo ? a.agentId : actor.self;
+							const rows = await app.triggers.list(call.p, { ...(a.lifecycle ? { lifecycle: a.lifecycle } : {}), ...(a.sourceKind ? { sourceKind: a.sourceKind } : {}), ...(agentId ? { agentId } : {}), limit: limit + 1, offset });
+							const ctx = await app.db.owner(call.p.ownerId, (tx) => contextOf(tx));
+							const shown = rows.slice(0, limit);
+							const triggers = await viewsOf(app, call, await Promise.all(shown.map(async (t) => (await load(app, call.p, t.id)).row)), ctx);
+							// What was made with delay_seconds, at or cron is pending beside them, on the first page of a list that could hold it.
+							const holds = offset === 0 && (a.sourceKind === undefined || a.sourceKind === "time") && (a.lifecycle === undefined || a.lifecycle === "enabled") && (agentId === undefined || agentId === actor.self);
+							const scheduled = holds ? (await app.schedules.list(call.p)).filter((s) => s.enabled && s.nextRunAt && (actor.majordomo || s.agentId === call.agentId)).map(taskOf) : [];
+							return json({ triggers, ...(scheduled.length > 0 ? { scheduled } : {}), nextCursor: rows.length > limit ? String(offset + limit) : null });
+						}
+						case "runs": {
+							if (!tg) return notATrigger(a.id!);
+							await visible(app, call, actor, a.id!);
+							const limit = a.limit ?? 20;
+							const offset = page(a.cursor);
+							if (offset === null) return failure(400, "invalid_cursor", "cursor is what a page gave as nextCursor");
+							const runs = await app.triggers.runs(call.p, a.id!, limit + 1, offset);
+							return json({ runs: runs.slice(0, limit), nextCursor: runs.length > limit ? String(offset + limit) : null });
+						}
+						case "test": {
+							if (a.id !== undefined) await visible(app, call, actor, a.id);
+							return json(await app.triggers.test(call.p, a.id ?? null, { ...(a.count ? { count: a.count } : {}), ...(a.trigger ? { spec: specOf(actor, call, a.trigger) } : {}), ...(a.samples ? { samples: a.samples } : {}) }));
+						}
+						case "sources": {
+							const sources = sourcesOf(await app.db.owner(call.p.ownerId, (tx) => contextOf(tx)));
+							return json(a.kind === "connector_event" ? { sources, connectorEvents: await watch.events(call.chat) } : { sources });
+						}
+					}
 				}),
-		),
-		read(
-			"list_trigger_sources",
-			"Which kinds of source this space can run now, which only as drafts, and what each needs. Which connector events you may use: list_connector_events.",
-			Type.Object({ agentId: O(S({ description: "For the majordomo: another agent's connectors." })) }),
-			(app, call) => guarded(async () => json({ sources: sourcesOf(await app.db.owner(call.p.ownerId, (tx) => contextOf(tx))) })),
 		),
 		// Replay-safe: it parks until the person decides and runs again, and recording the grant twice is recording it once.
 		read(
 			"trigger_computer_grant",
-			"Asks the person to let a trigger's source (a poll, a stream or a process watch) run on their computer, exactly as the trigger has it now. It runs as their own user, with that user's access. A changed source needs asking again. Only the person can answer: no standing approval or majordomo does. Then resume_trigger enables it.",
+			"Asks the person to let a trigger's source (a poll, a stream or a process watch) run on their computer, exactly as the trigger has it now. It runs as their own user, with that user's access. A changed source needs asking again. Only the person can answer: no standing approval or majordomo does. Then trigger with action resume enables it.",
 			Type.Object({ triggerId: S({ description: "The trigger's id." }) }),
 			(app, call, a) =>
 				guarded(async () => {
@@ -399,7 +409,7 @@ export function triggerTools(deps: { ownerId: string; runtime: RuntimeDb; read: 
 					const now = (await load(app, call.p, row.id)).row;
 					if (sourceConfigHash(now.spec.source) !== hash) return text("The person approved, but the trigger has changed since, so the grant covers nothing it runs now. Ask again for what it is now.", true);
 					await recordComputerGrant(app, call.p.ownerId, row.id, "approval");
-					const done = `Granted: the trigger "${spec.label}" may run its source on the person's computer${row.lifecycle === "enabled" ? "" : " once it is enabled (resume_trigger)"}. The person can revoke this at any time.`;
+					const done = `Granted: the trigger "${spec.label}" may run its source on the person's computer${row.lifecycle === "enabled" ? "" : " once it is enabled (trigger action resume)"}. The person can revoke this at any time.`;
 					await recordResult(app, ownerId, "trigger:computer_grant", String(call.api.taskId), done);
 					return text(done);
 				}),

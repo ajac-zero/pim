@@ -8,6 +8,7 @@ import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-work
 import { App } from "@pim/v2-app/app";
 import { connect as connectApp } from "@pim/v2-app/db";
 import { MemoryObjectStore } from "@pim/v2-app/objects";
+import { toolDefinition } from "@pim/v2-app/tool-permissions";
 import { discoverTokenEndpoint, type Transport } from "../src/connector-tools.ts";
 import type { Process } from "../src/main.ts";
 import { readTranscript, waitFor } from "../../v2-runtime/test/support/rig.ts";
@@ -440,6 +441,64 @@ real("connector tools", () => {
 			await put("create_ticket", null);
 		}
 	}, 60_000);
+
+	it("follows a tool its connector changed without anyone rediscovering it: the screen shows it, the card says why, and Always approve trusts the new version", async () => {
+		const info = async () => (await toolsOf(agent)).find((t) => t.tool === "delete_all")!;
+		const stored = async () => (await d.stack.admin.query("SELECT definition FROM pim_app.tool_permissions WHERE tool = 'delete_all' AND audience = $1", [`agent:${agent}`])).rows[0]?.definition as string | null;
+		const approvals = async () => (await d.stack.admin.query("SELECT count(*)::int AS n FROM pim_app.approvals")).rows[0].n as number;
+		const tool = mcp.tools.find((t) => t.name === "delete_all")!;
+		const was = tool.description;
+		// The agent of this chat, which is the one whose permissions count.
+		const agent = (await d.stack.admin.query("SELECT agent_id FROM pim_app.conversations WHERE public_chat_id = $1", [chatId])).rows[0].agent_id as string;
+		expect((await web.call("PUT", `/api/agents/${agent}`, { apps: [connector] })).status).toBe(200);
+		// A Runner keeps each server's tool list for a while; a new address is a new list.
+		let version = 0;
+		const relist = () => d.stack.admin.query("UPDATE pim_app.connectors SET url = regexp_replace(url, '\\?v=.*$', '') || $2 WHERE id = $1", [connector, `?v=${++version}`]);
+		const live = () => toolDefinition({ description: tool.description, inputSchema: tool.inputSchema, annotations: tool.annotations });
+		try {
+			// On and unchanged: it runs with no approval.
+			expect((await setFor(agent, "delete_all", "on")).json).toMatchObject({ permission: "on", changed: false });
+			const filed = await approvals();
+			let before = mcp.calls.length;
+			await relist();
+			await send("wipe", false, toolUse(fauxToolCall("connector_call", { connector, tool: "delete_all" })));
+			expect(mcp.calls.length).toBe(before + 1);
+			expect(await approvals()).toBe(filed);
+
+			// The server changes it, and the Runner notices: the stored digest follows, so the screen shows the change although nobody rediscovered.
+			tool.description = "Delete every ticket, and the archive";
+			await relist();
+			before = mcp.calls.length;
+			await send("wipe again", true, toolUse(fauxToolCall("connector_call", { connector, tool: "delete_all" })));
+			const approval = await waiting();
+			expect(mcp.calls.length).toBe(before);
+			expect(await info()).toMatchObject({ permission: "ask", chosen: "on", changed: true });
+			// The card says why it asks, and offers Always approve although the tool is destructive.
+			expect((await web.call("GET", `/api/approvals/${approval.id}`)).json).toMatchObject({ status: "pending", action: "connector:call", tool: "connector:call", reason: "Tickets changed this tool since you turned it On, so it asks again." });
+			expect(approval.args.definition).toBe(live());
+			expect((await web.call("POST", `/api/approvals/${approval.id}/approve`, { always: true })).status).toBe(200);
+			await finish();
+			expect(callNames().at(-1)).toBe("delete_all");
+
+			// Always approve stored the digest the person was asked about, so it stops asking.
+			expect(await stored()).toBe(live());
+			expect(await info()).toMatchObject({ permission: "on", changed: false });
+			const asked = await approvals();
+			before = mcp.calls.length;
+			await send("wipe a third time", false, toolUse(fauxToolCall("connector_call", { connector, tool: "delete_all" })));
+			expect(mcp.calls.length).toBe(before + 1);
+			expect(await approvals()).toBe(asked);
+
+			// Choosing On from the screen stores what the server says now, not what was found when it was connected.
+			tool.description = "Delete every ticket, the archive and the backups";
+			expect((await setFor(agent, "delete_all", "on")).json).toMatchObject({ permission: "on", changed: false });
+			expect(await stored()).toBe(live());
+		} finally {
+			tool.description = was;
+			await setFor(agent, "delete_all", null);
+			await web.call("POST", `/api/connectors/${connector}/discover`);
+		}
+	}, 240_000);
 
 	it("serves the web app's connected-servers and connections lists, connects a server by its address and removes it", async () => {
 		const listed = (await web.call("GET", "/api/mcp")).json.servers as { id: string; state: string; tools: { name: string }[] }[];

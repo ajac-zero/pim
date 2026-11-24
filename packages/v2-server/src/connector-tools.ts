@@ -270,7 +270,12 @@ export function connectorToolset(deps: ConnectorToolsDeps): { tools: ToolRegistr
 		const key = `${c.id}\u0000${c.url}`;
 		const held = listed.get(key);
 		if (held && deps.now() - held.at < LISTED_FOR_MS) return held.tools;
-		const tools = withBearer(c, (bearer) => listTools(deps.transport, c.url ?? "", bearer));
+		// What the server lists now is what a permission is held to, so the digests kept for the permissions screen follow it.
+		const tools = withBearer(c, (bearer) => listTools(deps.transport, c.url ?? "", bearer)).then(async (live) => {
+			const digests = live.map((t) => ({ name: t.name, definition: toolDefinition(t) }));
+			await runtime.read(ownerId, "SELECT pim_app.runner_refresh_tool_digests($1, $2, $3::jsonb)", [ownerId, c.id, JSON.stringify(digests)]).catch(() => undefined);
+			return live;
+		});
 		listed.set(key, { at: deps.now(), tools });
 		tools.catch(() => listed.delete(key));
 		return tools;
@@ -405,7 +410,7 @@ export function connectorToolset(deps: ConnectorToolsDeps): { tools: ToolRegistr
 				if (!listsConnector(apps, c)) return text(`You don't work with ${c.name}: it is not one of your connectors.`, true);
 				const tool = (await toolsOf(c)).find((t) => t.name === args.tool);
 				if (!tool) return text(`${c.name} has no tool ${args.tool}.`, true);
-				const { permission } = resolvePermission(c.id, tool, perms, agentId);
+				const { permission, changed } = resolvePermission(c.id, tool, perms, agentId);
 				if (permission === "off") return text(`The tool ${args.tool} of ${c.name} is switched off for you, so it was not called.`, true);
 				const readOnly = tool.annotations?.readOnlyHint === true;
 				// Checked before anyone is asked: a call the tool would refuse for its arguments is not worth a person's approval.
@@ -425,7 +430,7 @@ export function connectorToolset(deps: ConnectorToolsDeps): { tools: ToolRegistr
 						const waiting = { output: [{ type: "text", text: "Waiting for a person's approval." }], control: { suspend: true } } as never;
 						const filed = await app.db.owner(ownerId, async (tx) => (await tx.query("SELECT id FROM pim_app.approvals WHERE tool = 'connector:call' AND args->>'taskId' = $1 LIMIT 1", [taskId])).rows[0]?.id as string | undefined);
 						if (filed) return waiting;
-						const gate = await app.approvals.gate(p, { action: "connector:call", resource: { connector: c.id, tool: tool.name }, ...(chat ? { chatId: chat } : {}), args: { taskId, callId: api.callId, ...(agentId ? { agentId } : {}), connector: c.id, service: c.name, tool: tool.name, readOnly, arguments: redact(args.arguments) }, timeoutMs: 24 * 3600_000, onTimeout: "deny", explicit: tool.annotations?.destructiveHint === true });
+						const gate = await app.approvals.gate(p, { action: "connector:call", resource: { connector: c.id, tool: tool.name }, ...(chat ? { chatId: chat } : {}), args: { taskId, callId: api.callId, ...(agentId ? { agentId } : {}), connector: c.id, service: c.name, tool: tool.name, readOnly, arguments: redact(args.arguments), definition: toolDefinition(tool), ...(changed ? { changed: true, reason: `${c.name} changed this tool since you turned it On, so it asks again.` } : {}) }, timeoutMs: 24 * 3600_000, onTimeout: "deny", explicit: tool.annotations?.destructiveHint === true });
 						if (gate.outcome === "waiting") return waiting;
 					}
 				}

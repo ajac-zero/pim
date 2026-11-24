@@ -109,6 +109,8 @@ export function permissionRoutes(): Route[] {
 					await app.db.owner(p.ownerId, (tx) => store(tx, null));
 					return ok(ownInfo(own, (await rows(app, p.ownerId)).permissions));
 				}
+				// What is stored is tied to the tool as the server describes it now, so ask it first; a server that cannot answer leaves what was discovered.
+				await app.connectors.discover(p, app_).catch(() => undefined);
 				const { connectors } = await rows(app, p.ownerId);
 				const c = connectors.find((x) => x.id === app_);
 				const tool = c?.discovered.find((t) => t.name === b.tool);
@@ -135,11 +137,12 @@ export function permissionRoutes(): Route[] {
 				} else if (approve && body.always === true && filed.tool === "connector:call") {
 					// Always approve opens the tool for the agent that asked, and no other: a connector's tools are each agent's own to set.
 					const { connector, tool } = filed.args?.resource ?? {};
+					// The digest the person saw when asked, not the stored one, which may be older than the tool.
 					const agent = filed.args?.agentId;
 					if (typeof connector === "string" && typeof tool === "string" && typeof agent === "string") {
 						const known = await app.db.owner(p.ownerId, async (tx) => ((await tx.query("SELECT discovered_tools FROM pim_app.connectors WHERE id = $1", [connector])).rows[0]?.discovered_tools ?? []) as McpTool[]);
 						const found = known.find((t) => t.name === tool);
-						await app.db.owner(p.ownerId, (tx) => tx.query("INSERT INTO pim_app.tool_permissions (owner_id, audience, app, tool, permission, definition) VALUES ($1,$2,$3,$4,'on',$5) ON CONFLICT (owner_id, audience, app, tool) DO UPDATE SET permission = 'on', definition = excluded.definition, updated_at = now()", [p.ownerId, `agent:${agent}`, connector, tool, found?.definition ?? null]));
+						await app.db.owner(p.ownerId, (tx) => tx.query("INSERT INTO pim_app.tool_permissions (owner_id, audience, app, tool, permission, definition) VALUES ($1,$2,$3,$4,'on',$5) ON CONFLICT (owner_id, audience, app, tool) DO UPDATE SET permission = 'on', definition = excluded.definition, updated_at = now()", [p.ownerId, `agent:${agent}`, connector, tool, typeof filed.args?.definition === "string" ? filed.args.definition : (found?.definition ?? null)]));
 					}
 				} else if (approve && body.always === true && own) {
 					// Always approve sets the tool to On for every gated action, and settles the person's other calls of it that wait.

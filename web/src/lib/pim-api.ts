@@ -438,6 +438,8 @@ export type Approval = {
   action: string;
   /** The tool "always approve" remembers; null for explicit-only or older requests. */
   tool: string | null;
+  /** Why it asks although the tool was turned On, such as the connector having changed the tool. */
+  reason?: string | null;
   args: unknown;
   summary: string;
   status: ApprovalStatus;

@@ -760,6 +760,11 @@ export const ApprovalBlock = memo(function ApprovalBlock({
       >
         {view.title}
       </p>
+      {approval.reason && (
+        <p className="mt-1 text-muted-foreground text-xs [overflow-wrap:anywhere]">
+          {approval.reason}
+        </p>
+      )}
       {asker && <p className="mt-1 text-muted-foreground text-xs">{asker}</p>}
       {escalation && (
         <p className="mt-1 text-sm [overflow-wrap:anywhere]">

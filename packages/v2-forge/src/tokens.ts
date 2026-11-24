@@ -68,12 +68,12 @@ export class Credentials {
 		return row;
 	}
 
-	/** Clone/fetch need a read or push token for the repository; a push also needs a branch under the prefix that is not the default. */
-	async verifyGit(token: string, access: { repo: string; op: "fetch" | "push" | "advertise-push"; branch?: string; defaultBranch?: string }): Promise<{ threadId: string; ownerId: string }> {
+	/** Clone/fetch need a read or push token for the repository; a pull request needs a push token; a push also needs a branch under the prefix that is not the default. */
+	async verifyGit(token: string, access: { repo: string; op: "fetch" | "push" | "advertise-push" | "pull-request"; branch?: string; defaultBranch?: string }): Promise<{ threadId: string; ownerId: string }> {
 		const c = open("pimgit_", this.key, token, this.clock());
 		if (c.repo !== repoName(access.repo)) throw new ForbiddenError("credential", "this credential is for another repository");
 		await this.live(c);
-		if (access.op === "advertise-push" && c.scope !== "push") throw new ForgeError("push_refused", "This credential can only fetch");
+		if ((access.op === "advertise-push" || access.op === "pull-request") && c.scope !== "push") throw new ForgeError("push_refused", "This credential can only fetch");
 		if (access.op === "push") {
 			if (c.scope !== "push") throw new ForgeError("push_refused", "This credential can only fetch");
 			assertPushBranch(this.policy, access.branch ?? "", access.defaultBranch ?? "main");

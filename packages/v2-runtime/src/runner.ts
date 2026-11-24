@@ -53,8 +53,9 @@ export type RunnerEvent =
 	/** The run watchdog stopped a chat whose run made no progress, or a stop that did not end the run recycled the partition (`recycled`). */
 	| { type: "stalled"; ownerId: string; partitionId: string; conversationId: number; recycled: boolean };
 
-export type ChatAgent = NonNullable<Parameters<Harness["createConversation"]>[0]["agent"]> & { readonly explicit?: boolean };
-const withoutExplicit = ({ explicit: _explicit, ...agent }: ChatAgent) => agent;
+export type ChatAgent = NonNullable<Parameters<Harness["createConversation"]>[0]["agent"]> & { readonly explicit?: boolean; /** Tools the model is never offered in this chat, by name: a chat's kind decides, and the tools stay registered for the chats that have them. */ readonly hideTools?: readonly string[] };
+const hidden = (names: readonly string[]) => ({ remove: names.map((name) => ({ name }) as never) });
+const withoutExplicit = ({ explicit: _explicit, hideTools, ...agent }: ChatAgent) => (hideTools && hideTools.length > 0 ? { ...agent, modelTools: hidden(hideTools) } : agent);
 
 export type RunnerOptions = {
 	readonly db: Db;
@@ -499,7 +500,11 @@ const refreshAgent = async (resident: ResidentPartition, conversation: Conversat
 		const chosen = await resident.runner.chatAgent(resident.ownerId, command.publicChatId);
 		const wanted = chosen.explicit === false ? undefined : chosen.model;
 		const current = await conversation.agent(context);
+		// The tools its kind of chat does not have are left out of what the model is offered, also for a chat made before they were.
+		const offered = new Set((current.tools ?? []).map((tool) => tool.name));
+		const hide = (chosen.hideTools ?? []).filter((name) => offered.has(name));
 		const change = {
+			...(hide.length > 0 ? { modelTools: hidden(hide) } : {}),
 			...(wanted != null && (wanted.provider !== current.model?.provider || wanted.modelId !== current.model?.modelId) ? { model: wanted } : {}),
 			...(chosen.thinkingLevel !== undefined && chosen.thinkingLevel !== current.thinkingLevel ? { thinkingLevel: chosen.thinkingLevel } : {}),
 		};

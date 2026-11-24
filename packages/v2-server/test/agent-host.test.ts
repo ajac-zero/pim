@@ -303,7 +303,7 @@ real("the default agent host", () => {
 		expect((await web.call("POST", `/api/sessions/${chat}/messages`, { commandId: "refused-1", text: "hello" })).status).toBe(202);
 		await waitFor("the refused turn to end", async () => ((await lastShown())?.stopReason === "error" && (await busy()) === false ? true : undefined), 60_000);
 		// A later message is a new turn: the model answers with send_to_user, then stops with a lone newline and an empty thought, as in the incident (a send finishes the turn only when no other call is made in its round).
-		faux.setResponses([toolUse(fauxToolCall("send_to_user", { message: "Hello!" }), fauxToolCall("list_triggers", {})), fauxAssistantMessage([{ type: "text", text: "\n" }, { type: "thinking", thinking: "" }] as never)] as never);
+		faux.setResponses([toolUse(fauxToolCall("send_to_user", { message: "Hello!" }), fauxToolCall("trigger", { action: "list" })), fauxAssistantMessage([{ type: "text", text: "\n" }, { type: "thinking", thinking: "" }] as never)] as never);
 		expect((await web.call("POST", `/api/sessions/${chat}/messages`, { commandId: "refused-2", text: "hello again" })).status).toBe(202);
 		await waitFor("the turn after the refusal", async () => ((await entries()).some((e) => JSON.stringify(e).includes("Hello!")) && (await busy()) === false ? true : undefined), 60_000);
 		// The blank stop is stored with no content, and the chat shows nothing for it.
@@ -509,7 +509,7 @@ real("the default agent host", () => {
 		expect(await transcript()).toContain("Coding threads are unavailable");
 		expect((await d.stack.admin.query("SELECT 1 FROM pim_forge.forge_threads WHERE owner_id = $1", [ownerId])).rowCount).toBe(0);
 
-		expect((await web.call("POST", "/api/admin/coding-grants", { ownerId, permissions: ["coding:start", "coding:merge"], repositories: ["github.com/acme/*"], pools: ["default"] })).status).toBe(201);
+		expect((await web.call("POST", "/api/admin/coding-grants", { ownerId, permissions: ["coding:start", "coding:steer"], repositories: ["github.com/acme/*"], pools: ["default"] })).status).toBe(201);
 		const forgeDb = d.stack.admin as unknown as ForgeDb;
 		await new ForgeScheduler(forgeDb, new (await import("@pim/v2-forge/store")).ForgeStore(forgeDb), Date.now).upsertPool({ poolId: "default", provider: "local", size: 10 });
 		await say("try again", toolUse(fauxToolCall("coding_start", { task: "Fix the flaky test", repo: REPO })));
@@ -523,43 +523,61 @@ real("the default agent host", () => {
 		expect((await results("coding_start")).at(-1)).toMatch(/no model provider own:nope/);
 		expect((await d.stack.admin.query("SELECT 1 FROM pim_forge.forge_threads WHERE owner_id = $1", [ownerId])).rowCount).toBe(threadsNow);
 		// Its state reads back through the tool, as the owner's.
-		await say("how is it going?", toolUse(fauxToolCall("coding_status", { thread: threads[0].thread_id })));
-		expect((await results("coding_status")).at(-1)).toContain(threads[0].thread_id);
-		// v1's spelling and shapes still work: `thread_id`, a brief that never carries what signs the thread's grants, a list when no thread is named, a diff that says nothing is committed yet.
-		await say("v1 style", toolUse(fauxToolCall("coding_status", { thread_id: threads[0].thread_id }), fauxToolCall("coding_status", {}), fauxToolCall("coding_diff", { thread_id: threads[0].thread_id })));
-		const [one, list] = (await results("coding_status")).slice(-2).map((r) => JSON.parse(r));
-		expect(one).toMatchObject({ thread_id: threads[0].thread_id, repo: REPO, harness: "pi", task: "Fix the flaky test", turn_under_way: false });
-		expect(JSON.stringify(one)).not.toMatch(/gatewayNonce|gateway_nonce|leaseHolder/);
-		expect(list).toEqual({ threads: [expect.objectContaining({ thread_id: threads[0].thread_id, task: "Fix the flaky test", status: expect.any(String) })] });
-		expect((await results("coding_diff")).at(-1)).toMatch(/Nothing committed yet/);
-		// Push, pull request and merge are gated by their own permissions: the grant above holds merge but not push or pull request, and this thread has no workspace to merge from.
+		await say("how is it going?", toolUse(fauxToolCall("coding_inspect", { thread: threads[0].thread_id })));
+		expect((await results("coding_inspect")).at(-1)).toContain(threads[0].thread_id);
+		// v1's spelling and shapes still work: `thread_id`, a brief that never carries what signs the thread's grants, a list when no thread is named, and each view: a diff that says nothing is committed yet, the transcript, a message whole, and the test runs.
+		const inspect = async (args: Record<string, any>) => {
+			await say("inspect", toolUse(fauxToolCall("coding_inspect", args)));
+			return (await results("coding_inspect")).at(-1)!;
+		};
+		const one = await inspect({ thread_id: threads[0].thread_id, view: "status" });
+		const list = await inspect({});
+		const diff = await inspect({ thread_id: threads[0].thread_id, view: "diff" });
+		const page = await inspect({ thread: threads[0].thread_id, view: "transcript", tail: true, limit: 5 });
+		const output = await inspect({ thread: threads[0].thread_id, view: "transcript_output" });
+		const tests = await inspect({ thread: threads[0].thread_id, view: "tests" });
+		const nameless = await inspect({ view: "diff" });
+		expect(JSON.parse(one)).toMatchObject({ thread_id: threads[0].thread_id, repo: REPO, harness: "pi", task: "Fix the flaky test", turn_under_way: false });
+		expect(one).not.toMatch(/gatewayNonce|gateway_nonce|leaseHolder/);
+		expect(JSON.parse(list)).toEqual({ threads: [expect.objectContaining({ thread_id: threads[0].thread_id, task: "Fix the flaky test", status: expect.any(String) })] });
+		expect(diff).toMatch(/Nothing committed yet/);
+		expect(JSON.parse(page)).toHaveProperty("messages");
+		expect(output).toBeDefined();
+		expect(tests).toBe("It hasn't run any tests.");
+		expect(nameless).toMatch(/Say which coding thread/);
+		// Stopping keeps the thread and its work; archiving ends it for good. Both need the right to steer, which this grant holds.
 		const id = threads[0].thread_id;
-		await say("ship it", toolUse(fauxToolCall("coding_push", { thread: id }), fauxToolCall("coding_open_pull_request", { thread: id, title: "Fix" }), fauxToolCall("coding_merge", { thread: id })));
-		expect((await results("coding_push")).at(-1)).toMatch(/coding:push/);
-		expect((await results("coding_open_pull_request")).at(-1)).toMatch(/coding:pr/);
-		expect((await results("coding_merge")).at(-1)).toMatch(/workspace/);
+		await say("stop it", toolUse(fauxToolCall("coding_stop", { thread: id })));
+		expect(JSON.parse((await results("coding_stop")).at(-1)!)).toMatchObject({ thread_id: id });
+		await say("start another", toolUse(fauxToolCall("coding_start", { task: "A second one", repo: REPO })));
+		const second = (await d.stack.admin.query("SELECT thread_id FROM pim_forge.forge_threads WHERE owner_id = $1 AND task = 'A second one'", [ownerId])).rows[0].thread_id as string;
+		await say("end it", toolUse(fauxToolCall("coding_stop", { thread: second, archive: true })));
+		expect(JSON.parse((await results("coding_stop")).at(-1)!)).toEqual({ thread_id: second, status: "archived" });
+		// A person's push, pull request and merge are their own act (the app's routes, gated by their own permissions): an agent has no tool for any of them.
+		const registered = ((await import("../src/agent-tools.ts")).pimExtension({ ownerId: "o_".padEnd(28, "0"), partitionId: "", runtime: {} } as never, []).tools as unknown as { name: string }[]).map((t) => t.name);
+		expect(registered.filter((n) => /^coding_/.test(n)).sort()).toEqual(["coding_inspect", "coding_start", "coding_steer", "coding_stop"]);
 	}, 120_000);
-	it("shows a person the push, pull request or merge Forge needs them to approve, and carries their answer back to it", async () => {
+	it("shows a person the push, pull request or merge Forge needs them to approve when they ask for it in the app, and carries their answer back to it", async () => {
 		const id = (await d.stack.admin.query("SELECT thread_id FROM pim_forge.forge_threads WHERE owner_id = $1", [ownerId])).rows[0].thread_id as string;
 		const granted = await web.call("POST", "/api/admin/coding-grants", { ownerId, permissions: ["coding:pr"], repositories: ["github.com/acme/*"], pools: ["default"] });
 		expect(granted.status).toBe(201);
 		const waiting = async () => (await d.stack.admin.query("SELECT id, tool, public_chat_id, args FROM pim_app.approvals WHERE state = 'waiting' AND args ? 'forgeApproval'")).rows;
 		const forgeState = async () => (await d.stack.admin.query("SELECT status FROM pim_forge.forge_approvals WHERE thread_id = $1 AND action = 'pr'", [id])).rows.map((r) => r.status);
-		// Asking twice files one approval, in the person's list and in the chat that asked.
-		await say("open a pull request", toolUse(fauxToolCall("coding_open_pull_request", { thread: id }), fauxToolCall("coding_open_pull_request", { thread: id })));
-		expect((await results("coding_open_pull_request")).at(-1)).toMatch(/waiting in their approvals/);
+		const ask = () => web.call("POST", `/api/coding/threads/${id}/pull-request`, {});
+		// Asking twice files one approval, in the person's list.
+		expect((await ask()).json).toMatchObject({ status: "approval_required" });
+		expect((await ask()).json).toMatchObject({ status: "approval_required" });
 		const [filed, ...others] = await waiting();
 		expect(others).toEqual([]);
-		expect(filed).toMatchObject({ tool: "coding:pr", public_chat_id: chatId, args: { explicit: true } });
+		expect(filed).toMatchObject({ tool: "coding:pr", args: { explicit: true } });
 		expect((await web.call("GET", "/api/approvals?status=pending")).json.approvals.map((a: { id: string }) => a.id)).toContain(filed.id);
 		expect(await forgeState()).toEqual(["pending"]);
 		// Their yes is Forge's, so the next try goes past the approval; a no is Forge's too.
 		expect((await web.call("POST", `/api/approvals/${filed.id}/approve`, {})).status).toBe(200);
 		expect(await forgeState()).toEqual(["approved"]);
-		await say("try again", toolUse(fauxToolCall("coding_open_pull_request", { thread: id })));
-		expect((await results("coding_open_pull_request")).at(-1)).not.toMatch(/approval/);
+		expect(JSON.stringify((await ask()).json)).not.toMatch(/approval_required/);
 		await d.stack.admin.query("DELETE FROM pim_forge.forge_approvals WHERE thread_id = $1", [id]);
-		await say("and again", toolUse(fauxToolCall("coding_open_pull_request", { thread: id })));
+		expect((await ask()).json).toMatchObject({ status: "approval_required" });
 		const [second] = await waiting();
 		expect(second.id).not.toBe(filed.id);
 		expect((await web.call("POST", `/api/approvals/${second.id}/deny`, {})).status).toBe(200);
@@ -573,9 +591,9 @@ real("the default agent host", () => {
 		expect(access.harnesses.find((h: { id: string }) => h.id === "pi")).toMatchObject({ available: true, runsIn: "sandbox" });
 		// The grant the earlier test made by hand is listed, with its holder.
 		const listed = (await web.call("GET", "/api/admin/coding-grants")).json.grants;
-		expect(listed).toEqual([expect.objectContaining({ ownerId, username: "anibal", permissions: ["coding:start", "coding:merge"], repositories: ["github.com/acme/*"] })]);
+		expect(listed).toEqual([expect.objectContaining({ ownerId, username: "anibal", permissions: ["coding:start", "coding:steer"], repositories: ["github.com/acme/*"] })]);
 		const forgeRows = async () => (await d.stack.admin.query("SELECT permission, source_grant_id FROM pim_forge.forge_grants WHERE subject_id = $1 AND revoked_at IS NULL ORDER BY permission", [ownerId])).rows;
-		expect((await forgeRows()).map((r) => r.permission)).toEqual(["coding:merge", "coding:start"]);
+		expect((await forgeRows()).map((r) => r.permission)).toEqual(["coding:abort", "coding:start", "coding:steer"]);
 
 		// Revoking takes both tables' rows back (this grant has no link to its Forge rows, so they are found by what they say) and stops the agent at once.
 		expect((await web.call("DELETE", `/api/admin/coding-grants/${ownerId}/${listed[0].grantId}`)).status).toBe(200);
@@ -613,27 +631,38 @@ real("the default agent host", () => {
 		// (Saving a skill is a person's to approve; the next test does that. This one reads one back.)
 		await app.agents.createSkill({ kind: "agent", ownerId: ownerId as never, agentId: "pim" }, { name: "haiku", description: "Write haiku", body: "Five, seven, five.", files: { "ref.md": "# ref" } });
 const agentId = (await d.stack.admin.query("SELECT id FROM pim_app.agents WHERE name = 'Poet'")).rows[0].id as string;
-		const trigger = { label: "Hourly", instruction: "check in", source: { kind: "time", schedule: "cron", expression: "0 * * * *", timeZone: "UTC" }, agentId, newChat: true };
+		const trigger = { action: "create", label: "Hourly", instruction: "check in", source: { kind: "time", schedule: "cron", expression: "0 * * * *", timeZone: "UTC" }, agentId, newChat: true };
 		await say(
 			"more",
-			toolUse(fauxToolCall("read_skill", { name: "haiku" }), fauxToolCall("read_skill_file", { name: "haiku", path: "ref.md" }), fauxToolCall("schedule_task", { instruction: "Stretch", label: "Stretching", delay_seconds: 3600 }), fauxToolCall("create_trigger", trigger)),
-			toolUse(fauxToolCall("list_scheduled_tasks", {}), fauxToolCall("list_triggers", {}), fauxToolCall("update_agent", { id: agentId, name: "Bard" })),
+			toolUse(fauxToolCall("read_skill", { name: "haiku" }), fauxToolCall("read_skill_file", { name: "haiku", path: "ref.md" }), fauxToolCall("trigger", { action: "create", instruction: "Stretch", label: "Stretching", source: { kind: "time", delay_seconds: 3600 } }), fauxToolCall("trigger", trigger)),
+			toolUse(fauxToolCall("trigger", { action: "list" }), fauxToolCall("update_agent", { id: agentId, name: "Bard" })),
 		);
 		expect((await results("read_skill")).at(-1)).toContain("Five, seven, five.");
 		expect((await results("read_skill_file")).at(-1)).toBe("# ref");
 		expect((await d.stack.admin.query("SELECT name FROM pim_app.agents WHERE id = $1", [agentId])).rows[0].name).toBe("Bard");
 		expect((await d.stack.admin.query("SELECT lifecycle FROM pim_app.triggers")).rows).toEqual([{ lifecycle: "draft" }]);
 		expect((await d.stack.admin.query("SELECT kind, prompt, label, target FROM pim_app.schedules")).rows).toEqual([{ kind: "delay", prompt: "Stretch", label: "Stretching", target: "same_chat" }]);
-		expect(JSON.parse((await results("schedule_task")).at(-1)!)).toMatchObject({ type: "delayed", label: "Stretching", instruction: "Stretch", newChat: false });
-		expect(JSON.parse((await results("list_scheduled_tasks")).at(-1)!)).toMatchObject([{ type: "delayed", label: "Stretching", instruction: "Stretch" }]);
-		// A time trigger that is on is a scheduled task too, whoever made it: listed beside what schedule_task made, and cancelled with it.
-		await say("a daily one", toolUse(fauxToolCall("create_trigger", { ...trigger, label: "Daily", source: { kind: "time", schedule: "cron", expression: "30 7 * * *", timeZone: "Europe/Lisbon" }, enabled: true })));
+		const results2 = (await results("trigger")).map((r) => JSON.parse(r));
+		expect(results2.find((r) => r.type === "delayed")).toMatchObject({ type: "delayed", label: "Stretching", instruction: "Stretch", newChat: false });
+		// A listing holds the triggers, and beside them what was scheduled with delay_seconds, at or cron.
+		expect(results2.find((r) => r.triggers)).toMatchObject({ triggers: [{ label: "Hourly", lifecycle: "draft" }], scheduled: [{ type: "delayed", label: "Stretching", instruction: "Stretch" }], nextCursor: null });
+		// A time trigger that is on is listed with its next firing, and deleted by its id like a scheduled task is by its own.
+		await say("a daily one", toolUse(fauxToolCall("trigger", { ...trigger, label: "Daily", source: { kind: "time", schedule: "cron", expression: "30 7 * * *", timeZone: "Europe/Lisbon" }, enabled: true })));
 		const daily = (await d.stack.admin.query("SELECT id FROM pim_app.triggers WHERE title = 'Daily' AND lifecycle = 'enabled'")).rows[0].id as string;
-		await say("what is scheduled", toolUse(fauxToolCall("list_scheduled_tasks", {})));
-		expect(JSON.parse((await results("list_scheduled_tasks")).at(-1)!)).toMatchObject([{ type: "delayed", label: "Stretching" }, { id: daily, type: "cron", cron: "30 7 * * *", timeZone: "Europe/Lisbon", label: "Daily", instruction: "check in", newChat: true, agent: agentId, next: expect.any(String) }]);
-		await say("drop it", toolUse(fauxToolCall("cancel_scheduled_task", { id: daily })));
-		expect((await results("cancel_scheduled_task")).at(-1)).toBe("Cancelled.");
+		await say("what is scheduled", toolUse(fauxToolCall("trigger", { action: "list", sourceKind: "time", lifecycle: "enabled" })));
+		expect(JSON.parse((await results("trigger")).at(-1)!)).toMatchObject({ triggers: [{ id: daily, label: "Daily", instruction: "check in", agentId, schedule: { nextFiringAt: expect.any(Number) } }], scheduled: [{ label: "Stretching" }] });
+		const task = (await d.stack.admin.query("SELECT id FROM pim_app.schedules")).rows[0].id as string;
+		await say("look at it", toolUse(fauxToolCall("trigger", { action: "get", id: task })));
+		await say("pause it", toolUse(fauxToolCall("trigger", { action: "pause", id: task })));
+		const [got, paused] = (await results("trigger")).slice(-2).map((r) => JSON.parse(r));
+		expect(got).toMatchObject({ scheduled: { id: task, type: "delayed" } });
+		expect(paused).toMatchObject({ error: { code: "not_a_trigger" } });
+		for (const id of [daily, task, task]) await say("drop it", toolUse(fauxToolCall("trigger", { action: "delete", id })));
+		const [gone, goneTask, again] = (await results("trigger")).slice(-3).map((r) => JSON.parse(r));
+		expect([gone, goneTask]).toEqual([{ deleted: true, id: daily }, { deleted: true, id: task }]);
+		expect(again).toMatchObject({ error: { code: "not_found" } });
 		expect((await d.stack.admin.query("SELECT lifecycle FROM pim_app.triggers WHERE id = $1", [daily])).rows).toEqual([{ lifecycle: "deleted" }]);
+		expect((await d.stack.admin.query("SELECT 1 FROM pim_app.schedules")).rowCount).toBe(0);
 	}, 120_000);
 
 	/** A turn in a chat of its own that ends with a plain send. */
@@ -657,10 +686,17 @@ const agentId = (await d.stack.admin.query("SELECT id FROM pim_app.agents WHERE 
 	const message = (chat: string, text: string) => web.call("POST", `/api/sessions/${chat}/messages`, { commandId: `m-${chat}-${++n}`, text });
 	const updatesIn = async (chat: string) => (await d.stack.admin.query("SELECT payload->>'text' AS text FROM pim_app.accepted_commands WHERE public_chat_id = $1 AND payload->>'text' LIKE '[Task update]%' ORDER BY accepted_at", [chat])).rows.map((r) => r.text as string);
 	/** What each agent does, told by who it is and what it was just given: the requester hands tasks out, a task agent answers, and the requester relays what comes back. */
-	const team = (calls: ReturnType<typeof fauxToolCall>[], options: { wait?: boolean } = {}) => (ctx: { messages: { role: string; toolName?: string }[] }) => {
+	const offered: { worker?: string[]; requester?: string[] } = {};
+	const team = (calls: ReturnType<typeof fauxToolCall>[], options: { wait?: boolean } = {}) => (ctx: { messages: { role: string; toolName?: string; toolsAdded?: { name: string }[]; toolsRemoved?: { name: string }[] }[] }) => {
 		const asked = JSON.stringify(ctx.messages);
 		const last = ctx.messages.at(-1);
 		const given = /\[From Pim\]\\n(Find A|Write B|Find C)/.exec(asked)?.[1];
+		// The tools a request offers are what its system messages add and remove, in order.
+		const tools = new Set<string>();
+		for (const m of ctx.messages) if (m.role === "system") for (const t of m.toolsAdded ?? []) tools.add(t.name);
+		for (const m of ctx.messages) if (m.role === "system") for (const t of m.toolsRemoved ?? []) tools.delete(t.name);
+		if (given) offered.worker = [...tools];
+		else offered.requester ??= [...tools];
 		if (given) return toolUse(fauxToolCall("send_to_user", { message: { "Find A": "A found", "Write B": "B written", "Find C": "C found" }[given]! }));
 		if (last?.toolName === "delegate") return toolUse(fauxToolCall("send_to_user", { message: options.wait ? "Waited" : "On it" }));
 		if (JSON.stringify(last).includes("[Task update]")) return toolUse(fauxToolCall("send_to_user", { message: "Relayed both" }));
@@ -691,6 +727,10 @@ const agentId = (await d.stack.admin.query("SELECT id FROM pim_app.agents WHERE 
 		// A task agent is told who handed it its task, and its first message is from them.
 		const taskChat = (await d.stack.admin.query("SELECT task_chat FROM pim_app.tasks WHERE started_by = $1 ORDER BY position", [chat])).rows[0].task_chat as string;
 		expect(await said(taskChat)).toContain("[From Pim]\\nFind A");
+		// The agent that hands work out is offered the tools to; the agent handed a task is not offered triggers, delegation or agent management, but keeps the rest.
+		expect(offered.requester).toEqual(expect.arrayContaining(["trigger", "delegate", "create_agent", "update_agent", "send_to_user", "read_chat"]));
+		expect(offered.worker).toEqual(expect.arrayContaining(["send_to_user", "read_chat", "note", "fetch_url"]));
+		for (const hidden of ["trigger", "trigger_computer_grant", "delegate", "archive_task_chats", "create_agent", "update_agent"]) expect(offered.worker).not.toContain(hidden);
 	}, 180_000);
 
 	it("waits for the answers of the tasks it hands out when asked to, and gets them as the call's result instead of an update", async () => {
@@ -846,13 +886,13 @@ const agentId = (await d.stack.admin.query("SELECT id FROM pim_app.agents WHERE 
 		await say(
 			"schedule things",
 			toolUse(
-				fauxToolCall("schedule_task", { instruction: "Too early", at: "2020-01-01T00:00:00Z" }),
-				fauxToolCall("schedule_task", { instruction: "Both", delay_seconds: 5, cron: "0 * * * *" }),
-				fauxToolCall("schedule_task", { instruction: "Weekly report", label: "Report", cron: "0 9 * * 1", agent: writer }),
-				fauxToolCall("schedule_task", { instruction: "Nope", cron: "0 9 * * 1", agent: "a_missing" }),
+				fauxToolCall("trigger", { action: "create", instruction: "Too early", source: { kind: "time", at: "2020-01-01T00:00:00Z" } }),
+				fauxToolCall("trigger", { action: "create", instruction: "Both", source: { kind: "time", delay_seconds: 5, cron: "0 * * * *" } }),
+				fauxToolCall("trigger", { action: "create", instruction: "Weekly report", label: "Report", source: { kind: "time", cron: "0 9 * * 1" }, agentId: writer }),
+				fauxToolCall("trigger", { action: "create", instruction: "Nope", source: { kind: "time", cron: "0 9 * * 1" }, agentId: "a_missing" }),
 			),
 		);
-		const made = (await results("schedule_task")).slice(-4);
+		const made = (await results("trigger")).slice(-4);
 		const [past, both, report, missing] = ["is in the past", "Give exactly one", '"label": "Report"', "No agent has the id"].map((needle) => made.find((r) => r.includes(needle)));
 		expect(past).toBe("2020-01-01T00:00:00Z is in the past.");
 		expect(both).toBe("Give exactly one of delay_seconds, at, or cron.");
@@ -882,13 +922,13 @@ const agentId = (await d.stack.admin.query("SELECT id FROM pim_app.agents WHERE 
 		expect((await web.call("PUT", `/api/sessions/${room}/room`, { mode: "bad" })).status).toBe(400);
 		expect((await web.call("PUT", `/api/sessions/${room}/room`, { mode: "mentions" })).json.room).toMatchObject({ mode: "mentions" });
 		// Ada is mentioned, wakes in her seat, reads what was said before she joined, and answers by mentioning the host, which wakes in its turn.
-		faux.setResponses([toolUse(fauxToolCall("chat_history", {})), toolUse(fauxToolCall("read_chat", { id: room })), toolUse(fauxToolCall("send_to_user", { message: "@Pim over to you" })), toolUse(fauxToolCall("send_to_user", { message: "thanks Ada" }))] as never);
+		faux.setResponses([toolUse(fauxToolCall("read_chat", {})), toolUse(fauxToolCall("read_chat", { id: room })), toolUse(fauxToolCall("send_to_user", { message: "@Pim over to you" })), toolUse(fauxToolCall("send_to_user", { message: "thanks Ada" }))] as never);
 		expect((await message(room, "@Ada what came before?")).status).toBe(202);
-		await waitFor("Ada's reading", async () => ((await resultsIn(seat, "read_chat")).length === 1 ? true : undefined), 90_000);
-		expect((await resultsIn(seat, "chat_history"))[0]).toContain("The person: first words");
-		expect((await resultsIn(seat, "read_chat"))[0]).toMatch(/^Chat "Room":\n\n/);
+		await waitFor("Ada's reading", async () => ((await resultsIn(seat, "read_chat")).length === 2 ? true : undefined), 90_000);
+		expect((await resultsIn(seat, "read_chat"))[0]).toContain("The person: first words");
+		expect((await resultsIn(seat, "read_chat"))[1]).toMatch(/^Chat "Room":\n\n/);
 		await waitFor("the host to answer Ada", async () => ((await resultsIn(room, "send_to_user")).length === 2 ? true : undefined), 90_000);
-		expect(await said(room)).toContain("[From Ada]\\n@Pim over to you");
+		await waitFor("Ada's post in the room", async () => ((await said(room)).includes("[From Ada]\\n@Pim over to you") ? true : undefined), 30_000);
 		expect((await web.call("PUT", `/api/sessions/${chat0}/room`, { mode: "open" })).status).toBe(404);
 		// Only the host takes agents out; an agent that is not there is said not to be.
 		faux.setResponses([toolUse(fauxToolCall("remove_from_chat", { agents: ["@Ada", "Nobody"] })), toolUse(fauxToolCall("send_to_user", { message: "removed" }))] as never);
@@ -1153,47 +1193,58 @@ const agentId = (await d.stack.admin.query("SELECT id FROM pim_app.agents WHERE 
 		const turn = async (chat: string, ...calls: ReturnType<typeof fauxToolCall>[]) => (await begin(chat, ...calls))();
 		const last = async (chat: string, tool: string) => (await resultsIn(chat, tool)).at(-1)!;
 		const cron = { kind: "time", schedule: "cron", expression: "0 9 * * *", timeZone: "UTC" };
+		/** One turn of `trigger` calls, and what each answered. */
+		const triggers = async (chat: string, ...calls: Record<string, any>[]) => {
+			for (const c of calls) await turn(chat, fauxToolCall("trigger", c));
+			return (await resultsIn(chat, "trigger")).slice(-calls.length);
+		};
 
 		// What the model gives is a label, an instruction and a source; Pim fills in the rest: the owner, the chat it belongs to, where its work goes.
-		await turn(annChat, fauxToolCall("create_trigger", { label: "Morning", instruction: "Say good morning", source: cron }));
-		const made = JSON.parse(await last(annChat, "create_trigger"));
+		const [madeText] = await triggers(annChat, { action: "create", label: "Morning", instruction: "Say good morning", source: cron });
+		const made = JSON.parse(madeText!);
 		expect(made.trigger).toMatchObject({ lifecycle: "draft", label: "Morning", agentId: ann, origin: { type: "chat", chatId: annChat }, destination: { type: "existing_chat", chatId: annChat }, capability: { status: "available" } });
 		const id = made.trigger.id as string;
 		// Another agent's triggers are not its to see or change, and an agent cannot make one for another.
-		await turn(bobChat, fauxToolCall("get_trigger", { id }), fauxToolCall("pause_trigger", { id }), fauxToolCall("delete_trigger", { id }), fauxToolCall("list_triggers", {}), fauxToolCall("create_trigger", { label: "Not mine", instruction: "x", source: cron, agentId: ann }));
-		expect(await resultsIn(bobChat, "get_trigger")).toEqual([expect.stringContaining('"code":"not_found"')]);
-		expect(JSON.parse(await last(bobChat, "list_triggers"))).toEqual({ triggers: [], nextCursor: null });
-		expect(await last(bobChat, "create_trigger")).toContain("Only the majordomo makes triggers for other agents");
+		const [seen, paused, deleted, listed, notMine] = await triggers(bobChat, { action: "get", id }, { action: "pause", id }, { action: "delete", id }, { action: "list" }, { action: "create", label: "Not mine", instruction: "x", source: cron, agentId: ann });
+		for (const refused of [seen, paused, deleted]) expect(refused).toContain('"code":"not_found"');
+		expect(JSON.parse(listed!)).toEqual({ triggers: [], nextCursor: null });
+		expect(notMine).toContain("Only the majordomo makes triggers for other agents");
 		expect((await d.stack.admin.query("SELECT count(*)::int AS n FROM pim_app.triggers WHERE id = $1 AND lifecycle = 'draft'", [id])).rows[0].n).toBe(1);
 
-		// A replayed create makes nothing new; an edit made on a stale revision is refused with the current one.
-		await turn(annChat, fauxToolCall("update_trigger", { id, expectedRevision: made.trigger.revision - 1, label: "Stale" }), fauxToolCall("update_trigger", { id, expectedRevision: made.trigger.revision, label: "Morning!", newChat: true }));
-		const [stale, updated] = await resultsIn(annChat, "update_trigger");
+		// A change needs the revision it is for: a stale or missing one is refused with the current one, and the right one is applied.
+		const [stale, missing, updated] = await triggers(annChat, { action: "update", id, expectedRevision: made.trigger.revision - 1, label: "Stale" }, { action: "update", id, label: "No revision" }, { action: "update", id, expectedRevision: made.trigger.revision, label: "Morning!", newChat: true });
 		expect(JSON.parse(stale!).error).toMatchObject({ status: 409, code: "revision_conflict" });
+		expect(JSON.parse(missing!).error).toMatchObject({ code: "revision_required" });
 		expect(JSON.parse(updated!).trigger).toMatchObject({ label: "Morning!", destination: { type: "new_chat" } });
-		await turn(annChat, fauxToolCall("resume_trigger", { id, expectedRevision: JSON.parse(updated!).trigger.revision }));
-		expect(JSON.parse(await last(annChat, "resume_trigger")).trigger.lifecycle).toBe("enabled");
+		const [resumed, runs, got] = await triggers(annChat, { action: "resume", id, expectedRevision: JSON.parse(updated!).trigger.revision }, { action: "runs", id }, { action: "get", id });
+		expect(JSON.parse(resumed!).trigger.lifecycle).toBe("enabled");
+		expect(JSON.parse(runs!)).toEqual({ runs: [], nextCursor: null });
+		expect(JSON.parse(got!)).toMatchObject({ trigger: { id, lifecycle: "enabled" }, runs: [] });
+		// A dry run changes nothing: it says when a trigger would fire.
+		const [dry] = await triggers(annChat, { action: "test", trigger: { label: "Dry", instruction: "x", source: cron }, count: 2 });
+		expect(JSON.parse(dry!)).toMatchObject({ dryRun: true, valid: true, sourceKind: "time" });
+		expect((await d.stack.admin.query("SELECT count(*)::int AS n FROM pim_app.triggers WHERE title = 'Dry'")).rows[0].n).toBe(0);
 
 		// A source on the computer runs only as the person's own user: with no computer paired it is a draft that cannot start, and once one is, only their approval grants it.
 		const stream = { kind: "stream", command: "tail -f /var/log/syslog" };
-		await turn(annChat, fauxToolCall("list_trigger_sources", {}), fauxToolCall("create_trigger", { label: "Log", instruction: "Read the line", source: stream, newChat: true, enabled: true }));
-		expect(JSON.parse(await last(annChat, "list_trigger_sources")).sources.find((x: { kind: string }) => x.kind === "stream")).toMatchObject({ status: "draft_only", delivers: false, reason: "computer_not_paired" });
-		expect(await last(annChat, "create_trigger")).toContain("source_not_wired");
+		const [sources, streamed] = await triggers(annChat, { action: "sources" }, { action: "create", label: "Log", instruction: "Read the line", source: stream, newChat: true, enabled: true });
+		expect(JSON.parse(sources!).sources.find((x: { kind: string }) => x.kind === "stream")).toMatchObject({ status: "draft_only", delivers: false, reason: "computer_not_paired" });
+		expect(streamed).toContain("source_not_wired");
 		const logId = (await d.stack.admin.query("SELECT id FROM pim_app.triggers WHERE title = 'Log'")).rows[0].id as string;
 		expect((await web.call("POST", "/api/computer", {})).status).toBe(201);
-		const granted = await begin(annChat, fauxToolCall("list_trigger_sources", {}), fauxToolCall("trigger_computer_grant", { triggerId: logId }));
+		const granted = await begin(annChat, fauxToolCall("trigger", { action: "sources" }), fauxToolCall("trigger_computer_grant", { triggerId: logId }));
 		const approval = await waitFor("the grant to wait for the person", async () => (await d.stack.admin.query("SELECT id, args FROM pim_app.approvals WHERE tool = 'trigger:computer_grant' AND state = 'waiting'")).rows[0], 60_000);
 		expect(approval.args.summary).toContain("tail -f /var/log/syslog");
 		expect(approval.args.explicit).toBe(true);
 		expect((await d.stack.admin.query("SELECT count(*)::int AS n FROM pim_app.trigger_computer_grants WHERE trigger_id = $1", [logId])).rows[0].n).toBe(0);
 		expect((await web.call("POST", `/api/approvals/${approval.id}/decision`, { approve: true })).status).toBe(200);
 		await granted();
-		expect(JSON.parse((await resultsIn(annChat, "list_trigger_sources")).at(-1)!).sources.find((x: { kind: string }) => x.kind === "stream")).toMatchObject({ status: "available", delivers: true });
+		expect(JSON.parse((await resultsIn(annChat, "trigger")).at(-1)!).sources.find((x: { kind: string }) => x.kind === "stream")).toMatchObject({ status: "available", delivers: true });
 		expect(await last(annChat, "trigger_computer_grant")).toContain("Granted");
 		const view = (await web.call("GET", `/api/triggers/${logId}`)).json;
 		expect(view.grant.state).toBe("current");
-		await turn(annChat, fauxToolCall("resume_trigger", { id: logId, expectedRevision: view.revision }));
-		expect(JSON.parse(await last(annChat, "resume_trigger")).trigger).toMatchObject({ lifecycle: "enabled", grant: { state: "current" } });
+		const [grantResumed] = await triggers(annChat, { action: "resume", id: logId, expectedRevision: view.revision });
+		expect(JSON.parse(grantResumed!).trigger).toMatchObject({ lifecycle: "enabled", grant: { state: "current" } });
 
 		// A retried create with the same Idempotency-Key gives the trigger the first one made; the same key for another request is refused.
 		const body = { agentId: ann, label: "Once", instruction: "x", destination: { type: "new_chat" }, source: cron };

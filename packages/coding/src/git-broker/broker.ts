@@ -31,7 +31,7 @@ import { GITHUB_INSTANCE, type GitCredential, type GitProvider, type ProviderIns
  * one is moved only forward, which GitHub checks: the pack goes to a staging
  * ref, GitHub's API moves the branch with `force: false`, and the staging
  * ref is deleted. Pim pushes to the repository's default branch, `main` or
- * `master` in most, only for a merge (`toDefault`, for a merge by `coding_merge`),
+ * `master` in most, only for a merge (`toDefault`, the merge Pim itself makes),
  * which moves the branch only forward. Any other push is to a branch inside the policy's prefix
  * (`pim/`).
  */
@@ -103,7 +103,7 @@ export function checkBranch(branch: string, policy: Pick<BrokerPolicy, "branchPr
 	checkBranchName(branch);
 	const lower = branch.toLowerCase();
 	if ((PROTECTED_BRANCHES as readonly string[]).includes(lower) || (defaultBranch !== null && lower === defaultBranch.toLowerCase())) {
-		throw new GitBrokerError(403, `Pim never pushes to ${branch} except to merge a coding thread into it (coding_merge): push to a branch of its own and open a pull request`);
+		throw new GitBrokerError(403, `${branch} is never pushed to: push your own pim/… branch and open a pull request; a person merges it`);
 	}
 	const prefix = policy.branchPrefix;
 	if (prefix !== null && (!branch.startsWith(prefix) || branch.length === prefix.length)) {

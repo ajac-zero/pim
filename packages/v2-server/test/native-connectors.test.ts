@@ -347,14 +347,14 @@ real("native and OAuth connectors", () => {
 
 	it("watches a server's events: subscribes with its own secret, takes each signed delivery once, tells the chat, renews the grant and stops", async () => {
 		const mcpId = (await web.call("GET", "/api/mcp")).json.servers.find((x: { url: string }) => x.url === `${standOrigin}/mcp`).id as string;
-		faux.setResponses([toolUse(fauxToolCall("list_connector_events", {})), toolUse(fauxToolCall("watch_connector_event", { connector: mcpId, event: "ticket.created", arguments: { project: "P" }, instruction: "Summarise the ticket" })), toolUse(fauxToolCall("watch_connector_event", { connector: mcpId, event: "nothing", instruction: "x" })), toolUse(fauxToolCall("list_watches", {})), toolUse(fauxToolCall("send_to_user", { message: `done ${++n}` })), fauxAssistantMessage(`ended ${n}`)] as never);
+		faux.setResponses([toolUse(fauxToolCall("trigger", { action: "sources", kind: "connector_event" })), toolUse(fauxToolCall("trigger", { action: "create", source: { kind: "connector_event", connectorId: mcpId, event: "ticket.created", arguments: { project: "P" } }, instruction: "Summarise the ticket" })), toolUse(fauxToolCall("trigger", { action: "create", source: { kind: "connector_event", connectorId: mcpId, event: "nothing" }, instruction: "x" })), toolUse(fauxToolCall("trigger", { action: "list", sourceKind: "connector_event" })), toolUse(fauxToolCall("send_to_user", { message: `done ${++n}` })), fauxAssistantMessage(`ended ${n}`)] as never);
 		expect((await web.call("POST", `/api/sessions/${chatId}/messages`, { commandId: `m-${n}`, text: "watch tickets" })).status).toBe(202);
 		await waitFor("the watch turn", async () => (sentAndAnswered(await transcript(), `done ${n}`) ? true : undefined), 60_000);
-		const listed = (await results("list_connector_events"))[0]!;
+		const [listed, watching, unknown, watches] = (await results("trigger")) as [string, string, string, string];
 		expect(listed).toContain("ticket.created");
 		expect(listed).not.toContain("polled.only");
-		expect((await results("watch_connector_event"))[0]).toContain('Watching Lookup for "ticket.created"');
-		expect((await results("watch_connector_event"))[1]).toContain("has no event named nothing");
+		expect(watching).toContain('Watching Lookup for "ticket.created"');
+		expect(unknown).toContain("has no event named nothing");
 		expect(stand.subscribed).toHaveLength(1);
 		const sub = stand.subscribed[0]!;
 		expect(sub).toMatchObject({ name: "ticket.created", arguments: { project: "P" } });
@@ -364,8 +364,8 @@ real("native and OAuth connectors", () => {
 		const stored = (await d.stack.admin.query("SELECT secret, status, provider_id FROM pim_app.watch_subscriptions")).rows[0];
 		expect(stored).toMatchObject({ status: "active", provider_id: "sub-1" });
 		expect(stored.secret).not.toContain(sub.delivery.secret);
-		const listing = JSON.parse((await results("list_watches"))[0]!);
-		expect(listing).toEqual([expect.objectContaining({ app: "Lookup", event: "ticket.created", instruction: "Summarise the ticket", status: "active", session: chatId })]);
+		const listing = JSON.parse(watches).triggers;
+		expect(listing).toEqual([expect.objectContaining({ instruction: "Summarise the ticket", lifecycle: "enabled", origin: { type: "chat", chatId }, watch: expect.objectContaining({ service: "Lookup", status: "active" }) })]);
 		const watchId = listing[0].id as string;
 
 		// A server delivers: Standard Webhooks, signed with the watch's secret, naming its subscription.
@@ -401,11 +401,11 @@ real("native and OAuth connectors", () => {
 		expect((await d.stack.admin.query("SELECT status, last_error FROM pim_app.watch_subscriptions")).rows[0]).toMatchObject({ status: "ended", last_error: expect.stringContaining("-32012") });
 		expect((await deliver({ ...event, eventId: "evt-2" })).status).toBe(401);
 
-		faux.setResponses([toolUse(fauxToolCall("stop_watch", { id: watchId })), toolUse(fauxToolCall("stop_watch", { id: watchId })), toolUse(fauxToolCall("send_to_user", { message: `done ${++n}` })), fauxAssistantMessage(`ended ${n}`)] as never);
+		faux.setResponses([toolUse(fauxToolCall("trigger", { action: "delete", id: watchId })), toolUse(fauxToolCall("trigger", { action: "delete", id: watchId })), toolUse(fauxToolCall("send_to_user", { message: `done ${++n}` })), fauxAssistantMessage(`ended ${n}`)] as never);
 		expect((await web.call("POST", `/api/sessions/${chatId}/messages`, { commandId: `m-${n}`, text: "stop watching" })).status).toBe(202);
 		await waitFor("the stop turn", async () => (sentAndAnswered(await transcript(), `done ${n}`) ? true : undefined), 60_000);
-		expect((await results("stop_watch"))[0]).toBe("Stopped.");
-		expect((await results("stop_watch"))[1]).toContain("No watch with id");
+		expect(JSON.parse((await results("trigger"))[4]!)).toEqual({ deleted: true, id: watchId });
+		expect((await results("trigger"))[5]).toContain('"code":"not_found"');
 		expect(stand.unsubscribed).toEqual([{ name: "ticket.created", arguments: { project: "P" }, delivery: { url: sub.delivery.url } }]);
 		expect((await d.stack.admin.query("SELECT count(*)::int AS n FROM pim_app.watch_subscriptions")).rows[0].n).toBe(0);
 		expect((await d.stack.admin.query("SELECT lifecycle FROM pim_app.triggers WHERE id = $1", [watchId])).rows[0]?.lifecycle ?? "deleted").toBe("deleted");
@@ -418,7 +418,7 @@ real("native and OAuth connectors", () => {
 		const rows = async () => (await d.stack.admin.query("SELECT trigger_id, status FROM pim_app.watch_subscriptions")).rows;
 		const subscribedBefore = stand.subscribed.length;
 		const unsubscribedBefore = stand.unsubscribed.length;
-		// Made on the Triggers screen, not by watch_connector_event: nothing subscribes it until the maintenance pass matches subscriptions to triggers.
+		// Made on the Triggers screen, not as a watch: nothing subscribes it until the maintenance pass matches subscriptions to triggers.
 		const made = await web.call("POST", "/api/triggers", { agentId: agent, label: "Tickets", instruction: "Look at the ticket", destination: { type: "new_chat" }, source: { kind: "connector_event", connectorId: mcpId, event: "ticket.created", arguments: { project: "Q" } }, enabled: true });
 		expect(made.status, JSON.stringify(made.json)).toBe(201);
 		const id = made.json.id as string;

@@ -153,7 +153,7 @@ export async function renewDue(deps: WatchDeps, pool: Pool): Promise<number> {
 /**
  * Makes the subscriptions at the servers match the triggers, whichever way a trigger was made or changed: an enabled connector-event trigger has one, and one whose trigger is paused,
  * ended, deleted (by itself or with its chat or its connector) or changed to another event or arguments has none, so nothing is renewed for ever for a trigger that is gone. A trigger that
- * `watch_connector_event` made has its subscription at once; this is for the rest (the Triggers screen, `create_trigger`, `resume_trigger`) and for what a failure left half done.
+ * a `trigger` call with a connector event made has its subscription at once; this is for the rest (the Triggers screen, `resume`) and for what a failure left half done.
  */
 export async function reconcileWatches(deps: WatchDeps, pool: Pool): Promise<number> {
 	const client = await pool.connect();

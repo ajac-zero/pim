@@ -28,7 +28,7 @@ import { acquireRemote, type RelayBus } from "@pim/v2-app/relay";
 import { openString, type KeyringCrypto } from "@pim/v2-app/crypto";
 import type { Db as RuntimeDb } from "@pim/v2-runtime/db";
 import type { PartitionContext, RunnerOptions } from "@pim/v2-runtime/runner";
-import { pimExtension, timeZoneOf, type ToolDeps } from "./agent-tools.ts";
+import { chatToolLimits, pimExtension, timeZoneOf, type ToolDeps } from "./agent-tools.ts";
 import { BUILTIN_SKILLS } from "./builtin-skills.ts";
 import { CodexImagesClient } from "./codex-images.ts";
 import { imageEndpoints } from "./image-tools.ts";
@@ -695,7 +695,7 @@ export function createAgentHost(options: AgentHostOptions) {
 				if (!room) return undefined;
 				const names = (room.role === "host" ? room.members : [room.host ?? { id: "", name: "Pim" }, ...room.members]).map((m) => m.name);
 				const turns = room.mode === "open" ? "Everything the person says wakes every agent in the room; each decides whether it has something to add." : "The host answers what the person says to no one in particular; an agent answers when it is mentioned as @Name.";
-				return `This is a group chat${room.role === "seat" ? " and you are one of its agents, not its host" : " and you are its host"}. ${room.role === "host" ? "Also in it" : "Others in it"}: ${names.join(", ") || "no one else yet"}. ${turns} What another agent says reaches you as a message that starts "[From Name]"; what you send with send_to_user is shown in the chat as yours, under your name. Mention an agent by @Name to bring its attention; do not repeat what others have said. ${room.role === "host" ? "When an agent you or the person brought in has done what it was here for, take it out of the chat with `remove_from_chat`: it hears nothing more, and can be brought in again later." : "You joined knowing nothing of what was said here before; when what you are asked refers to it, read it with `chat_history`."}`;
+				return `This is a group chat${room.role === "seat" ? " and you are one of its agents, not its host" : " and you are its host"}. ${room.role === "host" ? "Also in it" : "Others in it"}: ${names.join(", ") || "no one else yet"}. ${turns} What another agent says reaches you as a message that starts "[From Name]"; what you send with send_to_user is shown in the chat as yours, under your name. Mention an agent by @Name to bring its attention; do not repeat what others have said. ${room.role === "host" ? "When an agent you or the person brought in has done what it was here for, take it out of the chat with `remove_from_chat`: it hears nothing more, and can be brought in again later." : "You joined knowing nothing of what was said here before; when what you are asked refers to it, read it with `read_chat` and no id."}`;
 			}),
 			section("delegates", async (input) => {
 				if (await visitOf(input.conversationId)) return undefined;
@@ -750,7 +750,8 @@ export function createAgentHost(options: AgentHostOptions) {
 		const own = c?.agent ? [asModelRef(c.chat_model), asModelRef(c.agent.config.model), ...((c.agent.config.fallbacks ?? []) as unknown[]).map(asModelRef)] : [];
 		const { explicit, ...model } = await choose(ownerId, [...(c?.agent ? [] : [asModelRef(c?.chat_model)]), ...own, await chosenModel(ownerId), ...(c?.fallbacks ?? []).map(asModelRef)]);
 		// Every chat thinks at a low effort, as in v1: a reasoning model reasons a little before it answers, and the harness's own default is not to.
-		return { model, thinkingLevel: "low", explicit };
+		const hideTools = options.app && chat ? (await chatToolLimits(options.app, ownerId, chat).catch(() => undefined))?.hidden : undefined;
+		return { model, thinkingLevel: "low", explicit, ...(hideTools && hideTools.length > 0 ? { hideTools } : {}) };
 	};
 
 	/** One model call as an owner's own models, for what is not a chat turn (an approval review): the same catalog, failover and ledger, no tools. */

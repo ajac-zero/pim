@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { gitBroker, pushCommands } from "../src/http/git-broker";
+import { FORGE_INSTRUCTIONS } from "../src/cli-port";
+import { PI_CODING_PROMPT } from "../src/pi-port";
 import { ScriptedPort, startReq, ada, stack } from "./stack";
 import { GitHttpHost } from "./git-http-backend";
 import { serve } from "./serve";
@@ -89,6 +91,79 @@ describe("git broker over smart HTTP", () => {
 		expect((await git(w, push, "push", "origin", `:refs/heads/${t.branch}`)).status).not.toBe(0);
 		expect(hostRef("main")).toBe(mainBefore);
 		expect(hostRef(`refs/heads/${t.branch}`)).toBeTruthy();
+	});
+
+	/** The thread's own branch pushed through the broker, as the agent in its workspace does. */
+	const pushed = async (t: Awaited<ReturnType<typeof thread>>, push: string) => {
+		const dir = sandbox();
+		expect((await git(dir, push, "clone", url(), "w")).status).toBe(0);
+		const w = join(dir, "w");
+		await git(w, null, "checkout", "-b", t.branch!);
+		execFileSync("sh", ["-c", "echo pr > pr.txt"], { cwd: w });
+		await git(w, null, "add", ".");
+		await git(w, null, "commit", "-m", "work");
+		expect((await git(w, push, "push", "origin", `HEAD:refs/heads/${t.branch}`)).status).toBe(0);
+	};
+	const openPr = (token: string, body?: unknown, repo = "acme/app") => fetch(`${broker.url}/api/coding/git/${repo}.git/pull-request`, { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
+
+	it("opens the pull request of the token's own thread and branch, and nothing the body says changes where it goes", async () => {
+		const t = await thread();
+		const push = s.credentials.gitToken(t, { repo: "acme/app", scope: "push" });
+		const read = s.credentials.gitToken(t, { repo: "acme/app", scope: "read" });
+		// Before the branch is on the host there is nothing to open.
+		const early = await openPr(push, { title: "Early" });
+		expect(early.status).toBe(409);
+		expect(((await early.json()) as { code: string }).code).toBe("not_pushed");
+		await pushed(t, push);
+		const before = s.git.pullRequests.length;
+		const res = await openPr(push, { title: "  Add the thing ", body: "Changed a; ran the tests.", head: "main", base: "release", branch: "pim/other", repo: "evil/x" });
+		expect(res.status).toBe(200);
+		const answer = (await res.json()) as { url: string; number: number; title: string; base: string; head: string };
+		expect(answer).toMatchObject({ title: "Add the thing", base: "main", head: t.branch });
+		expect(s.git.pullRequests.length).toBe(before + 1);
+		expect(s.git.pullRequests.at(-1)).toMatchObject({ repo: t.repo, branch: t.branch, base: "main", title: "Add the thing", body: "Changed a; ran the tests." });
+		expect((await s.store.get(t.threadId))!.pullRequest).toMatchObject({ url: answer.url, number: answer.number });
+		// Without a body it is the task's, and with no body at all it still works; nothing was merged.
+		expect((await openPr(push)).status).toBe(200);
+		expect((await openPr(push, { title: 5 })).status).toBe(400);
+		// A read-only token, another repository's token and a thread that no longer lives are refused.
+		expect((await openPr(read, {})).status).toBe(403);
+		expect((await openPr(s.credentials.gitToken(t, { repo: "acme/other", scope: "push" }), {})).status).toBe(403);
+		expect((await fetch(`${broker.url}/api/coding/git/acme/app.git/pull-request`, { method: "POST" })).status).toBe(401);
+		const count = s.git.pullRequests.length;
+		await s.forge.archive(ada, t.threadId);
+		expect((await openPr(push, {})).status).toBe(403);
+		const gone = await thread();
+		const goneToken = s.credentials.gitToken(gone, { repo: "acme/app", scope: "push" });
+		await s.forge.abort(ada, gone.threadId);
+		expect((await openPr(goneToken, {})).status).toBe(403);
+		expect(s.git.pullRequests.length).toBe(count);
+		expect(hostRef("main")).toBeTruthy();
+	});
+
+	it("keeps the design's guard: a push token never reaches main, another branch or a delete, and the agents are told to push their own branch and open the pull request", async () => {
+		const t = await thread();
+		const push = s.credentials.gitToken(t, { repo: "acme/app", scope: "push" });
+		await pushed(t, push);
+		const dir = sandbox();
+		expect((await git(dir, push, "clone", url(), "w")).status).toBe(0);
+		const w = join(dir, "w");
+		execFileSync("sh", ["-c", "echo z > z.txt"], { cwd: w });
+		await git(w, null, "add", ".");
+		await git(w, null, "commit", "-m", "z");
+		const main = hostRef("main");
+		const mine = hostRef(`refs/heads/${t.branch}`);
+		for (const ref of ["refs/heads/main", "refs/heads/pim/not-mine", "refs/heads/feature"]) expect((await git(w, push, "push", "origin", `HEAD:${ref}`)).status, ref).not.toBe(0);
+		expect((await git(w, push, "push", "origin", `:refs/heads/${t.branch}`)).status).not.toBe(0);
+		expect(hostRef("main")).toBe(main);
+		expect(hostRef(`refs/heads/${t.branch}`)).toBe(mine);
+		for (const text of [PI_CODING_PROMPT, FORGE_INSTRUCTIONS]) {
+			expect(text).toContain("git push origin HEAD:refs/heads/<branch>");
+			expect(text).toContain("helper.mjs pull-request");
+			expect(text).toMatch(/never push[^.]*main/i);
+			expect(text).toContain("A person reviews and merges");
+			expect(text).not.toMatch(/Pim pushes|coding_merge|coding_push/);
+		}
 	});
 
 	it("takes a fast-forward of the thread's branch but refuses a force push, leaving the branch and no staging refs behind", async () => {

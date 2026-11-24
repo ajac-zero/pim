@@ -445,9 +445,9 @@ A pause, an edit of the source or condition, or a deletion all start a new gener
 
 ## Schedules and watches
 
-**Scheduled tasks are time triggers.** `schedule_task` makes a time trigger through the API (below) as the agent of its chat ([`packages/v2-server/src/agent-tools.ts`](../packages/v2-server/src/agent-tools.ts)); nothing makes a schedule in the agents SDK. Its triggers read `[Scheduled task "<label>" <id>]` and notify open apps once per firing, as schedules did, through the host's `TriggerTakeover` (`text`, `delivered`), by a record of the triggers it made (`pim_scheduled_tasks`, with the label each was given). `list_scheduled_tasks` and `GET /schedules` list the space's enabled time triggers; `cancel_scheduled_task` and `DELETE /schedules/:id` delete one by its trigger's id. Deleting a chat deletes the scheduled tasks that run in it.
+**Scheduled tasks are time triggers.** `trigger` with a time source given as `delay_seconds`, `at` or `cron` (v1's `schedule_task`; [`packages/v2-server/src/trigger-tools.ts`](../packages/v2-server/src/trigger-tools.ts)) makes a scheduled task, kept by the schedule engine, as the agent of its chat; a time source with `schedule` (`once`, `cron`, `interval`) makes a trigger. Its triggers read `[Scheduled task "<label>" <id>]` and notify open apps once per firing, as schedules did, through the host's `TriggerTakeover` (`text`, `delivered`), by a record of the triggers it made (`pim_scheduled_tasks`, with the label each was given). `trigger` with `action: list` shows the scheduled tasks under `scheduled`, beside the triggers; `GET /schedules` lists the space's enabled time triggers; `action: delete` (or `DELETE /schedules/:id`) deletes one by its id. Deleting a chat deletes the scheduled tasks that run in it.
 
-**Connector watches are triggers on a connector's event.** `watch_connector_event` makes one, `list_watches` lists them with their subscriptions, and `stop_watch` deletes one by its trigger's id and unsubscribes it at once ([`packages/v2-server/src/watch-tools.ts`](../packages/v2-server/src/watch-tools.ts)).
+**Connector watches are triggers on a connector's event.** `trigger` with a `connector_event` source makes one (enabled, and subscribed at once, unless `enabled` is false), `action: list` shows each with a `watch` for its subscription, and `action: delete` unsubscribes it at once, and `action: sources` with `kind: connector_event` lists the events the agent's connectors offer ([`packages/v2-server/src/watch-tools.ts`](../packages/v2-server/src/watch-tools.ts)).
 
 **Nothing from before is read.** Earlier versions kept schedules in the agents SDK and watches in `pim_app_watches`, and moved them to triggers as each space started; that migration is gone. A space that still holds those rows keeps them (`pim_app_watches`, and the migration's `pim_trigger_migrations`, `pim_trigger_ownership` and `pim_trigger_cutover_receipts`): nothing reads or writes them, `remainingData` names them while they hold rows, and erasing the space removes them. An SDK alarm left for `runScheduledTask` or `refreshAppWatch` finds no such method, so the SDK logs it and runs nothing. A trigger the migration made (its id starts `legacy:`) is an ordinary trigger: it can be edited, paused and deleted like any other, and its firings go in under the trigger's own operation ids.
 
@@ -462,7 +462,7 @@ A pause, an edit of the source or condition, or a deletion all start a new gener
 | Caller | Sees and changes | Makes triggers for |
 | --- | --- | --- |
 | The person (HTTP, signed in or with an API token) | Every trigger of their space | Any of their agents (`agentId`, the majordomo by default), delivering to a new chat or an existing chat of that agent |
-| The majordomo (tools) | Every trigger | Itself, in the chat it asks from or new chats; another agent, only in new chats (as `schedule_task`'s `agent`) |
+| The majordomo (tools) | Every trigger | Itself, in the chat it asks from or new chats; another agent, only in new chats (as `agentId`) |
 | Any other agent (tools) | Only triggers it owns | Itself, in the chat it asks from or new chats |
 | A guest | Nothing: `/triggers` and `/trigger-runs` aren't in their routes (`GUEST_ROUTES`, `403`), and their space has neither routes nor tools | — |
 | No caller | Nothing: the Worker answers `401` before the space is asked | — |
@@ -486,13 +486,13 @@ Every body is JSON; times are milliseconds since 1970 (UTC), and a source's `at`
 | `GET /triggers/:id/runs` | `limit`, `cursor` | `{ runs: Run[], nextCursor }`, newest first |
 | `GET /trigger-runs/:runId` | | The `Run` |
 
-There is no route to run a trigger now, and none for the sources: `list_trigger_sources` is a tool only so far. `If-Match` takes `"3"` or `3`; a weak or other ETag is `400`. A cursor is opaque, works only for the listing that gave it (and, for runs, that trigger), and is `invalid_cursor` anywhere else. Unknown query parameters are ignored; unknown body fields are refused.
+There is no route to run a trigger now, and none for the sources: `trigger` with `action: sources` is a tool only so far. `If-Match` takes `"3"` or `3`; a weak or other ETag is `400`. A cursor is opaque, works only for the listing that gave it (and, for runs, that trigger), and is `invalid_cursor` anywhere else. Unknown query parameters are ignored; unknown body fields are refused.
 
 ### Tools
 
-`create_trigger`, `update_trigger` (`expectedRevision`), `list_triggers`, `get_trigger`, `pause_trigger`, `resume_trigger` (`expectedRevision`), `delete_trigger` (optional `expectedRevision`), `list_trigger_runs`, `test_trigger` and `list_trigger_sources` take the same fields as the routes, with `newChat` for the destination (`true` a new chat, `false` the chat they are called in) and `maxPendingEvents` for `delivery`. They answer the same JSON; a refusal is the tool result `{ error, code, ... }` marked as an error. `create_trigger` answers `{ trigger, replayed }`.
+`trigger` takes an `action`: `create`, `update` (`expectedRevision`), `list`, `get`, `pause`, `resume` (`expectedRevision`), `delete` (optional `expectedRevision`), `runs`, `test` and `sources`, with the same fields as the routes, `newChat` for the destination (`true` a new chat, `false` the chat they are called in) and `maxPendingEvents` for `delivery`. They answer the same JSON; a refusal is the tool result `{ error, code, ... }` marked as an error. `create` answers `{ trigger, replayed }`.
 
-**One creation per tool call.** `create_trigger` makes its trigger under the creation key `tool:<conversation>:<tool task>`, the durable identity pi gives the call, so the call replayed after an eviction gives the trigger it made (`replayed: true`) instead of a second one.
+**One creation per tool call.** `trigger` with `action: create` makes its trigger under the creation key `tool:<conversation>:<tool task>`, the durable identity pi gives the call, so the call replayed after an eviction gives the trigger it made (`replayed: true`) instead of a second one.
 
 ### Shapes
 
@@ -541,11 +541,11 @@ There is no route to run a trigger now, and none for the sources: `list_trigger_
 
 Accepted is never called done, and unknown is never called a success or a failure. A run's error text isn't in the API, since it may carry what a host said.
 
-`DryRun`: `{ dryRun: true, valid: true, sourceKind, capability, grant, policies, blockers }`, with `id`, `revision` and `lifecycle` when it tests a trigger by id; for a time source `firings` (each `{ at, timeZone, local, offset }`, `count` of them, 5 by default and at most 10), `skipped`, `skippedCount` and `exhausted`; for other sources `evaluations`, one per sample (`{ value, observedAt?, gap? }`, at most 10, values within the store's 16 KB and 8 levels): `{ index, truth, fires, stale, fields }`, in order from a fresh start, as `evaluate` would on those samples alone. `blockers` lists the codes enabling would meet now (`source_not_wired`, `grant_required`, `grant_not_current`, `schedule_exhausted`). Over HTTP it tests the trigger in the path; `test_trigger` also takes `trigger`, what `create_trigger` takes. **A dry run writes nothing** (not a row of the space's database, the tests check every table), starts no agent turn, runs no command and sends no request; a time source observes nothing, so it takes no samples.
+`DryRun`: `{ dryRun: true, valid: true, sourceKind, capability, grant, policies, blockers }`, with `id`, `revision` and `lifecycle` when it tests a trigger by id; for a time source `firings` (each `{ at, timeZone, local, offset }`, `count` of them, 5 by default and at most 10), `skipped`, `skippedCount` and `exhausted`; for other sources `evaluations`, one per sample (`{ value, observedAt?, gap? }`, at most 10, values within the store's 16 KB and 8 levels): `{ index, truth, fires, stale, fields }`, in order from a fresh start, as `evaluate` would on those samples alone. `blockers` lists the codes enabling would meet now (`source_not_wired`, `grant_required`, `grant_not_current`, `schedule_exhausted`). Over HTTP it tests the trigger in the path; `trigger` with `action: test` also takes `trigger`, what `action: create` takes. **A dry run writes nothing** (not a row of the space's database, the tests check every table), starts no agent turn, runs no command and sends no request; a time source observes nothing, so it takes no samples.
 
 ### Sources here
 
-`list_trigger_sources` says, per kind, what this space can do now, never more:
+`trigger` with `action: sources` says, per kind, what this space can do now, never more:
 
 | Kind | `status` | Why |
 | --- | --- | --- |
@@ -602,7 +602,7 @@ What is left, roughly in order. Each step is its own change:
 3. **Tools, routes and UI for time triggers.** Done: the API, its routes and agents' tools (above), with `previewFirings` in a dry run and the refusals as coded errors, and the screen ("The screen", above). Left: a route for the sources, and a manual run.
 4. **Connector events.** Done: the ingress adapter on Pim's events route, the renewal contract, the subscription manager over the MCP bridge on the trigger wake (above), handing events on through the coordinator with `connectorEvents`, and connector watches as such triggers. Left: a cursor kept with a gap.
 5. **Computer observers.** Done wherever the engine is, with no gate of their own: pim-computer's runtime and observers (triggers-runtime.md), which installed computers get from the Pim as they start, and the space's side (above), with health from the connection (`waiting_computer`, `reconnecting`) and `recordGap` from the runtime's gaps. Also done: the agent's tool that asks for a grant and the action that records it, refreshing the computer when a trigger or grant changes, handing computer occurrences on (kind and id only), and keeping the link and its lease across an eviction. The web app decides a request (above). Left: a route to ask for and revoke grants, a contract for what of an observation a run may read, and a run against a real pim-computer and Durable Object.
-6. **Schedules and watches.** Done: `schedule_task` makes time triggers and connector watches are connector triggers ("Schedules and watches", above); the migration that moved what earlier versions kept, and its route, tool and screen, are gone.
+6. **Schedules and watches.** Done: `trigger` makes scheduled tasks and connector watches are connector triggers ("Schedules and watches", above); the migration that moved what earlier versions kept, and its route, tool and screen, are gone.
 
 Not done here: any observer, a notification for a trigger's chat (other than a scheduled task's, which notifies as schedules did), a run-status bridge, a manual run, keeping raw samples, expiry for computer sources other than a process, and quotas across a space's triggers. The coordinator hands on time firings, and connector events only when made with `connectorEvents`, as Pim's engine is; it doesn't cancel or stop a run (deleting or pausing a trigger doesn't stop one already going), and a chat it made for an operation that was never submitted is left for the host to clean up.
 

@@ -4,7 +4,7 @@ import { MESSAGE_CHARS, OUTPUT_LINE_CHARS, pageTranscript, SUMMARY_CHARS, transc
 import type { TranscriptMessage } from "@pim/shared/transcript";
 
 // What an agent reads of a coding thread's transcript (packages/coding/src/transcript.ts): the page
-// coding_transcript cuts out of it and the whole of one message coding_transcript_output reads
+// coding_inspect cuts out of it and the whole of one message it reads
 // back. Like the coding tools' tests, these run in the Worker pool but touch no binding.
 
 let ids = 0;
@@ -77,7 +77,7 @@ describe("a page of a coding thread's transcript", () => {
 	it("cuts a long message, and says the rest is readable by its id", () => {
 		const messages = [said("assistant", "y".repeat(MESSAGE_CHARS + 600), "long"), said("user", "Short.", "short")];
 		const [cut, whole] = pageTranscript(messages).messages;
-		expect(cut!.text).toBe(`y`.repeat(MESSAGE_CHARS) + `… [600 more characters, coding_transcript_output reads the whole message]`);
+		expect(cut!.text).toBe(`y`.repeat(MESSAGE_CHARS) + `… [600 more characters, coding_inspect with view transcript_output reads the whole message]`);
 		expect(whole!.text).toBe("Short.");
 	});
 
@@ -85,7 +85,7 @@ describe("a page of a coding thread's transcript", () => {
 		const messages = [said("assistant", `${"x".repeat(SUMMARY_CHARS + 20)}\nit went on`, "first"), said("user", "Thanks.", "second")];
 		const summary = pageTranscript(messages, { summary: true });
 		expect(summary.messages).toEqual([
-			{ id: "first", role: "assistant", text: "x".repeat(SUMMARY_CHARS) + `… [${20} more characters, coding_transcript_output reads the whole message]` },
+			{ id: "first", role: "assistant", text: "x".repeat(SUMMARY_CHARS) + `… [${20} more characters, coding_inspect with view transcript_output reads the whole message]` },
 			{ id: "second", role: "user", text: "Thanks." },
 		]);
 	});

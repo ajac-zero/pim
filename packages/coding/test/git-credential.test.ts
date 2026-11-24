@@ -146,3 +146,57 @@ it.each(["http", "https"])("fetches and pulls through an %s broker and proxy, re
 		await rm(root, { recursive: true, force: true });
 	}
 });
+
+it("opens a pull request through the broker with `pull-request`, printing its URL, renewing the grant and never printing a token or raw answer", async () => {
+	const root = await mkdtemp(join(tmpdir(), "pim-git-pr-"));
+	let token = "pimgit_initial.grant";
+	let mode: "ok" | "refused" | "garbage" = "ok";
+	const seen: { path: string; auth?: string; body: string }[] = [];
+	const server = createServer(async (req, res) => {
+		let body = "";
+		for await (const chunk of req) body += chunk;
+		seen.push({ path: req.url!, auth: req.headers.authorization, body });
+		if (req.headers.authorization !== `Bearer ${token}`) return void res.writeHead(401).end();
+		if (req.url === "/demo.git/credential") {
+			token = `pimgit_renewed${seen.length}.grant`;
+			return void res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ token }));
+		}
+		if (mode === "refused") return void res.writeHead(409, { "content-type": "application/json" }).end(JSON.stringify({ error: `The thread's branch isn't on the git host yet ${token}`, code: "not_pushed" }));
+		if (mode === "garbage") return void res.writeHead(200).end("<html>secret</html>");
+		res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ url: "https://git.example.test/acme/demo/pull/7", number: 7, title: "T", base: "main", head: "pim/x" }));
+	});
+	await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+	try {
+		const port = (server.address() as { port: number }).port;
+		const helper = join(root, "helper.mjs");
+		await writeFile(helper, workspaceCredentialHelper);
+		await writeFile(join(root, "credential.json"), JSON.stringify({ url: `http://127.0.0.1:${port}/demo.git`, token }), { mode: 0o600 });
+		const env = { ...process.env, NO_PROXY: "127.0.0.1", no_proxy: "127.0.0.1" };
+		const run = (...args: string[]) => exec("node", [helper, "pull-request", ...args], { env }).then((r) => ({ code: 0, ...r }), (e) => ({ code: e.code as number, stdout: e.stdout as string, stderr: e.stderr as string }));
+		const ok = await run("--title", "Add it", "--body", "Changed a.\nTested.");
+		expect(ok).toMatchObject({ code: 0, stdout: "https://git.example.test/acme/demo/pull/7\n#7\n" });
+		// The grant was renewed first, and the renewed one carried the request, with only the title and the body.
+		expect(seen.map((r) => r.path)).toEqual(["/demo.git/credential", "/demo.git/pull-request"]);
+		expect(seen[1]!.auth).toBe(`Bearer ${token}`);
+		expect(JSON.parse(seen[1]!.body)).toEqual({ title: "Add it", body: "Changed a.\nTested." });
+		expect(JSON.parse(await readFile(join(root, "credential.json"), "utf8")).token).toBe(token);
+		// A refusal prints the broker's reason without any token, and exits non-zero.
+		mode = "refused";
+		const refused = await run("--title", "x");
+		expect(refused.code).toBe(1);
+		expect(refused.stdout).toBe("");
+		expect(refused.stderr).toContain("isn't on the git host yet");
+		expect(refused.stderr).not.toContain("pimgit_");
+		mode = "garbage";
+		const garbage = await run();
+		expect(garbage.code).toBe(1);
+		expect(garbage.stderr).not.toContain("secret");
+		expect((await run("--nope", "x")).code).toBe(1);
+		// Git's own protocol is untouched: an unknown subcommand does nothing.
+		expect((await exec("node", [helper, "store"], { env })).stdout).toBe("");
+	} finally {
+		server.closeAllConnections();
+		await new Promise<void>((resolve) => server.close(() => resolve()));
+		await rm(root, { recursive: true, force: true });
+	}
+});

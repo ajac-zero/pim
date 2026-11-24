@@ -20,7 +20,7 @@ export type Actor = {
 export type Decision = { readonly grantId: number; readonly standing: boolean; readonly requiresApproval: boolean; /** The standing approval that stood in for a person's yes. */ readonly viaStandingApproval?: string };
 
 export type Policy = {
-	/** Pushes are confined to this prefix; the default branch is only ever reached by coding_merge. */
+	/** Pushes are confined to this prefix; a thread's work reaches the default branch only when a person merges its pull request. */
 	readonly branchPrefix: string;
 };
 
@@ -179,10 +179,10 @@ export async function assertCapability(db: Db, harness: string, ampConfigured: b
 	if (!pools.length) throw new CapabilityUnavailableError("coding:pool", pool ? `coding pool ${pool} isn't available` : "this deployment has no coding pool configured");
 }
 
-/** Branch rules for Pim-side pushes: only `<prefix>*`, and never the default branch, which only coding_merge reaches. */
+/** Branch rules for Pim-side pushes: only `<prefix>*`, and never the default branch, which only a person's merge of a pull request reaches. */
 export function assertPushBranch(policy: Policy, branch: string, defaultBranch: string): void {
 	if (branch === defaultBranch || !branch.startsWith(policy.branchPrefix) || branch === policy.branchPrefix) {
-		throw new ForgeError("push_refused", `Coding threads push only to ${policy.branchPrefix}* branches, never to ${defaultBranch}; use coding_merge to integrate`);
+		throw new ForgeError("push_refused", `Coding threads push only to ${policy.branchPrefix}* branches, never to ${defaultBranch}; push your own ${policy.branchPrefix}… branch and open a pull request, which a person merges`);
 	}
 }
 

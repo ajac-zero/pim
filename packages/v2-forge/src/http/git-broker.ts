@@ -7,6 +7,7 @@ import { type ForgeStore } from "../store";
 import { ForgeError } from "../errors";
 import { type GitHost } from "../ports";
 import { type Credentials } from "../tokens";
+import { openThreadPullRequest } from "../forge";
 import { type Handler, errorResponse, json, match } from "./common";
 
 /** `repoUrl` is the repository as the thread names it (its provider instance is found from it). Where the host's smart HTTP endpoint is, and how to sign in to it for this repository. The broker never gives this to a sandbox. */
@@ -64,6 +65,8 @@ export function gitBroker(d: GitBrokerDeps): Handler {
 				await d.credentials.verifyGit(token, { repo, op: "fetch" });
 				return json(200, { token: await d.credentials.refreshGit(token) });
 			}
+			// The workspace asks for the pull request of its own thread's branch; nothing here merges.
+			if (rest === "pull-request" && req.method === "POST") return await pullRequest(d, req, repo, token);
 			const service = url.searchParams.get("service");
 			let target: string;
 			let op: "read" | "write";
@@ -117,6 +120,26 @@ async function proxy(d: GitBrokerDeps, doFetch: typeof fetch, req: Request, repo
 		}),
 	);
 	return new Response(capped, { status: res.status, headers: out });
+}
+
+/** Opens the pull request for the token's own thread: its branch into its base, as `Forge.openPullRequest` does. The body can only name a title and a description. */
+async function pullRequest(d: GitBrokerDeps, req: Request, repo: string, token: string): Promise<Response> {
+	const who = await d.credentials.verifyGit(token, { repo, op: "pull-request" });
+	let sent: { title?: unknown; body?: unknown } = {};
+	const raw = await req.text();
+	if (raw.length > 100_000) return json(413, { error: "The request is too big", code: "invalid" });
+	if (raw.trim()) {
+		try {
+			sent = JSON.parse(raw);
+		} catch {
+			throw new ForgeError("invalid", "The body must be JSON");
+		}
+	}
+	if (!sent || typeof sent !== "object" || (sent.title !== undefined && typeof sent.title !== "string") || (sent.body !== undefined && typeof sent.body !== "string")) throw new ForgeError("invalid", "title and body must be text");
+	const store = storeOf(d, who.ownerId);
+	const thread = (await store.get(who.threadId))!;
+	const pr = await openThreadPullRequest({ git: d.git, store }, thread, sent.title?.slice(0, 256), sent.body?.slice(0, 60_000));
+	return json(200, { url: pr.url, number: pr.number, title: pr.title, base: pr.base, head: pr.head });
 }
 
 async function receive(d: GitBrokerDeps, doFetch: typeof fetch, req: Request, repo: string, token: string): Promise<Response> {

@@ -1,6 +1,6 @@
 /**
  * The tools that go with group chats and with reading other chats, ported from v1 (`src/rooms.ts`, `src/extensions/chats.ts`): the host takes agents out of the chat once they are
- * no longer needed (`remove_from_chat`), an agent that joined later reads what was said before it did (`chat_history`), and any agent reads another of the person's chats (`read_chat`).
+ * no longer needed (`remove_from_chat`), and any agent reads another of the person's chats (`read_chat`), or with no id what was said in a group chat before it joined.
  */
 import { Type } from "typebox";
 import type { ToolRegistration } from "@earendil-works/pi-durable";
@@ -75,7 +75,8 @@ export function roomTools(deps: { ownerId: string; runtime: RuntimeDb; read: Def
 		},
 	);
 
-	const history = deps.read("chat_history", "Read what was said in this group chat before you joined it.", Type.Object({}), async (app, call) => {
+	/** What was said in a group chat before this seat joined it. */
+	const before = async (app: App, call: Call): Promise<Result> => {
 		const room = await roomOf(call.chat);
 		if (!room || room.role !== "seat" || !call.chat) return text("You have everything said in this chat already.");
 		const seat = (await app.db.owner(ownerId, async (tx) => (await tx.query(
@@ -85,13 +86,14 @@ export function roomTools(deps: { ownerId: string; runtime: RuntimeDb; read: Def
 		const before = (await transcriptPage(app.db.pool, ownerId, seat.room_of as string)).messages.filter((m) => m.timestamp < joined);
 		const said = roomHistory(before, seat.host as string, ROOM_HISTORY_CHARS);
 		return text(said === "" ? "Nothing was said in this chat before you joined." : said);
-	});
+	};
 
 	const readChat = deps.read(
 		"read_chat",
-		"Read another of the person's chats by its id, which they can copy from the chat's title bar: what they said and what the agent in it sent them. Use it to carry on from a chat in a new one, or to check what was done in a previous chat. A long chat is cut to its latest part.",
-		Type.Object({ id: Type.String({ minLength: 1, description: "The chat's id." }) }),
+		"Read another of the person's chats by its id, which they can copy from the chat's title bar: what they said and what the agent in it sent them. Use it to carry on from a chat in a new one, or to check what was done in a previous chat. A long chat is cut to its latest part. With no id, in a group chat you joined late, it reads what was said before you joined.",
+		Type.Object({ id: Type.Optional(Type.String({ minLength: 1, description: "The chat's id." })) }),
 		async (app, call, a) => {
+			if (a.id === undefined) return before(app, call);
 			const id = String(a.id).trim();
 			const chat = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)
 				? (await app.db.owner(ownerId, async (tx) => (await tx.query("SELECT title FROM pim_app.conversations WHERE public_chat_id = $1 AND deleted_at IS NULL AND room_of IS NULL AND kind <> 'visit'", [id])).rows))[0]
@@ -102,5 +104,5 @@ export function roomTools(deps: { ownerId: string; runtime: RuntimeDb; read: Def
 		},
 	);
 
-	return [remove, history, readChat];
+	return [remove, readChat];
 }

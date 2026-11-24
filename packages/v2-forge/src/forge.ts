@@ -46,6 +46,21 @@ export type StartRequest = { operationId: string; harness?: Harness; task: strin
 export type ThreadDiff = { source: "workspace" | "orb"; diff: string; unpushedOrb: boolean; since: string | null; head: string | null; truncated: boolean };
 export type Gated<T> = ({ status: "done" } & T) | { status: "approval_required"; approvalId: string };
 
+/**
+ * Opens the pull request for the thread's own pushed branch, into the branch the thread started from (or the default branch when it started from a commit or from main), and records it on the thread.
+ * The one place this is decided, for the REST route and for the sandbox's own request through the git broker; it never merges, and the branch is the thread's, never a caller's.
+ */
+export async function openThreadPullRequest(c: { git: GitHost; store: ForgeStore }, t: ThreadRow, title?: string, body?: string): Promise<{ url: string; number: number; title: string; base: string; head: string }> {
+	const branch = (t.branch ?? (t.orb?.branch as string | undefined)) ?? null;
+	if (!branch || !(await c.git.hasBranch(t.repo, branch))) throw new ForgeError("not_pushed", "The thread's branch isn't on the git host yet");
+	const base = !t.ref || t.ref === "main" || /^[0-9a-f]{40}$/i.test(t.ref) ? await c.git.defaultBranch(t.repo) : t.ref;
+	const first = t.task.split("\n")[0]!.trim().slice(0, 100) || branch;
+	const named = title?.trim() || first;
+	const pr = await c.git.openPullRequest(t.repo, branch, base, named, body ?? `${t.task.length > 2000 ? `${t.task.slice(0, 2000)}…` : t.task}\n\n---\nOpened by Pim from a coding thread.`);
+	await c.store.locked(t.threadId, (q) => c.store.patch(q, t.threadId, { pull_request: pr }));
+	return { ...pr, title: named, base, head: branch };
+}
+
 export class Forge {
 	constructor(private readonly c: ForgeConfig) {}
 
@@ -530,21 +545,14 @@ export class Forge {
 		const t = await this.own(actor, ref);
 		const pending = await this.gate(actor, "coding:pr", "pr", t);
 		if (pending) return { status: "approval_required", ...pending };
-		const branch = (t.branch ?? (t.orb?.branch as string | undefined)) ?? null;
-		if (!branch || !(await this.c.git.hasBranch(t.repo, branch))) throw new ForgeError("not_pushed", "The thread's branch isn't on the git host yet");
-		// Into the branch the thread started from, or the default branch when it started from a commit (or from main, which is the default's usual name).
-		const base = !t.ref || t.ref === "main" || /^[0-9a-f]{40}$/i.test(t.ref) ? await this.c.git.defaultBranch(t.repo) : t.ref;
-		const first = t.task.split("\n")[0]!.trim().slice(0, 100) || branch;
-		const named = title?.trim() || first;
-		const pr = await this.c.git.openPullRequest(t.repo, branch, base, named, body ?? `${t.task.length > 2000 ? `${t.task.slice(0, 2000)}…` : t.task}\n\n---\nOpened by Pim from a coding thread.`);
-		await this.c.store.locked(t.threadId, (q) => this.c.store.patch(q, t.threadId, { pull_request: pr }));
+		const pr = await openThreadPullRequest(this.c, t, title, body);
 		await this.c.authz.consumeApproval(t.threadId, "pr");
-		return { status: "done", ...pr, title: named, base, head: branch };
+		return { status: "done", ...pr };
 	}
 
 	/**
 	 * The only way onto the default branch: fast-forward, else rebase, never force; a conflict aborts and changes nothing.
-	 * A sandbox thread's branch is pushed first (Pim pushes for it); an Amp thread's work is already on the host, pushed by Amp, so it is merged from there, as `coding_merge` always did.
+	 * A sandbox thread's branch is pushed first if its own push didn't leave it on the host; an Amp thread's work is already on the host, pushed by Amp, so it is merged from there. The agents themselves push their own pim/… branch and open a pull request, which a person merges.
 	 */
 	async merge(actor: Actor, ref: string): Promise<Gated<{ outcome: "merged" | "conflict"; method?: string; detail?: string; sha?: string; base: string }>> {
 		const t = await this.own(actor, ref);

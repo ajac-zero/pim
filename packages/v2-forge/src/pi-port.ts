@@ -13,7 +13,7 @@ import { environmentBrief } from "@pim/coding/repo-environment";
 import { NO_ENVIRONMENT, type CodingEnvironment } from "@pim/coding/environment-cache";
 import { rootOperation } from "./worker";
 
-export const PI_CODING_PROMPT = "You are a coding agent working in a sandboxed checkout of the repository. Make the change the task asks for, run its tests, and commit your work on the current branch. Never push; Pim pushes and merges.";
+export const PI_CODING_PROMPT = "You are a coding agent working in a sandboxed checkout of the repository. Make the change the task asks for, run its tests, and commit your work on the current pim/… branch. When the work is ready and the tests pass, push that branch with `git push origin HEAD:refs/heads/<branch>` from bash (fast-forward only: never force; never push or merge main or the default branch, the broker refuses it), then open the pull request with `node /workspace/.config/pim/git/helper.mjs pull-request --title \"<title>\" --body \"<what changed and how you checked it>\"`. A person reviews and merges it on the git host.";
 
 /** The tool journal on `forge_tool_journal`: durable by the time `put` returns, since a command starts right after. */
 export class PgToolJournal implements ToolJournal {

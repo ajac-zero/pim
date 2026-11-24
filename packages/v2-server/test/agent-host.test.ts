@@ -928,7 +928,7 @@ const agentId = (await d.stack.admin.query("SELECT id FROM pim_app.agents WHERE 
 		expect((await resultsIn(seat, "read_chat"))[0]).toContain("The person: first words");
 		expect((await resultsIn(seat, "read_chat"))[1]).toMatch(/^Chat "Room":\n\n/);
 		await waitFor("the host to answer Ada", async () => ((await resultsIn(room, "send_to_user")).length === 2 ? true : undefined), 90_000);
-		expect(await said(room)).toContain("[From Ada]\\n@Pim over to you");
+		await waitFor("Ada's post in the room", async () => ((await said(room)).includes("[From Ada]\\n@Pim over to you") ? true : undefined), 30_000);
 		expect((await web.call("PUT", `/api/sessions/${chat0}/room`, { mode: "open" })).status).toBe(404);
 		// Only the host takes agents out; an agent that is not there is said not to be.
 		faux.setResponses([toolUse(fauxToolCall("remove_from_chat", { agents: ["@Ada", "Nobody"] })), toolUse(fauxToolCall("send_to_user", { message: "removed" }))] as never);

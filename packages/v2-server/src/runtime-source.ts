@@ -22,7 +22,7 @@ import type { RuntimeOutboxEvent } from "@pim/v2-contracts/runtime-seam";
 import { Db } from "@pim/v2-runtime/db";
 import { PgPiStorage } from "@pim/v2-runtime/storage";
 import { ROOM_POST, type Provenance } from "@pim/shared/transcript";
-import { provenanceOfEntry } from "./send-provenance.ts";
+import { onlyNative, provenanceOfEntry } from "./send-provenance.ts";
 import { withOwner } from "@pim/v2-live/owner-tx";
 import type { CommitUnit, OutboxSource } from "@pim/v2-live/projections/outbox-source";
 import type { Pool } from "pg";
@@ -142,13 +142,15 @@ async function translate(pool: Pool, storage: PgPiStorage, ownerId: OwnerId, par
 	// A fork starts with what its parent said up to the entry it forked at, which is none of its own entries: the transcript it shows is made of them.
 	if (changes.some((c) => c.type === "conversation")) {
 		const forked = await withOwner(pool, ownerId, (client) =>
-			client.query<{ parent_at: string; parent_conversation_id: string }>("SELECT parent_at, parent_conversation_id FROM pim_runtime.conversations WHERE owner_id = $1 AND partition_id = $2 AND id = $3 AND parent_conversation_id IS NOT NULL", [ownerId, partitionId, conversationId]),
+			client.query<{ parent_at: string }>("SELECT parent_at FROM pim_runtime.conversations WHERE owner_id = $1 AND partition_id = $2 AND id = $3 AND parent_conversation_id IS NOT NULL", [ownerId, partitionId, conversationId]),
 		);
 		if (forked.rows[0]) {
 			let cursor: never | undefined;
 			do {
 				const page = await storage.scanEntries({ conversationId: conversationId as never, order: "ascending", maxEntryId: Number(forked.rows[0].parent_at) as never }, 500, cursor, BACKGROUND_CONTEXT);
-				for (const entry of page.items) events.push(event("chat.entry", { entry, ...(await provenanceOf(entry, Number(forked.rows[0].parent_conversation_id))) }));
+				// What the parent's entries recorded is kept only for those the runtime committed itself: an imported entry's model is not known to be the one that answered.
+				const own = await onlyNative((sql, params) => withOwner(pool, ownerId, (client) => client.query(sql, params)), ownerId, page.items);
+				for (const entry of own) events.push(event("chat.entry", { entry, ...(await provenanceOf(entry, Number(entry.conversationId))) }));
 				cursor = page.next as never;
 			} while (cursor !== undefined);
 		}

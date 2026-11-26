@@ -9,6 +9,25 @@ import { type Provenance, sendProvenance } from "@pim/shared/transcript";
 /** Runs a query over `pim_runtime` as the owner the entries belong to. */
 export type Read = (sql: string, params: unknown[]) => Promise<{ rows: Record<string, unknown>[] }>;
 
+/**
+ * An entry the runtime did not commit itself: one imported from the Cloudflare version, which is stored verbatim with its old commit sequence and has no commit receipt. What its requests
+ * recorded of the model is not known to be the model that answered, so it is read as recording none: its work is counted, as unknown, and no identity from it reaches a message.
+ */
+export const NATIVE = "EXISTS (SELECT 1 FROM pim_runtime.commit_receipts r WHERE r.owner_id = e.owner_id AND r.partition_id = e.partition_id AND r.commit_seq = e.commit_seq)";
+
+/** The entry as if its answers had recorded no model. */
+export function unrecorded(entry: EntryRecord): EntryRecord {
+	if (!entry.model?.some((m) => m.role === "assistant")) return entry;
+	return { ...entry, model: entry.model.map((m) => (m.role === "assistant" ? { ...m, provider: "", model: "", responseModel: undefined } : m)) } as EntryRecord;
+}
+
+/** These entries, with those the runtime did not commit itself read as recording no model. */
+export async function onlyNative(read: Read, ownerId: string, entries: readonly EntryRecord[]): Promise<EntryRecord[]> {
+	if (entries.length === 0) return [];
+	const native = new Set((await read(`SELECT e.id FROM pim_runtime.entries e WHERE e.owner_id = $1 AND e.id = ANY($2::bigint[]) AND ${NATIVE}`, [ownerId, entries.map((entry) => Number(entry.id))])).rows.map((row) => Number(row.id)));
+	return entries.map((entry) => (native.has(Number(entry.id)) ? entry : unrecorded(entry)));
+}
+
 const PAGE = 200;
 /** The work of one turn this long is not read back further: the list then says it may be missing models. */
 const MAX_ENTRIES = 2_000;
@@ -25,7 +44,7 @@ const sendsOf = (entry: EntryRecord) => (entry.model?.[0] as { role?: string; co
  */
 export async function provenanceOfEntry(read: Read, ownerId: string, conversationId: number, entry: EntryRecord, partial = false): Promise<Record<string, Provenance>> {
 	if (!sendsOf(entry)) return {};
-	const rows = async (before: number, limit: number) => (await read("SELECT record FROM pim_runtime.entries WHERE owner_id = $1 AND conversation_id = $2 AND id < $3 ORDER BY id DESC LIMIT $4", [ownerId, conversationId, before, limit])).rows.map((row) => JSON.parse(row.record as string) as EntryRecord);
+	const rows = async (before: number, limit: number) => (await read(`SELECT e.record, ${NATIVE} AS native FROM pim_runtime.entries e WHERE e.owner_id = $1 AND e.conversation_id = $2 AND e.id < $3 ORDER BY e.id DESC LIMIT $4`, [ownerId, conversationId, before, limit])).rows.map((row) => (row.native ? (JSON.parse(row.record as string) as EntryRecord) : unrecorded(JSON.parse(row.record as string) as EntryRecord)));
 	const key = `${ownerId}\u0000${conversationId}`;
 	let target = entry;
 	if (partial) {

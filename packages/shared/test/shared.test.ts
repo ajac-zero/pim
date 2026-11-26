@@ -155,6 +155,16 @@ describe("who is behind a message that was sent", () => {
 		expect(run([user("Go"), answer(neon, [search], "toolUse")], "start")).toEqual({});
 	});
 
+	it("names the emitter while the answer is still being written, and counts it as a contributor only once it ended well", () => {
+		const earlier = [user("Go"), answer(sol, [search], "toolUse"), result("s")];
+		for (const stopReason of ["pending", "error", "aborted"]) {
+			const found = run([...earlier, answer(neon, [send("a")], stopReason)])?.a;
+			expect(found?.emitter).toEqual(neon);
+			expect(names(found?.contributors)).toEqual(["gpt-6-sol"]);
+		}
+		for (const stopReason of ["toolUse", "stop"]) expect(names(run([...earlier, answer(neon, [send("a")], stopReason)])?.a?.contributors)).toEqual(["gpt-6-sol", "gemini-4-neon"]);
+	});
+
 	it("is put on a projected message by call id, and a post carries its own", () => {
 		const [message] = projectEntries([answer(neon, [send("a"), send("b")])]);
 		const found = run([user("Go"), answer(neon, [send("a")])])!;

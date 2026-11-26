@@ -867,5 +867,8 @@ describe("where the turns put a request that failed over", () => {
 		// Two attempts that failed in a row ran one after the other, the last ending where the answered request began.
 		const twice = callsOf([row("mc_c1_t1_100000_f0", "a", 40_000, "x"), row("mc_c1_t1_100000_f1", "b", 60_000, "y")]);
 		expect(twice.failed.map((f) => [f.model, f.at])).toEqual([["gw/b", 40_000], ["gw/a", 0]]);
+		// Three in a row, two of them after the first: each ends where the next began, however long the answered request took.
+		const rows = [row("mc_c1_t1_300000", "sol", 90_000, null), row("mc_c1_t1_300000_f0", "a", 100_000, "x"), row("mc_c1_t1_300000_f1", "b", 70_000, "y"), row("mc_c1_t1_300000_f2", "c", 30_000, "z")];
+		expect(callsOf(rows).failed.map((f) => [f.model, f.at, f.ms])).toEqual([["gw/c", 270_000, 30_000], ["gw/b", 200_000, 70_000], ["gw/a", 100_000, 100_000]]);
 	});
 });

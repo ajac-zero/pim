@@ -146,7 +146,7 @@ export async function startGate(config: ProcessConfig, env: Env, host: Host, nat
 		first: [...webCompatRoutes], before: gateBefore(app, env) };
 	const gate = createGate(app, options);
 	const listener = gate.listeners("request")[0] as (req: never, res: never) => void;
-	const web = webAssets(env.PIM_WEB_DIR);
+	const web = webAssets(env.PIM_WEB_DIR, { releases: env.PIM_WEB_RELEASES, onRelease: (release) => console.log(JSON.stringify({ event: "pim.web_release", release: release ?? null, from: release ? "releases" : "image" })) });
 	if (web) host.handle(web);
 	host.handle((req, res) => (listener(req as never, res as never), true));
 	// The host owns the server's `upgrade` event and destroys a socket none of its handlers claims, so the Gate's sockets (a computer connecting, the desktop,

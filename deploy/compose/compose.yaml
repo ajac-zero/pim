@@ -175,7 +175,9 @@ services:
   gate:
     <<: *pim
     command: ["gate"]
-    environment: { <<: *pim-env, PIM_ROLE: gate, PIM_HTTP_PORT: "8080", PIM_DATABASE_URL: "postgres://pim_gate_login:${PIM_GATE_DB_PASSWORD:?}@pgbouncer:6432/pim" }
+    # The web app the image holds is what the Gate serves until a release is published into the pim-web volume (docs/v2-operations.md, "Releasing the web app on its own"); the Gate only reads it.
+    environment: { <<: *pim-env, PIM_ROLE: gate, PIM_HTTP_PORT: "8080", PIM_WEB_RELEASES: /web-releases, PIM_DATABASE_URL: "postgres://pim_gate_login:${PIM_GATE_DB_PASSWORD:?}@pgbouncer:6432/pim" }
+    volumes: [pim-web:/web-releases:ro]
     depends_on: *pim-deps
     healthcheck: &http-health
       # The image is node:*-slim, which has no wget or curl.
@@ -184,6 +186,20 @@ services:
       timeout: 3s
       retries: 6
       start_period: 20s
+
+  # Publishes a web build into the pim-web volume, and switches or rolls back the release the Gate serves, without touching any running service:
+  #   docker compose --profile tools run --rm --no-deps web-release publish /app/web/dist /web-releases --activate
+  # PIM_IMAGE=<another image> in front of it publishes that image's web app. Run it from deploy/compose/ (or through pim.sh).
+  web-release:
+    <<: *pim
+    profiles: [tools]
+    restart: "no"
+    entrypoint: ["node", "--import", "tsx", "src/web-release.ts"]
+    command: ["list", "/web-releases"]
+    environment: { PIM_ROLE: tools }
+    env_file: []
+    depends_on: {}
+    volumes: [pim-web:/web-releases]
 
   live:
     <<: *pim
@@ -360,6 +376,8 @@ networks:
   computer: {}
 
 volumes:
+  # Releases of the web app (packages/v2-server/src/web-release.ts); empty until the first publish, when the Gate serves the image's own.
+  pim-web: {}
   pim-files: {}
   pim-computer-home: {}
   postgres-data: {}

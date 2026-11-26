@@ -76,6 +76,8 @@ COPY --from=web /app/web/dist /app/web/dist
 COPY computer /app/computer
 # The folder a computer's files are mounted on, owned by `node`: a new volume takes the owner this folder has in the image.
 RUN mkdir -p /workspace && chown node:node /workspace
+# The folder the web app's releases are published into (`web-release.ts`), owned by `node` for the same reason: the Gate reads it, and the one-off `web-release` service writes it.
+RUN mkdir -p /web-releases && chown node:node /web-releases
 ENV PIM_WEB_DIR=/app/web/dist
 # The roles listen on PIM_HTTP_PORT (8080) and PIM_METRICS_PORT (9464); the filesystem is read-only in both deployments, and /tmp is a tmpfs.
 USER node

@@ -84,7 +84,10 @@ async function appFile(event) {
   const kept = await cache.match(event.request);
   if (kept) return kept;
   const response = await fetch(event.request);
-  if (response.ok) event.waitUntil(cache.put(event.request, response.clone()));
+  // Only a file that is a file is kept: a page answering in its place (a path the server did not have) is never what this name means.
+  if (response.ok && !response.headers.get("content-type")?.includes("text/html")) {
+    event.waitUntil(cache.put(event.request, response.clone()));
+  }
   return response;
 }
 

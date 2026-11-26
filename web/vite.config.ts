@@ -39,12 +39,12 @@ export default defineConfig(({ mode }) => {
     build.update(file).update(readFileSync(path));
   }
 
+  const buildId = build.digest("hex").slice(0, 16);
+
   return {
     define: {
       __PIM_VERSION__: JSON.stringify(version),
-      "import.meta.env.PIM_BUILD": JSON.stringify(
-        build.digest("hex").slice(0, 16),
-      ),
+      "import.meta.env.PIM_BUILD": JSON.stringify(buildId),
     },
     server: {
       port: 3000,
@@ -109,6 +109,23 @@ export default defineConfig(({ mode }) => {
             type: "asset",
             fileName: "displayd.tar.gz",
             source: displaydBundle(),
+          });
+        },
+      },
+      {
+        // What this build says of itself, for the page that asks (`/release.json`) and for the tool that publishes it
+        // as a release of its own (packages/v2-server/src/web-release.ts).
+        name: "pim-release",
+        generateBundle() {
+          this.emitFile({
+            type: "asset",
+            fileName: "release.json",
+            source: JSON.stringify({
+              id: buildId,
+              version,
+              ...(env.PIM_REVISION ? { revision: env.PIM_REVISION } : {}),
+              builtAt: new Date().toISOString(),
+            }),
           });
         },
       },

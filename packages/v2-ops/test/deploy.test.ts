@@ -38,6 +38,19 @@ describe("the Compose homelab profile", () => {
 		expect(Object.keys(compose.services.runner.depends_on)).toEqual(expect.arrayContaining(["migrator", "pgbouncer", "nats", "objects-init"]));
 	});
 
+	it("lets the web app be released on its own: only the Gate reads the releases volume, read-only, and a one-off tools service writes it without starting anything else", () => {
+		expect(compose.services.gate.environment.PIM_WEB_RELEASES).toBe("/web-releases");
+		expect(compose.services.gate.volumes).toEqual(["pim-web:/web-releases:ro"]);
+		for (const name of Object.keys(compose.services)) if (name !== "gate" && name !== "web-release") expect(JSON.stringify(compose.services[name].volumes ?? []), name).not.toContain("pim-web");
+		const tool = compose.services["web-release"];
+		expect(tool.profiles).toEqual(["tools"]);
+		expect(tool.volumes).toEqual(["pim-web:/web-releases"]);
+		expect(tool.depends_on).toEqual({});
+		expect(tool.restart).toBe("no");
+		expect(compose.volumes).toHaveProperty("pim-web");
+		expect(read("deploy/Dockerfile.v2")).toMatch(/mkdir -p \/web-releases && chown node:node \/web-releases/);
+	});
+
 	it("orders startup by health: postgres, then pooler and migrator, then roles; roles wait for the migrator to finish", () => {
 		expect(compose.services.pgbouncer.depends_on.postgres.condition).toBe("service_healthy");
 		expect(compose.services.migrator.depends_on.postgres.condition).toBe("service_healthy");

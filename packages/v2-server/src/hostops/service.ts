@@ -18,7 +18,7 @@ import { newId, secret } from "@pim/v2-app/ids";
 export const HOST_OPS = ["stats", "deploy", "rollback", "restart", "logs", "set_slot_limit", "exec", "update"] as const;
 export type HostOpName = (typeof HOST_OPS)[number];
 /** The services the daemon may restart or read the logs of: the stack's Compose services, and the daemon itself. Its own copy in `sandbox-manager/hostopsd/validate.js` must say the same (a test checks). */
-export const HOST_SERVICES = ["caddy", "postgres", "pgbouncer", "nats", "seaweedfs", "gate", "live", "runner", "forge", "maintenance", "canvas", "relay", "pim-computer", "sandbox-manager", "hostopsd"] as const;
+export const HOST_SERVICES = ["caddy", "postgres", "pgbouncer", "nats", "seaweedfs", "gate", "live", "runner", "forge", "maintenance", "web", "canvas", "relay", "pim-computer", "sandbox-manager", "hostopsd"] as const;
 
 export type HostOpState = "queued" | "running" | "succeeded" | "failed" | "rolled_back" | "expired";
 /** The operations that replace what the stack runs, one at a time. */

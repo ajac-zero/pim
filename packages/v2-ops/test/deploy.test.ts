@@ -182,6 +182,56 @@ describe("the Compose homelab profile", () => {
 		rmSync(directory, { recursive: true, force: true });
 	});
 
+	it("updates the backend and the web app together, and a web image that cannot be pulled, or a stack that does not come up, leaves or puts back both pins", () => {
+		const directory = mkdtempSync(join(tmpdir(), "pim-sh-update-"));
+		try {
+			const compose_ = join(directory, "deploy", "compose");
+			execFileSync("mkdir", ["-p", compose_, join(directory, "bin"), join(directory, "scripts", "v2-backup")]);
+			cpSync(join(ROOT, "deploy/compose/pim.sh"), join(compose_, "pim.sh"));
+			writeFileSync(join(compose_, "compose.yaml"), "services: {}\n");
+			writeFileSync(join(directory, "scripts", "v2-backup", "compose-backup.sh"), "#!/bin/sh\nmkdir -p \"$1\"\necho backup >> \"$DOCKER_LOG\"\n");
+			chmodSync(join(directory, "scripts", "v2-backup", "compose-backup.sh"), 0o755);
+			const docker = join(directory, "bin", "docker");
+			writeFileSync(docker, `#!/bin/sh\necho "$@" >> "$DOCKER_LOG"\ncase "$1" in\n  pull) case "$*" in *pim-web*) [ -z "\${PULL_FAIL_WEB:-}" ] ;; esac ;;\n  image) echo "ghcr.io/ajac-zero/pim@sha256:newbackend"; echo "ghcr.io/ajac-zero/pim-web@sha256:newweb" ;;\n  compose) case "$*" in *" up "*) [ -z "\${FAIL_UP:-}" ] ;; esac ;;\nesac\n`);
+			chmodSync(docker, 0o755);
+			const before = "PIM_IMAGE=ghcr.io/ajac-zero/pim:stable@sha256:oldbackend\nPIM_WEB_IMAGE=ghcr.io/ajac-zero/pim-web:stable@sha256:oldweb\nPIM_PUBLIC_URL=https://pim.example.test\n";
+			const envFile = () => readFileSync(join(compose_, ".env"), "utf8");
+			const run = (extra: Record<string, string>) => {
+				writeFileSync(join(compose_, ".env"), before);
+				writeFileSync(join(directory, "log"), "");
+				try {
+					return { out: execFileSync("sh", [join(compose_, "pim.sh"), "update"], { cwd: compose_, env: { PATH: `${join(directory, "bin")}:${process.env.PATH}`, DOCKER_LOG: join(directory, "log"), ...extra }, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }), code: 0 };
+				} catch (error: any) {
+					return { out: String(error.stdout ?? ""), code: error.status as number };
+				}
+			};
+			const last = (out: string) => JSON.parse(out.trim().split("\n").at(-1)!);
+			const log = () => readFileSync(join(directory, "log"), "utf8");
+			// Both images are pulled, backed up first, and both pins move in the one `up` that recreates the stack.
+			const updated = run({});
+			expect(updated.code).toBe(0);
+			expect(last(updated.out)).toMatchObject({ result: "updated" });
+			expect(envFile()).toContain("PIM_IMAGE=ghcr.io/ajac-zero/pim:stable@sha256:newbackend");
+			expect(envFile()).toContain("PIM_WEB_IMAGE=ghcr.io/ajac-zero/pim-web:stable@sha256:newweb");
+			expect(envFile()).toContain("PIM_WEB_IMAGE_PREVIOUS=ghcr.io/ajac-zero/pim-web:stable@sha256:oldweb");
+			expect(log().split("\n").filter((l) => /^pull|backup|compose .* up/.test(l))).toEqual(["pull -q ghcr.io/ajac-zero/pim:stable", "pull -q ghcr.io/ajac-zero/pim-web:stable", "backup", "compose -f compose.yaml up -d --wait"]);
+			// A web image that cannot be pulled (not published yet) stops the update before anything is backed up, pinned or recreated: the running stack is as it was.
+			const unpublished = run({ PULL_FAIL_WEB: "1" });
+			expect(unpublished.code).toBe(1);
+			expect(last(unpublished.out)).toMatchObject({ result: "failed" });
+			expect(envFile()).toBe(before);
+			expect(log()).not.toMatch(/backup|compose/);
+			// A stack that does not come up with the new pair goes back to the old backend and the old web app together.
+			const broken = run({ FAIL_UP: "1" });
+			expect(broken.code).toBe(1);
+			expect(last(broken.out)).toMatchObject({ result: "rolled_back" });
+			expect(envFile()).toContain("PIM_IMAGE=ghcr.io/ajac-zero/pim:stable@sha256:oldbackend");
+			expect(envFile()).toContain("PIM_WEB_IMAGE=ghcr.io/ajac-zero/pim-web:stable@sha256:oldweb");
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
+	});
+
 	it("orders startup by health: postgres, then pooler and migrator, then roles; roles wait for the migrator to finish", () => {
 		expect(compose.services.pgbouncer.depends_on.postgres.condition).toBe("service_healthy");
 		expect(compose.services.migrator.depends_on.postgres.condition).toBe("service_healthy");

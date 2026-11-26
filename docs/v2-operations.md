@@ -43,7 +43,7 @@ Pim publishes its images, so an instance updates the way a self-hosted app does:
 | `ghcr.io/ajac-zero/pim-web` | `deploy/Dockerfile.web` | the `web` service: the interface, released on its own |
 | `ghcr.io/ajac-zero/pim-computer` | `deploy/Dockerfile.computer` | the `local-computer` profile |
 
-All are `linux/amd64` and `linux/arm64`, carry `org.opencontainers.image.version` and `.revision`, and are published by `.github/workflows/publish.yml`. **Channels and tags:** `stable` is the newest release; a tag `vX.Y.Z` on a commit of `main` publishes `X.Y.Z`, `X.Y` and `stable`. each push to `main` is built as `sha-<first 12 characters of the commit>` while CI runs, and `edge` is moved to that same image (same digest and labels) once CI and the Compose smoke test on the commit have passed, so `edge` is the newest push to `main` that passed both. Nothing is published for `pim/*` branches or pull requests.
+All are `linux/amd64` and `linux/arm64`, carry `org.opencontainers.image.version` and `.revision`, and are published by `.github/workflows/publish.yml`. **Channels and tags:** `stable` is the newest release; a tag `vX.Y.Z` on a commit of `main` publishes `X.Y.Z`, `X.Y` and `stable`. each push to `main` is built as `sha-<first 12 characters of the commit>` while CI runs, and `edge` is moved to that same image (same digest and labels) once CI and the Compose smoke test on the commit have passed, so `edge` is the newest push to `main` that passed both. Nothing is published for branches other than `main` or for pull requests.
 
 **First install from the published image.** `init-env.sh` writes `PIM_IMAGE=ghcr.io/ajac-zero/pim:stable` and `PIM_CHANNEL=stable` by default:
 
@@ -52,7 +52,7 @@ deploy/compose/init-env.sh https://pim.example.com
 deploy/compose/pim.sh up -d --wait          # pulls the image; migrations run first
 ```
 
-**Switching a stack built from source to the published image** (its `.env` has `PIM_IMAGE=pim:v2` or similar): `deploy/compose/pim.sh update stable` backs the stack up, pulls the image, and switches `PIM_IMAGE` to it, keeping the old reference in `PIM_IMAGE_PREVIOUS`; if it fails, the source-built image is put back. Add `PIM_CHANNEL=stable` (or `edge`) to `.env` so later updates need no argument. To keep building from source, leave `PIM_IMAGE` on your own tag and build it as before (`docker build -f deploy/Dockerfile.v2 -t pim:v2 .`); the development overlay and CI's `compose` job do.
+**Switching a stack built from source to the published image** (its `.env` has `PIM_IMAGE=pim:v2` or similar): `deploy/compose/pim.sh update stable` backs the stack up, pulls both images (the backend's and the web app's), and switches `PIM_IMAGE` and `PIM_WEB_IMAGE` to them, keeping the old reference in `PIM_IMAGE_PREVIOUS`; if it fails, the source-built image is put back. Add `PIM_CHANNEL=stable` (or `edge`) to `.env` so later updates need no argument. To keep building from source, leave `PIM_IMAGE` on your own tag and build it as before (`docker build -f deploy/Dockerfile.v2 -t pim:v2 .`); the development overlay and CI's `compose` job do.
 
 **Updating.**
 
@@ -104,12 +104,15 @@ deploy/compose/pim.sh update                # the backend and the interface, on 
 
 **What a browser keeps** (`web-host/src/assets.js`). A content-hashed file under `/assets/` (scripts, styles, fonts) is `public, max-age=31536000, immutable`: its name is its content. The page, `sw.js`, `release.json`, the icons and every other file are `no-cache` with an `ETag`, so a visit that changed nothing gets `304 Not Modified` and moves no body. A path with a file extension that names no file, and any `/assets/` path that does not, is a `404` with `no-store`, never the page, so a missing script is an error the app can see and nothing keeps it. Private data is never cached by the web host or a shared cache: it holds none, and `/api` and `/auth` answer `no-store` (`web-host-split.test.ts` pins it); the stylesheet every load waits on, `/api/themes.css`, is revalidated with an `ETag`. Caddy compresses (`encode zstd gzip`); the web host does not. The service worker (`web/public/sw.js`) keeps the app's page and `/assets/` files for opening without the network, never an API answer, and refuses to keep a page that answers in place of a file.
 
-**Migrating a deployment that serves the interface from the backend image.** There is no compatibility mode: the backend image no longer contains the web app and `PIM_WEB_DIR` is not read. For a Compose stack on the published images, the one-time change is:
+**Migrating a deployment that serves the interface from the backend image.** There is no compatibility mode: the backend image no longer contains the web app and `PIM_WEB_DIR` is not read, so a backend without a web container has no interface at all. The change is one coordinated cutover, and it must be done in this order:
 
-1. `git pull` brings `compose.yaml` (the `web` service, the `pim-web` volume), the Caddyfile and `pim.sh`. Nothing runs yet.
-2. Add `PIM_WEB_IMAGE=ghcr.io/ajac-zero/pim-web:stable` (or the channel in use) to `deploy/compose/.env`; without it the Compose file defaults to `:stable`. `env.example` has the line and comments.
-3. `deploy/compose/pim.sh update` (the usual update: backup, pull both images, switch, roll back on failure). The new backend image no longer serves the interface and the new Caddyfile sends it to `web`; Caddy, which mounts the changed Caddyfile, and every Pim role are recreated by this one update. Interface releases after it are `pim.sh update-web`.
-4. Nothing to migrate in data: the web host's volume starts empty and is filled by the first start. Browsers keep what they had: their cached files are content-hashed, and a page opened before the cutover finds its scripts only if the cut-over web image's release has them (a one-off reload is enough otherwise; the first release has no earlier releases to draw on).
+1. **Publish both images first.** `pim-web` has to exist in the registry on the channel the stack follows (`stable` after a release tag, `edge` after a push to `main`) at the same release as the backend image. Until it does, `pim.sh update` stops at pulling it, before the backup, before `.env` changes and before any container is touched, and the running stack stays as it was.
+2. **Then bring the checkout forward**: `git pull` brings `compose.yaml` (the `web` service, the `pim-web` volume), the Caddyfile and `pim.sh`. Nothing runs yet. Do not run `pim.sh up` with the new files while `.env` still names a backend image of the old release: only `update` (or the host daemon's `update`, which is the same command) moves both images together and puts both pins back if the stack does not come up. If the nightly update timer is installed (it fast-forwards the checkout before it updates), stop it until step 1 is done: a checkout ahead of the published images makes every update fail safely, but a `deploy` of a commit by the host daemon is a different path (below).
+3. Add `PIM_WEB_IMAGE=ghcr.io/ajac-zero/pim-web:stable` (or the channel in use) to `deploy/compose/.env`; `env.example` has the line and comments. Without it the Compose file defaults to `:stable`.
+4. `deploy/compose/pim.sh update` (backup, pull both images, switch both pins, recreate the stack, roll both pins back if it does not come up healthy). Caddy, which mounts the changed Caddyfile, and every Pim role are recreated by this one update; interface releases after it are `pim.sh update-web`. If it rolls back, the old pair is running and `.env` names it again.
+5. Nothing to migrate in data: the web host's volume starts empty and is filled by the first start. A page open from before the cutover finds its scripts only if the new web image's release has them (the first release has no earlier releases to draw on); a reload is enough otherwise.
+
+**The host daemon (`hostopsd`).** Its `update` operation runs `pim.sh update`, so it moves both images. Its `deploy` and `rollback` operations of a stack built from source build the backend and the web app from the checked-out commit (`PIM_IMAGE` and `PIM_WEB_IMAGE`, both tags, in `.env`) and bring the stack up: a deploy never runs one commit's backend with another's interface. It refuses, before building or touching anything, when `PIM_WEB_IMAGE` is missing or is a digest, and it goes back to the previous commit when either build or the health wait fails. Its `restart` and `logs` take the `web` service. After the first cutover, set `PIM_WEB_IMAGE` before the host daemon's next `deploy`.
 
 A stack built from source: build both images (`docker build -f deploy/Dockerfile.v2 -t pim:v2 .`, `docker build -f deploy/Dockerfile.web -t pim-web:v2 .`) and set `PIM_IMAGE` and `PIM_WEB_IMAGE`. Kubernetes needs a ReadWriteMany volume for the web Deployment (`deploy/k8s/base/web.yaml`, `storageClassName` there), the new `pim-web` image in the kustomization, and the ingress and network policy of this repository, which route by the same list. Anything else in front of Pim (a proxy of your own) must route the paths in `BACKEND_PATHS` to the backend and everything else to the web host.
 
@@ -149,9 +152,10 @@ Three artifacts are released independently: the web app (`pim-web`), the shared 
 A trial on one machine, over plain HTTP on `127.0.0.1:8088` (a browser treats `localhost` as secure, so passkeys work):
 
 ```sh
-deploy/compose/init-env.sh http://localhost:8088 --image pim:v2-local   # writes deploy/compose/.env with random secrets and keys
+deploy/compose/init-env.sh http://localhost:8088 --image pim:v2-local --web-image pim-web:v2-local   # writes deploy/compose/.env with random secrets and keys
 docker build -f deploy/Dockerfile.v2 -t pim:v2-local .
-deploy/compose/pim.sh up -d --wait          # caddy, postgres 17, pgbouncer, nats, seaweedfs, migrator, gate, live, runner, forge, maintenance
+docker build -f deploy/Dockerfile.web -t pim-web:v2-local .
+deploy/compose/pim.sh up -d --wait          # caddy, postgres 17, pgbouncer, nats, seaweedfs, migrator, gate, live, runner, forge, maintenance, web
 curl -s -X POST -H 'origin: http://localhost:8088' http://localhost:8088/auth/setup-link
 deploy/compose/pim.sh logs gate | grep -o 'http[^ "]*#claim=[^ "]*'   # open it, make the admin's passkey, save the recovery codes
 ```

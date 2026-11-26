@@ -4,7 +4,8 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { type Db, type Row, scopedDb } from "./db";
 import { ForbiddenError, ForgeError } from "./errors";
-import { type Policy, assertPushBranch, repoName } from "./authz";
+import { assertPushBranch, repoName } from "./authz";
+import { ownBranch } from "./store";
 
 export const MAX_TOKEN_TTL_MS = 12 * 3_600_000;
 export const DEFAULT_TOKEN_TTL_MS = 3_600_000;
@@ -36,7 +37,6 @@ export class Credentials {
 	constructor(
 		private readonly db: Db,
 		private readonly key: string,
-		private readonly policy: Policy,
 		private readonly clock: () => number = Date.now,
 		/** Reads a token's thread under its owner's row-level security scope: for a process, the Gate's, that is subject to it. */
 		private readonly scoped = false,
@@ -68,15 +68,15 @@ export class Credentials {
 		return row;
 	}
 
-	/** Clone/fetch need a read or push token for the repository; a pull request needs a push token; a push also needs a branch under the prefix that is not the default. */
+	/** Clone/fetch need a read or push token for the repository; a pull request needs a push token; a push also needs exactly the thread's own branch, which is never the default. */
 	async verifyGit(token: string, access: { repo: string; op: "fetch" | "push" | "advertise-push" | "pull-request"; branch?: string; defaultBranch?: string }): Promise<{ threadId: string; ownerId: string }> {
 		const c = open("pimgit_", this.key, token, this.clock());
 		if (c.repo !== repoName(access.repo)) throw new ForbiddenError("credential", "this credential is for another repository");
-		await this.live(c);
+		const row = await this.live(c);
 		if ((access.op === "advertise-push" || access.op === "pull-request") && c.scope !== "push") throw new ForgeError("push_refused", "This credential can only fetch");
 		if (access.op === "push") {
 			if (c.scope !== "push") throw new ForgeError("push_refused", "This credential can only fetch");
-			assertPushBranch(this.policy, access.branch ?? "", access.defaultBranch ?? "main");
+			assertPushBranch(access.branch ?? "", access.defaultBranch ?? "main", ownBranch({ harness: row.harness as string, task: row.task as string, threadId: row.thread_id as string, branch: row.branch as string | null }));
 		}
 		return { threadId: c.thread, ownerId: c.owner };
 	}

@@ -14,7 +14,7 @@ import type { KeyringCrypto } from "@pim/v2-app/crypto";
 import { type PageApproval, webCodingShapes } from "./compat/coding.ts";
 import { randomBytes } from "node:crypto";
 import { GiteaNotConnectedError } from "@pim/coding/git-broker/gitea-connection";
-import { githubAppConfig, githubAppStatus, giteaConfig, brokerPolicy, GITEA_INSTANCE_ID } from "@pim/coding/git-broker/config";
+import { githubAppConfig, githubAppStatus, giteaConfig, GITEA_INSTANCE_ID } from "@pim/coding/git-broker/config";
 import { GitHubApp } from "@pim/coding/git-broker/github-app";
 import { GitHubProvider } from "@pim/coding/git-broker/github-provider";
 import { GiteaProvider } from "@pim/coding/git-broker/gitea-provider";
@@ -113,11 +113,11 @@ export function ownerModels(db: ForgeDb, crypto: EnvelopeCrypto | undefined, env
 
 export function assembleForge(db: ForgeDb, objects: ObjectStore, env: Env, crypto?: EnvelopeCrypto, opts: { scoped?: boolean; /** Whether this deployment can run Amp, for a process that holds no vault of its own (the Runner, which only starts threads). Default: this process has a vault. */ ampConfigured?: boolean; /** Where a person answers what Forge asks them to approve. */ onApprovalFiled?: (filed: ApprovalFiled) => Promise<void> } = {}): ForgeParts {
 	const store = new ForgeStore(db);
-	const authz = new Authz(db, { branchPrefix: env.PIM_CODING_BRANCH_PREFIX ?? "pim/" }, opts.onApprovalFiled);
+	const authz = new Authz(db, opts.onApprovalFiled);
 	const clock = overrides.clock ?? Date.now;
 	const scheduler = new ForgeScheduler(db, store, clock);
 	// Without a configured signing key a process signs with its own, so the broker tokens it issues die with it: fine for a trial, set one in a deployment.
-	const credentials = new Credentials(db, env.PIM_CODING_SIGNING_KEY ?? randomBytes(32).toString("base64url"), authz.policy, clock, opts.scoped ?? false);
+	const credentials = new Credentials(db, env.PIM_CODING_SIGNING_KEY ?? randomBytes(32).toString("base64url"), clock, opts.scoped ?? false);
 	const publicUrl = env.PIM_PUBLIC_URL ?? "";
 	// Where a workspace reaches the git broker: Pim's public address, or `PIM_CODING_BROKER_URL` where that isn't reachable from a workspace (a Compose stack with no public HTTPS address: the egress proxy's `EGRESS_INTERNAL_HOSTS` then lists it).
 	const brokerUrl = env.PIM_CODING_BROKER_URL || publicUrl;
@@ -134,8 +134,7 @@ export function assembleForge(db: ForgeDb, objects: ObjectStore, env: Env, crypt
 
 	// The git host: the GitHub App (public repositories are read without it) and Gitea once its OAuth application is set up.
 	const aliased = { ...env, PIM_GITHUB_APP_PRIVATE_KEY: env.PIM_GITHUB_APP_PRIVATE_KEY ?? env.PIM_GITHUB_PRIVATE_KEY };
-	const policy = brokerPolicy(env);
-	const providers: GitProvider[] = [new GitHubProvider(githubAppStatus(aliased).configured ? new GitHubApp(githubAppConfig(aliased)) : null, { policy })];
+	const providers: GitProvider[] = [new GitHubProvider(githubAppStatus(aliased).configured ? new GitHubApp(githubAppConfig(aliased)) : null)];
 	const giteaOauth = giteaConfig(env);
 	const gitea = crypto && giteaOauth && publicUrl ? new GiteaConnection(db, crypto, { ...giteaOauth, redirectUri: `${publicUrl.replace(/\/$/, "")}/api/coding/gitea/callback` }) : null;
 	if (gitea && giteaOauth) {

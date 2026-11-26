@@ -51,9 +51,9 @@ export async function stack(o: { ampConfigured?: boolean } = {}) {
 	const sandboxes = new LocalSandboxProvider(join(dir, "sandboxes"));
 	const gitHost = new LocalGitHost(sandboxes, { "acme/app": bare });
 	const store = new ForgeStore(db);
-	const authz = new Authz(db, { branchPrefix: "pim/" });
+	const authz = new Authz(db);
 	const scheduler = new ForgeScheduler(db, store, clock);
-	const credentials = new Credentials(db, "test-signing-key", authz.policy, clock);
+	const credentials = new Credentials(db, "test-signing-key", clock);
 	const objects = new MemoryObjects();
 	const orb = new FakeOrbClient();
 	const orbs = () => orb;

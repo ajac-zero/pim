@@ -42,7 +42,7 @@ export type ThreadRow = {
 	createdBy: string;
 	workspaceRef: any;
 	placement: any;
-	orb: { threadId: string; url: string; client?: string; /** The operation whose turn is running on the remote thread. */ turn?: string; /** The total dollars the orb has reported so far, so each sync records only the difference. */ reportedUsd?: number; /** The branch Amp pushed its work to, once known. */ branch?: string } | null;
+	orb: { threadId: string; url: string; client?: string; /** The operation whose turn is running on the remote thread. */ turn?: string; /** The total dollars the orb has reported so far, so each sync records only the difference. */ reportedUsd?: number; /** The branch Amp pushed its work to, once known. */ branch?: string; /** The names of the branches the git host had before the thread began, which are not the thread's to follow (`refuseOrbBranch`); absent when the host could not be read. */ baseline?: string[] } | null;
 	provisioning: any;
 	budgetUsd: number | null;
 	spentUsd: number;
@@ -112,10 +112,23 @@ export type OutboxTopic = "projection" | "wake" | "cost_ledger";
 /** `resume-<root>-<n>` and `retry-<root>-<n>` belong to the turn `root`; its wake is keyed by the root so a resumed turn ends once. */
 export const rootOperation = (op: string) => op.replace(/^(?:resume|retry)-(.*)-\d+$/, "$1");
 
-/** A thread slug for the pim/<slug>-<id> branch name. */
-export function branchFor(task: string, threadId: string, prefix = "pim/"): string {
+/** The thread's own branch: an ordinary name, the task as a short slug and the start of the thread's id (`<slug>-<id>`), so no two threads share one. */
+export function branchFor(task: string, threadId: string): string {
 	const slug = task.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 32).replace(/-+$/, "") || "task";
-	return `${prefix}${slug}-${threadId.slice(0, 8)}`;
+	return `${slug}-${threadId.slice(0, 8)}`;
+}
+
+/** What every branch Pim made for a thread began with before branches were ordinary names: threads made then (and imported ones) still hold such a branch in their row. */
+const LEGACY_BRANCH_PREFIX = "pim/";
+
+/**
+ * The one branch a sandbox thread may write: the name `branchFor` makes of its task and id, and only if its row still says so. A thread's branch is not something a request or an agent names:
+ * a row that says anything else (damaged, or edited) leaves the thread with no branch to push, rather than with whatever the row says. The one allowance is a thread made before branches were
+ * ordinary names, whose row holds the `pim/…` branch Pim made for it then and keeps it. An Amp thread has none (it follows a recorded orb branch).
+ */
+export function ownBranch(t: { harness: string; task: string; threadId: string; branch: string | null }): string | null {
+	if (t.harness === "amp" || t.branch === null) return null;
+	return t.branch === branchFor(t.task, t.threadId) || t.branch.startsWith(LEGACY_BRANCH_PREFIX) ? t.branch : null;
 }
 
 export class ForgeStore {
@@ -125,13 +138,13 @@ export class ForgeStore {
 	) {}
 
 	/** Starts a thread, or finds the one this (owner, operation) already made: the same start is always the same thread. */
-	async start(input: StartInput, branchPrefix = "pim/"): Promise<{ thread: ThreadRow; created: boolean }> {
+	async start(input: StartInput): Promise<{ thread: ThreadRow; created: boolean }> {
 		const threadId = codingThreadId(input.ownerId, input.operationId);
 		const r = await this.db.query<Row>(
 			`insert into pim_forge.forge_threads (thread_id, owner_id, start_operation, harness, state, task, repo, ref, branch, chat_id, created_by, budget_usd, limits, profile, gateway_nonce)
 			 values ($1,$2,$3,$4,'provisioning',$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
 			 on conflict (owner_id, start_operation) do nothing returning *`,
-			[threadId, input.ownerId, input.operationId, input.harness, input.task, input.repo, input.ref ?? null, input.harness === "amp" ? null : branchFor(input.task, threadId, branchPrefix), input.chatId ?? null, input.createdBy, input.budgetUsd ?? null, input.limits ?? null, input.profile ?? null, randomUUID()],
+			[threadId, input.ownerId, input.operationId, input.harness, input.task, input.repo, input.ref ?? null, input.harness === "amp" ? null : branchFor(input.task, threadId), input.chatId ?? null, input.createdBy, input.budgetUsd ?? null, input.limits ?? null, input.profile ?? null, randomUUID()],
 		);
 		if (r.rows[0]) return { thread: toThread(r.rows[0]), created: true };
 		return { thread: (await this.get(threadId))!, created: false };

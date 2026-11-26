@@ -23,21 +23,36 @@ describe("push, pull request, merge and archive", () => {
 	});
 	afterAll(async () => s.close());
 
-	it("pushes only pim/* branches, reports unchanged the second time, and refuses the default branch", async () => {
+	it("pushes only the thread's own branch, reports unchanged the second time, and refuses the default branch, any other branch and a row that says otherwise", async () => {
 		const id = await ready();
 		const t = (await s.store.get(id))!;
-		expect(t.branch).toMatch(/^pim\/fix-the-login-bug-[0-9a-f]{8}$/);
+		// An ordinary name (task and id), with no namespace in front of it.
+		expect(t.branch).toMatch(/^fix-the-login-bug-[0-9a-f]{8}$/);
 		const r = await s.forge.push(ada, id);
 		expect(r).toMatchObject({ status: "done", outcome: "pushed", branch: t.branch });
 		expect(host(s, "rev-parse", `refs/heads/${t.branch}`)).toBe((r as any).sha);
 		expect(await s.forge.push(ada, id)).toMatchObject({ outcome: "unchanged" });
 		expect((await s.store.get(id))!.lastPushedSha).toBe((r as any).sha);
-		// Even if a thread's branch were ever main (or outside the prefix), Pim refuses to push there.
-		for (const bad of ["main", "release/1.0"]) {
+		// A thread names no branch but its own: not another, not the default, even by the push's `branch` argument.
+		for (const other of ["main", "release/1.0", "someone-elses-work", `${t.branch}-2`]) await expect(s.forge.push(ada, id, { branch: other })).rejects.toMatchObject({ code: "push_refused" });
+		await expect(s.forge.push(ada, id, { branch: t.branch! })).resolves.toMatchObject({ outcome: "unchanged" });
+		// Even if the row's branch were ever main, an ordinary branch, or a lookalike of its own (another thread's id), Pim refuses to push there: a row does not name the branch.
+		for (const bad of ["main", "release/1.0", "fix-the-login-bug-deadbeef", "fix-something-else-" + t.threadId.slice(0, 8)]) {
 			await s.pool.query("update pim_forge.forge_threads set branch = $2 where thread_id = $1", [id, bad]);
 			await expect(s.forge.push(ada, id)).rejects.toMatchObject({ code: "push_refused" });
 		}
 		expect(host(s, "rev-parse", "refs/heads/main")).not.toBe((r as any).sha);
+		await s.pool.query("update pim_forge.forge_threads set branch = $2 where thread_id = $1", [id, t.branch]);
+	});
+
+	it("keeps a thread made before branches were ordinary names pushing its own `pim/…` branch, and no other", async () => {
+		const id = await ready("legacy.txt", "legacy");
+		const t = (await s.store.get(id))!;
+		const legacy = `pim/${t.branch}`;
+		await s.pool.query("update pim_forge.forge_threads set branch = $2 where thread_id = $1", [id, legacy]);
+		await expect(s.forge.push(ada, id)).resolves.toMatchObject({ status: "done", branch: legacy });
+		// It still writes nothing but the branch its row holds.
+		await expect(s.forge.push(ada, id, { branch: t.branch! })).rejects.toMatchObject({ code: "push_refused" });
 		await s.pool.query("update pim_forge.forge_threads set branch = $2 where thread_id = $1", [id, t.branch]);
 	});
 
@@ -140,7 +155,7 @@ describe("credentials, archive and cancellation", () => {
 	});
 	afterAll(async () => s.close());
 
-	it("scopes a pimgit_ token to a repository and operation, and refuses pushes outside pim/*", async () => {
+	it("scopes a pimgit_ token to a repository and operation, and refuses a push of any branch but its own", async () => {
 		const t = await ready();
 		const read = s.credentials.gitToken(t, { repo: REPO, scope: "read" });
 		expect(read.startsWith("pimgit_")).toBe(true);

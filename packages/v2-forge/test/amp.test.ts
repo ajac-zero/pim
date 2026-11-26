@@ -209,16 +209,16 @@ describe("Amp: a remote orb Forge adopts and never restarts", () => {
 		const clone = await s.sandboxes.create(`amp-found-${n}`);
 		await s.sandboxes.exec(clone, ["git", "clone", s.bare, "."]);
 		await s.sandboxes.exec(clone, ["sh", "-c", "echo found > found.txt"]);
-		await s.sh(clone, "checkout", "-b", `pim/found-${n}`);
+		await s.sh(clone, "checkout", "-b", `found-${n}`);
 		await s.sh(clone, "add", ".");
 		await s.sh(clone, "commit", "-m", "found work");
-		await s.sh(clone, "push", s.bare, `pim/found-${n}`);
-		orb.say(h, "assistant", `All done: I pushed my work to pim/found-${n} for you.`);
+		await s.sh(clone, "push", s.bare, `found-${n}`);
+		orb.say(h, "assistant", `All done: I pushed my work to found-${n} for you.`);
 		orb.setState(h, "idle");
 		await w.step(id);
-		expect((await s.store.get(id))!.orb).toMatchObject({ branch: `pim/found-${n}` });
-		expect(await s.forge.diff(ada, id)).toMatchObject({ unpushedOrb: false, head: `pim/found-${n}`, diff: expect.stringContaining("+found") });
-		expect(await s.forge.openPullRequest(ada, id)).toMatchObject({ status: "done", head: `pim/found-${n}` });
+		expect((await s.store.get(id))!.orb).toMatchObject({ branch: `found-${n}` });
+		expect(await s.forge.diff(ada, id)).toMatchObject({ unpushedOrb: false, head: `found-${n}`, diff: expect.stringContaining("+found") });
+		expect(await s.forge.openPullRequest(ada, id)).toMatchObject({ status: "done", head: `found-${n}` });
 		expect(await s.forge.merge(ada, id)).toMatchObject({ status: "done", outcome: "merged" });
 		// A commit it names, which the host has, is followed when no branch is named.
 		const byCommit = new FakeOrbClient();
@@ -236,14 +236,14 @@ describe("Amp: a remote orb Forge adopts and never restarts", () => {
 		expect((await s.store.get(id2))!.orb!.branch).toBe(sha);
 	});
 
-	it("can't be pushed or merged by Forge, and its diff says honestly when the work isn't on the git host", async () => {
+	it("can't be pushed by Forge, and merges only the branch it follows; its diff says honestly when the work isn't on the git host", async () => {
 		const id = await amp();
-		await s.worker().step(id);
+		await s.worker({ git: s.git }).step(id);
 		await expect(s.forge.push(ada, id)).rejects.toMatchObject({ code: "unsupported" });
 		// Merging is different: Amp's work is on the host, so Forge merges it from there. Not until the branch exists.
 		await expect(s.forge.merge(ada, id)).rejects.toMatchObject({ code: "not_pushed" });
 		expect(await s.forge.diff(ada, id)).toEqual({ source: "orb", diff: "", unpushedOrb: true, since: null, head: null, truncated: false });
-		await s.forge.recordOrbBranch(id, "amp/feature");
+		expect(await s.forge.recordOrbBranch(id, "amp/feature")).toBe(true);
 		expect(await s.forge.diff(ada, id)).toMatchObject({ unpushedOrb: true });
 		// Once the orb has pushed to the host, the diff is the host's.
 		const clone = (await s.sandboxes.create("amp-pusher"));
@@ -258,16 +258,74 @@ describe("Amp: a remote orb Forge adopts and never restarts", () => {
 		expect(d.diff).toContain("+amp");
 		// A PR can be opened for the pushed orb branch.
 		expect(await s.forge.openPullRequest(ada, id)).toMatchObject({ status: "done", head: "amp/feature" });
-		// Only pim/* branches are merged by Pim, whoever pushed them.
-		await expect(s.forge.merge(ada, id)).rejects.toMatchObject({ code: "push_refused" });
-		await s.sh(clone, "push", s.bare, "amp/feature:refs/heads/pim/amp-work-1234");
-		await s.forge.recordOrbBranch(id, "pim/amp-work-1234");
+		// The branch it follows is merged, by fast-forward, never forced; no name rule is needed because it is this thread's and nobody else's.
 		expect(await s.forge.merge(ada, id)).toMatchObject({ status: "done", outcome: "merged", method: "fast-forward" });
 		expect(execFileSync("git", ["--git-dir", s.bare, "show", "main:amp.txt"], { encoding: "utf8" }).trim()).toBe("amp");
 		// Revoked: denied at once.
 		const grants = await s.pool.query("select grant_id from pim_forge.forge_grants where subject_id = 'ada' and permission = 'coding:merge'");
 		await s.authz.revoke(grants.rows[0].grant_id);
 		await expect(s.forge.merge(ada, id)).rejects.toMatchObject({ code: "forbidden" });
+	});
+
+	it("follows only a branch of its own: not the default branch, not one that was there before it began, not another thread's, and nothing when the host could not be read at the start", async () => {
+		const tag = `adv${n}`;
+		const clone = await s.sandboxes.create(`amp-adversary-${tag}`);
+		await s.sandboxes.exec(clone, ["git", "clone", s.bare, "."]);
+		const push = async (branch: string, file: string) => {
+			await s.sandboxes.exec(clone, ["git", "checkout", "-q", "-B", branch, "origin/main"]);
+			await s.sandboxes.exec(clone, ["sh", "-c", `echo ${branch} > ${file}`]);
+			await s.sh(clone, "add", ".");
+			await s.sh(clone, "commit", "-m", branch);
+			await s.sh(clone, "push", s.bare, `${branch}:refs/heads/${branch}`);
+		};
+		// Somebody else's branches, there before the thread begins.
+		await push(`teammate-work-${tag}`, "t.txt");
+		await push(`release-${tag}`, "r.txt");
+		const orb = new FakeOrbClient();
+		const mine = await amp();
+		const w = s.worker({ orbs: () => orb, git: s.git });
+		await w.step(mine);
+		const h = orb.started[0]!.threadId;
+		expect((await s.store.get(mine))!.orb!.baseline).toEqual(expect.arrayContaining([`teammate-work-${tag}`, `release-${tag}`, "main"]));
+		// An agent that says it pushed a branch that was there before is not followed, however it is told: its words don't make a branch its own.
+		orb.say(h, "assistant", `I pushed my work to teammate-work-${tag} and to release-${tag}.`);
+		await w.step(mine);
+		expect((await s.store.get(mine))!.orb!.branch).toBeUndefined();
+		expect(await s.forge.recordOrbBranch(mine, `teammate-work-${tag}`)).toBe(false);
+		// The default branch, however it is named, is never followed.
+		expect(await s.forge.recordOrbBranch(mine, "main")).toBe(false);
+		expect(await s.forge.recordOrbBranch(mine, "MASTER")).toBe(false);
+		expect(await s.forge.recordOrbBranch(mine, "pim-staging/x")).toBe(false);
+		expect(await s.forge.recordOrbBranch(mine, "bad..name")).toBe(false);
+		// A branch it makes itself is followed; and then no other thread, of this person or another, may follow the same one.
+		await push(`mine-${tag}`, "m.txt");
+		orb.say(h, "assistant", `Pushed mine-${tag} for you.`);
+		await w.step(mine);
+		expect((await s.store.get(mine))!.orb).toMatchObject({ branch: `mine-${tag}` });
+		const other = await amp();
+		await w.step(other);
+		expect(await s.forge.recordOrbBranch(other, `mine-${tag}`)).toBe(false);
+		const intruder = new FakeOrbClient();
+		const wi = s.worker({ orbs: () => intruder, git: s.git });
+		const third = await amp();
+		await wi.step(third);
+		intruder.say(intruder.started[0]!.threadId, "assistant", `I pushed my work to mine-${tag}.`);
+		await wi.step(third);
+		expect((await s.store.get(third))!.orb!.branch).toBeUndefined();
+		// A thread whose host could not be read when it began has no baseline, and so follows nothing it is told of.
+		const blind = await amp();
+		const blindOrb = new FakeOrbClient();
+		await s.worker({ orbs: () => blindOrb, git: { ...s.git, branches: async () => { throw new Error("host down"); } } as never }).step(blind);
+		expect((await s.store.get(blind))!.orb!.baseline).toBeUndefined();
+		await push(`late-${tag}`, "l.txt");
+		blindOrb.say(blindOrb.started[0]!.threadId, "assistant", `Pushed late-${tag}.`);
+		await w.step(blind);
+		expect((await s.store.get(blind))!.orb!.branch).toBeUndefined();
+		expect(await s.forge.recordOrbBranch(blind, `late-${tag}`)).toBe(false);
+		// A row that was made to name the default branch, or another thread's, is not merged: the merge asks the same questions again.
+		await s.pool.query("update pim_forge.forge_threads set orb = jsonb_set(orb, '{branch}', '\"main\"') where thread_id = $1", [other]);
+		await s.grantAll("ada");
+		await expect(s.forge.merge(ada, other)).rejects.toMatchObject({ code: "push_refused" });
 	});
 
 	it("takes no slot and consumes no sandbox quota, even at a concurrency quota of zero", async () => {

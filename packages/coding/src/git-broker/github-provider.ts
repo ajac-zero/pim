@@ -1,6 +1,6 @@
 import { apiHeaders, GITHUB_API, type Fetch, type GitHubApp, RepoNotInstalledError } from "./github-app";
 import { GitBrokerError, listBranchesOverGit, readCapped, type RepoRef, parseRepoUrl, repoDefaultBranch } from "./broker";
-import { type BrokerPolicy, GitBrokerNotConfiguredError } from "./config";
+import { GitBrokerNotConfiguredError } from "./config";
 import { type GitAccess, type GitCredential, type GitProvider, GITHUB_INSTANCE, MAX_COMPARE_CHARS, type ProviderInstance, type PullRequestInput } from "./provider";
 
 /**
@@ -12,13 +12,11 @@ export class GitHubProvider implements GitProvider {
 	readonly instance: ProviderInstance = GITHUB_INSTANCE;
 	readonly #app: GitHubApp | null;
 	readonly #fetch: Fetch;
-	readonly #policy: BrokerPolicy;
 
 	/** `app` is null when the deployment hasn't set the App up: public repositories are still read anonymously. */
-	constructor(app: GitHubApp | null, options: { fetch?: Fetch; policy?: BrokerPolicy } = {}) {
+	constructor(app: GitHubApp | null, options: { fetch?: Fetch } = {}) {
 		this.#app = app;
 		this.#fetch = options.fetch ?? ((input, init) => fetch(input, init));
-		this.#policy = options.policy ?? { branchPrefix: null };
 	}
 
 	parseRepoUrl(input: string): RepoRef {
@@ -47,7 +45,7 @@ export class GitHubProvider implements GitProvider {
 	}
 
 	defaultBranch(repo: RepoRef): Promise<string> {
-		return repoDefaultBranch({ app: this.#app, policy: this.#policy, fetch: this.#fetch }, this.repoUrl(repo));
+		return repoDefaultBranch({ app: this.#app, fetch: this.#fetch }, this.repoUrl(repo));
 	}
 
 	async listBranches(repo: RepoRef): Promise<ReadonlyMap<string, string>> {

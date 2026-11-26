@@ -1,6 +1,6 @@
 import { base64UrlDecode, base64UrlEncode } from "@pim/shared/encoding";
 import { HttpError } from "@pim/shared/http";
-import { type BrokerPolicy, GitBrokerNotConfiguredError } from "./config";
+import { GitBrokerNotConfiguredError } from "./config";
 import { apiHeaders, type Fetch, GITHUB_API, type GitHubApp } from "./github-app";
 import { GITHUB_INSTANCE, type GitCredential, type GitProvider, type ProviderInstance, type ProviderRegistry, basicAuth } from "./provider";
 
@@ -32,8 +32,9 @@ import { GITHUB_INSTANCE, type GitCredential, type GitProvider, type ProviderIns
  * ref, GitHub's API moves the branch with `force: false`, and the staging
  * ref is deleted. Pim pushes to the repository's default branch, `main` or
  * `master` in most, only for a merge (`toDefault`, the merge Pim itself makes),
- * which moves the branch only forward. Any other push is to a branch inside the policy's prefix
- * (`pim/`).
+ * which moves the branch only forward. Any other push is to a branch the caller names that is an ordinary,
+ * valid branch name and not `main`, `master`, the default branch or one of Pim's own staging refs: whether it is
+ * *that thread's* branch is the caller's to settle (a workspace's token names exactly one; Forge pushes only a thread's own).
  */
 
 export type RepoRef = { readonly owner: string; readonly name: string; readonly fullName: string };
@@ -94,21 +95,20 @@ export function parseRepoUrl(input: string): RepoRef {
 /** Branches Pim never pushes to, whatever the repository's default branch is. */
 export const PROTECTED_BRANCHES = ["main", "master"] as const;
 
+/** Where Pim stages a pack before moving a branch to it (`pushBranch`): never a name a branch may take. */
+export const STAGING_NAMESPACE = "pim-staging/";
+
 /**
- * `branch`, if Pim may push to it: a name git allows (as `git
- * check-ref-format` checks it), under the policy's prefix, and not `main`,
- * `master` or the repository's default branch (when known).
+ * `branch`, if Pim may push to it: a name git allows (as `git check-ref-format` checks it), not `main`, `master` or the repository's default branch (when known),
+ * and not under Pim's staging namespace. Any other name is an ordinary branch; which thread may push it is decided where the thread is known.
  */
-export function checkBranch(branch: string, policy: Pick<BrokerPolicy, "branchPrefix">, defaultBranch: string | null = null): string {
+export function checkBranch(branch: string, defaultBranch: string | null = null): string {
 	checkBranchName(branch);
 	const lower = branch.toLowerCase();
 	if ((PROTECTED_BRANCHES as readonly string[]).includes(lower) || (defaultBranch !== null && lower === defaultBranch.toLowerCase())) {
-		throw new GitBrokerError(403, `${branch} is never pushed to: push your own pim/… branch and open a pull request; a person merges it`);
+		throw new GitBrokerError(403, `${branch} is never pushed to: push your own branch and open a pull request; a person merges it`);
 	}
-	const prefix = policy.branchPrefix;
-	if (prefix !== null && (!branch.startsWith(prefix) || branch.length === prefix.length)) {
-		throw new GitBrokerError(403, `Pim pushes only branches whose names start with ${prefix}`);
-	}
+	if (lower.startsWith(STAGING_NAMESPACE)) throw new GitBrokerError(403, `Branches under ${STAGING_NAMESPACE} are Pim's own and are never pushed to`);
 	return branch;
 }
 
@@ -293,13 +293,13 @@ export function parseReceivePackRequest(bytes: Uint8Array): { commands: PushComm
 
 /**
  * Refuses a push from a workspace unless it is exactly one update of the
- * token's own branch: not any other ref (the default branch, other `pim/`
+ * token's own branch: not any other ref (the default branch, other
  * branches, tags), not a delete, and from the branch's current tip (`tip`,
  * null when it doesn't exist) or a creation. The client's old value must
  * equal the tip, so a stale view of the branch is refused.
  */
-export function checkPushScope(commands: readonly PushCommand[], capabilities: readonly string[], branch: string, tip: string | null, policy: Pick<BrokerPolicy, "branchPrefix">): PushCommand {
-	const own = `refs/heads/${checkBranch(branch, policy)}`;
+export function checkPushScope(commands: readonly PushCommand[], capabilities: readonly string[], branch: string, tip: string | null): PushCommand {
+	const own = `refs/heads/${checkBranch(branch)}`;
 	if (commands.length !== 1) throw new GitBrokerError(403, `A workspace pushes one ref at a time: its own branch, ${own}`);
 	const command = commands[0]!;
 	if (command.ref !== own) throw new GitBrokerError(403, `This workspace may push only its own branch, ${own}, not ${command.ref.slice(0, 200)}`);
@@ -403,7 +403,6 @@ export type PushResult = { readonly repo: string; readonly branch: string; reado
 export type PushDeps = {
 	/** The deployment's GitHub App; null when it isn't configured. */
 	readonly app: GitHubApp | null;
-	readonly policy: BrokerPolicy;
 	/** The deployment's git providers: without them, every repository is on GitHub. */
 	readonly providers?: ProviderRegistry;
 	readonly fetch?: Fetch;
@@ -419,7 +418,7 @@ export function preparePush(deps: PushDeps, request: PushRequest): PreparedPush 
 	if (instance.kind === "github" && !deps.app) throw new GitBrokerNotConfiguredError();
 	if (!SESSION_ID.test(request.sessionId)) throw new GitBrokerError(400, "That isn't a coding session's ID");
 	const repo = resolved?.repo ?? parseRepoUrl(request.repo);
-	const branch = request.toDefault ? checkBranchName(request.branch) : checkBranch(request.branch, deps.policy);
+	const branch = request.toDefault ? checkBranchName(request.branch) : checkBranch(request.branch);
 	const max = deps.maxBundleBytes ?? MAX_PUSH_BYTES;
 	if (request.bundle.length > max) throw new GitBrokerError(413, `The push is ${size(request.bundle.length)}; Pim pushes at most ${size(max)} at once`);
 	const bundle = parseBundle(request.bundle);
@@ -461,7 +460,7 @@ export async function pushBranch(deps: PushDeps, request: PushRequest): Promise<
 	const { default_branch: defaultBranch } = (await about.json()) as { default_branch?: unknown };
 	if (push.toDefault) {
 		if (branch !== defaultBranch) throw new GitBrokerError(409, `${branch} isn't ${repo.fullName}'s default branch${typeof defaultBranch === "string" ? `, ${defaultBranch}` : ""}`);
-	} else checkBranch(branch, deps.policy, typeof defaultBranch === "string" ? defaultBranch : null);
+	} else checkBranch(branch, typeof defaultBranch === "string" ? defaultBranch : null);
 
 	const { refs, caps } = await advertise(call, git, gitHeaders, repo, "GitHub");
 	const receivePack = (commands: [string, string, string][], body: Uint8Array | null) => sendReceivePack(call, git, gitHeaders, caps, "GitHub", commands, body);
@@ -577,7 +576,7 @@ async function pushToGitProvider(deps: PushDeps, push: PreparedPush): Promise<Pu
 	const defaultBranch = await provider.defaultBranch(repo);
 	if (push.toDefault) {
 		if (branch !== defaultBranch) throw new GitBrokerError(409, `${branch} isn't ${repo.fullName}'s default branch, ${defaultBranch}`);
-	} else checkBranch(branch, deps.policy, defaultBranch);
+	} else checkBranch(branch, defaultBranch);
 
 	const { refs, caps } = await advertise(call, git, gitHeaders, repo, name);
 	const receivePack = (commands: [string, string, string][], body: Uint8Array | null) => sendReceivePack(call, git, gitHeaders, caps, name, commands, body);

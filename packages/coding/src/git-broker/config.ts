@@ -18,11 +18,6 @@
  * Until the ID and key are both set, the App is not configured: anything
  * that needs it fails with `GitBrokerNotConfiguredError`, and public
  * repositories are still cloned anonymously.
- *
- * One variable sets the rules, whether or not the App is configured:
- * `PIM_GIT_BRANCH_PREFIX`, what every branch Pim pushes starts with, `pim/`
- * when unset; `none` lets it push any branch but the default one, `main` and
- * `master`.
  */
 
 export const GITHUB_APP_SECRETS = {
@@ -93,26 +88,6 @@ export function githubAppConfig(env: object): GitHubAppConfig {
 	const read = readGitHubApp(env);
 	if ("problem" in read) throw new GitBrokerNotConfiguredError(read.problem);
 	return read.config;
-}
-
-/** What the broker lets coding threads do. */
-export type BrokerPolicy = {
-	/** What every pushed branch starts with; null for any branch (but the default one, `main` and `master`). */
-	readonly branchPrefix: string | null;
-};
-
-export const DEFAULT_BRANCH_PREFIX = "pim/";
-
-const PREFIX = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,63}$/;
-
-/**
- * The broker's rules. A prefix Pim can't read stays `pim/`, so a typo never
- * loosens it.
- */
-export function brokerPolicy(env: object): BrokerPolicy {
-	const prefix = value(env, "PIM_GIT_BRANCH_PREFIX");
-	const branchPrefix = prefix === null ? DEFAULT_BRANCH_PREFIX : prefix === "none" ? null : PREFIX.test(prefix) && !/\.\.|\/\/|\/\./.test(prefix) ? prefix : DEFAULT_BRANCH_PREFIX;
-	return { branchPrefix };
 }
 
 /**

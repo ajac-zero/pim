@@ -11,9 +11,10 @@ import { ForbiddenError, ForgeError } from "./errors";
 import { HARNESSES, capabilitiesOf, type Harness } from "./harnesses";
 import { type GitHost, type Objects, type OrbClients } from "./ports";
 import { ForgeScheduler } from "./scheduler";
-import { ForgeStore, type OutboxTopic, type ThreadRow } from "./store";
+import { ForgeStore, type OutboxTopic, ownBranch, type ThreadRow } from "./store";
 import { type Credentials } from "./tokens";
 import { threadRef } from "./identity";
+import { refuseOrbBranch } from "./orb-branch";
 import { StallSupervisor } from "./stall";
 import { MAX_DIFF_CHARS, autosaveWorkspace, checkpointWorkspace, ensureBase, gitIn, keepDiff, latestCheckpoint, makeDiff } from "./checkpoint";
 import { REPO_DIR } from "./git-checkout";
@@ -53,6 +54,7 @@ export type Gated<T> = ({ status: "done" } & T) | { status: "approval_required";
 export async function openThreadPullRequest(c: { git: GitHost; store: ForgeStore }, t: ThreadRow, title?: string, body?: string): Promise<{ url: string; number: number; title: string; base: string; head: string }> {
 	const branch = (t.branch ?? (t.orb?.branch as string | undefined)) ?? null;
 	if (!branch || !(await c.git.hasBranch(t.repo, branch))) throw new ForgeError("not_pushed", "The thread's branch isn't on the git host yet");
+	assertPushBranch(branch, await c.git.defaultBranch(t.repo), t.branch ? ownBranch(t) : branch);
 	const base = !t.ref || t.ref === "main" || /^[0-9a-f]{40}$/i.test(t.ref) ? await c.git.defaultBranch(t.repo) : t.ref;
 	const first = t.task.split("\n")[0]!.trim().slice(0, 100) || branch;
 	const named = title?.trim() || first;
@@ -72,7 +74,7 @@ export class Forge {
 	scopedTo(ownerId: string): Forge {
 		const db = scopedDb(this.c.db, ownerId);
 		const store = new ForgeStore(db, this.c.store.now);
-		const authz = new Authz(db, this.c.authz.policy, this.c.authz.onFiled);
+		const authz = new Authz(db, this.c.authz.onFiled);
 		return new Forge({ ...this.c, db, store, authz, scheduler: new ForgeScheduler(db, store, this.c.scheduler.clock), promoteOnRelease: false });
 	}
 
@@ -152,7 +154,7 @@ export class Forge {
 		await assertCapability(this.c.db, harness, this.c.ampConfigured, pool);
 		await tx(this.c.db, (q) => this.c.scheduler.checkQuota(q, actor.ownerId, actor.tenantId ?? null, { startingWorkspaceThread: false }));
 		const parent = req.parent ? (await this.own(actor, req.parent)).threadId : null;
-		const { thread, created } = await this.c.store.start({ ownerId: actor.ownerId, operationId: req.operationId, harness, task: req.task, repo: req.repo, ref: req.ref, chatId: req.chatId, createdBy: actor.agent ? `agent:${actor.agent}` : actor.ownerId, budgetUsd: req.budgetUsd, profile: req.profile, limits: parent ? { parent } : null }, this.c.authz.policy.branchPrefix);
+		const { thread, created } = await this.c.store.start({ ownerId: actor.ownerId, operationId: req.operationId, harness, task: req.task, repo: req.repo, ref: req.ref, chatId: req.chatId, createdBy: actor.agent ? `agent:${actor.agent}` : actor.ownerId, budgetUsd: req.budgetUsd, profile: req.profile, limits: parent ? { parent } : null });
 		if (created) {
 			await this.c.store.locked(thread.threadId, async (q) => {
 				if (pool) await this.c.store.patch(q, thread.threadId, { placement: { pool } });
@@ -520,14 +522,14 @@ export class Forge {
 		return (saved === null || saved === t.lastPushedSha) && (await this.c.git.hasBranch(t.repo, t.branch));
 	}
 
-	/** Pushes the thread's work to its own branch, or to another of the branches Pim may push to (`branch`: under the prefix, never the default). */
+	/** Pushes the thread's work to its own branch. `branch`, when given, must be that branch: a thread writes no other, and never the default. */
 	async push(actor: Actor, ref: string, o: { branch?: string } = {}): Promise<Gated<{ outcome: "pushed" | "unchanged"; sha: string; branch: string }>> {
 		const t = await this.own(actor, ref);
 		this.assertStarted(t);
 		const pending = await this.gate(actor, "coding:push", "push", t);
 		if (pending) return { status: "approval_required", ...pending };
-		const branch = o.branch ?? t.branch!;
-		assertPushBranch(this.c.authz.policy, branch, await this.c.git.defaultBranch(t.repo));
+		const branch = o.branch ?? t.branch ?? "";
+		assertPushBranch(branch, await this.c.git.defaultBranch(t.repo), ownBranch(t));
 		// The work is already on the host (the thread's branch was pushed at its last turn's end): nothing is brought back to push it again.
 		if (branch === t.branch && !this.hasWorkspace(t) && (await this.onHost(t))) {
 			await this.c.authz.consumeApproval(t.threadId, "push");
@@ -552,7 +554,7 @@ export class Forge {
 
 	/**
 	 * The only way onto the default branch: fast-forward, else rebase, never force; a conflict aborts and changes nothing.
-	 * A sandbox thread's branch is pushed first if its own push didn't leave it on the host; an Amp thread's work is already on the host, pushed by Amp, so it is merged from there. The agents themselves push their own pim/… branch and open a pull request, which a person merges.
+	 * A sandbox thread's branch is pushed first if its own push didn't leave it on the host; an Amp thread's work is already on the host, pushed by Amp, so it is merged from there. The agents themselves push their own branch and open a pull request, which a person merges.
 	 */
 	async merge(actor: Actor, ref: string): Promise<Gated<{ outcome: "merged" | "conflict"; method?: string; detail?: string; sha?: string; base: string }>> {
 		const t = await this.own(actor, ref);
@@ -566,7 +568,7 @@ export class Forge {
 		const ws = remote || (!this.hasWorkspace(t) && (await this.onHost(t))) ? null : await this.workspaceOf(t);
 		if (!ws && (!branch || !(await this.c.git.hasBranch(t.repo, branch)))) throw new ForgeError("not_pushed", remote ? "The Amp thread's branch isn't on the git host yet" : "The thread's branch isn't on the git host yet");
 		if (branch === base) throw new ForgeError("push_refused", `${base} is the default branch`);
-		assertPushBranch(this.c.authz.policy, branch!, base);
+		assertPushBranch(branch!, base, remote ? branch : ownBranch(t));
 		if (ws) {
 			await this.commitWork((await this.c.store.get(t.threadId)) ?? t);
 			const pushed = await this.c.git.push(ws, t.repo, branch!);
@@ -593,11 +595,17 @@ export class Forge {
 		await this.teardownCompute(actor, ref);
 	}
 
-	/** Records the branch the remote orb pushed to, so its diff can be read from the git host. */
-	async recordOrbBranch(threadId: string, branch: string): Promise<void> {
-		await this.c.store.locked(threadId, async (q, t) => {
-			if (t.orb) await this.c.store.patch(q, threadId, { orb: { ...t.orb, branch } });
+	/**
+	 * Records the branch the remote orb pushed to, so its diff, pull request and merge can follow it, if it is this thread's to follow (`refuseOrbBranch`): a name the orb made since the thread began and that no other thread
+	 * follows, never the default branch. Returns whether it was recorded.
+	 */
+	async recordOrbBranch(threadId: string, branch: string): Promise<boolean> {
+		const t = await this.c.store.get(threadId);
+		if (!t?.orb || (await refuseOrbBranch(this.c, t, branch)) !== null) return false;
+		await this.c.store.locked(threadId, async (q, cur) => {
+			if (cur.orb) await this.c.store.patch(q, threadId, { orb: { ...cur.orb, branch } });
 		});
+		return true;
 	}
 
 	/** Deletes the workspace compute only. */
@@ -629,7 +637,7 @@ export class Forge {
 		const t = await this.own(actor, ref);
 		await this.allow(actor, "coding:push", t);
 		if (!t.branch) throw new ForgeError("not_pushed", "This thread has no branch of its own");
-		assertPushBranch(this.c.authz.policy, t.branch, await this.c.git.defaultBranch(t.repo));
+		assertPushBranch(t.branch, await this.c.git.defaultBranch(t.repo), ownBranch(t));
 		await this.c.git.deleteBranch(t.repo, t.branch);
 	}
 

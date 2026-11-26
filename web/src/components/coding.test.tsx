@@ -145,7 +145,7 @@ const view = (overrides: Partial<CodingThreadView> = {}): CodingThreadView => ({
   repo: {
     url: "https://github.com/acme/widgets",
     ref: "main",
-    branch: "pim/fix-date-test-t1",
+    branch: "fix-date-test-t1",
     baseSha: "abc",
   },
   profile: { providerId: "p", model: "m" },
@@ -363,7 +363,7 @@ const summary = (
   url: "/coding/t1",
   repo: "https://github.com/acme/widgets",
   ref: "main",
-  branch: "pim/fix-date-test-t1",
+  branch: "fix-date-test-t1",
   task: "Fix the flaky date test",
   state: "idle",
   stateReason: null,
@@ -411,7 +411,7 @@ describe("pinned chats on a thread's page", () => {
         .map((link) => link.getAttribute("href")),
     ).toEqual(["/chat/travel", "/chat/work"]);
     expect(within(nav).queryByRole("link", { current: "page" })).toBeNull();
-    await screen.findByText("pim/fix-date-test-t1");
+    await screen.findByText("fix-date-test-t1");
     fireEvent.click(within(nav).getAllByRole("button")[0] as HTMLElement);
     await waitFor(() =>
       expect(within(nav).getAllByRole("link")).toHaveLength(1),
@@ -428,7 +428,7 @@ describe("the list", () => {
         summary({
           id: "t2",
           repo: "https://github.com/acme/gadgets",
-          branch: "pim/gadgets-t2",
+          branch: "gadgets-t2",
           state: "queued",
           queue: { position: 2, reason: "slots_full" },
           spentUsd: 0,
@@ -445,7 +445,7 @@ describe("the list", () => {
     ]);
     const queued = within(rows[0] as HTMLElement);
     expect(queued.getByText("acme/gadgets")).toBeTruthy();
-    expect(queued.getByText("pim/gadgets-t2")).toBeTruthy();
+    expect(queued.getByText("gadgets-t2")).toBeTruthy();
     expect(queued.getByText("Queued")).toBeTruthy();
     expect(queued.getByText("#2 in the queue")).toBeTruthy();
     expect(queued.getByText("$0.00 of $5.00")).toBeTruthy();
@@ -911,7 +911,7 @@ describe("a thread's page", () => {
     threadPage(api);
     fireEvent.click(await screen.findByRole("button", { name: "Push" }));
     expect(
-      await screen.findByText("Push pim/fix-date-test-t1 to GitHub"),
+      await screen.findByText("Push fix-date-test-t1 to GitHub"),
     ).toBeTruthy();
     expect(screen.getByText("Waiting for approval")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Approve" })).toBeTruthy();
@@ -1034,10 +1034,8 @@ describe("a thread's page", () => {
       1,
     );
     // The branch, spend and start are icon items; the base ref moved into the branch's tooltip.
-    const branch = screen.getByText("pim/fix-date-test-t1").closest("div");
-    expect(branch?.getAttribute("title")).toBe(
-      "pim/fix-date-test-t1 from main",
-    );
+    const branch = screen.getByText("fix-date-test-t1").closest("div");
+    expect(branch?.getAttribute("title")).toBe("fix-date-test-t1 from main");
     expect(screen.getByText("$0.42 of $3.00")).toBeTruthy();
     const started = screen.getByRole("link", {
       name: /Started from a chat/,

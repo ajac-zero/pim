@@ -40,7 +40,7 @@ export function codingWakeText(f: CodingWakeFacts): string {
 	if (f.checkpoint) lines.push(`Its changes are committed as ${f.checkpoint.slice(0, 12)}.`);
 	if (f.said) lines.push("It last said:", f.said);
 	lines.push(
-		'Look with coding_inspect (view transcript with tail=true or role="assistant", then transcript_output for full messages; or status, diff or tests); tell it more with coding_steer. It pushes its own pim/… branch and opens its own pull request when its work is ready; a person merges it, you cannot. Never steer a thread just to ask for a summary or diff printout. Tell the person what matters.',
+		'Look with coding_inspect (view transcript with tail=true or role="assistant", then transcript_output for full messages; or status, diff or tests); tell it more with coding_steer. It pushes its own branch and opens its own pull request when its work is ready; a person merges it, you cannot. Never steer a thread just to ask for a summary or diff printout. Tell the person what matters.',
 	);
 	return lines.join("\n");
 }

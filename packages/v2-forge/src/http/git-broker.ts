@@ -1,9 +1,9 @@
 // `/api/coding/git/:owner/:name.git/*`: git smart HTTP for the sandboxes, in front of the git host (GitHub App or Gitea).
-// A sandbox holds only a `pimgit_` token. Every request is checked against PostgreSQL (the thread's nonce and state, the owner not suspended), a push may only update the thread's own `pim/*` branch (never the default branch, never a delete), and a pushed branch is recorded on the thread.
+// A sandbox holds only a `pimgit_` token. Every request is checked against PostgreSQL (the thread's nonce and state, the owner not suspended), a push may only update exactly the thread's own branch (never the default branch, never another, never a delete), and a pushed branch is recorded on the thread.
 import { createHash, randomUUID } from "node:crypto";
 import { MAX_FETCH_RESPONSE_BYTES, MAX_UPLOAD_REQUEST_BYTES, askWithRetries } from "@pim/coding/git-broker/routes";
 import { type Row } from "../db";
-import { type ForgeStore } from "../store";
+import { type ForgeStore, ownBranch } from "../store";
 import { ForgeError } from "../errors";
 import { type GitHost } from "../ports";
 import { type Credentials } from "../tokens";
@@ -157,7 +157,7 @@ async function receive(d: GitBrokerDeps, doFetch: typeof fetch, req: Request, re
 	const first = await d.credentials.verifyGit(token, { repo, op: "advertise-push" });
 	const thread = (await storeOf(d, first.ownerId).get(first.threadId))!;
 	const who = await d.credentials.verifyGit(token, { repo, op: "push", branch, defaultBranch: await d.git.defaultBranch(thread.repo) });
-	if (thread.branch && thread.branch !== branch) throw new ForgeError("push_refused", `This thread pushes only its own branch, ${thread.branch}`);
+	if (!thread.branch || thread.branch !== branch || ownBranch(thread) !== branch) throw new ForgeError("push_refused", thread.branch ? `This thread pushes only its own branch, ${thread.branch}` : "This thread has no branch of its own to push");
 	const send = (b: Uint8Array) => proxy(d, doFetch, new Request(req.url, { method: "POST", headers: req.headers }), thread.repo, "write", "git-receive-pack", b);
 	let answer: Uint8Array;
 	let status = 200;

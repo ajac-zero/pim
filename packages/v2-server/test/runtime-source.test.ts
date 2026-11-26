@@ -87,7 +87,8 @@ describe("Live's projector over the runtime's own tables", () => {
 		await waitFor("the send's provenance", async () => ((await sends()).length > 0 ? true : undefined), 30_000);
 		// Its own request and the one before it that called a tool; the faux model is `m` for both, so the list is one model.
 		expect(await sends()).toEqual([{ emitter: faux, contributors: [faux], complete: true }]);
-		await waitFor("the turn to end", async () => ((await transcriptPage(stack.live, ADA, chat)).messages.every((m) => !m.partial) ? true : undefined), 30_000);
+		// The turn ends with the scripted last answer: until it is committed the transcript is still growing, and a rebuild would show more than the page did.
+		await waitFor("the turn to end", async () => { const { messages } = await transcriptPage(stack.live, ADA, chat); return messages.every((m) => !m.partial) && messages.some((m) => m.parts.some((p) => "text" in p && p.text === "Done.")) ? true : undefined; }, 30_000);
 		await waitFor("the projector to catch up", async () => ((await projector.lag()).every((l) => l.lagCommits === 0) ? true : undefined));
 		const before = JSON.stringify((await transcriptPage(stack.live, ADA, chat)).messages);
 		await projector.rebuild(ADA);

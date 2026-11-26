@@ -204,6 +204,8 @@ export function selectScope(files, graph = buildGraph(), options = {}) {
 				"image-web": images.web,
 				"image-computer": images.computer,
 				// The registry adapter and the promotions against a real buildx and registry.
+				// The self-hosted Langfuse recipe against real Docker: what it renders, pins and starts, and the exporter that feeds it. Not on every full run: the images are heavy.
+				langfuse: changed.some((f) => inside(f, "deploy/langfuse") || inside(f, "deploy/compose") || inside(f, "packages/v2-ops/src/observability") || f === "packages/v2-server/src/telemetry.ts" || f === "scripts/langfuse-smoke.mjs" || f === "scripts/langfuse-qualify.sh"),
 				registry: full || changed.some((f) => /^scripts\/(registry|edge-|release-|ci-status|fake-docker)/.test(f)),
 			},
 			// What each job runs. Biome covers the web app only; the root's TypeScript project is the computer's and the scripts'.

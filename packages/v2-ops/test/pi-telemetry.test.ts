@@ -163,6 +163,45 @@ describe("what Langfuse receives", () => {
 	});
 });
 
+describe("what is left of an error and of a scope", () => {
+	it("keeps only pi's own error classes, never free text however short, and cleans every field of the scope", async () => {
+		const { spans, exporter } = sink();
+		const handle = createTracerProvider({ serviceName: "pim", exporter, scheduledDelayMs: 1 });
+		const pi = adapterOn(handle).context;
+		const fail = (name: string, message: string) => pi.startSpan({ name: `s-${name}` }, (span) => span.setStatus({ status: "error", error: { name, message } }));
+		await fail("provider_error", "503 my private question");
+		await fail("task_faulted", "boom");
+		await fail("hunter2", "x");
+		await fail("Secret", "y");
+		await pi.startSpan({ name: "thrown" }, () => Promise.reject(Object.assign(new Error("one"), { name: "PrivateWord" }))).catch(() => undefined);
+		await handle.shutdown();
+		expect(spans.map((s) => [s.name, s.status.code, s.status.message ?? null])).toEqual([["s-provider_error", 2, "provider_error"], ["s-task_faulted", 2, "task_faulted"], ["s-hunter2", 2, null], ["s-Secret", 2, null], ["thrown", 2, null]]);
+
+		const secret = "sk-ant-api03-abcdefghijklmnop";
+		const scoped = sink();
+		const other = createTracerProvider({ serviceName: "pim", exporter: scoped.exporter, scheduledDelayMs: 1 });
+		other.provider.getTracer(`lib ${secret}`, `1.0 ${secret}`, { schemaUrl: `https://schemas.example/${secret}` }).startSpan("x").end();
+		await other.shutdown();
+		expect(JSON.stringify(scoped.spans[0]!.instrumentationScope)).not.toContain("abcdefghijklmnop");
+		expect(scoped.spans[0]!.instrumentationScope).toMatchObject({ name: `lib ${REDACTED}`, version: `1.0 ${REDACTED}`, schemaUrl: `https://schemas.example/${REDACTED}` });
+	});
+
+	it("sends a batch without its enrichment when the lookup runs past the deadline, and nothing after shutdown", async () => {
+		const { spans, exporter } = sink();
+		let release!: (m: Map<ReadableSpan, Record<string, string>>) => void;
+		const handle = createTracerProvider({ serviceName: "pim", exporter, scheduledDelayMs: 1, enrichTimeoutMs: 50, enrich: () => new Promise((resolve) => (release = resolve as never)) });
+		await adapterOn(handle).context.startSpan({ name: "one" }, () => undefined);
+		await new Promise((r) => setTimeout(r, 300));
+		expect(spans.map((s) => [s.name, s.attributes["pim.chat"] ?? null])).toEqual([["one", null]]);
+		// A second batch waits for its own deadline, then the hung lookup is released after shutdown: it sends nothing.
+		await adapterOn(handle).context.startSpan({ name: "two" }, () => undefined);
+		await handle.shutdown(2000);
+		release(new Map(spans.map((s) => [s, { "pim.chat": "late" }])));
+		await new Promise((r) => setTimeout(r, 100));
+		expect(spans.map((s) => s.name)).toEqual(["one", "two"]);
+	});
+});
+
 describe("the exporter and its guard", () => {
 	it("reads headers at the first '=' only, so a Basic credential keeps its padding", () => {
 		expect(parseOtlpHeaders("Authorization=Basic cHVibGljOnNlY3JldA==, X-Langfuse-Ingestion-Version=4,x-pct=a%20b%3D==")).toEqual({ authorization: "Basic cHVibGljOnNlY3JldA==", "x-langfuse-ingestion-version": "4", "x-pct": "a b===" });

@@ -8,6 +8,7 @@ import { createRig, fauxAssistantMessage, fauxToolCall, readTranscript, waitFor 
 import { uniqueOwner } from "../../v2-runtime/test/support/partition.ts";
 import { createFailover } from "../src/provider-failover.ts";
 import { compatibleProvider } from "../src/agent-host.ts";
+import { createHmac } from "node:crypto";
 import { createTelemetry, ownerRef } from "../src/telemetry.ts";
 import { createStack, type Stack } from "./support/stack.ts";
 
@@ -362,5 +363,80 @@ describe("tracing that is not asked for", () => {
 		} finally {
 			globalThis.fetch = real;
 		}
+	});
+});
+
+describe("the owner reference", () => {
+	const derived = (key: string, ownerId: string) => `o_${createHmac("sha256", key).update(`pim.telemetry.owner:${ownerId}`).digest("hex").slice(0, 16)}`;
+	it("is keyed by the deployment's secret, and with none by a key made for the process, never by anything public", () => {
+		expect(ownerRef({ PIM_INGRESS_SECRET: "s3cret" }, "o_ada")).toBe(derived("s3cret", "o_ada"));
+		expect(ownerRef({ PIM_INGRESS_SECRET: "other" }, "o_ada")).not.toBe(ownerRef({ PIM_INGRESS_SECRET: "s3cret" }, "o_ada"));
+		for (const missing of [{}, { PIM_INGRESS_SECRET: "" }, { PIM_INGRESS_SECRET: "  " }]) {
+			const ref = ownerRef(missing, "o_ada");
+			// Not what anyone can compute from the code or a guessed owner id: not the old constant, not an empty key, not the id's plain hash.
+			for (const guess of ["pim", "", "  ", "ingress", "o_ada"]) expect(ref, JSON.stringify(guess)).not.toBe(derived(guess, "o_ada"));
+			expect(ownerRef(missing, "o_ada")).toBe(ref);
+			expect(ownerRef(missing, "o_bob")).not.toBe(ref);
+		}
+		expect(ownerRef({}, "o_ada")).toBe(ownerRef({ PIM_INGRESS_SECRET: " " }, "o_ada"));
+	});
+});
+
+describe("the lookup of chat and agent ids", () => {
+	/** Spans of one partition, each in a conversation of its own, exported to a list. */
+	function traced(resolve: (conversation: number) => Promise<{ chat: string } | undefined>, limits: Record<string, number>) {
+		const batches: { name: string; chat: unknown; session: unknown }[][] = [];
+		let late = 0;
+		const calls: number[] = [];
+		const tel = createTelemetry({ PIM_INGRESS_SECRET: "k" }, { role: "runner", immediate: true, limits, exporter: { export: (spans, done) => (batches.push(spans.map((s) => ({ name: s.name, chat: s.attributes["pim.chat"], session: s.attributes["pim.conversation"] }))), done({ code: 0 })), shutdown: async () => void (late = 0) }, conversation: async (_owner, conversation) => (calls.push(conversation), resolve(conversation)) })!;
+		const emit = (...conversations: number[]) => Promise.all(conversations.map((c) => tel.partition("o_x", "p1").startSpan({ name: `c${c}`, attributes: { "conversation.id": c } }, () => undefined)));
+		return { tel, emit, calls, batches, spans: () => batches.flat(), late: () => late };
+	}
+
+	it("never holds a batch past its deadline or keeps more lookups outstanding than its bound, however long the database hangs, over many batches and expired answers", async () => {
+		const { tel, emit, calls, spans } = traced(() => new Promise(() => {}), { deadlineMs: 40, inflight: 3, perBatch: 2, ttlMs: 10 });
+		let sent = 0;
+		for (let wave = 0; wave < 6; wave++) {
+			await emit(1 + wave * 5, 2 + wave * 5, 3 + wave * 5, 4 + wave * 5, 5 + wave * 5);
+			const before = Date.now();
+			// Every wave's spans are exported, without ids, within the deadline's order of time.
+			while (spans().length < sent + 5 && Date.now() - before < 3000) await pause(10);
+			expect(spans().length, `wave ${wave}`).toBe(sent + 5);
+			expect(Date.now() - before).toBeLessThan(1500);
+			sent += 5;
+		}
+		expect(spans().every((s) => s.chat === undefined)).toBe(true);
+		// 30 conversations asked about, none answered: no more than three lookups were ever started, and none was repeated.
+		expect(calls.length).toBeLessThanOrEqual(3);
+		expect(new Set(calls).size).toBe(calls.length);
+		const started = Date.now();
+		await tel.shutdown();
+		expect(Date.now() - started).toBeLessThan(3000);
+	}, 30_000);
+
+	it("counts every lookup against a batch's share, an expired answer's too", async () => {
+		const { tel, emit, calls } = traced(async (c) => ({ chat: `chat-${c}` }), { perBatch: 2, ttlMs: 30 });
+		await emit(1, 2, 3, 4, 5, 6);
+		await pause(300);
+		expect(calls.length).toBeLessThanOrEqual(2);
+		const first = calls.length;
+		// Past their time, the answers are asked for again, and again no more than a batch's share.
+		await pause(60);
+		await emit(1, 2, 3, 4, 5, 6);
+		await pause(300);
+		expect(calls.length - first).toBeLessThanOrEqual(2);
+		await tel.shutdown();
+	});
+
+	it("sends nothing after shutdown when a lookup that hung answers late", async () => {
+		let answer!: (v: { chat: string }) => void;
+		const { tel, emit, spans, batches } = traced(() => new Promise((resolve) => (answer = resolve)), { deadlineMs: 5_000 });
+		void emit(1);
+		await pause(150);
+		expect(spans()).toHaveLength(0); // still waiting for the lookup, inside its deadline
+		await tel.shutdown();
+		answer({ chat: "late" });
+		await pause(200);
+		expect(batches).toEqual([]);
 	});
 });

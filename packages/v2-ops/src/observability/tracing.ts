@@ -45,13 +45,21 @@ function patched(span: ReadableSpan, patch: Partial<Pick<ReadableSpan, "name" | 
 	};
 }
 
-/** A status keeps its error class (`provider_error`) and drops the message, which can echo what a person said, unless content capture is on; credentials go either way. */
+/** The error classes pi names itself (`provider_error` of a model request; `task_faulted`, `task_failed` and `task_orphaned` of a task): a fixed vocabulary, so it holds no content. */
+const KNOWN_ERRORS: ReadonlySet<string> = new Set(["provider_error", "task_faulted", "task_failed", "task_orphaned"]);
+
+/** A status keeps one of pi's own error classes and drops the message, which can echo what a person said; any other text is dropped, a one-word message included. With content capture on the message stays, minus credentials. */
 function cleanStatus(status: ReadableSpan["status"], options: RedactOptions): ReadableSpan["status"] {
 	if (status.message === undefined) return status;
-	const text = redactText(status.message);
-	if (options.captureContent) return { ...status, message: text.slice(0, 500) };
-	const name = /^[A-Za-z0-9_.-]{1,64}(?=:|$)/.exec(text)?.[0];
-	return name === undefined ? { code: status.code } : { ...status, message: name };
+	if (options.captureContent) return { ...status, message: redactText(status.message).slice(0, 500) };
+	const name = status.message.split(": ", 1)[0]!;
+	return KNOWN_ERRORS.has(name) ? { ...status, message: name } : { code: status.code };
+}
+
+/** The scope's name, version, schema URL and attributes (which the exporter sends too), cleaned like every other field. */
+function cleanScope(scope: ReadableSpan["instrumentationScope"], options: RedactOptions): ReadableSpan["instrumentationScope"] {
+	const { name, version, schemaUrl, attributes } = scope as typeof scope & { attributes?: Attributes };
+	return { name: redactText(name), ...(version === undefined ? {} : { version: redactText(version) }), ...(schemaUrl === undefined ? {} : { schemaUrl: redactText(schemaUrl) }), ...(attributes === undefined ? {} : { attributes: cleanAttributes(attributes, options) }) } as ReadableSpan["instrumentationScope"];
 }
 
 /**
@@ -63,18 +71,33 @@ export class RedactingSpanExporter implements SpanExporter {
 	readonly #inner: SpanExporter;
 	readonly #options: RedactOptions;
 	readonly #enrich: ((spans: readonly ReadableSpan[]) => Promise<ReadonlyMap<ReadableSpan, Attributes>>) | undefined;
-	constructor(inner: SpanExporter, options: RedactOptions = {}, enrich?: (spans: readonly ReadableSpan[]) => Promise<ReadonlyMap<ReadableSpan, Attributes>>) {
+	readonly #enrichTimeoutMs: number;
+	#closed = false;
+	constructor(inner: SpanExporter, options: RedactOptions = {}, enrich?: (spans: readonly ReadableSpan[]) => Promise<ReadonlyMap<ReadableSpan, Attributes>>, enrichTimeoutMs = 2000) {
 		this.#inner = inner;
 		this.#options = options;
 		this.#enrich = enrich;
+		this.#enrichTimeoutMs = enrichTimeoutMs;
 	}
 	export(spans: ReadableSpan[], done: Parameters<SpanExporter["export"]>[1]): void {
-		const send = (extra: ReadonlyMap<ReadableSpan, Attributes>) => this.#inner.export(spans.map((span) => this.#clean(span, extra.get(span))), done);
+		if (this.#closed) return done({ code: ExportResultCode.FAILED });
+		let sent = false;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		// Once: whichever of the enrichment and its deadline comes first sends the batch, and the other does nothing. A batch is never sent after shutdown.
+		const send = (extra: ReadonlyMap<ReadableSpan, Attributes>) => {
+			if (sent) return;
+			sent = true;
+			clearTimeout(timer);
+			if (this.#closed) return done({ code: ExportResultCode.FAILED });
+			this.#inner.export(spans.map((span) => this.#clean(span, extra.get(span))), done);
+		};
 		if (!this.#enrich) return send(new Map());
-		// An enrichment that fails sends the spans as they are: telemetry is never worth losing to a lookup.
+		// An enrichment that fails or runs past its deadline sends the spans as they are: telemetry is never worth losing to a lookup.
+		timer = setTimeout(() => send(new Map()), this.#enrichTimeoutMs);
 		this.#enrich(spans).then(send, () => send(new Map()));
 	}
 	shutdown(): Promise<void> {
+		this.#closed = true;
 		return this.#inner.shutdown();
 	}
 	forceFlush(): Promise<void> {
@@ -90,7 +113,7 @@ export class RedactingSpanExporter implements SpanExporter {
 			links: span.links.map((l) => ({ ...l, attributes: clean(l.attributes) })),
 			events: span.events.map((e) => ({ ...e, name: redactText(e.name), attributes: clean(e.attributes) })),
 			resource: resourceFromAttributes(redactAttributes(span.resource.attributes as Record<string, unknown>, o) as Attributes),
-			instrumentationScope: { ...span.instrumentationScope, name: redactText(span.instrumentationScope.name) },
+			instrumentationScope: cleanScope(span.instrumentationScope, o),
 		});
 	}
 }
@@ -177,6 +200,8 @@ export type TelemetryOptions = {
 	readonly maxExportBatchSize?: number;
 	readonly scheduledDelayMs?: number;
 	readonly exportTimeoutMs?: number;
+	/** How long a batch waits for `enrich` before it is sent without it; default 2 s. */
+	readonly enrichTimeoutMs?: number;
 };
 
 export type TracerHandle = {
@@ -199,7 +224,7 @@ const within = (work: Promise<unknown>, ms: number) =>
 export function createTracerProvider(options: TelemetryOptions): TracerHandle {
 	const sink = options.langfuse ? new LangfuseSpanExporter(options.exporter, options.langfuse) : options.exporter;
 	const processor = new BatchSpanProcessor({
-		exporter: new RedactingSpanExporter(sink, { captureContent: options.captureContent ?? false }, options.enrich),
+		exporter: new RedactingSpanExporter(sink, { captureContent: options.captureContent ?? false }, options.enrich, options.enrichTimeoutMs),
 		maxQueueSize: options.maxQueueSize ?? 2048,
 		maxExportBatchSize: options.maxExportBatchSize ?? 256,
 		scheduledDelayMillis: options.scheduledDelayMs ?? 5000,

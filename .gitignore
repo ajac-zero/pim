@@ -8,4 +8,3 @@ docs/deployments/
 deploy/compose/backups/
 deploy/compose/.env
 deploy/compose/.env.tmp
-deploy/langfuse/.env

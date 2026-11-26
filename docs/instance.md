@@ -93,7 +93,7 @@ The admin can't suspend or delete their own account from here; deleting it from 
 ## Before inviting people
 
 1. **Domain.** Passkeys belong to the hostname, so pick the address people will use before anyone joins: moving later means everyone makes new passkeys and reconnects their connectors. Point it at the stack and set `PIM_PUBLIC_URL` to it (`deploy/compose/init-env.sh https://pim.example.com` does both for Compose).
-   For public app links, add a second hostname that isn't under the first one's cookies (another domain is best), route its `/p/*` and `/artifact-runtime/*` to the Gate, and set `PIM_CONTENT_ORIGIN` to it (see [apps](apps.md#public-links)); the Compose Caddy file does it for `PIM_CONTENT_DOMAIN`.
+   For public app links, add a second hostname that isn't under the first one's cookies (another domain is best), route its `/p/*` to the Gate and its `/artifact-runtime/*` to the web app (answer nothing else there), and set `PIM_CONTENT_ORIGIN` to it (see [apps](apps.md#public-links)); the Compose Caddy file does it for `PIM_CONTENT_DOMAIN`.
    For apps with a backend at addresses of their own, add a wildcard hostname under another domain (`*.apps.example.net`), route it to the Gate, and set `PIM_APPS_ORIGIN` to its base (`https://apps.example.net`; see [apps](apps.md#apps-with-a-backend)); the Compose Caddy file does it for `PIM_APPS_DOMAIN`.
 2. **OpenAI:** for people outside your household, confirm with OpenAI that they may use ChatGPT-plan sign-in through your Pim.
 3. **Policy:** `PIM_REGISTRATION`, the `PIM_LIMIT_*` variables and `PIM_MODELS` for what you're willing to pay for.

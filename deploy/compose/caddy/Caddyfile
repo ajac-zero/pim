@@ -57,10 +57,20 @@
 		}
 	}
 
-	handle {
+	# What the backend owns, by path prefix (web-host/src/routes.js is the one list; a test fails when this differs from it). Everything else is the web app, served by the
+	# web host from its own container: the interface is released on its own, and the Gate serves no static file.
+	@backend path /api /api/* /auth /auth/* /health /health/* /install.sh /install.sh/* /mcp /mcp/* /oauth /oauth/* /.well-known /.well-known/* /images /images/* /app-pages /app-pages/* /hosted /hosted/* /p /p/* /snapshot /snapshot/* /live /live/* /__dev /__dev/* /pim-computer.ts /pim-computer.ts/* /pim-host.ts /pim-host.ts/* /triggers-host.ts /triggers-host.ts/* /triggers-runtime.ts /triggers-runtime.ts/* /triggers-adapters /triggers-adapters/* /displayd.tar.gz /displayd.tar.gz/*
+	handle @backend {
 		reverse_proxy gate:8080 {
 			import headers
 			health_uri /healthz
+			health_interval 5s
+		}
+	}
+
+	handle {
+		reverse_proxy web:8080 {
+			health_uri /readyz
 			health_interval 5s
 		}
 	}
@@ -70,8 +80,18 @@
 # (a plain-HTTP trial sets `http://*.apps.localhost:8088`, see init-env.sh).
 {$PIM_CONTENT_DOMAIN} {
 	encode zstd gzip
-	reverse_proxy gate:8080 {
-		import headers
+	# Only published pages (the Gate) and the scripts their frames run (the web host); nothing else is answered here.
+	@published path /p /p/*
+	handle @published {
+		reverse_proxy gate:8080 {
+			import headers
+		}
+	}
+	handle /artifact-runtime/* {
+		reverse_proxy web:8080
+	}
+	handle {
+		respond 404
 	}
 }
 

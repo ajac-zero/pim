@@ -30,8 +30,8 @@ A chat can't be held up for good. Stop always works: it tells every call of the 
  Browser, bot, app                    Your server (docker compose, or Kubernetes)
 ┌─────────────────────┐   HTTPS / WS   ┌───────────────────────────────────────────────┐
 │ web app, or REST +  │───────────────▶│ Caddy (or your ingress): TLS, one address     │
-│ WebSocket at /api;  │                │  ├ gate     /*  the web app (web/dist)        │
-│ MCP clients at /mcp │                │  │          /auth/*  joining, passkeys, OAuth │
+│ WebSocket at /api;  │                │  ├ web      /*  the web app, its own image   │
+│ MCP clients at /mcp │                │  ├ gate     /auth/*  joining, passkeys, OAuth │
 └─────────────────────┘                │  │          /api/*  whoever the session or    │
                                        │  │          token names; /mcp, /oauth/*       │
                                        │  ├ live     /api/ws  the live WebSocket       │

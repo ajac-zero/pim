@@ -1,7 +1,7 @@
 # Pim, portable: one Docker Compose stack with no Kubernetes, no Temporal and nothing from Cloudflare or AWS.
 #
 #   cp env.example .env     # then replace every CHANGE_ME
-#   docker compose up -d                        # core: caddy, postgres, pgbouncer, nats, seaweedfs, migrator, gate, live, runner, forge, maintenance
+#   docker compose up -d                        # core: caddy, postgres, pgbouncer, nats, seaweedfs, migrator, gate, live, runner, forge, maintenance, and web (the interface, its own image)
 #   docker compose up -d --scale runner=3       # more Runners; partitions are leased between them
 #   docker compose --profile canvas up -d       # shared-notes canvas server (/api/notes/live)
 #   docker compose --profile computer up -d     # personal-computer relay and TURN (relay, coturn)
@@ -72,6 +72,7 @@ services:
     depends_on:
       gate: { condition: service_healthy }
       live: { condition: service_healthy }
+      web: { condition: service_healthy }
 
   postgres:
     image: postgres:17.2-alpine
@@ -175,9 +176,7 @@ services:
   gate:
     <<: *pim
     command: ["gate"]
-    # The web app the image holds is what the Gate serves until a release is published into the pim-web volume (docs/v2-operations.md, "Releasing the web app on its own"); the Gate only reads it.
-    environment: { <<: *pim-env, PIM_ROLE: gate, PIM_HTTP_PORT: "8080", PIM_WEB_RELEASES: /web-releases, PIM_DATABASE_URL: "postgres://pim_gate_login:${PIM_GATE_DB_PASSWORD:?}@pgbouncer:6432/pim" }
-    volumes: [pim-web:/web-releases:ro]
+    environment: { <<: *pim-env, PIM_ROLE: gate, PIM_HTTP_PORT: "8080", PIM_DATABASE_URL: "postgres://pim_gate_login:${PIM_GATE_DB_PASSWORD:?}@pgbouncer:6432/pim" }
     depends_on: *pim-deps
     healthcheck: &http-health
       # The image is node:*-slim, which has no wget or curl.
@@ -187,19 +186,25 @@ services:
       retries: 6
       start_period: 20s
 
-  # Publishes a web build into the pim-web volume, and switches or rolls back the release the Gate serves, without touching any running service:
-  #   docker compose --profile tools run --rm --no-deps web-release publish /app/web/dist /web-releases --activate
-  # PIM_IMAGE=<another image> in front of it publishes that image's web app. Run it from deploy/compose/ (or through pim.sh).
-  web-release:
-    <<: *pim
-    profiles: [tools]
-    restart: "no"
-    entrypoint: ["node", "--import", "tsx", "src/web-release.ts"]
-    command: ["list", "/web-releases"]
-    environment: { PIM_ROLE: tools }
-    env_file: []
-    depends_on: {}
+  # The web app, on its own (deploy/Dockerfile.web, web-host/): it serves the interface and nothing else, and has no database, secret or backend dependency, so it starts, restarts and is
+  # replaced without any role noticing, and the other way round. Caddy sends it every path the backend does not own. On starting it publishes the build its image carries into the
+  # pim-web volume and keeps the files of earlier releases there for pages still open on them (docs/v2-operations.md, "The web app is its own component").
+  web:
+    image: ${PIM_WEB_IMAGE:-ghcr.io/ajac-zero/pim-web:stable}
+    restart: unless-stopped
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    networks: [internal]
+    environment: { PIM_HTTP_PORT: "8080", PIM_WEB_KEEP: "${PIM_WEB_KEEP:-5}", PIM_WEB_KEEP_DAYS: "${PIM_WEB_KEEP_DAYS:-7}" }
     volumes: [pim-web:/web-releases]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/readyz').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
 
   live:
     <<: *pim
@@ -376,7 +381,7 @@ networks:
   computer: {}
 
 volumes:
-  # Releases of the web app (packages/v2-server/src/web-release.ts); empty until the first publish, when the Gate serves the image's own.
+  # Releases of the web app (web-host/src/release.js): the web container publishes into it as it starts and keeps the earlier ones for open pages.
   pim-web: {}
   pim-files: {}
   pim-computer-home: {}

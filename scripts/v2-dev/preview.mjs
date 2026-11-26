@@ -2,24 +2,27 @@
 // The development preview of the v2 stack, for working on Pim inside an orb or on a laptop without Docker (`amp orb services ensure` runs it: .amp/services.yaml).
 //
 // It starts, from what is installed on the machine: a private PostgreSQL cluster (the repository's `packages/v2-runtime/scripts/ensure-postgres.sh` installs the binaries),
-// nats-server, an S3 server (s3rver, in this process), the stand-in model (scripts/v2-compose/fake-model.mjs) and one Pim process that runs every role (`all-in-one`), serving the
-// API and the built web app on $PORT (8787). State is kept in .wrangler/state-v2-dev: delete that directory for a fresh Pim. The web app is built when it is missing or older than
-// web/src.
+// nats-server, an S3 server (s3rver, in this process), the stand-in model (scripts/v2-compose/fake-model.mjs), one Pim process that runs every role (`all-in-one`: the API, no web app),
+// the web host (web-host/) serving the built web app, and a small front door on $PORT (8787) that sends each path to one or the other as Caddy does (web-host/src/routes.js). State is
+// kept in .wrangler/state-v2-dev: delete that directory for a fresh Pim. The web app is built when it is missing or older than web/src; the web host publishes it as a release when it starts,
+// so after rebuilding web/dist, `amp orb service restart preview` (or just restarting the web host) is a frontend-only release that leaves the backend process running.
 //
 // Signing in: `PIM_DEV_SIGN_IN=1` turns on GET /__dev/sign-in/<username>?returnTo=/path (&bot=<id> makes a new account a guest of that bot). It makes the account when it is new, the
 // first being the admin, and sets the session cookie. The stand-in model echoes each message through send_to_user; `/tool <name> {json}` makes it call that tool.
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { createServer } from "node:net";
+import http from "node:http";
+import { connect, createServer } from "node:net";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { isBackendPath } from "../../web-host/src/routes.js";
 
 const root = fileURLToPath(new URL("../..", import.meta.url));
 const state = join(root, ".wrangler", "state-v2-dev");
 const port = Number(process.env.PORT ?? 8787);
-const ports = { pg: Number(process.env.PIM_DEV_PG_PORT ?? 54329), nats: Number(process.env.PIM_DEV_NATS_PORT ?? 54222), s3: Number(process.env.PIM_DEV_S3_PORT ?? 54333), model: Number(process.env.PIM_DEV_MODEL_PORT ?? 54900) };
+const ports = { pg: Number(process.env.PIM_DEV_PG_PORT ?? 54329), nats: Number(process.env.PIM_DEV_NATS_PORT ?? 54222), s3: Number(process.env.PIM_DEV_S3_PORT ?? 54333), model: Number(process.env.PIM_DEV_MODEL_PORT ?? 54900), backend: Number(process.env.PIM_DEV_BACKEND_PORT ?? 54800), web: Number(process.env.PIM_DEV_WEB_PORT ?? 54801) };
 const log = (...args) => console.log("[v2-dev]", ...args);
 const children = [];
 const require = createRequire(join(root, "packages", "v2-server", "package.json"));
@@ -132,11 +135,10 @@ const env = {
 	PIM_S3_BUCKET: "pim",
 	PIM_S3_ACCESS_KEY: "S3RVER",
 	PIM_S3_SECRET_KEY: "S3RVER",
-	PIM_HTTP_PORT: String(port),
+	PIM_HTTP_PORT: String(ports.backend),
 	PIM_METRICS_PORT: "0",
 	PIM_KEK_CURRENT: "dev",
 	PIM_KEK_dev: readFileSync(kekFile, "utf8").trim(),
-	PIM_WEB_DIR: dist,
 	PIM_DEV_SIGN_IN: "1",
 	PIM_AI_GATEWAY_URL: `http://127.0.0.1:${ports.model}/v1`,
 	PIM_AI_GATEWAY_KEY: "none",
@@ -150,6 +152,43 @@ const env = {
 	...Object.fromEntries(Object.entries(process.env).filter(([k]) => k.startsWith("PIM_"))),
 };
 run("pim", process.execPath, ["--import", "tsx", "src/main.ts", "all-in-one"], env, join(root, "packages", "v2-server"));
-await waitFor("Pim", async () => (await fetch(`http://127.0.0.1:${port}/health`)).ok, 1200);
+// The web host is its own process and may be replaced alone, as a web image is in a deployment: when it exits it is started again with the build in `state/web-source` (a directory) if
+// that file exists, else web/dist, and nothing else is restarted. Stopping it (`kill <pid>`; the pid is in state/web.pid) is therefore a frontend-only release.
+const webSource = () => (existsSync(join(state, "web-source")) ? readFileSync(join(state, "web-source"), "utf8").trim() : dist);
+function startWeb() {
+	const child = spawn(process.execPath, [join(root, "web-host", "src", "main.js")], { cwd: root, env: { ...process.env, PIM_HTTP_PORT: String(ports.web), PIM_WEB_SOURCE: webSource(), PIM_WEB_RELEASES: join(state, "web-releases") }, stdio: ["ignore", "inherit", "inherit"] });
+	writeFileSync(join(state, "web.pid"), String(child.pid));
+	children.push(child);
+	child.on("exit", () => {
+		children.splice(children.indexOf(child), 1);
+		if (!stopping) startWeb();
+	});
+}
+startWeb();
+await waitFor("Pim", async () => (await fetch(`http://127.0.0.1:${ports.backend}/health`)).ok, 1200);
+await waitFor("the web host", async () => (await fetch(`http://127.0.0.1:${ports.web}/readyz`)).ok, 600);
+
+// ---- the front door: what Caddy is in a deployment ----
+const upstream = (url) => (isBackendPath(new URL(url ?? "/", "http://front").pathname) ? ports.backend : ports.web);
+const front = http.createServer((req, res) => {
+	const proxied = http.request({ host: "127.0.0.1", port: upstream(req.url), method: req.method, path: req.url, headers: req.headers }, (answer) => {
+		res.writeHead(answer.statusCode ?? 502, answer.headers);
+		answer.pipe(res);
+	});
+	proxied.on("error", () => (res.headersSent ? res.destroy() : res.writeHead(502).end()));
+	req.pipe(proxied);
+});
+front.on("upgrade", (req, socket, head) => {
+	const target = connect(upstream(req.url), "127.0.0.1", () => {
+		let raw = `${req.method} ${req.url} HTTP/1.1\r\n`;
+		for (let i = 0; i < req.rawHeaders.length; i += 2) raw += `${req.rawHeaders[i]}: ${req.rawHeaders[i + 1]}\r\n`;
+		target.write(`${raw}\r\n`);
+		target.write(head);
+		socket.pipe(target).pipe(socket);
+	});
+	target.on("error", () => socket.destroy());
+	socket.on("error", () => target.destroy());
+});
+await new Promise((resolve) => front.listen(port, "0.0.0.0", resolve));
 log(`Pim is up on http://localhost:${port}. Sign in: http://localhost:${port}/__dev/sign-in/ada?returnTo=/ (the first account is the admin)`);
 await new Promise(() => {});

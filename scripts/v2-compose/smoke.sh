@@ -3,17 +3,19 @@
 # through its claim link, a chat is answered by a Runner through a stand-in OpenAI-compatible model, an http_request is parked for approval and runs
 # after it is approved, an image round-trips through object storage, and a backup and restore bring the database and objects back.
 # Usage: scripts/v2-compose/smoke.sh [--keep]    (needs Docker with compose; uses deploy/compose/.env, creating a local one if there is none)
-# PIM_SMOKE_PREBUILT=1 uses the image already tagged as .env's PIM_IMAGE instead of building it (CI builds it with its layer cache).
+# PIM_SMOKE_PREBUILT=1 uses the images already tagged as .env's PIM_IMAGE and PIM_WEB_IMAGE instead of building them (CI builds them with its layer cache).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 C="$ROOT/deploy/compose/pim.sh"
 URL=http://localhost:8088
 step() { printf '\n== %s\n' "$*"; }
-[ -e "$ROOT/deploy/compose/.env" ] || "$ROOT/deploy/compose/init-env.sh" "$URL" --image pim:v2-smoke
+[ -e "$ROOT/deploy/compose/.env" ] || "$ROOT/deploy/compose/init-env.sh" "$URL" --image pim:v2-smoke --web-image pim-web:v2-smoke
 grep -q '^PIM_AI_GATEWAY_URL=' "$ROOT/deploy/compose/.env" || printf 'PIM_AI_GATEWAY_URL=http://fakemodel:9000/v1\nPIM_AI_GATEWAY_KEY=none\nPIM_AI_GATEWAY_MODELS=fake-1\nPIM_DEFAULT_MODEL=gateway/fake-1\n' >> "$ROOT/deploy/compose/.env"
 IMAGE="$(grep '^PIM_IMAGE=' "$ROOT/deploy/compose/.env" | cut -d= -f2)"
-step "build $IMAGE"
+WEB_IMAGE="$(grep '^PIM_WEB_IMAGE=' "$ROOT/deploy/compose/.env" | cut -d= -f2)"
+step "build $IMAGE and $WEB_IMAGE"
 [ -n "${PIM_SMOKE_PREBUILT:-}" ] || docker build -q -f "$ROOT/deploy/Dockerfile.v2" -t "$IMAGE" "$ROOT"
+[ -n "${PIM_SMOKE_PREBUILT:-}" ] || docker build -q -f "$ROOT/deploy/Dockerfile.web" -t "$WEB_IMAGE" "$ROOT"
 step "up"
 "$C" up -d --wait
 docker rm -f pim-fakemodel >/dev/null 2>&1 || true
@@ -22,6 +24,13 @@ JAR="$(mktemp)"
 api() { curl -sS -b "$JAR" -c "$JAR" -H "origin: $URL" -H 'content-type: application/json' "$@"; }
 step "web app and health"
 curl -sSf "$URL/" | grep -q '<div id="root">' && echo "index.html served"
+step "the web app is its own component: the backend serves none, and replacing the web container leaves the backend running"
+curl -sSI "$URL/" | grep -qi '^x-pim-web-release:' && echo "the page comes from the web host"
+[ "$(curl -s -o /dev/null -w '%{http_code}' "$URL/assets/gone-abcdefgh.js")" = 404 ] && echo "a missing script is a 404, not the page"
+GATE_BEFORE="$(docker inspect -f '{{.Id}} {{.State.StartedAt}}' "$("$C" ps -q gate)")"
+"$C" up -d --force-recreate --no-deps --wait web >/dev/null 2>&1
+[ "$GATE_BEFORE" = "$(docker inspect -f '{{.Id}} {{.State.StartedAt}}' "$("$C" ps -q gate)")" ] && echo "the gate was not restarted"
+curl -sSf "$URL/" | grep -q '<div id="root">' && echo "index.html served again"
 step "first account through its claim link"
 api -X POST "$URL/auth/setup-link" >/dev/null
 sleep 1

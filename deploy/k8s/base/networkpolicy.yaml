@@ -14,7 +14,7 @@ metadata: { name: allow-ingress-controller-to-edge-roles }
 spec:
   podSelector:
     matchExpressions:
-      - { key: app.kubernetes.io/component, operator: In, values: [gate, live, canvas, relay] }
+      - { key: app.kubernetes.io/component, operator: In, values: [gate, live, canvas, relay, web] }
   policyTypes: [Ingress]
   ingress:
     - from: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: ingress-nginx } } }]

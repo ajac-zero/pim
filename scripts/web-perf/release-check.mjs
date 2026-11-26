@@ -1,25 +1,38 @@
 #!/usr/bin/env node
-// Switches the web app of a running Pim to another release and back while a page is open, and reports what a browser saw. For a Pim started with
-// PIM_WEB_RELEASES (the development preview: `PIM_WEB_RELEASES=<dir> node scripts/v2-dev/preview.mjs`). It changes nothing but the releases directory.
+// Releases a second web build on a running development preview while a page is open on the first, and again to go back, and reports what the browser saw. The web host is its own
+// process (web-host/): a release is replacing it, as a new web image is in a deployment, and the preview does that when the host is stopped (scripts/v2-dev/preview.mjs: it starts it
+// again with the build named in <state>/web-source). Nothing else is restarted, so the Pim process, the page's Live socket and its session must be the same throughout.
 //
-//   BASE=http://localhost:8787 ROOT=<releases dir> NEXT=<a second build's dist> BACKEND_PID=<pid of the Pim process> node scripts/web-perf/release-check.mjs
+//   BASE=http://localhost:8787 STATE=.wrangler/state-v2-dev NEXT=<a second build's dist> BACKEND_PID=<pid of the Pim process> node scripts/web-perf/release-check.mjs
 //
-// 1. a page opens on the release being served (A) and its Live socket connects; 2. NEXT is published and activated (B); 3. the old page moves to a route whose script it
-// has not loaded yet: A's file must still be served, with no reload; 4. a reload gets B, moving only what changed; 5. rollback: a reload gets A.
-// The Pim process (pid and start time), the page's socket and the session must be the same throughout.
+// 1. a page opens on the release being served (A) and its Live socket connects; 2. the web host is replaced by one carrying NEXT (B); 3. the old page moves to a route whose script it
+// has not loaded yet: A's file must still be served, with no reload; 4. a reload reaches B; 5. the web host with A's build is started again (the rollback): a reload gets A.
 import { execFileSync } from "node:child_process";
-import { readdirSync, readFileSync } from "node:fs";
+import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { launch, sleep } from "./cdp.mjs";
 
 const base = process.env.BASE ?? "http://localhost:8787";
-const root = process.env.ROOT;
+const repo = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+const state = process.env.STATE ? join(process.cwd(), process.env.STATE) : join(repo, ".wrangler", "state-v2-dev");
+const root = join(state, "web-releases");
 const next = process.env.NEXT;
 const pid = process.env.BACKEND_PID;
-if (!root || !next || !pid) throw new Error("ROOT, NEXT and BACKEND_PID are required");
-const cli = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "packages", "v2-server");
-const release = (...args) => execFileSync(process.execPath, ["--import", "tsx", "src/web-release.ts", ...args], { cwd: cli, encoding: "utf8" }).trim();
+if (!next || !pid) throw new Error("NEXT and BACKEND_PID are required");
+const original = join(repo, "web", "dist");
+/** Replaces the web host with one carrying `source`, and waits until the page it serves is the new one's. */
+async function replaceWebHost(source) {
+	writeFileSync(join(state, "web-source"), source);
+	const old = Number(readFileSync(join(state, "web.pid"), "utf8"));
+	process.kill(old, "SIGTERM");
+	for (let i = 0; i < 100; i++) {
+		await sleep(100);
+		const now = Number(readFileSync(join(state, "web.pid"), "utf8"));
+		if (now !== old && (await fetch(`${base}/`).then((r) => r.ok, () => false))) return;
+	}
+	throw new Error("the web host did not come back");
+}
 const started = () => execFileSync("ps", ["-o", "lstart=", "-p", pid], { encoding: "utf8" }).trim();
 const header = async () => (await fetch(`${base}/`)).headers.get("x-pim-web-release");
 
@@ -43,11 +56,9 @@ step("page opened on A", { release: a, liveSockets: page.sockets.created, script
 
 // 2. Publish and activate B.
 const socketsBefore = { ...page.sockets };
-const published = release("publish", next, root, "--activate");
-// The Gate looks at its `current` link at most once a second.
-await sleep(1200);
+await replaceWebHost(next);
 const b = await header();
-step("B published and active", { output: published.split("\n"), release: b, switched: b !== a });
+step("web host replaced by one carrying B", { release: b, switched: b !== a, backendPid: pid });
 
 // 3. The old page loads a route's script it has not asked for yet: through the router, as a click would.
 const aAssets = readdirSync(join(root, "releases", a, "assets"));
@@ -86,14 +97,13 @@ step("reload reaches B", {
 });
 
 // 5. Roll back.
-const rolled = release("rollback", root);
-await sleep(1200);
+await replaceWebHost(original);
 const after = await header();
 page.reset();
 await page.send("Page.navigate", { url: `${base}/` });
 await page.waitFor(ready);
 await sleep(1500);
-step("rolled back", { output: rolled, release: (documents()[0]?.headers ?? {})["x-pim-web-release"], rolledBackTo: after, isA: after === a });
+step("rolled back", { release: (documents()[0]?.headers ?? {})["x-pim-web-release"], rolledBackTo: after, isA: after === a });
 
 // The backend and the session did not move.
 const session = await page.evalJs(`fetch('/auth/session').then(r => r.json()).then(s => s.signedIn)`);

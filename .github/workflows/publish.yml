@@ -32,6 +32,8 @@ jobs:
         include:
           - image: pim
             dockerfile: deploy/Dockerfile.v2
+          - image: pim-web
+            dockerfile: deploy/Dockerfile.web
           - image: pim-computer
             dockerfile: deploy/Dockerfile.computer
     steps:
@@ -133,7 +135,7 @@ jobs:
           set -eu
           owner="$(printf %s "$OWNER" | tr '[:upper:]' '[:lower:]')"
           sha12="$(printf %s "$SHA" | cut -c1-12)"
-          for name in pim pim-computer; do
+          for name in pim pim-web pim-computer; do
             image="ghcr.io/$owner/$name"
             # Pushes to main can finish out of order. Leave `edge` alone when it is already on this commit or a later one.
             current="$(docker buildx imagetools inspect "$image:edge" --format '{{ json .Image }}' 2>/dev/null | jq -r '.. | .Labels? // empty | ."org.opencontainers.image.revision" // empty' | head -n1 || true)"

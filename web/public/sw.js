@@ -6,7 +6,7 @@
 const APP_CACHE = "pim-app-v1";
 /** Every page of the app is the same page; it's kept as this one. */
 const APP_PAGE = "/";
-/** What the server answers itself, ahead of the app's page (its Gate, packages/v2-server/src/web-assets.ts): never the app's page. */
+/** What the server answers itself, ahead of the app's page: the backend's paths (web-host/src/routes.js is their one list), which are never the app's page. */
 const WORKER_FIRST = ["/api", "/api/*", "/install.sh", "/auth/*", "/health", "/mcp", "/oauth/*", "/.well-known/*", "/authorize", "/mcp/callback/*", "/mcp/client/*", "/mcp/events/*", "/images/*", "/shared/*", "/app-pages/*", "/hosted/*", "/__dev/*", "/p/*"];
 
 const workerFirst = (path) =>

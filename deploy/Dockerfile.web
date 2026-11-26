@@ -1,0 +1,54 @@
+# The web app, on its own: the interface is a separate image from the backend (deploy/Dockerfile.v2), so a change to it is released without replacing or restarting any role.
+# One process serves it, the web host (web-host/): it publishes the build this image carries into the releases volume as it starts, makes it the one served, and keeps the files of
+# the releases before it for pages that are still open on them (docs/v2-operations.md, "The web app is its own component"). The proxy in front sends it every path the backend
+# does not own (web-host/src/routes.js); it holds no private data, no secret and no database access.
+#
+#   docker build -f deploy/Dockerfile.web -t registry.example.test/pim-web:2.0.0 .
+#
+# PIM_VERSION and PIM_REVISION are build arguments as for the backend image (the publishing workflow passes them); the build records them in release.json.
+FROM node:26-bookworm-slim AS web
+ARG PIM_VERSION=dev
+ARG PIM_REVISION=unknown
+ENV PIM_REVISION=$PIM_REVISION
+
+# Node 26 no longer ships corepack; pnpm is the version package.json pins.
+RUN npm install -g pnpm@12.0.0
+WORKDIR /app
+# Install layers come first and take only manifests (the lockfile, the workspace file, patches and each workspace package's package.json, at their own paths), so a source change reuses the
+# cached install, native modules such as sharp included. Add a line here when a workspace package is added; `pnpm install --frozen-lockfile` fails if one is missing.
+COPY pnpm-lock.yaml pnpm-workspace.yaml package.json ./
+COPY patches ./patches
+COPY web/package.json ./web/
+COPY packages/coding/package.json ./packages/coding/
+COPY packages/shared/package.json ./packages/shared/
+COPY packages/triggers/package.json ./packages/triggers/
+COPY packages/ui-lang/package.json ./packages/ui-lang/
+COPY packages/v2-app/package.json ./packages/v2-app/
+COPY packages/v2-contracts/package.json ./packages/v2-contracts/
+COPY packages/v2-forge/package.json ./packages/v2-forge/
+COPY packages/v2-live/package.json ./packages/v2-live/
+COPY packages/v2-ops/package.json ./packages/v2-ops/
+COPY packages/v2-runtime/package.json ./packages/v2-runtime/
+COPY packages/v2-server/package.json ./packages/v2-server/
+RUN pnpm install --frozen-lockfile --filter "pim-web..."
+COPY packages ./packages
+COPY web ./web
+# Run through npm, not pnpm: `pnpm run` first checks that node_modules matches every workspace manifest and, when it thinks they differ (the sources were copied after the install),
+# installs the whole workspace again, which fails on the test-only Postgres binaries and is not needed here.
+WORKDIR /app/web
+RUN npm run build
+
+FROM node:26-bookworm-slim
+ARG PIM_VERSION=dev
+ARG PIM_REVISION=unknown
+LABEL org.opencontainers.image.version=$PIM_VERSION org.opencontainers.image.revision=$PIM_REVISION
+ENV NODE_ENV=production PIM_WEB_SOURCE=/app/dist PIM_WEB_RELEASES=/web-releases PIM_HTTP_PORT=8080
+WORKDIR /app/web-host
+COPY web-host/package.json ./package.json
+COPY web-host/src ./src
+COPY --from=web /app/web/dist /app/dist
+# The releases volume, owned by `node`: a new volume takes the owner this folder has in the image. The root filesystem is read-only; only this folder and /tmp are written.
+RUN mkdir -p /web-releases && chown node:node /web-releases
+USER node
+EXPOSE 8080
+ENTRYPOINT ["node", "src/main.js"]

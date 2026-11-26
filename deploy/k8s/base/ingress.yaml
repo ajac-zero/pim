@@ -23,8 +23,31 @@ spec:
           - { path: /api/notes/live, pathType: Prefix, backend: { service: { name: pim-canvas, port: { name: http } } } }
           - { path: /api/computer, pathType: Prefix, backend: { service: { name: pim-relay, port: { name: http } } } }
           - { path: /api/browser/live, pathType: Prefix, backend: { service: { name: pim-relay, port: { name: http } } } }
-          - { path: /, pathType: Prefix, backend: { service: { name: pim-gate, port: { name: http } } } }
+          # What the backend owns, by path prefix (web-host/src/routes.js is the one list; a test fails when this differs from it): the Gate. Everything else is the web app.
+          - { path: /api, pathType: Prefix, backend: { service: { name: pim-gate, port: { name: http } } } }
+          - { path: /auth, pathType: Prefix, backend: { service: { name: pim-gate, port: { name: http } } } }
+          - { path: /health, pathType: Prefix, backend: { service: { name: pim-gate, port: { name: http } } } }
+          - { path: /install.sh, pathType: Prefix, backend: { service: { name: pim-gate, port: { name: http } } } }
+          - { path: /mcp, pathType: Prefix, backend: { service: { name: pim-gate, port: { name: http } } } }
+          - { path: /oauth, pathType: Prefix, backend: { service: { name: pim-gate, port: { name: http } } } }
+          - { path: /.well-known, pathType: Prefix, backend: { service: { name: pim-gate, port: { name: http } } } }
+          - { path: /images, pathType: Prefix, backend: { service: { name: pim-gate, port: { name: http } } } }
+          - { path: /app-pages, pathType: Prefix, backend: { service: { name: pim-gate, port: { name: http } } } }
+          - { path: /hosted, pathType: Prefix, backend: { service: { name: pim-gate, port: { name: http } } } }
+          - { path: /p, pathType: Prefix, backend: { service: { name: pim-gate, port: { name: http } } } }
+          - { path: /snapshot, pathType: Prefix, backend: { service: { name: pim-gate, port: { name: http } } } }
+          - { path: /live, pathType: Prefix, backend: { service: { name: pim-gate, port: { name: http } } } }
+          - { path: /__dev, pathType: Prefix, backend: { service: { name: pim-gate, port: { name: http } } } }
+          - { path: /pim-computer.ts, pathType: Prefix, backend: { service: { name: pim-gate, port: { name: http } } } }
+          - { path: /pim-host.ts, pathType: Prefix, backend: { service: { name: pim-gate, port: { name: http } } } }
+          - { path: /triggers-host.ts, pathType: Prefix, backend: { service: { name: pim-gate, port: { name: http } } } }
+          - { path: /triggers-runtime.ts, pathType: Prefix, backend: { service: { name: pim-gate, port: { name: http } } } }
+          - { path: /triggers-adapters, pathType: Prefix, backend: { service: { name: pim-gate, port: { name: http } } } }
+          - { path: /displayd.tar.gz, pathType: Prefix, backend: { service: { name: pim-gate, port: { name: http } } } }
+          - { path: /, pathType: Prefix, backend: { service: { name: pim-web, port: { name: http } } } }
     - host: content.pim.example.test
       http:
+        # Only published pages (the Gate) and the scripts their frames run (the web app); the web app answers nothing else here, and the Gate's other paths are not routed.
         paths:
-          - { path: /, pathType: Prefix, backend: { service: { name: pim-gate, port: { name: http } } } }
+          - { path: /p, pathType: Prefix, backend: { service: { name: pim-gate, port: { name: http } } } }
+          - { path: /artifact-runtime, pathType: Prefix, backend: { service: { name: pim-web, port: { name: http } } } }

@@ -50,7 +50,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter pim-web test
 
-  # The standalone daemons (displayd, sandbox-manager and its hostopsd, workspace-agentd): `node --test`.
+  # The standalone daemons (displayd, sandbox-manager and its hostopsd, workspace-agentd, the web host): `node --test`.
   daemons:
     runs-on: ubuntu-latest
     steps:

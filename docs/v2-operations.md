@@ -150,7 +150,7 @@ Settings → Coding signs a harness in: Claude Code (a URL and a pasted code) an
 
 A chat whose turn cannot finish ends with an error instead of staying busy. Each guard has a setting on the `runner` role, in milliseconds:
 
-- `PIM_MODEL_STALL_MS` (default 120000): a model stream that sends nothing for this long is cut off; before any output the request goes to the next model of the chat's list, otherwise the chat ends with "The model timed out".
+- `PIM_MODEL_STALL_MS` (default 120000): a model stream that sends nothing for this long is cut off; before any output the request is asked once more on the same model after 2 seconds, then goes to the next model of the chat's list (so a fallback can take just over 4 minutes by default, and it then keeps the rest of the turn), otherwise the chat ends with "The model timed out".
 - `PIM_TOOL_TIMEOUT_MS` (default 600000): a tool call that has not returned by then ends with an error result, and a call also ends at once when the person stops the chat, whatever the tool's own work is doing.
 - `PIM_RUN_STALL_MS` (default 600000, 0 turns it off): the run watchdog. A run whose tasks and live document have not changed for this long, and that is not parked for an approval, a retry or a sleep, is stopped, and the chat says so.
 - `PIM_STOP_GRACE_MS` (default 10000): how long a stop (the web app's stop button, or the watchdog) waits for the run to end. A run that ignores its abort signal then has its partition recycled: the Runner closes the Harness and hands the lease back, and the next claim's recovery settles the aborted calls under a newer epoch, so a stuck run's late writes are fenced.

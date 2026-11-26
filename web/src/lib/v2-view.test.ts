@@ -498,3 +498,46 @@ describe("the provenance a message carries", () => {
     });
   });
 });
+
+describe("a model that was asked again or replaced", () => {
+  const retry = { kind: "retry", model: "gemini-4-neon" } as const;
+
+  it("is told before the answer it came with, after a reload as when it was live", () => {
+    const answered: V2Message = {
+      ...assistant(2, "from sol"),
+      notices: [retry],
+    };
+    const loaded = streamOf([user(1, "hi"), answered]);
+    expect(kinds(loaded)).toEqual([
+      "user:message",
+      "notice:model",
+      "agent:message",
+    ]);
+    const live = applyMessage(streamOf([user(1, "hi")]), answered);
+    expect(kinds(live)).toEqual(kinds(loaded));
+    expect(live.view.entries[1]).toMatchObject({
+      kind: "notice",
+      notice: { kind: "model", model: retry },
+    });
+  });
+
+  it("is still told by a request that answered with nothing, and is no message of the agent's", () => {
+    const alone: V2Message = {
+      id: "3",
+      role: "notice",
+      parts: [],
+      timestamp: 1_003,
+      notices: [retry],
+    };
+    expect(entryOf(alone)).toMatchObject({
+      id: 3,
+      kind: "pi.message",
+      model: [{ role: "assistant", content: [], modelNotices: [retry] }],
+    });
+    const state = streamOf([user(1, "hi"), alone]);
+    expect(kinds(state)).toEqual(["user:message", "notice:model"]);
+    expect(applyMessage(streamOf([user(1, "hi")]), alone).view.entries).toEqual(
+      state.view.entries,
+    );
+  });
+});

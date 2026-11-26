@@ -13,6 +13,7 @@ import {
   EMPTY_STREAM,
   layoutThread,
   noticeOf,
+  projectEntry,
   projectMessage,
   reduceAll,
   type StreamState,
@@ -1441,5 +1442,101 @@ describe("files that changed since the agent's last turn", () => {
       source: "user",
       item: { content: [{ type: "input_text", text: "Fix the rest" }] },
     });
+  });
+});
+
+describe("a model that was asked again or replaced", () => {
+  const retry = { kind: "retry", model: "gemini-4-neon" };
+  const fallback = {
+    kind: "fallback",
+    from: "gemini-4-neon",
+    to: "gpt-6.1-sol",
+    cause: "stalled",
+  };
+  const search = {
+    type: "toolCall",
+    id: "s",
+    name: "web_search",
+    arguments: {},
+  };
+  const neon = { provider: "ai-gateway", model: "gemini-4-neon" };
+  const sol = { provider: "openai", model: "gpt-6.1-sol" };
+  const send = (provenance?: unknown) => ({
+    type: "toolCall",
+    id: "m",
+    name: "send_to_user",
+    arguments: { message: "Found it." },
+    ...(provenance ? { provenance } : {}),
+  });
+  const kept = { emitter: sol, contributors: [neon, sol], complete: true };
+  const entries = (notices?: unknown[]) => [
+    user(1, "Weather?", 1_000),
+    assistant(2, [search], {
+      timestamp: 2_000,
+      durationMs: 500,
+      ...(notices ? { modelNotices: notices } : {}),
+    }),
+    toolResult(3, "s", "sunny", false, 3_000),
+    assistant(4, [send(kept)], { timestamp: 4_000, durationMs: 500 }),
+  ];
+  const rows = (notices?: unknown[]) =>
+    layoutThread(run([snapshot({ entries: entries(notices) })]).view.entries, {
+      shown: () => false,
+      work: { running: false },
+    });
+
+  it("is a notice before the answer it belongs to, one for each, saying which model", () => {
+    const projected = projectEntry(
+      assistant(2, [search], { modelNotices: [retry, fallback] }),
+    );
+    expect(
+      projected.map((e) =>
+        e.kind === "notice" ? [e.key, e.notice.kind, e.notice.model] : [e.key],
+      ),
+    ).toEqual([["2:n0", "model", retry], ["2:n1", "model", fallback], ["2:0"]]);
+    expect(projected[1]?.kind === "notice" && projected[1].notice.title).toBe(
+      "gemini-4-neon stalled twice; continuing with gpt-6.1-sol for the rest of this turn",
+    );
+    // An answer that was not asked again has none.
+    expect(projectEntry(assistant(2, [search])).map((e) => e.key)).toEqual([
+      "2:0",
+    ]);
+  });
+
+  it("changes nothing of what the work and the sends around it are: not the work's steps, not a send's provenance, not who spoke", () => {
+    const plain = rows();
+    const told = rows([retry, fallback]);
+    // The notices are rows of their own; every other row is as it was.
+    const others = told.filter(
+      (row) =>
+        !(
+          row.kind === "entry" &&
+          row.entry.kind === "notice" &&
+          row.entry.notice.kind === "model"
+        ),
+    );
+    expect(told).toHaveLength(plain.length + 2);
+    expect(others).toEqual(plain);
+    expect(
+      told.flatMap((row) => (row.kind === "sent" ? [row.provenance] : [])),
+    ).toEqual([kept]);
+    // It is shown where it happened, before the work of its answer.
+    expect(describeRows(told).slice(0, 4)).toEqual([
+      "entry 1",
+      "entry 2:n0",
+      "entry 2:n1",
+      "work work:2:0",
+    ]);
+  });
+
+  it("is not part of the conversation that is copied", () => {
+    const told = run([snapshot({ entries: entries([retry, fallback]) })]).view
+      .entries;
+    expect(conversationMarkdown(told, "Pim")).toBe(
+      conversationMarkdown(
+        run([snapshot({ entries: entries() })]).view.entries,
+        "Pim",
+      ),
+    );
   });
 });

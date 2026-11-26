@@ -14,6 +14,8 @@ import {
   fromPerson,
   INTRODUCTION,
   isDeliveryReminder,
+  type ModelNotice,
+  modelNoticesOf,
   NOTICE_PREFIXES,
   type Provenance,
   ROOM_POST,
@@ -48,7 +50,8 @@ export type PimNotice = {
     | "room"
     | "coding"
     | "reset"
-    | "compaction";
+    | "compaction"
+    | "model";
   /** One line, without the machine prefix. */
   title: string;
   /** The full text Pim received. */
@@ -57,6 +60,8 @@ export type PimNotice = {
   approval?: string;
   /** For a coding thread's turn ending, what the message says (see `codingNoticeOf`). */
   coding?: CodingNotice;
+  /** For a model that was asked again or replaced, what happened; the line is worded where it is shown, in the person's language. */
+  model?: ModelNotice;
 };
 
 /** What the message that tells an agent a coding thread it started ended a turn says (see turnEndedMessage in src/coding/supervisor.ts). Parts an older or shorter message lacks are absent. */
@@ -509,7 +514,21 @@ export function projectMessage(message: Message, key: string): ThreadEntry[] {
     case "assistant": {
       // Its timestamp is when the request started; a response being written has no duration yet.
       const at = message.timestamp + (message.durationMs ?? 0);
-      return message.content.flatMap((block, index): ThreadEntry[] => {
+      // A model that was asked again or replaced for this answer is told before it, in the notice's own place in the entry.
+      const told = modelNoticesOf(message).map(
+        (model, index): ThreadEntry => ({
+          key: `${key}:n${index}`,
+          kind: "notice",
+          notice: {
+            kind: "model",
+            title: modelNoticeText(model),
+            text: modelNoticeText(model),
+            model,
+          },
+          at: message.timestamp,
+        }),
+      );
+      const blocks = message.content.flatMap((block, index): ThreadEntry[] => {
         // Empty text blocks are placeholders while a block starts.
         if (block.type === "text" && block.text === "") return [];
         const item = blockItem(block, `${key}:${index}`);
@@ -526,6 +545,7 @@ export function projectMessage(message: Message, key: string): ThreadEntry[] {
             ]
           : [];
       });
+      return [...told, ...blocks];
     }
     case "toolResult":
       return [
@@ -547,6 +567,13 @@ export function projectMessage(message: Message, key: string): ThreadEntry[] {
       // System prompt changes are bookkeeping.
       return [];
   }
+}
+
+/** What a model notice says in English, for a reader without the app's wording, such as the notice's own title; the chat words it in the person's language. */
+function modelNoticeText(notice: ModelNotice): string {
+  if (notice.kind === "retry")
+    return `${notice.model} stopped responding; trying it once more`;
+  return `${notice.from} ${notice.cause === "stalled" ? "stalled twice" : "wasn't available"}; continuing with ${notice.to} for the rest of this turn`;
 }
 
 export function projectEntry(entry: EntryRecord): ThreadEntry[] {
@@ -1093,6 +1120,12 @@ export function layoutThread(
     since = entry.at ?? null;
   };
   for (const entry of entries) {
+    // Told in its place, but it is not something the agent or the person said: it neither ends the work before it nor starts the time of the work after it.
+    if (entry.kind === "notice" && entry.notice.kind === "model") {
+      fold(until);
+      rows.push({ kind: "entry", key: entry.key, entry });
+      continue;
+    }
     if (entry.kind === "notice" || entry.kind === "post") {
       own(entry);
       continue;
@@ -1190,31 +1223,41 @@ export function conversationMarkdown(
   const heading = (name: string) =>
     name.replace(/[\r\n]+/g, " ").replace(/[\\`*_{}[\]<>()#!|]/g, "\\$&");
   const name = heading(agent);
-  return layoutThread(entries, {
-    shown: () => false,
-    refused: (call) => refused.has(call.call_id),
-  })
-    .flatMap((row) => (row.kind === "work" ? [] : [row]))
-    .map((row) => {
-      if (row.kind === "sent") {
-        const email = row.sent.channel === "email" ? " (email)" : "";
-        return `## Agent: ${name}${email}\n\n${row.sent.message}`;
-      }
-      const { entry } = row;
-      if (entry.kind === "notice") {
-        return `## System\n\n${entry.notice.text || entry.notice.title}`;
-      }
-      if (entry.kind === "post") {
-        return `## Agent: ${heading(entry.from)}\n\n${entry.text}`;
-      }
-      const item = entry.item as MessageItem;
-      const images =
-        typeof item.content === "string"
-          ? []
-          : item.content
-              .filter((part) => part.type === "input_image")
-              .map(() => "[Attached image]");
-      return `## User\n\n${[messageText(item), ...images].filter(Boolean).join("\n\n")}`;
+  return (
+    layoutThread(entries, {
+      shown: () => false,
+      refused: (call) => refused.has(call.call_id),
     })
-    .join("\n\n---\n\n");
+      // A model asked again or replaced is the app's own line, not part of what was said.
+      .flatMap((row) =>
+        row.kind === "work" ||
+        (row.kind === "entry" &&
+          row.entry.kind === "notice" &&
+          row.entry.notice.kind === "model")
+          ? []
+          : [row],
+      )
+      .map((row) => {
+        if (row.kind === "sent") {
+          const email = row.sent.channel === "email" ? " (email)" : "";
+          return `## Agent: ${name}${email}\n\n${row.sent.message}`;
+        }
+        const { entry } = row;
+        if (entry.kind === "notice") {
+          return `## System\n\n${entry.notice.text || entry.notice.title}`;
+        }
+        if (entry.kind === "post") {
+          return `## Agent: ${heading(entry.from)}\n\n${entry.text}`;
+        }
+        const item = entry.item as MessageItem;
+        const images =
+          typeof item.content === "string"
+            ? []
+            : item.content
+                .filter((part) => part.type === "input_image")
+                .map(() => "[Attached image]");
+        return `## User\n\n${[messageText(item), ...images].filter(Boolean).join("\n\n")}`;
+      })
+      .join("\n\n---\n\n")
+  );
 }

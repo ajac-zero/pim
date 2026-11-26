@@ -468,6 +468,11 @@ const translations = {
     startedFrom: "{agent} started this chat from",
     continuedFrom: "This chat carries on",
     compactedNotice: "Compacted earlier conversation",
+    modelRetryNotice: "{model} stopped responding; trying it once more",
+    modelStalledNotice:
+      "{from} stalled twice; continuing with {to} for the rest of this turn",
+    modelFailedNotice:
+      "{from} wasn't available; continuing with {to} for the rest of this turn",
     continuedMark: "Continued from an earlier chat",
     taskChatsDone: "{done} of {total} tasks done",
     hideTaskChats:
@@ -2616,6 +2621,11 @@ const translations = {
     startedFrom: "{agent} inició este chat desde",
     continuedFrom: "Este chat continúa",
     compactedNotice: "Conversación anterior resumida",
+    modelRetryNotice: "{model} dejó de responder; se lo pide una vez más",
+    modelStalledNotice:
+      "{from} se detuvo dos veces; se continúa con {to} el resto de este turno",
+    modelFailedNotice:
+      "{from} no estaba disponible; se continúa con {to} el resto de este turno",
     continuedMark: "Continúa un chat anterior",
     taskChatsDone: "{done} de {total} tareas hechas",
     hideTaskChats:

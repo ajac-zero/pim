@@ -32,7 +32,8 @@ export function outcomeOf(messages: readonly TranscriptMessage[], since: number)
 	const begun = messages.findIndex((m) => m.role === "user" && m.timestamp >= since);
 	if (begun < 0) return null;
 	const turn = messages.slice(begun);
-	const last = turn.at(-1)!;
+	// What the chat told of a model that was asked again or replaced is neither the agent's word nor the end of the turn.
+	const last = turn.findLast((m) => m.notices === undefined || m.role !== "notice")!;
 	// A reply not marked `complete: false` ends the turn: the agent asks the model nothing more, so the newest message is that call's result, not an answer.
 	const closing = new Set<string>();
 	for (const m of turn) for (const part of m.role === "assistant" ? m.parts : []) if (part.type === "tool-call" && part.name === "send_to_user" && (part.arguments as { complete?: unknown } | undefined)?.complete !== false) closing.add(part.id);

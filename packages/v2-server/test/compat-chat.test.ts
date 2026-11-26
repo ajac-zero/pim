@@ -380,6 +380,9 @@ describe("the API's clients", () => {
 		] as never;
 		expect(outcomeOf(turn(), 0)).toEqual({ status: "done", replies: ["Hello."], text: "Hello." });
 		expect(outcomeOf(turn(false), 0)).toBeNull();
+		// What the chat told of a model asked again, which a request that answered with nothing leaves as its newest message, does not make the turn look unfinished.
+		const told = { role: "notice", timestamp: 4, parts: [], notices: [{ kind: "retry", model: "a" }] };
+		expect(outcomeOf([...turn(), told] as never, 0)).toEqual({ status: "done", replies: ["Hello."], text: "Hello." });
 	});
 
 	it("shows one trigger run by its id, and no other person's", async () => {

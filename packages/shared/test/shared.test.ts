@@ -79,6 +79,41 @@ describe("transcript", () => {
 	});
 });
 
+describe("the notices of a model that was asked again or replaced", () => {
+	const retry = { kind: "retry", model: "gemini-4-neon" };
+	const fallback = { kind: "fallback", from: "gemini-4-neon", to: "gpt-6.1-sol", cause: "stalled" };
+	const answer = (id: number, content: unknown[], modelNotices?: unknown, stopReason = "stop") => ({ id, kind: "pi.assistant", model: [{ role: "assistant", content, stopReason, timestamp: id, ...(modelNotices === undefined ? {} : { modelNotices }) }] }) as never;
+
+	it("go with the assistant message of the request they happened in, and the stored shape is checked", () => {
+		const [shown, plain, odd] = projectEntries([answer(1, [{ type: "text", text: "Hi" }], [retry, fallback]), answer(2, [{ type: "text", text: "Hi" }]), answer(3, [{ type: "text", text: "Hi" }], [{ kind: "x" }, { kind: "retry" }, { kind: "fallback", from: "a", to: "b" }])]);
+		expect(shown).toMatchObject({ role: "assistant", notices: [retry, fallback] });
+		expect(plain && "notices" in plain).toBe(false);
+		// What does not have the shape is left out; a fallback of no stated cause is a failure.
+		expect(odd?.notices).toEqual([{ kind: "fallback", from: "a", to: "b", cause: "failed" }]);
+	});
+
+	it("are still told by a request that answered with nothing, as a notice of their own, and an empty answer without them stays hidden", () => {
+		const shown = projectEntries([answer(1, [{ type: "text", text: "\n" }], [retry]), answer(2, [{ type: "text", text: "\n" }])]);
+		expect(shown).toEqual([{ id: "1", role: "notice", parts: [], timestamp: 1, notices: [retry] }]);
+	});
+
+	it("open no new work for a send's provenance, which counts the same models with them as without", () => {
+		const send = { type: "toolCall", id: "a", name: "send_to_user", arguments: { message: "Hi" } };
+		const search = { type: "toolCall", id: "s", name: "web_search", arguments: {} };
+		const neon = { provider: "ai-gateway", model: "gemini-4-neon" };
+		const sol = { provider: "openai", model: "gpt-6.1-sol" };
+		const entries = (notices?: unknown) => [
+			{ id: 1, kind: "pi.message", model: [{ role: "user", content: "Go", timestamp: 1 }] },
+			{ id: 2, kind: "pi.assistant", model: [{ role: "assistant", content: [search], stopReason: "toolUse", timestamp: 2, ...neon, ...(notices ? { modelNotices: notices } : {}) }] },
+			{ id: 3, kind: "pi.message", model: [{ role: "toolResult", toolCallId: "s", toolName: "web_search", content: [], isError: false, timestamp: 3 }] },
+			{ id: 4, kind: "pi.assistant", model: [{ role: "assistant", content: [send], stopReason: "stop", timestamp: 4, ...sol, ...(notices ? { modelNotices: notices } : {}) }] },
+		] as never[];
+		const told = sendProvenance(entries([retry, fallback]), "start");
+		expect(told).toEqual(sendProvenance(entries(), "start"));
+		expect(told?.a?.contributors.map((m) => m.model)).toEqual(["gemini-4-neon", "gpt-6.1-sol"]);
+	});
+});
+
 describe("a message's model", () => {
 	const answer = (id: number, fields: Record<string, unknown>) => ({ id, kind: "pi.assistant", model: [{ role: "assistant", content: [{ type: "text", text: "Hi" }], stopReason: "stop", timestamp: id, ...fields }] }) as never;
 

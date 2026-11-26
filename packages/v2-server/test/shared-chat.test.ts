@@ -30,6 +30,15 @@ describe("a chat's public copy", () => {
 		for (const hidden of ["They want Lisbon", "Private working note", "create_goal", "Never sent", "iVBORw0KGgo", "secret-chat"]) expect(raw).not.toContain(hidden);
 	});
 
+	it("leaves out the app's note of a model that was asked again or replaced", () => {
+		const told = { id: "n", role: "notice", parts: [], timestamp: 2, notices: [{ kind: "retry", model: "a" }] } as TranscriptMessage;
+		const answer = { ...sends("3", "c", { message: "Hi." }), notices: [{ kind: "fallback", from: "a", to: "b", cause: "stalled" }] } as TranscriptMessage;
+		expect(sharedMessages([user("1", { type: "text", text: "hello" }), told, answer, result("4", "c", "Sent.")])).toEqual([
+			{ role: "user", text: "hello", images: 0, at: 1 },
+			{ role: "agent", text: "Hi.", widgets: [], at: 2 },
+		]);
+	});
+
 	it("starts after the newest context reset, and turns a ui block into its readable text", () => {
 		const reset: TranscriptMessage = { id: "r", role: "notice", parts: [{ type: "text", text: "Context reset" }], timestamp: 0 };
 		const copy = sharedMessages([user("1", { type: "text", text: "before" }), reset, user("2", { type: "text", text: "after" }), sends("3", "c", { message: "Hi.\n```ui\nText \"Hello there\"\n```\n" }), result("4", "c", "Sent.")]);

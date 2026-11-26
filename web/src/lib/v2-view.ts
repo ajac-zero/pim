@@ -1,6 +1,6 @@
 import type { AssistantMessage, Message } from "@earendil-works/pi-ai";
 import type { AgentEvent, EntryRecord } from "@earendil-works/pi-durable";
-import type { TranscriptMessage } from "@pim/shared/transcript";
+import { MODEL_NOTICES, type TranscriptMessage } from "@pim/shared/transcript";
 import type { Session } from "~/lib/pim-api";
 import { EMPTY_STREAM, reduce, type StreamState } from "~/lib/pim-view";
 
@@ -70,6 +70,7 @@ export function assistantOf(m: V2Message): AssistantMessage {
     usage: {} as never,
     stopReason: (m.stopReason ?? "stop") as never,
     ...(m.error === undefined ? {} : { errorMessage: m.error }),
+    ...(m.notices ? { [MODEL_NOTICES]: m.notices } : {}),
     timestamp: m.timestamp,
   } as AssistantMessage;
 }
@@ -78,6 +79,26 @@ export function assistantOf(m: V2Message): AssistantMessage {
 export function entryOf(m: V2Message): EntryRecord | null {
   const id = Number(m.id);
   if (m.role === "notice") {
+    // What a request that answered with nothing told: an answer of no content that carries its notices.
+    if (m.notices) {
+      return {
+        id,
+        kind: "pi.message",
+        model: [
+          {
+            role: "assistant",
+            content: [],
+            api: "",
+            provider: "",
+            model: "",
+            usage: {},
+            stopReason: "stop",
+            [MODEL_NOTICES]: m.notices,
+            timestamp: m.timestamp,
+          },
+        ],
+      } as unknown as EntryRecord;
+    }
     if (m.compaction) {
       return {
         id,

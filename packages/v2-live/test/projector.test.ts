@@ -66,6 +66,22 @@ live("projections over PostgreSQL", () => {
 		expect(page.liveCursor).toBe(`${P1}:1:7`);
 	});
 
+	it("keeps the model an assistant message recorded, on the partial that shows it streaming and on the stored page, and none for one that recorded none", async () => {
+		const recorded = (id: number, fields: Record<string, unknown>) => entry(id, "pi.message", { role: "assistant", content: [{ type: "text", text: "Hi" }], stopReason: "stop", timestamp: 1000 + id, ...fields });
+		await outbox.entry(P1, ADA, C1, user(10, "hello"));
+		await outbox.entry(P1, ADA, C1, recorded(-1, { provider: "ai-gateway", model: "gemini-4-neon" }), true);
+		await outbox.entry(P1, ADA, C1, recorded(11, { provider: "openai", model: "gpt-6-sol", responseModel: "gpt-6-sol-2" }));
+		await outbox.entry(P1, ADA, C1, recorded(12, {}));
+		await new Projector(db.pool).drainAll();
+		const page = await transcriptPage(db.pool, ADA, C1);
+		expect(page.messages.map((message) => [message.id, message.model ?? null])).toEqual([
+			["-1", { provider: "ai-gateway", model: "gemini-4-neon" }],
+			["10", null],
+			["11", { provider: "openai", model: "gpt-6-sol", served: "gpt-6-sol-2" }],
+			["12", null],
+		]);
+	});
+
 	it("is idempotent: applying commits again, from one projector or two at once, changes nothing", async () => {
 		await history();
 		const a = new Projector(db.pool);

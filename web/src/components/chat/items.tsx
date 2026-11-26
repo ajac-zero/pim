@@ -1,3 +1,4 @@
+import type { ModelIdentity } from "@pim/shared/transcript";
 import { splitUiResponse, type UiResponse } from "@pim/ui-lang";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { memo, type ReactNode, useEffect, useMemo, useState } from "react";
@@ -59,6 +60,12 @@ import {
   DropdownMenuTrigger,
 } from "~/components/ui/dropdown-menu";
 import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "~/components/ui/tooltip";
+import {
   type ApprovalField,
   approvalView,
   type CodeLanguage,
@@ -79,6 +86,7 @@ import {
 import type {
   CodingNotice,
   PimNotice,
+  Provenance,
   WorkStep,
   WorkTime,
 } from "~/lib/pim-view";
@@ -389,6 +397,53 @@ export const UserMessage = memo(function UserMessage({
 
 /* --------------------------- assistant message --------------------------- */
 
+const modelName = (model: ModelIdentity) =>
+  `${model.provider}/${model.model}${model.served ? ` (${model.served})` : ""}`;
+
+/**
+ * The model that ran the request that made a message, as it was recorded then (not the chat's current choice, which a fallback can have replaced), and a count of the other
+ * models whose successful requests the message rests on. A message with no recorded model says so and names none.
+ */
+function ModelBadge({ provenance }: { provenance: Provenance }) {
+  const { t } = useI18n();
+  const { emitter, contributors, complete } = provenance;
+  const others = contributors.filter(
+    (model) => !emitter || modelName(model) !== modelName(emitter),
+  );
+  return (
+    <TooltipProvider>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span
+            data-model={emitter ? modelName(emitter) : "unknown"}
+            // biome-ignore lint/a11y/noNoninteractiveTabindex: a focusable trigger shows the models to keyboard users too.
+            tabIndex={0}
+            className="min-w-0 max-w-48 truncate rounded outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            {emitter ? emitter.model : t("modelUnknown")}
+            {others.length > 0 && ` +${others.length}`}
+          </span>
+        </TooltipTrigger>
+        <TooltipContent className="max-w-80 space-y-0.5">
+          <div>
+            {emitter
+              ? t("modelSentBy", { model: modelName(emitter) })
+              : t("modelNotRecorded")}
+          </div>
+          {others.length > 0 && (
+            <div>
+              {t("modelAlsoWorked", {
+                models: others.map(modelName).join(", "),
+              })}
+            </div>
+          )}
+          {emitter && !complete && <div>{t("modelStepsUnknown")}</div>}
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  );
+}
+
 export const AssistantMessage = memo(function AssistantMessage({
   item,
   at,
@@ -404,8 +459,11 @@ export const AssistantMessage = memo(function AssistantMessage({
   uiSend,
   submitted,
   messageId,
+  provenance,
 }: {
   item: MessageItem;
+  /** The models behind it, when it is a message the agent sent; none for what others said in a group chat. */
+  provenance?: Provenance;
   /** Opens a new chat with what was said through this message; without it, it can't be forked. */
   onFork?: () => Promise<void>;
   /** Keeps its time and copy button showing, rather than only on hover: for the latest message of a chat. */
@@ -464,6 +522,7 @@ export const AssistantMessage = memo(function AssistantMessage({
       <div className="mt-1 flex h-7 items-center gap-1.5 text-muted-foreground text-xs">
         {!streaming && (
           <>
+            {provenance && <ModelBadge provenance={provenance} />}
             {at !== undefined && (
               <MessageTime
                 at={at}

@@ -27,6 +27,8 @@ describe("a silent model stream", () => {
 		const message = await ask(failover.wrap(models, "o"), "a");
 		expect(message.stopReason).toBe("stop");
 		expect(JSON.stringify(message.content)).toContain("from b");
+		// The message records the model that answered, not the one the chat asked for: what every transcript's model label is read from.
+		expect([message.provider, message.model]).toEqual(["faux", "b"]);
 		expect(failover.isCooling("o", { provider: "faux", id: "a" })).toBe(true);
 	});
 

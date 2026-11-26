@@ -152,10 +152,25 @@ export type MessagePart =
 			readonly error: boolean;
 	  };
 
+/**
+ * The model a request actually ran on, as the request itself recorded it: the provider and model the failover called (never the one a chat selected, which a fallback can
+ * replace), and `served`, the model id the provider's response named when that differs from the one asked for, as a gateway's does.
+ */
+export type ModelIdentity = { readonly provider: string; readonly model: string; readonly served?: string };
+
+/** The identity an assistant message records, or undefined when it names none: a message stored without one, or a placeholder, is not guessed at. */
+export function modelIdentity(message: { readonly provider?: unknown; readonly model?: unknown; readonly responseModel?: unknown }): ModelIdentity | undefined {
+	const { provider, model, responseModel } = message;
+	if (typeof provider !== "string" || typeof model !== "string" || provider === "" || model === "") return undefined;
+	return { provider, model, ...(typeof responseModel === "string" && responseModel !== "" && responseModel !== model ? { served: responseModel } : {}) };
+}
+
 export type TranscriptMessage = {
 	/** The pi entry id. */
 	readonly id: string;
 	readonly role: "user" | "assistant" | "tool" | "notice";
+	/** An assistant message's model, as it was recorded when the request ran; absent when it was not recorded, which is not the chat's current model. */
+	readonly model?: ModelIdentity;
 	readonly parts: readonly MessagePart[];
 	readonly timestamp: number;
 	readonly stopReason?: string;
@@ -197,6 +212,7 @@ function projectMessage(message: Message, id: string): TranscriptMessage | undef
 			return {
 				id,
 				role: "assistant",
+				...(modelIdentity(message) ? { model: modelIdentity(message)! } : {}),
 				parts: message.content.map((part): MessagePart => {
 					switch (part.type) {
 						case "text":

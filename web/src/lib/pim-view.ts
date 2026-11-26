@@ -14,6 +14,8 @@ import {
   fromPerson,
   INTRODUCTION,
   isDeliveryReminder,
+  type ModelIdentity,
+  modelIdentity,
   NOTICE_PREFIXES,
   ROOM_POST,
   reasoningHeadings,
@@ -111,6 +113,8 @@ export type ThreadEntry =
       source: "user" | "agent";
       /** When it was said, in ms: when the person sent it, or when the agent finished writing it. */
       at: number;
+      /** For what an assistant message wrote: the model that ran its request (null when none was recorded) and whether the request succeeded, so it counts as a contributor. */
+      by?: { model: ModelIdentity | null; ok: boolean };
     }
   /** `at` is when Pim gave it, except for a reset. */
   | { key: string; kind: "notice"; notice: PimNotice; at?: number }
@@ -484,6 +488,10 @@ export function projectMessage(message: Message, key: string): ThreadEntry[] {
     case "assistant": {
       // Its timestamp is when the request started; a response being written has no duration yet.
       const at = message.timestamp + (message.durationMs ?? 0);
+      const by = {
+        model: modelIdentity(message) ?? null,
+        ok: message.stopReason === "stop" || message.stopReason === "toolUse",
+      };
       return message.content.flatMap((block, index): ThreadEntry[] => {
         // Empty text blocks are placeholders while a block starts.
         if (block.type === "text" && block.text === "") return [];
@@ -496,6 +504,7 @@ export function projectMessage(message: Message, key: string): ThreadEntry[] {
                 source: "agent",
                 item,
                 at,
+                by,
               },
             ]
           : [];
@@ -911,6 +920,20 @@ export type WorkApproval = {
 /** Where a stretch of work's time went: the model's answers, its tool calls apart from approvals, and waiting for those. */
 export type WorkTime = { thinking: number; tools: number; approvals: number };
 
+/**
+ * The models behind a message Pim sent. `emitter` is the model whose answer made the `send_to_user` call (null when its request recorded none). `contributors` are the models
+ * whose requests succeeded in the work leading to it, the emitter's among them: failed attempts, which never wrote anything the message rests on, are not. `complete` is false
+ * when a successful request of that work recorded no model, as every message stored before models were recorded: then the list may be missing models, and none is guessed.
+ */
+export type Provenance = {
+  emitter: ModelIdentity | null;
+  contributors: ModelIdentity[];
+  complete: boolean;
+};
+
+const sameModel = (a: ModelIdentity, b: ModelIdentity) =>
+  a.provider === b.provider && a.model === b.model && a.served === b.served;
+
 /** One row of the chat as the person reads it. */
 export type ThreadRow =
   /** Something they said, a notice, or a user-facing approval or app. */
@@ -923,6 +946,7 @@ export type ThreadRow =
       sent: Sent;
       /** When it was sent, in ms. */
       at: number;
+      provenance: Provenance;
     }
   /** The work the agent did before the next row, or is doing now (`live`). */
   | {
@@ -1025,6 +1049,33 @@ export function layoutThread(
   let since: number | null = null;
   /** When the work's latest step ended. */
   let until: number | null = null;
+  /*
+   * Provenance. The work toward a message is every successful model request since the last thing that opened a new turn of work: a person's message, a notice, or another
+   * agent's post, or the previous message sent. Failed requests and the retries after them are entries of their own that do not count, and a retry or a continuation after a
+   * failure is part of the same stretch. The requests of one message are one point, by its entry id, and a request that made several `send_to_user` calls gave them all one
+   * provenance, and what it sent is not counted as work toward the next message.
+   */
+  let worked = new Map<string, ModelIdentity | null>();
+  const emitted = new Map<string, ModelIdentity | null>();
+  const sentFrom = new Map<string, Provenance>();
+  const provenanceOf = (id: string): Provenance => {
+    const known = sentFrom.get(id);
+    if (known) return known;
+    const contributors: ModelIdentity[] = [];
+    for (const model of worked.values()) {
+      if (model && !contributors.some((other) => sameModel(other, model))) {
+        contributors.push(model);
+      }
+    }
+    const provenance = {
+      emitter: emitted.get(id) ?? null,
+      contributors,
+      complete: ![...worked.values()].includes(null),
+    };
+    sentFrom.set(id, provenance);
+    worked = new Map();
+    return provenance;
+  };
   const lines = options.work?.lines ?? {};
   const approvals = options.work?.approvals ?? {};
   const fold = (end: number | null, live = false) => {
@@ -1066,15 +1117,23 @@ export function layoutThread(
   };
   for (const entry of entries) {
     if (entry.kind === "notice" || entry.kind === "post") {
+      worked = new Map();
       own(entry);
       continue;
     }
     const { item } = entry;
+    const id = entry.key.split(":")[0] as string;
+    if (entry.by) {
+      emitted.set(id, entry.by.model);
+      if (entry.by.ok) worked.set(id, entry.by.model);
+    }
     switch (item.type) {
       case "message":
       case "reasoning":
-        if ((item as MessageItem).role === "user") own(entry);
-        else if (entry.source === "agent") {
+        if ((item as MessageItem).role === "user") {
+          worked = new Map();
+          own(entry);
+        } else if (entry.source === "agent") {
           if (steps.length === 0) workKey = entry.key;
           steps.push(...stepsOf(item, lines, approvals));
           until = entry.at;
@@ -1095,7 +1154,10 @@ export function layoutThread(
             call,
             sent: message,
             at: entry.at,
+            provenance: provenanceOf(id),
           });
+          // A request that made several sends is not work toward what follows the first of them.
+          worked.delete(id);
           since = entry.at;
         } else if (options.shown(call)) own(entry);
         else {

@@ -438,6 +438,124 @@ describe("layoutThread", () => {
     ).toEqual(["entry 1", "sent 4:0: It's sunny."]);
   });
 
+  describe("provenance", () => {
+    const neon = { provider: "ai-gateway", model: "gemini-4-neon" };
+    const sol = { provider: "openai", model: "gpt-6-sol" };
+    const by = (model: { provider: string; model: string }, extra = {}) => ({
+      ...model,
+      stopReason: "stop",
+      ...extra,
+    });
+    const sent = (entries: EntryRecord[]) =>
+      layoutThread(run([snapshot({ entries })]).view.entries, {
+        shown: () => false,
+      }).flatMap((row) =>
+        row.kind === "sent"
+          ? [
+              {
+                key: row.key,
+                emitter: row.provenance.emitter?.model ?? null,
+                contributors: row.provenance.contributors.map((m) => m.model),
+                complete: row.provenance.complete,
+              },
+            ]
+          : [],
+      );
+
+    it("names the model that emitted a send, and the models that succeeded toward it, never one that only failed", () => {
+      expect(
+        sent([
+          user(1, "Weather?"),
+          // Neon went silent: its failed attempt, kept in the transcript, wrote nothing the message rests on.
+          assistant(2, [], by(neon, { stopReason: "error" })),
+          assistant(3, [search], by(sol, { stopReason: "toolUse" })),
+          toolResult(4, "s", "sunny"),
+          assistant(5, [send("m", "It's sunny.")], by(neon)),
+        ]),
+      ).toEqual([
+        {
+          key: "5:0",
+          emitter: "gemini-4-neon",
+          contributors: ["gpt-6-sol", "gemini-4-neon"],
+          complete: true,
+        },
+      ]);
+    });
+
+    it("starts each message's work after the previous message sent, and gives sends of one request one provenance", () => {
+      expect(
+        sent([
+          user(1, "Go"),
+          assistant(2, [send("a", "One")], by(sol, { stopReason: "toolUse" })),
+          toolResult(3, "a", "Sent."),
+          assistant(4, [send("b", "Two"), send("c", "Three")], by(neon)),
+          toolResult(5, "b", "Sent."),
+          toolResult(6, "c", "Sent."),
+          assistant(7, [send("d", "Four")], by(sol)),
+        ]),
+      ).toEqual([
+        {
+          key: "2:0",
+          emitter: "gpt-6-sol",
+          contributors: ["gpt-6-sol"],
+          complete: true,
+        },
+        {
+          key: "4:0",
+          emitter: "gemini-4-neon",
+          contributors: ["gemini-4-neon"],
+          complete: true,
+        },
+        {
+          key: "4:1",
+          emitter: "gemini-4-neon",
+          contributors: ["gemini-4-neon"],
+          complete: true,
+        },
+        {
+          key: "7:0",
+          emitter: "gpt-6-sol",
+          contributors: ["gpt-6-sol"],
+          complete: true,
+        },
+      ]);
+    });
+
+    it("keeps work across a person's next message apart", () => {
+      expect(
+        sent([
+          user(1, "One"),
+          assistant(2, [search], by(sol, { stopReason: "toolUse" })),
+          toolResult(3, "s", "x"),
+          assistant(4, [send("a", "A")], by(neon)),
+          user(5, "Two"),
+          assistant(6, [send("b", "B")], by(neon)),
+        ]).map((row) => row.contributors),
+      ).toEqual([["gpt-6-sol", "gemini-4-neon"], ["gemini-4-neon"]]);
+    });
+
+    it("leaves a message stored without a model unknown, and says so when it is among the work", () => {
+      expect(
+        sent([
+          user(1, "Old"),
+          assistant(2, [send("a", "Old answer")], { stopReason: "stop" }),
+          user(3, "New"),
+          assistant(4, [search], { stopReason: "toolUse" }),
+          toolResult(5, "s", "x"),
+          assistant(6, [send("b", "New answer")], by(neon)),
+        ]),
+      ).toEqual([
+        { key: "2:0", emitter: null, contributors: [], complete: false },
+        {
+          key: "6:0",
+          emitter: "gemini-4-neon",
+          contributors: ["gemini-4-neon"],
+          complete: false,
+        },
+      ]);
+    });
+  });
+
   it("times the person's message by when they sent it, and an agent's by when it finished writing it", () => {
     const rows = layoutThread(
       run([

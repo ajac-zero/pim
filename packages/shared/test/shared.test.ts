@@ -79,6 +79,23 @@ describe("transcript", () => {
 	});
 });
 
+describe("a message's model", () => {
+	const answer = (id: number, fields: Record<string, unknown>) => ({ id, kind: "pi.assistant", model: [{ role: "assistant", content: [{ type: "text", text: "Hi" }], stopReason: "stop", timestamp: id, ...fields }] }) as never;
+
+	it("is the provider and model the request recorded, with the model the response named only when it differs, and none when the message recorded none", () => {
+		const [gateway, same, blank, user] = projectEntries([
+			answer(1, { provider: "ai-gateway", model: "gemini-4-neon", responseModel: "gemini-4-neon-0925" }),
+			answer(2, { provider: "openai", model: "gpt-6-sol", responseModel: "gpt-6-sol" }),
+			answer(3, { provider: "", model: "" }),
+			{ id: 4, kind: "pi.message", model: [{ role: "user", content: "x", timestamp: 4 }] } as never,
+		]);
+		expect(gateway?.model).toEqual({ provider: "ai-gateway", model: "gemini-4-neon", served: "gemini-4-neon-0925" });
+		expect(same?.model).toEqual({ provider: "openai", model: "gpt-6-sol" });
+		expect(blank && "model" in blank).toBe(false);
+		expect(user && "model" in user).toBe(false);
+	});
+});
+
 describe("Pim's own themes", () => {
 	it("each have both modes with the colors the app reads", () => {
 		expect(new Set(pimThemes.map((theme) => theme.id)).size).toBe(pimThemes.length);

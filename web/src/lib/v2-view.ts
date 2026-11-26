@@ -59,9 +59,11 @@ export function assistantOf(m: V2Message): AssistantMessage {
       }
       return [];
     }),
-    api: "v2",
-    provider: "v2",
-    model: "v2",
+    api: "",
+    // What the request recorded, or nothing: a message stored without its model stays unknown here.
+    provider: m.model?.provider ?? "",
+    model: m.model?.model ?? "",
+    ...(m.model?.served === undefined ? {} : { responseModel: m.model.served }),
     usage: {} as never,
     stopReason: (m.stopReason ?? "stop") as never,
     ...(m.error === undefined ? {} : { errorMessage: m.error }),

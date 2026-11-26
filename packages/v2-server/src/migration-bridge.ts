@@ -311,7 +311,9 @@ async function promoteChats(pool: Pool, runtime: RuntimeDb, owner: string): Prom
 		const seq = Number(part.next_seq) - 1;
 		await asOwner(pool, owner, async (c) => {
 			for (const entry of entries) {
-				for (const m of projectEntries([entry])) {
+				for (const projected of projectEntries([entry])) {
+					// What the Cloudflare version recorded of the model is not known to have been the one that answered, so an imported message says none.
+					const { model: _recorded, ...m } = projected;
 					messages++;
 					await c.query(
 						"INSERT INTO pim_projection.chat_transcript_projection (owner_id, stream_kind, chat_id, entry_id, position, partial, message, partition_id, commit_seq, projection_version) VALUES ($1,'chat',$2,$3,$4,false,$5,$6,$7,1) ON CONFLICT DO NOTHING",

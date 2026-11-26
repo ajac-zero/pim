@@ -604,6 +604,7 @@ export const Thread = memo(function Thread({
                   content: [{ type: "output_text", text: row.sent.message }],
                 }}
                 at={row.at}
+                provenance={row.provenance}
                 mention={mention(row.key, row.sent.message)}
                 streaming={liveKeys.has(row.key)}
                 pinned={row.key === latestKey}

@@ -1,7 +1,7 @@
 import { codingWakeText } from "@pim/shared/coding-wake";
 import { DELIVERY_REMINDER, NOT_DELIVERED } from "@pim/shared/transcript";
 import { describe, expect, it } from "vitest";
-import { codingNoticeOf, EMPTY_STREAM } from "~/lib/pim-view";
+import { codingNoticeOf, EMPTY_STREAM, layoutThread } from "~/lib/pim-view";
 import {
   applyBusy,
   applyMessage,
@@ -448,5 +448,49 @@ describe("a coding thread's wake in a v2 chat", () => {
       kind: "notice",
       notice: { kind: "coding", coding: { state: "idle" } },
     });
+  });
+});
+
+describe("the model a message records", () => {
+  const neon = { provider: "ai-gateway", model: "gemini-4-neon" };
+  const send = (id: number, model: V2Message["model"], partial = false) => ({
+    ...assistant(
+      id,
+      "",
+      [
+        {
+          type: "tool-call",
+          id: `c${id}`,
+          name: "send_to_user",
+          arguments: { message: "Hello" },
+        },
+      ],
+      partial,
+    ),
+    ...(model ? { model } : {}),
+  });
+  const emitters = (stream: ReturnType<typeof streamOf>) =>
+    layoutThread([...stream.view.entries, ...stream.view.live], {
+      shown: () => false,
+    }).flatMap((row) =>
+      row.kind === "sent" ? [row.provenance.emitter?.model ?? null] : [],
+    );
+
+  it("reaches a message loaded from history and one still streaming, and is unknown for one stored without it", () => {
+    const history = streamOf([
+      user(1, "Hi"),
+      send(2, neon),
+      send(3, undefined),
+    ]);
+    expect(emitters(history)).toEqual(["gemini-4-neon", null]);
+    const live = applyMessage(
+      streamOf([user(1, "Hi")]),
+      send(-1, { ...neon, served: "gemini-4-neon-0925" }, true),
+    );
+    expect(
+      layoutThread(live.view.live, { shown: () => false }).flatMap((row) =>
+        row.kind === "sent" ? [row.provenance.emitter] : [],
+      ),
+    ).toEqual([{ ...neon, served: "gemini-4-neon-0925" }]);
   });
 });

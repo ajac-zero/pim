@@ -56,20 +56,15 @@ it("opens its list of models on a tap, as touch has no hover, and says when step
   ).toBeTruthy();
 });
 
-it("opens on hover by mouse, and says where a group chat post's model is", () => {
+it("opens on hover by mouse", () => {
   const { container } = show({
     emitter: null,
     contributors: [],
     complete: false,
-    elsewhere: true,
   });
   const badge = container.querySelector("[data-model]") as Element;
   fireEvent.pointerEnter(badge, { pointerType: "mouse" });
-  expect(
-    screen.getByText(
-      "Another agent wrote this in its own chat, and this chat doesn't record its model.",
-    ),
-  ).toBeTruthy();
+  expect(screen.getByText("This message has no recorded model.")).toBeTruthy();
 });
 
 it("stays open when a mouse that hovered it clicks it", () => {

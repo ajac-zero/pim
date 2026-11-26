@@ -451,10 +451,12 @@ describe("a coding thread's wake in a v2 chat", () => {
   });
 });
 
-describe("the model a message records", () => {
+describe("the provenance a message carries", () => {
   const neon = { provider: "ai-gateway", model: "gemini-4-neon" };
-  const send = (id: number, model: V2Message["model"], partial = false) => ({
-    ...assistant(
+  const sol = { provider: "openai", model: "gpt-6-sol" };
+  const kept = { emitter: neon, contributors: [sol, neon], complete: true };
+  const send = (id: number, provenance?: typeof kept, partial = false) =>
+    assistant(
       id,
       "",
       [
@@ -463,34 +465,36 @@ describe("the model a message records", () => {
           id: `c${id}`,
           name: "send_to_user",
           arguments: { message: "Hello" },
+          ...(provenance ? { provenance } : {}),
         },
       ],
       partial,
-    ),
-    ...(model ? { model } : {}),
-  });
-  const emitters = (stream: ReturnType<typeof streamOf>) =>
-    layoutThread([...stream.view.entries, ...stream.view.live], {
-      shown: () => false,
-    }).flatMap((row) =>
-      row.kind === "sent" ? [row.provenance.emitter?.model ?? null] : [],
+    );
+  const provenances = (entries: Parameters<typeof layoutThread>[0]) =>
+    layoutThread(entries, { shown: () => false }).flatMap((row) =>
+      row.kind === "sent" ? [row.provenance] : [],
     );
 
-  it("reaches a message loaded from history and one still streaming, and is unknown for one stored without it", () => {
-    const history = streamOf([
-      user(1, "Hi"),
-      send(2, neon),
-      send(3, undefined),
+  it("reaches a message loaded from history and one still streaming, and is unknown for one that kept none", () => {
+    const history = streamOf([user(1, "Hi"), send(2, kept), send(3)]);
+    expect(provenances(history.view.entries)).toEqual([
+      kept,
+      { emitter: null, contributors: [], complete: false },
     ]);
-    expect(emitters(history)).toEqual(["gemini-4-neon", null]);
-    const live = applyMessage(
-      streamOf([user(1, "Hi")]),
-      send(-1, { ...neon, served: "gemini-4-neon-0925" }, true),
-    );
-    expect(
-      layoutThread(live.view.live, { shown: () => false }).flatMap((row) =>
-        row.kind === "sent" ? [row.provenance.emitter] : [],
-      ),
-    ).toEqual([{ ...neon, served: "gemini-4-neon-0925" }]);
+    const live = applyMessage(streamOf([user(1, "Hi")]), send(-1, kept, true));
+    expect(provenances(live.view.live)).toEqual([kept]);
+  });
+
+  it("reaches a post another agent made in a group chat, carried beside its text", () => {
+    const post: V2Message = {
+      ...user(5, "[From Ada]\nOver to you"),
+      provenance: kept,
+    };
+    const [entry] = streamOf([post]).view.entries;
+    expect(entry).toMatchObject({
+      kind: "post",
+      from: "Ada",
+      provenance: kept,
+    });
   });
 });

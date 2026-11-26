@@ -21,6 +21,8 @@ import { OwnerId, type PartitionId, type PublicChatId } from "@pim/v2-contracts/
 import type { RuntimeOutboxEvent } from "@pim/v2-contracts/runtime-seam";
 import { Db } from "@pim/v2-runtime/db";
 import { PgPiStorage } from "@pim/v2-runtime/storage";
+import { ROOM_POST, type Provenance } from "@pim/shared/transcript";
+import { provenanceOfEntry } from "./send-provenance.ts";
 import { withOwner } from "@pim/v2-live/owner-tx";
 import type { CommitUnit, OutboxSource } from "@pim/v2-live/projections/outbox-source";
 import type { Pool } from "pg";
@@ -124,16 +126,29 @@ async function translate(pool: Pool, storage: PgPiStorage, ownerId: OwnerId, par
 		committedAt: committedAt.toISOString(),
 	});
 	const events: RuntimeOutboxEvent[] = [];
+	/** What a committed entry carries beyond itself, worked out where it was written: who is behind each send of an answer, and behind another agent's post in a group chat. */
+	const provenanceOf = async (entry: EntryRecord, conversation: number, partial = false): Promise<{ provenance?: Record<string, Provenance>; post?: Provenance }> => {
+		const read = (sql: string, params: unknown[]) => withOwner(pool, ownerId, (client) => client.query(sql, params));
+		if (isAssistant(entry)) {
+			const provenance = await provenanceOfEntry(read, ownerId, conversation, entry, partial);
+			return Object.keys(provenance).length > 0 ? { provenance } : {};
+		}
+		const message = entry.model?.[0];
+		const text = message?.role === "user" ? (typeof message.content === "string" ? message.content : message.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n")) : "";
+		if (partial || !ROOM_POST.test(text)) return {};
+		const post = (await read("SELECT pim_app.live_post_provenance($1, $2, $3) AS post", [ownerId, conversation, entry.id])).rows[0]?.post as Provenance | null | undefined;
+		return post ? { post } : {};
+	};
 	// A fork starts with what its parent said up to the entry it forked at, which is none of its own entries: the transcript it shows is made of them.
 	if (changes.some((c) => c.type === "conversation")) {
 		const forked = await withOwner(pool, ownerId, (client) =>
-			client.query<{ parent_at: string }>("SELECT parent_at FROM pim_runtime.conversations WHERE owner_id = $1 AND partition_id = $2 AND id = $3 AND parent_conversation_id IS NOT NULL", [ownerId, partitionId, conversationId]),
+			client.query<{ parent_at: string; parent_conversation_id: string }>("SELECT parent_at, parent_conversation_id FROM pim_runtime.conversations WHERE owner_id = $1 AND partition_id = $2 AND id = $3 AND parent_conversation_id IS NOT NULL", [ownerId, partitionId, conversationId]),
 		);
 		if (forked.rows[0]) {
 			let cursor: never | undefined;
 			do {
 				const page = await storage.scanEntries({ conversationId: conversationId as never, order: "ascending", maxEntryId: Number(forked.rows[0].parent_at) as never }, 500, cursor, BACKGROUND_CONTEXT);
-				for (const entry of page.items) events.push(event("chat.entry", { entry }));
+				for (const entry of page.items) events.push(event("chat.entry", { entry, ...(await provenanceOf(entry, Number(forked.rows[0].parent_conversation_id))) }));
 				cursor = page.next as never;
 			} while (cursor !== undefined);
 		}
@@ -147,7 +162,7 @@ async function translate(pool: Pool, storage: PgPiStorage, ownerId: OwnerId, par
 		for (const { record } of records.rows) {
 			const entry = JSON.parse(record) as EntryRecord;
 			written.push(entry);
-			events.push(event("chat.entry", { entry, ...(isAssistant(entry) ? { replaces: String(partialId(conversationId)) } : {}) }));
+			events.push(event("chat.entry", { entry, ...(isAssistant(entry) ? { replaces: String(partialId(conversationId)) } : {}), ...(await provenanceOf(entry, conversationId)) }));
 		}
 	}
 	let busy: boolean | undefined;
@@ -167,7 +182,8 @@ async function translate(pool: Pool, storage: PgPiStorage, ownerId: OwnerId, par
 		if (message !== undefined) {
 			const top = await withOwner(pool, ownerId, (client) => client.query<{ top: string | null }>("SELECT max(id) AS top FROM pim_runtime.entries WHERE owner_id = $1 AND conversation_id = $2", [ownerId, conversationId]));
 			// The partial sorts after everything committed so far; the answer's own entry takes its place when it commits.
-			events.push(event("chat.entry", { entry: { id: partialId(conversationId), kind: "pi.assistant", model: [message] }, partial: true, position: Number(top.rows[0]?.top ?? 0) + 1 }));
+			const partial = { id: partialId(conversationId), kind: "pi.assistant", model: [message] } as unknown as EntryRecord;
+			events.push(event("chat.entry", { entry: partial, partial: true, position: Number(top.rows[0]?.top ?? 0) + 1, ...(await provenanceOf(partial, conversationId, true)) }));
 		}
 	}
 	const context = await contextOf(storage, conversationId, written);

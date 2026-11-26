@@ -1,4 +1,4 @@
-import type { ModelIdentity } from "@pim/shared/transcript";
+import type { ModelIdentity, Provenance } from "@pim/shared/transcript";
 import { splitUiResponse, type UiResponse } from "@pim/ui-lang";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -92,7 +92,6 @@ import {
 import type {
   CodingNotice,
   PimNotice,
-  Provenance,
   WorkStep,
   WorkTime,
 } from "~/lib/pim-view";
@@ -414,7 +413,7 @@ function ModelBadge({ provenance }: { provenance: Provenance }) {
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const hovered = useRef(false);
-  const { emitter, contributors, complete, elsewhere } = provenance;
+  const { emitter, contributors, complete } = provenance;
   const others = contributors.filter(
     (model) => !emitter || modelName(model) !== modelName(emitter),
   );
@@ -452,9 +451,7 @@ function ModelBadge({ provenance }: { provenance: Provenance }) {
         <div>
           {emitter
             ? t("modelSentBy", { model: modelName(emitter) })
-            : elsewhere
-              ? t("modelElsewhere")
-              : t("modelNotRecorded")}
+            : t("modelNotRecorded")}
         </div>
         {others.length > 0 && (
           <div>
@@ -463,7 +460,7 @@ function ModelBadge({ provenance }: { provenance: Provenance }) {
             })}
           </div>
         )}
-        {!complete && !elsewhere && <div>{t("modelStepsUnknown")}</div>}
+        {!complete && emitter && <div>{t("modelStepsUnknown")}</div>}
       </PopoverContent>
     </Popover>
   );

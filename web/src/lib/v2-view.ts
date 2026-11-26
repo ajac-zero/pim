@@ -20,7 +20,9 @@ function piMessage(m: V2Message): Message | null {
         (part) => part.type === "text" || part.type === "image",
       ) as never,
       timestamp: m.timestamp,
-    };
+      // What another agent's post carries, for the chat to show who is behind it.
+      ...(m.provenance ? { provenance: m.provenance } : {}),
+    } as Message;
   }
   if (m.role === "assistant") return assistantOf(m);
   if (m.role === "tool") {
@@ -54,6 +56,7 @@ export function assistantOf(m: V2Message): AssistantMessage {
             id: part.id,
             name: part.name,
             arguments: part.arguments as never,
+            ...(part.provenance ? { provenance: part.provenance } : {}),
           },
         ];
       }

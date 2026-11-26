@@ -15,6 +15,7 @@ import { createChat, requestId, requireChat } from "@pim/v2-app/conversations";
 import type { Tx } from "@pim/v2-app/db";
 import { ConflictError, NotFoundError } from "@pim/v2-app/errors";
 import type { Principal } from "@pim/v2-contracts/identity";
+import type { Provenance } from "@pim/shared/transcript";
 
 const WORD = /[\p{L}\p{N}_]/u;
 
@@ -105,14 +106,14 @@ async function roomOf(tx: Tx, hostChat: string) {
  * Tells the others in a room what one of them said, as v1's `posted` did: those it mentions, or everyone in an open room, take a turn, one further from the person's message than the
  * turn that said it; the rest hear it without being woken, in their context from their next request. `from` is the chat that spoke (a seat, or the host chat), whose own agent is not told.
  */
-async function tellRoom(tx: Tx, ownerId: string, hostChat: string, from: string, key: string, speaker: { id: string; name: string }, message: string): Promise<void> {
+async function tellRoom(tx: Tx, ownerId: string, hostChat: string, from: string, key: string, speaker: { id: string; name: string }, message: string, provenance?: Provenance): Promise<void> {
 	const room = await roomOf(tx, hostChat);
 	const named = mentionedAgents(message, [{ id: room.hostId, name: room.hostName }, ...room.members]);
 	const depth = Number((await tx.query("SELECT coalesce(max((payload->>'depth')::int), 0) AS depth FROM (SELECT payload FROM pim_app.accepted_commands WHERE public_chat_id = $1 AND kind = 'user_message' ORDER BY accepted_at DESC LIMIT 1) latest", [from])).rows[0]?.depth ?? 0) + 1;
 	const text = `[From ${speaker.name}]\n${message}`;
 	const hear = (chat: string, who: string) => {
 		const wake = (room.open || named.includes(who)) && depth < MAX_ROOM_DEPTH;
-		return accept(tx, ownerId, `room-heard:${from}:${key}:${who}`.slice(0, 128), chat, wake ? { text, depth, whenBusy: "followUp" } : { text, write: true });
+		return accept(tx, ownerId, `room-heard:${from}:${key}:${who}`.slice(0, 128), chat, { ...(wake ? { text, depth, whenBusy: "followUp" } : { text, write: true }), ...(provenance ? { provenance } : {}) });
 	};
 	if (from !== hostChat && speaker.id !== room.hostId) await hear(hostChat, room.hostId);
 	for (const m of room.members) if (m.seat_chat_id !== from) await hear(m.seat_chat_id, m.id);
@@ -122,23 +123,23 @@ async function tellRoom(tx: Tx, ownerId: string, hostChat: string, from: string,
  * What an agent in a room sends: it lands in the host chat as "[From Name]", where the person reads it, and the other agents hear it too (`tellRoom`). Posted under a key (the tool call's),
  * so a replay posts nothing twice. Returns false for a chat that is not a seat, which has nothing to post to.
  */
-export async function postToRoom(app: App, p: Principal, seatChatId: string, key: string, message: string): Promise<boolean> {
+export async function postToRoom(app: App, p: Principal, seatChatId: string, key: string, message: string, provenance?: Provenance): Promise<boolean> {
 	await app.identity.authz.enforce(p, "api:write");
 	return app.db.owner(p.ownerId, async (tx) => {
 		const seat = (await tx.query("SELECT c.room_of, c.agent_id, a.name FROM pim_app.conversations c LEFT JOIN pim_app.agents a ON a.id = c.agent_id WHERE c.public_chat_id = $1", [seatChatId])).rows[0];
 		if (!seat?.room_of) return false;
-		await tellRoom(tx, p.ownerId, seat.room_of as string, seatChatId, key, { id: seat.agent_id as string, name: (seat.name as string) ?? "an agent" }, message);
+		await tellRoom(tx, p.ownerId, seat.room_of as string, seatChatId, key, { id: seat.agent_id as string, name: (seat.name as string) ?? "an agent" }, message, provenance);
 		await tx.query("UPDATE pim_app.conversations SET response_at = now(), updated_at = now() WHERE public_chat_id = $1", [seat.room_of]);
 		return true;
 	});
 }
 
 /** What a room's host sends in the host chat reaches the agents in its seats, as what the agents in them send reaches each other and the host; a chat that is not a room's host tells no one. */
-export async function hostSpeaks(app: App, p: Principal, hostChat: string, key: string, message: string): Promise<void> {
+export async function hostSpeaks(app: App, p: Principal, hostChat: string, key: string, message: string, provenance?: Provenance): Promise<void> {
 	await app.db.owner(p.ownerId, async (tx) => {
 		const room = await roomOf(tx, hostChat);
 		if (room.members.length === 0) return;
-		await tellRoom(tx, p.ownerId, hostChat, hostChat, key, { id: room.hostId, name: room.hostName }, message);
+		await tellRoom(tx, p.ownerId, hostChat, hostChat, key, { id: room.hostId, name: room.hostName }, message, provenance);
 	});
 }
 

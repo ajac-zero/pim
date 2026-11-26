@@ -17,6 +17,7 @@ import { accountRoutes } from "../src/compat/chat-account.ts";
 import { bootRoutes } from "../src/compat/boot.ts";
 import { screenRoutes } from "../src/compat/admin-screens.ts";
 import { diagnosticsRoutes } from "../src/compat/diagnostics.ts";
+import { callsOf } from "../src/compat/activity.ts";
 import { usageRoutes } from "../src/compat/usage.ts";
 import { modelRoutes } from "../src/compat/model.ts";
 import { snapshotRoutes } from "../src/gate-extras.ts";
@@ -450,7 +451,8 @@ describe("a chat's activity and the diagnostics of how its turns went", () => {
 		// What the ledger knows of the model call (its id ends with the answer's time), a call that failed over to it, and a failed one with the provider's words.
 		const call1 = (id: string, extra: Record<string, unknown>) => stack.admin.query("SELECT pim_app.record_model_call($1, $2, 'chat', $3, 'gw', 'm1', 10, 5, 0, 0, 0, NULL, $4::jsonb)", [owner, id, chat, JSON.stringify(extra)]);
 		await call1(`mc_c1_t1_${started + 1_000}`, { stopReason: "toolUse", latencyMs: 3_000, turnIndex: 1, toolCount: 4, promptBytes: 2_000, runKind: "chat" });
-		await call1(`mc_c1_t1_${started + 1_000}_f0`, { stopReason: "error", latencyMs: 125_000, error: "529 overloaded at https://gw.example.test/v1/messages for ada@example.test with max_tokens", request: { phases: { headersMs: 125_000, httpAttempts: 1 } }, runKind: "chat" });
+		// Its attempt ran in the second before the answered request began, as the turn shows it.
+		await call1(`mc_c1_t1_${started + 1_000}_f0`, { stopReason: "error", latencyMs: 900, error: "529 overloaded at https://gw.example.test/v1/messages for ada@example.test with max_tokens", request: { phases: { headersMs: 900, httpAttempts: 1 } }, runKind: "chat" });
 		// They happened when the turn did.
 		await stack.admin.query("UPDATE pim_app.model_calls SET at = to_timestamp(($2::bigint + latency_ms) / 1000.0) WHERE owner_id = $1 AND public_chat_id = $3", [owner, started + 1_000, chat]);
 		await app.db.owner(owner, (tx) => tx.query("SELECT pim_app.record_diagnostic_event($1, 'model_call_failed', $2)", [owner, JSON.stringify({ provider: "gw", model: "m1", error: "529 overloaded" })]));
@@ -464,7 +466,7 @@ describe("a chat's activity and the diagnostics of how its turns went", () => {
 		expect(tools[0].summary).not.toContain("abc");
 		expect(tools[1]).toMatchObject({ id: "call-b", ms: null, timeoutMs: 3_600_000, summary: expect.stringContaining("make all") });
 		expect(activity.steps.find((step: any) => step.kind === "model" && step.error === null)).toMatchObject({ ms: 3_000, model: "gw/m1", stop: "toolUse" });
-		expect(activity.steps.find((step: any) => step.kind === "model" && step.error)).toMatchObject({ ms: 125_000, stop: "error" });
+		expect(activity.steps.find((step: any) => step.kind === "model" && step.error)).toMatchObject({ ms: 900, stop: "error" });
 		expect(activity.current).toMatchObject([{ id: "call-b", name: "shell", timeoutMs: 3_600_000 }]);
 		// Quiet inside its own declared timeout, so shown but never woken for.
 		expect(activity.stalls).toMatchObject([{ reason: "no output for five minutes", actionable: false }]);
@@ -475,7 +477,7 @@ describe("a chat's activity and the diagnostics of how its turns went", () => {
 		await stack.admin.query("DELETE FROM pim_app.approvals WHERE id = 'ap1'");
 
 		const turns = (await call(ada, "GET", `/api/admin/diagnostics?kind=turns&chat=${chat}`)).body;
-		expect(turns.items[0]).toMatchObject({ in_progress: true, model_calls: 2, tool_calls: 2, model_ms: 128_000 });
+		expect(turns.items[0]).toMatchObject({ in_progress: true, model_calls: 2, tool_calls: 2, model_ms: 3_900 });
 		expect(turns.items[0].steps.map((step: any) => step.step)).toEqual(["model", "model", "tool", "tool"]);
 		const working = (await call(ada, "GET", "/api/admin/diagnostics?kind=runs")).body.chats.find((c: any) => c.chat === chat);
 		expect(working).toMatchObject({ waiting_on: expect.stringContaining("shell"), working_minutes: 20, stalls: [{ reason: "no output for five minutes" }] });
@@ -484,8 +486,8 @@ describe("a chat's activity and the diagnostics of how its turns went", () => {
 		const calls = (await call(ada, "GET", "/api/admin/diagnostics?kind=model_calls")).body;
 		expect(calls.totals.errors).toBeGreaterThanOrEqual(1);
 		expect(calls.totals.calls).toBeGreaterThanOrEqual(2);
-		const failure = calls.failures.find((f: any) => f.stop_reason === "error" && f.latency_ms === 125_000);
-		expect(failure).toMatchObject({ why: "stopped with error", provider: "gw", model: "m1", latency_ms: 125_000, request: { phases: { headersMs: 125_000 } } });
+		const failure = calls.failures.find((f: any) => f.stop_reason === "error" && f.latency_ms === 900);
+		expect(failure).toMatchObject({ why: "stopped with error", provider: "gw", model: "m1", latency_ms: 900, request: { phases: { headersMs: 900 } } });
 		// The provider's words keep their ids and their words, but not an address or an email.
 		expect(failure.error).toBe("529 overloaded at [address]/v1/messages for [email] with max_tokens");
 		expect((await call(ada, "GET", "/api/admin/diagnostics?kind=events")).body.items).toMatchObject([{ kind: "model_call_failed", detail: { provider: "gw" }, error: "529 overloaded" }]);
@@ -852,5 +854,18 @@ describe("the agents' rules and the majordomo", () => {
 		expect(sent).toContain('Their name is Anita.');
 		expect(sent).toContain('"es"');
 		expect(owner).toBeTruthy();
+	});
+});
+
+describe("where the turns put a request that failed over", () => {
+	it("is where it ran, ending when the next attempt began, not when the request that followed it ended", () => {
+		// Neon began at 0, went silent for 120 s, and Sol began then and answered in 5 s. The ledger writes both rows when Sol ended.
+		const row = (id: string, model: string, latency: number, error: string | null) => ({ id, provider: "gw", model, latency_ms: latency, error, at: 125_000 });
+		const { calls, failed } = callsOf([row("mc_c1_t1_120000", "sol", 5_000, null), row("mc_c1_t1_120000_f0", "neon", 120_000, "timed out")]);
+		expect(calls.get(120_000)).toEqual({ model: "gw/sol", ms: 5_000 });
+		expect(failed).toEqual([{ at: 0, ms: 120_000, model: "gw/neon", error: "timed out" }]);
+		// Two attempts that failed in a row ran one after the other, the last ending where the answered request began.
+		const twice = callsOf([row("mc_c1_t1_100000_f0", "a", 40_000, "x"), row("mc_c1_t1_100000_f1", "b", 60_000, "y")]);
+		expect(twice.failed.map((f) => [f.model, f.at])).toEqual([["gw/b", 40_000], ["gw/a", 0]]);
 	});
 });

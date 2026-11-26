@@ -143,7 +143,7 @@ export type MessagePart =
 	| TextContent
 	| ImageContent
 	| { readonly type: "thinking"; readonly text: string }
-	| { readonly type: "tool-call"; readonly id: string; readonly name: string; readonly arguments: JsonValue }
+	| { readonly type: "tool-call"; readonly id: string; readonly name: string; readonly arguments: JsonValue; /** For a `send_to_user` call written since models were recorded: who is behind what it sent. */ readonly provenance?: Provenance }
 	| {
 			readonly type: "tool-result";
 			readonly id: string;
@@ -165,12 +165,79 @@ export function modelIdentity(message: { readonly provider?: unknown; readonly m
 	return { provider, model, ...(typeof responseModel === "string" && responseModel !== "" && responseModel !== model ? { served: responseModel } : {}) };
 }
 
+/**
+ * The models behind a message the agent sent, as the server worked it out from the conversation's own entries when the message was written, and kept with it. `emitter` is the model
+ * whose request made the `send_to_user` call (null when the request recorded none). `contributors` are the models whose successful requests the message rests on, in the order they
+ * answered, the emitter's among them; a request that failed is never one. `complete` is false when a successful request of that work recorded no model, or the work reaches back past
+ * entries that could not be read (a fork's parent): the list may then be missing models, and none is guessed.
+ */
+export type Provenance = { readonly emitter: ModelIdentity | null; readonly contributors: readonly ModelIdentity[]; readonly complete: boolean };
+
+/**
+ * Whether the entries given are the whole of the work before the target: `more` when older entries exist and could be read, `start` when the first of them is where the conversation
+ * began, `cut` when older ones exist that will not be read.
+ */
+export type ProvenanceEdge = "more" | "start" | "cut";
+
+const sameModel = (a: ModelIdentity, b: ModelIdentity) => a.provider === b.provider && a.model === b.model && a.served === b.served;
+
+const textOfUser = (message: Extract<Message, { role: "user" }>): string => (typeof message.content === "string" ? message.content : withoutFileChanges(message.content).flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n"));
+
+/**
+ * The provenance of each `send_to_user` call of the last entry, from the conversation's entries in order up to and including it; undefined when the entries do not yet reach back to a
+ * boundary and `edge` is `more`, for the caller to read older ones. The work toward a message is every successful request (`stop` or `toolUse`) since the last thing that opened new work:
+ * a person's message, a notice, another agent's post, a context reset, or the message sent before. A compaction is not one, and entries a retry left out are not seen. A request counts once,
+ * by its entry; its sends share one provenance, and a request that sent counts toward the next message only if it also made another tool call, whose result that message rests on.
+ */
+export function sendProvenance(entries: readonly EntryRecord[], edge: ProvenanceEdge): Record<string, Provenance> | undefined {
+	const target = entries.at(-1);
+	const message = target?.model?.[0];
+	if (message?.role !== "assistant") return {};
+	const calls = message.content.flatMap((part) => (part.type === "toolCall" && part.name === "send_to_user" ? [part.id] : []));
+	if (calls.length === 0) return {};
+	const omitted = new Set(entries.flatMap((entry) => (entry.edits ?? []).flatMap((edit) => (edit.action === "omit" ? [Number(edit.target)] : []))));
+	const ok = (m: Extract<Message, { role: "assistant" }>) => m.stopReason === "stop" || m.stopReason === "toolUse";
+	/** Newest first: the target's own request, then those before it. */
+	const worked: (ModelIdentity | null)[] = ok(message) ? [modelIdentity(message) ?? null] : [];
+	const failedSends = new Set<string>();
+	let settled = false;
+	for (let index = entries.length - 2; index >= 0 && !settled; index--) {
+		const entry = entries[index]!;
+		if (omitted.has(Number(entry.id))) continue;
+		if (entry.kind === "pi.reset") {
+			settled = true;
+			break;
+		}
+		const m = entry.model?.[0];
+		if (m === undefined || entry.kind === "pi.compaction") continue;
+		if (m.role === "toolResult") {
+			if (m.isError) failedSends.add(m.toolCallId);
+		} else if (m.role === "user") {
+			const text = textOfUser(m);
+			// The harness's own prompts open nothing; whatever else a user-role message says, the person or Pim or another agent, starts new work.
+			if (!isDeliveryReminder(text) && !text.startsWith(INTRODUCTION)) settled = true;
+		} else if (m.role === "assistant" && ok(m)) {
+			const delivered = m.content.some((part) => part.type === "toolCall" && part.name === "send_to_user" && !failedSends.has(part.id) && typeof (part.arguments as { message?: unknown } | undefined)?.message === "string" && (part.arguments as { message: string }).message !== "");
+			const forward = m.content.some((part) => part.type === "toolCall" && part.name !== "send_to_user");
+			if (!delivered || forward) worked.push(modelIdentity(m) ?? null);
+			if (delivered) settled = true;
+		}
+	}
+	if (!settled && edge === "more") return undefined;
+	const contributors: ModelIdentity[] = [];
+	for (const model of [...worked].reverse()) if (model && !contributors.some((other) => sameModel(other, model))) contributors.push(model);
+	const provenance: Provenance = { emitter: modelIdentity(message) ?? null, contributors, complete: !worked.includes(null) && (settled || edge === "start") };
+	return Object.fromEntries(calls.map((call) => [call, provenance]));
+}
+
 export type TranscriptMessage = {
 	/** The pi entry id. */
 	readonly id: string;
 	readonly role: "user" | "assistant" | "tool" | "notice";
 	/** An assistant message's model, as it was recorded when the request ran; absent when it was not recorded, which is not the chat's current model. */
 	readonly model?: ModelIdentity;
+	/** A message another agent said in a group chat, as it reached this chat: the models behind it, carried from the chat where it was written, never in its text. */
+	readonly provenance?: Provenance;
 	readonly parts: readonly MessagePart[];
 	readonly timestamp: number;
 	readonly stopReason?: string;
@@ -284,4 +351,12 @@ export function projectEntries(entries: readonly EntryRecord[]): TranscriptMessa
 		const projected = projectMessage(message, String(entry.id));
 		return projected ? [projected] : [];
 	});
+}
+
+
+/** A projected message with the provenance the server worked out for it: each `send_to_user` call of an assistant message by its id, or what a post in a group chat carries. */
+export function withProvenance(message: TranscriptMessage, calls: Readonly<Record<string, Provenance>> | undefined, post?: Provenance): TranscriptMessage {
+	if (post !== undefined && message.role === "user") return { ...message, provenance: post };
+	if (calls === undefined || message.role !== "assistant") return message;
+	return { ...message, parts: message.parts.map((part) => (part.type === "tool-call" && calls[part.id] !== undefined ? { ...part, provenance: calls[part.id]! } : part)) };
 }

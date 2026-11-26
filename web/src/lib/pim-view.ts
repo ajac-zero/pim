@@ -14,9 +14,8 @@ import {
   fromPerson,
   INTRODUCTION,
   isDeliveryReminder,
-  type ModelIdentity,
-  modelIdentity,
   NOTICE_PREFIXES,
+  type Provenance,
   ROOM_POST,
   reasoningHeadings,
   withoutFileChanges,
@@ -113,13 +112,21 @@ export type ThreadEntry =
       source: "user" | "agent";
       /** When it was said, in ms: when the person sent it, or when the agent finished writing it. */
       at: number;
-      /** For what an assistant message wrote: the model that ran its request (null when none was recorded) and whether the request succeeded, so it counts as a contributor. */
-      by?: { model: ModelIdentity | null; ok: boolean };
+      /** For a `send_to_user` call: who is behind what it sent, as the server kept it with the message; absent when none was kept. */
+      provenance?: Provenance;
     }
   /** `at` is when Pim gave it, except for a reset. */
   | { key: string; kind: "notice"; notice: PimNotice; at?: number }
   /** What another agent in a group chat said there, by its name. */
-  | { key: string; kind: "post"; from: string; text: string; at: number };
+  | {
+      key: string;
+      kind: "post";
+      from: string;
+      text: string;
+      at: number;
+      /** Who is behind it, carried from the chat where the other agent wrote it; absent when none was kept. */
+      provenance?: Provenance;
+    };
 
 export type RunningTool = { callId: string; name: string; output: string };
 
@@ -452,6 +459,19 @@ function blockItem(
   }
 }
 
+/** The provenance the server kept with a message or one of its calls, which the projection carries on the pi message it was put back into. */
+const provenanceOf = (carrier: object): { provenance?: Provenance } => {
+  const { provenance } = carrier as { provenance?: Provenance };
+  return provenance ? { provenance } : {};
+};
+
+/** What a message says of its models when the server kept nothing: that they are not known. Never worked out from anything else. */
+export const UNKNOWN_PROVENANCE: Provenance = {
+  emitter: null,
+  contributors: [],
+  complete: false,
+};
+
 /** One pi message as thread entries, keyed under `key`. */
 export function projectMessage(message: Message, key: string): ThreadEntry[] {
   switch (message.role) {
@@ -473,6 +493,7 @@ export function projectMessage(message: Message, key: string): ThreadEntry[] {
             from: post[1] as string,
             text: text.slice(post[0].length),
             at: message.timestamp,
+            ...provenanceOf(message),
           },
         ];
       return [
@@ -488,10 +509,6 @@ export function projectMessage(message: Message, key: string): ThreadEntry[] {
     case "assistant": {
       // Its timestamp is when the request started; a response being written has no duration yet.
       const at = message.timestamp + (message.durationMs ?? 0);
-      const by = {
-        model: modelIdentity(message) ?? null,
-        ok: message.stopReason === "stop" || message.stopReason === "toolUse",
-      };
       return message.content.flatMap((block, index): ThreadEntry[] => {
         // Empty text blocks are placeholders while a block starts.
         if (block.type === "text" && block.text === "") return [];
@@ -504,7 +521,7 @@ export function projectMessage(message: Message, key: string): ThreadEntry[] {
                 source: "agent",
                 item,
                 at,
-                by,
+                ...provenanceOf(block),
               },
             ]
           : [];
@@ -920,30 +937,6 @@ export type WorkApproval = {
 /** Where a stretch of work's time went: the model's answers, its tool calls apart from approvals, and waiting for those. */
 export type WorkTime = { thinking: number; tools: number; approvals: number };
 
-/**
- * The models behind a message Pim sent. `emitter` is the model whose answer made the `send_to_user` call (null when its request recorded none). `contributors` are the models
- * whose requests succeeded in the work leading to it, the emitter's among them: failed attempts, which never wrote anything the message rests on, are not. `complete` is false
- * when a successful request of that work recorded no model, as every message stored before models were recorded: then the list may be missing models, and none is guessed.
- */
-export type Provenance = {
-  emitter: ModelIdentity | null;
-  contributors: ModelIdentity[];
-  complete: boolean;
-  /** Said by another agent in a group chat: its request is in that agent's own chat, and this chat holds no record of its model. */
-  elsewhere?: true;
-};
-
-/** What a group chat's post by another agent carries: nothing of its model reaches this chat (see docs/reference.md). */
-export const POSTED: Provenance = {
-  emitter: null,
-  contributors: [],
-  complete: false,
-  elsewhere: true,
-};
-
-const sameModel = (a: ModelIdentity, b: ModelIdentity) =>
-  a.provider === b.provider && a.model === b.model && a.served === b.served;
-
 /** One row of the chat as the person reads it. */
 export type ThreadRow =
   /** Something they said, a notice, or a user-facing approval or app. */
@@ -956,6 +949,7 @@ export type ThreadRow =
       sent: Sent;
       /** When it was sent, in ms. */
       at: number;
+      /** Who is behind it, as the server kept it with the message. */
       provenance: Provenance;
     }
   /** The work the agent did before the next row, or is doing now (`live`). */
@@ -1036,8 +1030,6 @@ export function layoutThread(
   entries: readonly ThreadEntry[],
   options: {
     shown: (call: FunctionCallItem) => boolean;
-    /** The transcript starts mid-work: older messages are on the server, so work before its first boundary may be missing requests. */
-    truncated?: boolean;
     /** A `send_to_user` call the tool refused (an unknown widget, an email that couldn't go): nothing reached the person. */
     refused?: (call: FunctionCallItem) => boolean;
     work?: {
@@ -1061,55 +1053,6 @@ export function layoutThread(
   let since: number | null = null;
   /** When the work's latest step ended. */
   let until: number | null = null;
-  /*
-   * Provenance. The work toward a message is every successful model request since the last thing that opened new work: a person's message, a context reset, another agent's
-   * post, or the previous message sent (a compaction is not one: what came before it is still in the transcript). Failed requests, and the retries and continuations after
-   * them, are entries of their own: only successful requests count. A request is counted once, by its entry id. When it made `send_to_user` calls, those share one provenance,
-   * and the request counts toward the next message only if it also made another tool call, whose result that message rests on; text it wrote after its sends leads nowhere.
-   * Where the loaded transcript starts mid-work (`truncated`: older messages are still on the server), the work before its first boundary may have requests that are not here,
-   * so what is built from it is never complete.
-   */
-  let worked = new Map<string, ModelIdentity | null>();
-  let open = options.truncated ?? false;
-  const emitted = new Map<
-    string,
-    { model: ModelIdentity | null; ok: boolean }
-  >();
-  const sentFrom = new Map<string, Provenance>();
-  /** The requests that made a tool call that is not a send: their work goes on after what they sent. */
-  const forward = new Set(
-    entries.flatMap((entry) =>
-      entry.kind === "item" &&
-      entry.item.type === "function_call" &&
-      !sentOf(entry.item as FunctionCallItem)
-        ? [entry.key.split(":")[0] as string]
-        : [],
-    ),
-  );
-  const opened = () => {
-    worked = new Map();
-    open = false;
-  };
-  const provenanceOf = (id: string): Provenance => {
-    const known = sentFrom.get(id);
-    if (known) return known;
-    const contributors: ModelIdentity[] = [];
-    for (const model of worked.values()) {
-      if (model && !contributors.some((other) => sameModel(other, model))) {
-        contributors.push(model);
-      }
-    }
-    const provenance = {
-      emitter: emitted.get(id)?.model ?? null,
-      contributors,
-      complete: !open && ![...worked.values()].includes(null),
-    };
-    sentFrom.set(id, provenance);
-    opened();
-    const by = emitted.get(id);
-    if (by?.ok && forward.has(id)) worked.set(id, by.model);
-    return provenance;
-  };
   const lines = options.work?.lines ?? {};
   const approvals = options.work?.approvals ?? {};
   const fold = (end: number | null, live = false) => {
@@ -1151,26 +1094,15 @@ export function layoutThread(
   };
   for (const entry of entries) {
     if (entry.kind === "notice" || entry.kind === "post") {
-      if (entry.kind === "post" || entry.notice.kind !== "compaction") {
-        opened();
-      }
       own(entry);
       continue;
     }
     const { item } = entry;
-    const id = entry.key.split(":")[0] as string;
-    if (entry.by) {
-      emitted.set(id, entry.by);
-      // Before its sends; after them, a request counts only through `forward`.
-      if (entry.by.ok && !sentFrom.has(id)) worked.set(id, entry.by.model);
-    }
     switch (item.type) {
       case "message":
       case "reasoning":
-        if ((item as MessageItem).role === "user") {
-          opened();
-          own(entry);
-        } else if (entry.source === "agent") {
+        if ((item as MessageItem).role === "user") own(entry);
+        else if (entry.source === "agent") {
           if (steps.length === 0) workKey = entry.key;
           steps.push(...stepsOf(item, lines, approvals));
           until = entry.at;
@@ -1191,7 +1123,7 @@ export function layoutThread(
             call,
             sent: message,
             at: entry.at,
-            provenance: provenanceOf(id),
+            provenance: entry.provenance ?? UNKNOWN_PROVENANCE,
           });
           since = entry.at;
         } else if (options.shown(call)) own(entry);

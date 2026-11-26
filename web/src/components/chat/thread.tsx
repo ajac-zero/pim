@@ -63,11 +63,11 @@ import {
   layoutThread,
   type ModelProblem,
   modelError,
-  POSTED,
   type SessionView,
   type ThreadEntry,
   taskHistory,
   thinkingSince,
+  UNKNOWN_PROVENANCE,
   userItem,
   type ViewError,
 } from "~/lib/pim-view";
@@ -475,11 +475,9 @@ export const Thread = memo(function Thread({
    * calls. An image a visit's agent made is in that space's files, which
    * this app can't open.
    */
-  const earlierOnServer = usePimClient((state) => state.earlier);
   const rows = useMemo(
     () =>
       layoutThread(entries, {
-        truncated: earlierOnServer,
         shown: (call) =>
           history.delegations.has(call.call_id) ||
           (ARTIFACT_TOOLS.has(call.name) &&
@@ -520,7 +518,6 @@ export const Thread = memo(function Thread({
       visit,
       view.running,
       view.lines,
-      earlierOnServer,
     ],
   );
 
@@ -543,6 +540,8 @@ export const Thread = memo(function Thread({
     rows.length,
   );
   const earlierRows = windowStart;
+
+  const earlierOnServer = usePimClient((state) => state.earlier);
 
   const empty =
     !view.running &&
@@ -662,7 +661,7 @@ export const Thread = memo(function Thread({
                   content: [{ type: "output_text", text: entry.text }],
                 }}
                 at={entry.at}
-                provenance={POSTED}
+                provenance={entry.provenance ?? UNKNOWN_PROVENANCE}
                 mention={mention(entry.key, entry.text)}
                 pinned={entry.key === latestKey}
                 images={postedImages(entry.text)}

@@ -7,7 +7,7 @@ import type { EntryRecord } from "@earendil-works/pi-durable";
 import { contextTokens, runtimeOutboxSource } from "../src/runtime-source.ts";
 import { readTranscript, waitFor } from "../../v2-runtime/test/support/rig.ts";
 import { createStack, type Stack } from "./support/stack.ts";
-import { ADA, createTurnRig, fauxAssistantMessage, LEAD } from "./support/turn.ts";
+import { ADA, createTurnRig, fauxAssistantMessage, fauxToolCall, LEAD } from "./support/turn.ts";
 
 type Rig = Awaited<ReturnType<typeof createTurnRig>>;
 
@@ -70,6 +70,27 @@ describe("Live's projector over the runtime's own tables", () => {
 		expect(JSON.stringify((await transcriptPage(stack.live, ADA, chat)).messages)).toBe(JSON.stringify(shown.messages));
 		expect((await stack.admin.query("SELECT count(*) AS n FROM pim_runtime.entries")).rows[0].n).toBe(entries);
 		expect(rig.echoRuns).toEqual(["ping"]);
+	});
+
+	it("keeps with each send_to_user the models behind it, worked out from the conversation's own entries: the answer that made the call and the requests of the turn before it; a rebuild gives the same", async () => {
+		const sent = (text: string) => fauxToolCall("send_to_user", { message: text });
+		rig.faux.setResponses([
+			fauxAssistantMessage([{ type: "text", text: "Looking." }, fauxToolCall("echo", { text: "pong" })], { stopReason: "toolUse" }),
+			fauxAssistantMessage([sent("It said pong.")], { stopReason: "toolUse" }),
+			fauxAssistantMessage("Done."),
+		]);
+		await rig.submit("c3", "say pong");
+		const chat = await waitFor("the home conversation's public id", () => rig.chatId());
+		const faux = { provider: "faux", model: "m" };
+		const sends = async () => (await transcriptPage(stack.live, ADA, chat)).messages.filter((m) => !m.partial).flatMap((m) => m.parts.flatMap((p) => (p.type === "tool-call" && p.name === "send_to_user" ? [p.provenance ?? null] : [])));
+		await waitFor("the send's provenance", async () => ((await sends()).length > 0 ? true : undefined), 30_000);
+		// Its own request and the one before it that called a tool; the faux model is `m` for both, so the list is one model.
+		expect(await sends()).toEqual([{ emitter: faux, contributors: [faux], complete: true }]);
+		await waitFor("the turn to end", async () => ((await transcriptPage(stack.live, ADA, chat)).messages.every((m) => !m.partial) ? true : undefined), 30_000);
+		await waitFor("the projector to catch up", async () => ((await projector.lag()).every((l) => l.lagCommits === 0) ? true : undefined));
+		const before = JSON.stringify((await transcriptPage(stack.live, ADA, chat)).messages);
+		await projector.rebuild(ADA);
+		expect(JSON.stringify((await transcriptPage(stack.live, ADA, chat)).messages)).toBe(before);
 	});
 
 	it("counts a conversation's context as pi-durable does: the newest answer's own count after the last marker, and an estimate of what came after it", () => {

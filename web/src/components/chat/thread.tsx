@@ -20,6 +20,7 @@ import {
   EventNotice,
   GeneratedImage,
   generatedImagePath,
+  ModelSwitchNotice,
   ThinkingDot,
   type ToolApps,
   UserMessage,
@@ -669,6 +670,12 @@ export const Thread = memo(function Thread({
                 messageId={entry.key}
                 uiSend={sendTurn}
               />
+            );
+          }
+          // Told between an agent's messages and its next, so the same agent goes on without being named again.
+          if (entry.kind === "notice" && entry.notice.model) {
+            return (
+              <ModelSwitchNotice key={entry.key} notice={entry.notice.model} />
             );
           }
           // Anything else between two of an agent's messages names it again.

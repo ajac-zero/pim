@@ -1,4 +1,8 @@
-import type { ModelIdentity, Provenance } from "@pim/shared/transcript";
+import type {
+  ModelIdentity,
+  ModelNotice,
+  Provenance,
+} from "@pim/shared/transcript";
 import { splitUiResponse, type UiResponse } from "@pim/ui-lang";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -42,6 +46,7 @@ import {
   Monitor,
   Pencil,
   RefreshCw,
+  Repeat,
   RotateCcw,
   Search,
   Shapes,
@@ -622,7 +627,40 @@ const NOTICE_ICONS = {
   coding: Code,
   reset: RotateCcw,
   compaction: History,
+  model: RefreshCw,
 } as const;
+
+/**
+ * A model that stalled and was asked again, or was replaced by a fallback for the rest of the turn: one muted line in the chat, in the person's language. It is the app's note, not
+ * something either side said, so it has nothing to open.
+ */
+export const ModelSwitchNotice = memo(function ModelSwitchNotice({
+  notice,
+}: {
+  notice: ModelNotice;
+}) {
+  const { t } = useI18n();
+  const Icon = notice.kind === "retry" ? RefreshCw : Repeat;
+  const text =
+    notice.kind === "retry"
+      ? t("modelRetryNotice", { model: notice.model })
+      : t(
+          notice.cause === "stalled"
+            ? "modelStalledNotice"
+            : "modelFailedNotice",
+          { from: notice.from, to: notice.to },
+        );
+  return (
+    <div
+      role="note"
+      data-notice="model"
+      className="flex w-full items-start justify-center gap-1.5 px-3 py-1 text-center text-muted-foreground text-[13px]"
+    >
+      <Icon aria-hidden className="mt-0.5 size-3.5 shrink-0" />
+      <span className="[overflow-wrap:anywhere]">{text}</span>
+    </div>
+  );
+});
 
 /**
  * Something Pim fed itself rather than something the user said: an approval

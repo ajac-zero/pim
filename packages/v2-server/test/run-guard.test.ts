@@ -7,7 +7,7 @@ import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/provid
 import { defineTool } from "@earendil-works/pi-durable";
 import { DELIVERY_REMINDER } from "@pim/shared/transcript";
 import { stoppable } from "../src/agent-tools.ts";
-import { type CooldownStore, createFailover } from "../src/provider-failover.ts";
+import { type CooldownStore, createFailover, turnOf } from "../src/provider-failover.ts";
 
 const never = () => new Promise<never>(() => {});
 
@@ -135,6 +135,71 @@ describe("a stalled model is asked once more, then replaced for the rest of the 
 		faux.setResponses([fauxAssistantMessage("a3")]);
 		expect(((await ask(wrapped, [...round, user("again", 9)])) as any).model).toBe("a");
 		expect(events.filter((e) => e.kind === "failover")).toHaveLength(1);
+	});
+
+	const told = (m: any) => m.modelNotices;
+
+	it("tells the person once about each retry and each fallback, on the answer of the request they happened in", async () => {
+		const { faux, models } = rig();
+		const wrapped = failover({ cooldowns: { transientMs: 1 } }).wrap(models, "o");
+		// A stall that the second try answers: a retry, and no fallback.
+		faux.setResponses([never, fauxAssistantMessage("again a")]);
+		const retried: any = await ask(wrapped, [user("hi", 1)]);
+		expect(retried.model).toBe("a");
+		expect(told(retried)).toEqual([{ kind: "retry", model: "a" }]);
+		// Two stalls: the retry and the fallback, in the order they happened, naming both models.
+		faux.setResponses([never, never, fauxAssistantMessage("from b")]);
+		const turn = [user("again", 10)];
+		const first: any = await ask(wrapped, turn);
+		expect(first.model).toBe("b");
+		expect(told(first)).toEqual([{ kind: "retry", model: "a" }, { kind: "fallback", from: "a", to: "b", cause: "stalled" }]);
+		// The rest of the turn runs on b without a word: a later request that finds the fallback kept has nothing to tell, though a's cooldown ended.
+		await new Promise((r) => setTimeout(r, 30));
+		faux.setResponses([fauxAssistantMessage("b2")]);
+		const round = [...turn, first, { role: "toolResult", toolCallId: "t", toolName: "x", content: [], isError: false, timestamp: 11 }];
+		const later: any = await ask(wrapped, round);
+		expect(later.model).toBe("b");
+		expect(told(later)).toBeUndefined();
+		// The next message is a new turn, asked of a, which says nothing either.
+		faux.setResponses([fauxAssistantMessage("a3")]);
+		expect(told(await ask(wrapped, [...round, later, user("next", 20)]))).toBeUndefined();
+		// The admin's events are told as before.
+		expect(events.filter((e) => e.kind === "failover")).toHaveLength(1);
+		expect(events.some((e) => e.detail.note === "model stalled; retrying once")).toBe(true);
+	});
+
+	it("words a fallback after a failure, not a stall, as the model having been unavailable", async () => {
+		const { faux, models } = rig();
+		faux.setResponses([limited("429 rate limit reached"), fauxAssistantMessage("from b")]);
+		const message: any = await ask(failover().wrap(models, "o"), [user("hi", 1)]);
+		expect(told(message)).toEqual([{ kind: "fallback", from: "a", to: "b", cause: "failed" }]);
+	});
+
+	it("says nothing for a request that needed nothing, and keeps the notices on the failure when every model failed", async () => {
+		const { faux, models } = rig();
+		faux.setResponses([fauxAssistantMessage("fine")]);
+		expect(told(await ask(failover().wrap(models, "o"), [user("hi", 1)]))).toBeUndefined();
+		const only = createFailover({ stallMs: 80, stallRetryMs: 10 });
+		faux.setResponses([never, never]);
+		const failed: any = await ask(only.wrap(models, "o"), [user("hi", 1)]);
+		expect(failed.stopReason).toBe("error");
+		expect(told(failed)).toEqual([{ kind: "retry", model: "a" }]);
+	});
+
+	it("does not announce a retry the person's stop cut short", async () => {
+		const { faux, models } = rig();
+		faux.setResponses([never, fauxAssistantMessage("never asked")]);
+		const stop = new AbortController();
+		setTimeout(() => stop.abort(), 200);
+		const message: any = await ask(createFailover({ stallMs: 50, stallRetryMs: 60_000 }).wrap(models, "o"), [user("hi", 1)], stop.signal);
+		expect(message.stopReason).toBe("aborted");
+		expect(told(message)).toBeUndefined();
+	});
+
+	it("counts a turn by the person's messages only: the notices are on the answer, not a message of their own", () => {
+		const answer = { role: "assistant", content: [], timestamp: 2, modelNotices: [{ kind: "retry", model: "a" }] };
+		expect(turnOf({ messages: [user("hi", 1), answer] })).toBe(turnOf({ messages: [user("hi", 1)] }));
+		expect(turnOf({ messages: [user("hi", 1), answer, user("again", 3)] })).not.toBe(turnOf({ messages: [user("hi", 1), answer] }));
 	});
 
 	it("stops at once when the person stops it during the pause", async () => {

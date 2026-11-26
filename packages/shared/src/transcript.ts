@@ -230,6 +230,29 @@ export function sendProvenance(entries: readonly EntryRecord[], edge: Provenance
 	return Object.fromEntries(calls.map((call) => [call, provenance]));
 }
 
+/**
+ * What the person is told in the chat when the model that was asked is replaced (`provider-failover.ts` in v2-server writes it, `modelNoticesOf` reads it): a stalled model asked once
+ * more, or a fallback that took over for the rest of the turn. It is kept on the assistant message of the request it happened in, which is no entry of its own, so it is never in what a
+ * model reads, opens no work, and goes with the message when a retry leaves it out.
+ */
+export type ModelNotice =
+	| { readonly kind: "retry"; readonly model: string }
+	| { readonly kind: "fallback"; readonly from: string; readonly to: string; readonly cause: "stalled" | "failed" };
+
+/** The name an assistant message carries its notices under, in the stored message. */
+export const MODEL_NOTICES = "modelNotices";
+
+/** The notices an assistant message carries, read defensively since they come from stored JSON; those that do not have the shape are left out. */
+export function modelNoticesOf(message: object): readonly ModelNotice[] {
+	const list = (message as Record<string, unknown>)[MODEL_NOTICES];
+	if (!Array.isArray(list)) return [];
+	return list.flatMap((n: any): ModelNotice[] => {
+		if (n?.kind === "retry" && typeof n.model === "string") return [{ kind: "retry", model: n.model }];
+		if (n?.kind === "fallback" && typeof n.from === "string" && typeof n.to === "string") return [{ kind: "fallback", from: n.from, to: n.to, cause: n.cause === "stalled" ? "stalled" : "failed" }];
+		return [];
+	});
+}
+
 export type TranscriptMessage = {
 	/** The pi entry id. */
 	readonly id: string;
@@ -244,6 +267,8 @@ export type TranscriptMessage = {
 	readonly error?: string;
 	/** A notice that is the summary of what the chat said before it was compacted. */
 	readonly compaction?: true;
+	/** The notices of a model that was replaced while this message was being answered, shown before it. On an assistant message; a request that answered with nothing is a `notice` message that carries only these. */
+	readonly notices?: readonly ModelNotice[];
 };
 
 /** What pi puts before a compaction's summary and after it, in the message that carries it. */
@@ -275,7 +300,9 @@ function projectMessage(message: Message, id: string): TranscriptMessage | undef
 			};
 		case "assistant":
 			// An answer that stopped with nothing in it (a lone newline, an empty thinking block, as a model leaves after `send_to_user`) says nothing, so it is not shown.
-			if (message.stopReason === "stop" && message.content.every((part) => (part.type === "text" ? part.text.trim() === "" : part.type === "thinking" && part.thinking.trim() === ""))) return undefined;
+			const notices = modelNoticesOf(message);
+			// The notices of such a request are still told, as a message of their own.
+			if (message.stopReason === "stop" && message.content.every((part) => (part.type === "text" ? part.text.trim() === "" : part.type === "thinking" && part.thinking.trim() === ""))) return notices.length === 0 ? undefined : { id, role: "notice", parts: [], timestamp: message.timestamp, notices };
 			return {
 				id,
 				role: "assistant",
@@ -293,6 +320,7 @@ function projectMessage(message: Message, id: string): TranscriptMessage | undef
 				timestamp: message.timestamp,
 				stopReason: message.stopReason,
 				...(message.errorMessage === undefined ? {} : { error: message.errorMessage }),
+				...(notices.length === 0 ? {} : { notices }),
 			};
 		case "toolResult":
 			return {

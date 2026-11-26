@@ -9,11 +9,15 @@
  * to the next one: a stall is often one dropped connection. Quota, a refused credential and a request the provider calls invalid never get that second try. The worst case before a
  * fallback answers is then two idle limits and the pause, a little over four minutes. A fallback that answers is kept for the rest of the turn (`turnOf`), so a turn does not bounce
  * between the agent's model and its fallback; the next message of the person starts on the agent's own model again.
+ *
+ * The person is told in the chat, once, when a stalled model is asked again and when a fallback takes over (`ModelNotice`). The notices are put on the answer of the request they
+ * happened in (`MODEL_NOTICES`), which stores them with it: they are not a message the model reads, a later request of the turn that finds the fallback kept says nothing, and the
+ * admin's diagnostics events are told as before.
  */
 import { type Models, createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import type { AssistantMessage, AssistantMessageEvent } from "@earendil-works/pi-ai";
 import { isContextOverflow } from "@earendil-works/pi-ai/utils/overflow";
-import { isDeliveryReminder } from "@pim/shared/transcript";
+import { isDeliveryReminder, MODEL_NOTICES, type ModelNotice } from "@pim/shared/transcript";
 import { isUsageLimitError, limitCooldown, type LimitState } from "./usage-limits.ts";
 import { type CallDetail, type FailedAttempt, keepCall, SLOW_CALL_MS, trackAttempt } from "./call-details.ts";
 
@@ -190,6 +194,14 @@ export function createFailover(options: { now?: (() => number) | undefined; cool
 			if (found) list = [found, ...list.filter((m) => m !== found)];
 			else sticky.delete(stuckKey!);
 		}
+		/** What the person is told of this request, put on whatever answer it ends with. */
+		const notices: ModelNotice[] = [];
+		const carry = <T extends object>(message: T): T => {
+			if (notices.length > 0) (message as Record<string, unknown>)[MODEL_NOTICES] = [...notices];
+			return message;
+		};
+		/** Why the last candidate that was left behind was: it went silent twice, or it failed. */
+		let cause: "stalled" | "failed" = "failed";
 		/** After a request is answered: a fallback that answered is kept for the turn, the requested model answering ends that. A model that fails for good is not kept. */
 		const settle = (current: any, answered: boolean) => {
 			if (stuckKey === undefined) return;
@@ -201,7 +213,10 @@ export function createFailover(options: { now?: (() => number) | undefined; cool
 			}
 			sticky.delete(stuckKey);
 			if (name === requested) return;
-			if (kept !== name) tell(ownerId, "failover", { provider: current.provider, model: current.id, from: requested, until: "the next message" });
+			if (kept !== name) {
+				tell(ownerId, "failover", { provider: current.provider, model: current.id, from: requested, until: "the next message" });
+				notices.push({ kind: "fallback", from: model.id, to: current.id, cause });
+			}
 			sticky.set(stuckKey, { turn: turn!, model: name });
 			if (sticky.size > STICKY_KEPT) sticky.delete(sticky.keys().next().value as string);
 		};
@@ -242,6 +257,8 @@ export function createFailover(options: { now?: (() => number) | undefined; cool
 				const event = next.value;
 				// A fallback is kept before the caller sees the answer end, so the request that follows it already finds it.
 				if (event.type === "done") settle(current, true);
+				if (event.type === "done") carry(event.message);
+				else if (event.type === "error") carry(event.error);
 				if (shown) {
 					out.push(event);
 					continue;
@@ -267,9 +284,10 @@ export function createFailover(options: { now?: (() => number) | undefined; cool
 					failures.pop();
 					const aborted = failureMessage(current, "Request was aborted", "aborted", now());
 					finished(ownerId, aborted, { ...detail, stopReason: "aborted", error: "Request was aborted" }, failures);
-					out.push({ type: "error", reason: "aborted", error: aborted } as AssistantMessageEvent);
+					out.push({ type: "error", reason: "aborted", error: carry(aborted) } as AssistantMessageEvent);
 					return;
 				}
+				notices.push({ kind: "retry", model: current.id });
 				askedAgain = true;
 				i--;
 				continue;
@@ -280,13 +298,14 @@ export function createFailover(options: { now?: (() => number) | undefined; cool
 				if (!shown) for (const e of held) out.push(e);
 				settle(current, false);
 				finished(ownerId, stalled, attempt.finish(stalled), failures);
-				out.push({ type: "error", reason: stalled.stopReason as "error" | "aborted", error: stalled } as AssistantMessageEvent);
+				out.push({ type: "error", reason: stalled.stopReason as "error" | "aborted", error: carry(stalled) } as AssistantMessageEvent);
 				return;
 			}
 			if (failed) {
 				const detail = attempt.finish(failed);
 				failures.push({ provider: current.provider, model: current.id, detail });
 				tell(ownerId, "model_call_failed", { provider: current.provider, model: current.id, latencyMs: detail.latencyMs, error: detail.error ?? "", tryingNext: true, ...(failed === stalled ? { note: "model stalled twice; falling back" } : {}) });
+				cause = failed === stalled ? "stalled" : "failed";
 				settle(current, false);
 				coolFor(ownerId, current, failed, failureKind(failed) === "auth" ? "auth" : "transient");
 				continue;
@@ -298,7 +317,7 @@ export function createFailover(options: { now?: (() => number) | undefined; cool
 			if (kind && !shown) coolFor(ownerId, current, message, kind);
 			finished(ownerId, message, attempt.finish(message), failures);
 			if (message.stopReason === "error" || message.stopReason === "aborted") settle(current, false);
-			out.end(message);
+			out.end(carry(message));
 			return;
 		}
 	}

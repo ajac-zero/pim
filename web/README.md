@@ -3,9 +3,9 @@
 Chat with streaming replies and tool calls, approve or deny the actions Pim
 asks to take, read its notifications, and manage its model and passkeys.
 
-The Pim server (its Gate) serves it (see the [repository's README](../README.md)): the
-built app from `web/dist`, the API under `/api`, and passkey sign-in under
-`/auth`. Built from [parley](https://github.com/ajac-zero/parley)'s chat UI:
+It is its own component (see the [repository's README](../README.md)): the web host
+([`web-host/`](../web-host/)) serves the built app from `web/dist`, and the Pim server serves the API under
+`/api` and passkey sign-in under `/auth`; a proxy sends each path to one or the other. Built from [parley](https://github.com/ajac-zero/parley)'s chat UI:
 React, TanStack Router and Query, Tailwind, shadcn/ui.
 
 ## Develop

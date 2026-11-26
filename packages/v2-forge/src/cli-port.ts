@@ -17,7 +17,7 @@ import type { TurnPort, TurnRequest, TurnResult } from "./ports";
 /** The person's login is leased this long and renewed as a run goes on, so a dead worker can't hold it for long. */
 export const HARNESS_LOCK_LEASE_MS = 20 * 60_000;
 
-export const FORGE_INSTRUCTIONS = "You are running as a Pim coding thread. Work in the repository checkout and commit your work on the pim/… branch you are on. When the work is ready and the tests pass, push that branch with `git push origin HEAD:refs/heads/<branch>` (fast-forward only: never force; never push, rewrite or merge main or the default branch, the broker refuses it), then open the pull request with `node /workspace/.config/pim/git/helper.mjs pull-request --title \"<title>\" --body \"<what changed and how you checked it>\"`. A person reviews and merges it on the git host.";
+export const FORGE_INSTRUCTIONS = "You are running as a Pim coding thread. Work in the repository checkout and commit your work on the branch you are on. When the work is ready and the tests pass, push that branch with `git push origin HEAD:refs/heads/<branch>` (fast-forward only: never force; never push, rewrite or merge main or the default branch, the broker refuses it), then open the pull request with `node /workspace/.config/pim/git/helper.mjs pull-request --title \"<title>\" --body \"<what changed and how you checked it>\"`. A person reviews and merges it on the git host.";
 
 export type CliPortDeps = {
 	cli: CliHarness;

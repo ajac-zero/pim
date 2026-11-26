@@ -1,5 +1,6 @@
 // Coding authorization. Chatting with a normal agent grants nothing here: running code needs an admin-issued grant, a grant that covers the repository, and (where policy says so) a person's approval.
 // REST routes and agent tools both call `check`, at start and again before every privileged action, so they cannot drift apart.
+import { checkBranch } from "@pim/coding/git-broker/broker";
 import { type Db, type Row, tx } from "./db";
 import { effectivePrincipal, type Principal } from "@pim/v2-contracts/identity";
 import { type Authorizer, type AuthzDecision, type AuthzRequest, standingApprovalCovers, repositoryAllowed } from "@pim/v2-contracts/authz";
@@ -18,13 +19,6 @@ export type Actor = {
 };
 
 export type Decision = { readonly grantId: number; readonly standing: boolean; readonly requiresApproval: boolean; /** The standing approval that stood in for a person's yes. */ readonly viaStandingApproval?: string };
-
-export type Policy = {
-	/** Pushes are confined to this prefix; a thread's work reaches the default branch only when a person merges its pull request. */
-	readonly branchPrefix: string;
-};
-
-export const DEFAULT_POLICY: Policy = { branchPrefix: "pim/" };
 
 const URL_REPO = /^https?:\/\/([^/\s]+)\/([^/\s]+)\/([^/\s?#]+?)(?:\.git)?\/?(?:[?#].*)?$/;
 
@@ -53,7 +47,6 @@ export type ApprovalFiled = { approvalId: string; ownerId: string; chatId: strin
 export class Authz {
 	constructor(
 		private readonly db: Db,
-		readonly policy: Policy = DEFAULT_POLICY,
 		/** Called each time Forge asks for an approval, so the person can be shown it where they answer approvals; it must not file the same one twice. */
 		readonly onFiled?: (filed: ApprovalFiled) => Promise<void>,
 	) {}
@@ -179,11 +172,19 @@ export async function assertCapability(db: Db, harness: string, ampConfigured: b
 	if (!pools.length) throw new CapabilityUnavailableError("coding:pool", pool ? `coding pool ${pool} isn't available` : "this deployment has no coding pool configured");
 }
 
-/** Branch rules for Pim-side pushes: only `<prefix>*`, and never the default branch, which only a person's merge of a pull request reaches. */
-export function assertPushBranch(policy: Policy, branch: string, defaultBranch: string): void {
-	if (branch === defaultBranch || !branch.startsWith(policy.branchPrefix) || branch === policy.branchPrefix) {
-		throw new ForgeError("push_refused", `Coding threads push only to ${policy.branchPrefix}* branches, never to ${defaultBranch}; push your own ${policy.branchPrefix}… branch and open a pull request, which a person merges`);
+/**
+ * Branch rules for every write Pim makes to a git host for a thread: the branch is an ordinary, valid branch name that is neither `main`, `master`, the default branch nor one of
+ * Pim's staging refs (`checkBranch`), and it is exactly `own`, the branch recorded for this thread. A thread never writes any other branch, so there is no namespace to keep it away
+ * from other threads' branches: its authority is its own branch, named by the thread's row. Its work reaches the default branch only when a person merges its pull request.
+ */
+export function assertPushBranch(branch: string, defaultBranch: string, own: string | null | undefined): void {
+	try {
+		checkBranch(branch, defaultBranch);
+	} catch (error) {
+		throw new ForgeError("push_refused", error instanceof Error ? error.message : "that branch can't be pushed to");
 	}
+	if (!own) throw new ForgeError("push_refused", "This thread has no branch of its own to push");
+	if (branch !== own) throw new ForgeError("push_refused", `A coding thread pushes only its own branch, ${own}, not ${branch.slice(0, 200)}`);
 }
 
 const PERMISSIONS: readonly string[] = ["coding:start", "coding:steer", "coding:abort", "coding:push", "coding:pr", "coding:merge"];

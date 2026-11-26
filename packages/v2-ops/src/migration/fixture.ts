@@ -336,7 +336,7 @@ export async function buildLegacySnapshot(dir: string, options: { cutoverAt?: nu
 
 	// Coding: Ada's scheduler, one thread running in Amp's cloud and one CLI run the fence cut off.
 	const ampThread = "T-fixture-amp-0001";
-	const threadRow = (id: string, extra: Record<string, unknown>) => ({ thread_id: id, space: owners.ada, repo_url: "https://git.example.test/ada/app", base_ref: "main", branch: `pim/${id}`, harness: "pi", provider_id: "prov", provider_kind: "workspace", orb: null, state: "running", start_operation: `start:${id}`, ...extra });
+	const threadRow = (id: string, extra: Record<string, unknown>) => ({ thread_id: id, space: owners.ada, repo_url: "https://git.example.test/ada/app", base_ref: "main", branch: `fix-the-thing-${id.slice(0, 8)}`, harness: "pi", provider_id: "prov", provider_kind: "workspace", orb: null, state: "running", start_operation: `start:${id}`, ...extra });
 	const threadColumns = ["thread_id", "space", "repo_url", "base_ref", "branch", "harness", "provider_id", "provider_kind", "orb", "state", "start_operation"];
 	await writer.dump(
 		dump("CodingScheduler", owners.ada, {

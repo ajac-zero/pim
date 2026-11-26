@@ -71,12 +71,15 @@ describe("backup, restore and the post-restore safety pass (real PostgreSQL, phy
 		const server = await startEmbeddedPostgres({ dataDir, existing: true });
 		restored.push(server);
 		const restoredPool = new pg.Pool({ connectionString: server.url(), max: 4 }).on("error", () => undefined);
-		for (let i = 0; i < 60; i++) {
+		// Recovery replays the archived WAL up to the target before the server promotes and accepts queries: on a slow runner that took longer than the fifteen seconds this once waited.
+		let ready = false;
+		for (let i = 0; i < 240 && !ready; i++) {
 			try {
-				if (!(await restoredPool.query("SELECT pg_is_in_recovery() AS r")).rows[0].r) break;
+				ready = !(await restoredPool.query("SELECT pg_is_in_recovery() AS r")).rows[0].r;
 			} catch {}
-			await new Promise((r) => setTimeout(r, 250));
+			if (!ready) await new Promise((r) => setTimeout(r, 250));
 		}
+		if (!ready) throw new Error(`${name}: the restored server was not accepting queries after 60 seconds`);
 		return { pool: restoredPool, manifest, objects: new FsObjectStore(join(root, `s3-${name}`)) };
 	}
 

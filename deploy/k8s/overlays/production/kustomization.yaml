@@ -1,4 +1,4 @@
-# A starting point for production: the OpenBao secrets, the sandbox zone, and a pinned image digest. Copy it, set the image and hostnames, and apply.
+# A starting point for production: the OpenBao secrets, the sandbox zone, and pinned image digests (the backend's and the web app's, which are released separately). Copy it, set the image and hostnames, and apply.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
@@ -6,4 +6,6 @@ resources:
   - ../../sandboxes
 images:
   - name: registry.example.test/pim
+    newTag: 2.0.0
+  - name: registry.example.test/pim-web
     newTag: 2.0.0

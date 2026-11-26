@@ -6,6 +6,7 @@
  * names it (the promotion sets it from v1's default agent), and the first time it is asked for without one an agent is made for it.
  * `runner_context` (migration 0605) gives a chat with no agent of its own the majordomo's instructions.
  */
+import { createHash } from "node:crypto";
 import type { Principal } from "@pim/v2-contracts/identity";
 import type { App } from "@pim/v2-app/app";
 import { MAJORDOMO_ROLE, PIMBOT_ROLE, type Agent as V2Agent } from "@pim/v2-app/agents";
@@ -327,7 +328,14 @@ export const bootRoutes: Route[] = [
 		});
 	}),
 	route("GET", "/api/themes", async () => ok(themes.list(), 200, { "cache-control": "no-cache" })),
-	route("GET", "/api/themes.css", async () => ({ status: 200, raw: themes.stylesheet(), headers: { "content-type": "text/css; charset=utf-8", "cache-control": "no-cache" } })),
+	// The page waits on this stylesheet before it draws, on every load: the browser asks again each time (no-cache) and a repeat gets 304 rather than the whole sheet.
+	route("GET", "/api/themes.css", async ({ req }) => {
+		const css = themes.stylesheet();
+		const etag = `"${createHash("sha256").update(css).digest("base64url").slice(0, 22)}"`;
+		const headers = { "content-type": "text/css; charset=utf-8", "cache-control": "no-cache", etag };
+		if ((req.headers["if-none-match"] ?? "").split(",").some((tag) => tag.trim() === etag)) return { status: 304, raw: "", headers };
+		return { status: 200, raw: css, headers };
+	}),
 	// Pim's own extensions with their widgets, and the deployment's logo (`PIM_LOGO`, an https or data: image address, where v1 had `logo` in pim.config.ts).
 	route("GET", "/api/extensions", async ({ principal }) => {
 		await principal();

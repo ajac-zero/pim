@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useSearch } from "@tanstack/react-router";
 import { type ReactNode, useState } from "react";
 import { useStickToBottomContext } from "use-stick-to-bottom";
-import { Markdown } from "~/components/chat/markdown";
+import { Markdown } from "~/components/chat/markdown-lazy";
 import { useI18n } from "~/components/i18n";
 import {
   ArrowDownIcon,

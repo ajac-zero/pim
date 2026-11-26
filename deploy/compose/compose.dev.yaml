@@ -1,9 +1,10 @@
-# Development on top of the local trial (compose.local.yaml): the Pim containers run this checkout's sources (tsx reads TypeScript directly) and its
-# web build, so a change needs only a restart, not an image build. New npm dependencies still need `docker build`.
+# Development on top of the local trial (compose.local.yaml): the Pim containers run this checkout's sources (tsx reads TypeScript directly) and the web container
+# publishes this checkout's web build (web/dist) as its release, so a change needs only a restart, not an image build. New npm dependencies still need `docker build`.
 #
 #   pnpm --filter pim-web build                                   # when web/ changed
 #   docker compose -f deploy/compose/compose.yaml -f deploy/compose/compose.local.yaml -f deploy/compose/compose.dev.yaml up -d
 #   docker compose -f ... restart gate                            # after editing a package's src/; rerun `up -d migrator` after adding a migration
+#   docker compose -f ... restart web                             # after rebuilding web/dist (the web host publishes it as a new release)
 x-sources: &sources
     - ../../packages/coding/src:/app/packages/coding/src:ro
     - ../../packages/shared/src:/app/packages/shared/src:ro
@@ -23,7 +24,6 @@ x-sources: &sources
     - ../../packages/v2-runtime/src:/app/packages/v2-runtime/src:ro
     - ../../packages/v2-server/migrations:/app/packages/v2-server/migrations:ro
     - ../../packages/v2-server/src:/app/packages/v2-server/src:ro
-    - ../../web/dist:/app/web/dist:ro
 
 services:
   migrator: { volumes: *sources }
@@ -32,3 +32,4 @@ services:
   runner: { volumes: *sources }
   forge: { volumes: *sources }
   maintenance: { volumes: *sources }
+  web: { volumes: ["../../web/dist:/app/dist:ro", "../../web-host/src:/app/web-host/src:ro"] }

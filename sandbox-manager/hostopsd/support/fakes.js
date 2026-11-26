@@ -42,7 +42,7 @@ if (tool === 'docker') {
 	} else if (args[0] === 'build') {
 		// The Pim image, on the Compose stack: built from whatever the checkout is at.
 		const head = spawnSync(ctl.realGit, ['rev-parse', '--short', 'HEAD'], { encoding: 'utf8' }).stdout.trim()
-		if (matches(ctl.buildFail, head)) {
+		if (matches(ctl.buildFail, head) || (args.includes('deploy/Dockerfile.web') && matches(ctl.webBuildFail, head))) {
 			console.error(`build failed for ${head}`)
 			process.exit(1)
 		}

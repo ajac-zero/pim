@@ -1,0 +1,22 @@
+# pnpm, the Node version the repository pins (.nvmrc) and the workspace's dependencies, installed from the lockfile. The pnpm store is cached by Setup Node under the lockfile's hash,
+# so a run that did not change the lockfile reuses it. `filter` installs only what a pnpm filter reaches (`pim-web...` is the web app and the packages it imports), for jobs that
+# need no more: the full install includes the test-only PostgreSQL binaries, which the web app's jobs do not.
+name: Set up Pim
+description: pnpm, Node and the workspace's dependencies
+inputs:
+  filter:
+    description: A pnpm filter; empty installs the whole workspace
+    default: ""
+runs:
+  using: composite
+  steps:
+    - uses: pnpm/action-setup@v4
+    - uses: actions/setup-node@v4
+      with:
+        node-version-file: .nvmrc
+        cache: pnpm
+    - shell: bash
+      env:
+        FILTER: ${{ inputs.filter }}
+      run: |
+        if [ -n "$FILTER" ]; then pnpm install --frozen-lockfile --filter "$FILTER"; else pnpm install --frozen-lockfile; fi

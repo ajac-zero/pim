@@ -38,7 +38,7 @@ const packageOf = (file) => /^packages\/([^/]+)\//.exec(file)?.[1] ?? null;
 const packageTest = (file) => /^packages\/[^/]+\/test\//.test(file) && !file.includes("/test/support/");
 
 /** The standalone daemons, each with its own `node --test` tests (`pnpm test:daemons`). */
-const DAEMONS = ["displayd/", "sandbox-manager/", "workspace-agentd/"];
+const DAEMONS = ["displayd/", "sandbox-manager/", "workspace-agentd/", "web-host/"];
 
 /** Whether a root test reads a file of a daemon: only displayd's bundle, which the computer's install test checks. */
 const readByRootTests = (file) => file.startsWith("displayd/bundle.");

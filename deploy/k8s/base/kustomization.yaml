@@ -6,6 +6,7 @@ resources:
   - serviceaccount.yaml
   - config.yaml
   - gate.yaml
+  - web.yaml
   - live.yaml
   - runner.yaml
   - forge.yaml
@@ -19,4 +20,7 @@ resources:
   - networkpolicy.yaml
 images:
   - name: registry.example.test/pim
+    newTag: 2.0.0
+  # The web app is its own image and its own tag: setting it releases the interface without rolling any backend role.
+  - name: registry.example.test/pim-web
     newTag: 2.0.0

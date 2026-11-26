@@ -4,7 +4,6 @@ import tailwindcss from "@tailwindcss/vite";
 import { tanstackRouter } from "@tanstack/router-plugin/vite";
 import viteReact from "@vitejs/plugin-react";
 import { defineConfig, loadEnv } from "vite";
-import { displaydBundle } from "../displayd/bundle.js";
 
 /**
  * In development, `/api` goes to a running Pim (the preview, `node scripts/v2-dev/preview.mjs`)
@@ -39,12 +38,12 @@ export default defineConfig(({ mode }) => {
     build.update(file).update(readFileSync(path));
   }
 
+  const buildId = build.digest("hex").slice(0, 16);
+
   return {
     define: {
       __PIM_VERSION__: JSON.stringify(version),
-      "import.meta.env.PIM_BUILD": JSON.stringify(
-        build.digest("hex").slice(0, 16),
-      ),
+      "import.meta.env.PIM_BUILD": JSON.stringify(buildId),
     },
     server: {
       port: 3000,
@@ -81,34 +80,19 @@ export default defineConfig(({ mode }) => {
         },
       },
       {
-        // pim-computer, which people download from their Pim to connect a computer, with its triggers
-        // runtime, which it gets as it starts, and pim-host, which the admin downloads to keep
-        // everyone's computers: every module in ../computer, at the same path.
-        name: "pim-computer",
-        generateBundle() {
-          const files = readdirSync(new URL("../computer", import.meta.url), {
-            encoding: "utf8",
-            recursive: true,
-          }).filter((file) => file.endsWith(".ts"));
-          for (const file of files) {
-            this.emitFile({
-              type: "asset",
-              fileName: file,
-              source: readFileSync(
-                new URL(`../computer/${file}`, import.meta.url),
-              ),
-            });
-          }
-        },
-      },
-      {
-        // displayd, which pim-computer gets from the same Pim to give each thread its own display.
-        name: "pim-displayd",
+        // What this build says of itself, for the page that asks (`/release.json`) and for the web host that publishes
+        // it as a release of its own (web-host/).
+        name: "pim-release",
         generateBundle() {
           this.emitFile({
             type: "asset",
-            fileName: "displayd.tar.gz",
-            source: displaydBundle(),
+            fileName: "release.json",
+            source: JSON.stringify({
+              id: buildId,
+              version,
+              ...(env.PIM_REVISION ? { revision: env.PIM_REVISION } : {}),
+              builtAt: new Date().toISOString(),
+            }),
           });
         },
       },

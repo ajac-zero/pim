@@ -153,7 +153,14 @@ export class V2Link {
         if (status === "live" && this.#dropped) {
           this.#dropped = false;
           this.#handlers.onReconnected();
-        } else if (status !== "live" && this.#everLive) this.#dropped = true;
+        } else if (
+          status !== "live" &&
+          this.#everLive &&
+          !this.#live.connected
+        ) {
+          // Only a socket that went down missed notices. Following another chat is "syncing" too, over a socket that never dropped, and must not read every list again.
+          this.#dropped = true;
+        }
         if (status === "live") this.#everLive = true;
         options.onStatus(status);
       },
@@ -193,6 +200,8 @@ export class V2Link {
   }
 
   stop(): void {
+    // A snapshot still on its way must not show a chat after access ended.
+    this.#chat = null;
     this.#live.stop();
   }
 

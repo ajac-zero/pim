@@ -3,7 +3,7 @@ import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ARTIFACT_KIND_NAMES, ArtifactIcon } from "~/components/artifact-icon";
-import { Markdown } from "~/components/chat/markdown";
+import { Markdown } from "~/components/chat/markdown-lazy";
 import { useI18n } from "~/components/i18n";
 import { ShieldAlert } from "~/components/icons";
 import { Button } from "~/components/ui/button";

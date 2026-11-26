@@ -14,7 +14,7 @@ import { createPortal } from "react-dom";
 import { toast } from "sonner";
 import { yCollab, yUndoManagerKeymap } from "y-codemirror.next";
 import * as Y from "yjs";
-import { Markdown } from "~/components/chat/markdown";
+import { Markdown } from "~/components/chat/markdown-lazy";
 import { useI18n } from "~/components/i18n";
 import { noteLivePreview } from "~/components/note-live-preview";
 import { NoteLive, type NoteStatus } from "~/lib/note-live";

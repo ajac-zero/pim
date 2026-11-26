@@ -16,7 +16,7 @@ import {
 import { toast } from "sonner";
 import { AppIcon } from "~/components/app-icon";
 import { imageContent } from "~/components/chat/composer";
-import { Markdown } from "~/components/chat/markdown";
+import { Markdown } from "~/components/chat/markdown-lazy";
 import { ReplyImages } from "~/components/chat/reply-blocks";
 import { FileLink } from "~/components/file-link";
 import { type TranslationKey, useI18n } from "~/components/i18n";

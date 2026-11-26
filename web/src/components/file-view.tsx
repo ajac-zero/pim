@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { lazy, type ReactNode, Suspense, useRef, useState } from "react";
 import { toast } from "sonner";
-import { Markdown } from "~/components/chat/markdown";
+import { Markdown } from "~/components/chat/markdown-lazy";
 import { useI18n } from "~/components/i18n";
 import { Download, Trash2, X } from "~/components/icons";
 import {

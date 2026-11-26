@@ -21,6 +21,7 @@ import { BadRequestError, ConflictError, NotFoundError } from "@pim/v2-app/error
 import { ok, type Reply, type Route, route } from "@pim/v2-app/http";
 import { filesPath, FILES_ROOT } from "../computer-tools.ts";
 import { installScript } from "../computer-install-script.ts";
+import { displaydBundle } from "../../../../displayd/bundle.js";
 
 const MAX_UPLOAD_BYTES = 25_000_000;
 const CHUNK_BYTES = 700_000;
@@ -282,6 +283,8 @@ export function computerRoutes(options: { source?: string } = {}): Route[] {
 		// Public, as the Worker's were: a machine that has no session fetches them before it has paired, and again to update itself.
 		route("GET", "/install.sh", async ({ origin }) => ({ status: 200, headers: { "content-type": "text/x-shellscript; charset=utf-8", "cache-control": "no-cache" }, raw: installScript(origin) })),
 		route("GET", "/pim-computer.ts", async () => ({ status: 200, headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-cache" }, raw: await readFile(source).catch(() => { throw new NotFoundError("This deployment does not carry pim-computer.ts (set PIM_COMPUTER_SOURCE)"); }) })),
+		// displayd, which pim-computer gets from the same Pim to give each thread its own display (displayd/bundle.js): the same bytes for the same files, so a computer can tell by its checksum that it has the newest.
+		route("GET", "/displayd.tar.gz", async () => ({ status: 200, headers: { "content-type": "application/gzip", "cache-control": "no-cache" }, raw: displaydBundle() })),
 		...TRIGGERS_MODULES.map((file) => route("GET", `/${file}`, async () => ({ status: 200, headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-cache" }, raw: await readFile(join(dirname(source), file)).catch(() => { throw new NotFoundError(`This deployment does not carry ${file}`); }) }))),
 	];
 }

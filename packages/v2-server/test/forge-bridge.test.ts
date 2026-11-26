@@ -34,11 +34,11 @@ describe("Forge's outbox joined to the runtime's inbox and to Live", () => {
 		stack = await createStack();
 		rig = await createTurnRig(stack);
 		store = new ForgeStore(forgeDb());
-		const authz = new Authz(forgeDb(), { branchPrefix: "pim/" });
+		const authz = new Authz(forgeDb());
 		const scheduler = new ForgeScheduler(forgeDb(), store, Date.now);
 		await scheduler.upsertPool({ poolId: "default", provider: "local", size: 50 });
 		for (const owner of [ADA, "ada"]) for (const p of ["coding:start"] as const) await authz.grant({ subjectType: "user", subjectId: owner, permission: p, grantedBy: "admin" });
-		forge = new Forge({ db: forgeDb(), store, authz, scheduler, credentials: new Credentials(forgeDb(), "test-signing-key", authz.policy, Date.now), git: {} as never, objects: new MemoryObjects(), orbs: () => new FakeOrbClient(), compute: {} as never, ampConfigured: false });
+		forge = new Forge({ db: forgeDb(), store, authz, scheduler, credentials: new Credentials(forgeDb(), "test-signing-key", Date.now), git: {} as never, objects: new MemoryObjects(), orbs: () => new FakeOrbClient(), compute: {} as never, ampConfigured: false });
 		projector = new Projector(stack.live, { source: combineSources(runtimeOutboxSource(stack.live), forgeOutboxSource(stack.live)) });
 		rig.faux.setResponses([fauxAssistantMessage("Hello, Ada.")]);
 		await rig.submit("c0", "hi");

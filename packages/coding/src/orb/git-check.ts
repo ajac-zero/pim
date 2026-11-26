@@ -119,7 +119,7 @@ export type RefReport = {
 	readonly repo: string;
 	/** Its default branch, whose movement is the one Pim most needs to show. */
 	readonly defaultBranch: BranchReport;
-	/** Every other branch that moved, was made or was deleted, by name: the thread's own `pim/*` branch among them. */
+	/** Every other branch that moved, was made or was deleted, by name: the thread's own branch among them. */
 	readonly branches: readonly BranchReport[];
 	/** Whether any ref moved without the old commit being in the new one's history: a force push, which rewrites history rather than adding to it. */
 	readonly forcePushed: boolean;

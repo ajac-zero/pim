@@ -3,13 +3,17 @@
 # because its keys open what is already stored (PIM_KEK_K1 above all) and every browser's push subscription is bound to the VAPID public key. Back the file up with the database backups.
 #
 #   deploy/compose/init-env.sh https://pim.example.com                  # a public deployment: Caddy gets certificates for that host; the image is the published ghcr.io/ajac-zero/pim:stable
-#   deploy/compose/init-env.sh http://localhost:8088 --image pim:v2      # a trial on this machine, plain HTTP on port 8088 (compose.local.yaml), with an image built from source
+#   deploy/compose/init-env.sh http://localhost:8088 --image pim:v2 [--web-image pim-web:v2]   # a trial on this machine, plain HTTP on port 8088 (compose.local.yaml), with images built from source
 set -eu
 cd "$(dirname "$0")"
 [ -e .env ] && { echo ".env exists; not overwriting it" >&2; exit 1; }
 url="${1:?usage: init-env.sh <public URL> [--image <image>]}"
 image="ghcr.io/ajac-zero/pim:stable"
+web="ghcr.io/ajac-zero/pim-web:stable"
 [ "${2:-}" = "--image" ] && image="${3:?}"
+# A backend image built from source goes with a web image built from source (pim-web:v2 unless named).
+[ "${2:-}" = "--image" ] && web="pim-web:v2"
+[ "${4:-}" = "--web-image" ] && web="${5:?}"
 host="$(printf %s "$url" | sed -E 's|^[a-z]+://||; s|/.*$||')"
 name="${host%%:*}"
 scheme="${url%%://*}"
@@ -25,6 +29,7 @@ while IFS= read -r line; do
 		PIM_VAPID_PRIVATE_KEY=) echo "PIM_VAPID_PRIVATE_KEY=${vapid#* }" ;;
 		*=CHANGE_ME) echo "${line%%=*}=$(rand)" ;;
 		PIM_IMAGE=*) echo "PIM_IMAGE=$image" ;;
+		PIM_WEB_IMAGE=*) echo "PIM_WEB_IMAGE=$web" ;;
 		PIM_PUBLIC_URL=*) echo "PIM_PUBLIC_URL=$url" ;;
 		PIM_DOMAIN=*) if [ "$scheme" = http ]; then echo "PIM_DOMAIN=:${host##*:}"; else echo "PIM_DOMAIN=$host"; fi ;;
 		PIM_CONTENT_DOMAIN=*) if [ "$scheme" = http ]; then echo "PIM_CONTENT_DOMAIN=http://content.$host"; else echo "PIM_CONTENT_DOMAIN=content.$host"; fi ;;

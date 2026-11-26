@@ -7,7 +7,9 @@ import { del, get, keys, set } from "idb-keyval";
  * The lists the app's frame and first pages show, kept on this device (in
  * IndexedDB) so the app opens with them at once and refreshes them while it
  * draws, rather than waiting on Pim before it shows anything. Only these
- * lists are kept: no secrets, and nothing of files' or apps' contents.
+ * lists are kept: no secrets, nothing of files' or apps' contents, and nothing
+ * that asks for a decision (approvals) or says how work stands (tasks): what
+ * was true when it was kept must not be shown as true now, so those wait on Pim.
  *
  * They are kept per owner: each account's lists have a key of their own, and
  * the device remembers which account it last kept them for. When the account
@@ -22,7 +24,6 @@ const SAVED = new Set(
     ["agents", "majordomo"],
     ["sessions"],
     ["extensions"],
-    ["approvals"],
     ["notifications"],
     ["account"],
     ["computer"],

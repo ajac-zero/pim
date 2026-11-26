@@ -7,7 +7,7 @@ import { GitBrokerError } from "./broker";
  * reads a repository's URL, signs in to the host's git for a repository,
  * names where git clones and pushes, finds the default branch, and opens a
  * pull request. What Pim allows is not the provider's to decide: push
- * approvals and the branch rules (`pim/` prefix, protected `main` and
+ * approvals and the branch rules (protected `main` and
  * `master`) are the broker's, the same for every provider.
  *
  * A repository is identified by its instance's id and its `owner/name`.

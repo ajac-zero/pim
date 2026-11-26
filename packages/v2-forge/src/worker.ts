@@ -15,7 +15,7 @@ import { DUE, rootOperation, type ForgeStore, type ThreadRow } from "./store";
 import { type CheckpointDeps, autosaveWorkspace, checkpointWorkspace, ensureBase, gitIn } from "./checkpoint";
 import { REPO_DIR } from "./git-checkout";
 import { retryPlan } from "./retry";
-import { orbMessageText, pushedByAgent } from "./orb-branch";
+import { orbMessageText, pushedByAgent, refuseOrbBranch } from "./orb-branch";
 import { repoName } from "./authz";
 import { NO_ENVIRONMENT, SETUP_ENV, SETUP_TIMEOUT_MS, type CodingEnvironment } from "@pim/coding/environment-cache";
 
@@ -745,8 +745,11 @@ export class ForgeWorker {
 	private async startOrb(thread: ThreadRow, epoch: number, client: OrbClient): Promise<StepResult> {
 		const { store } = this.d;
 		const key = `forge:${thread.threadId}:${thread.startOperation}`;
+		// The branches the git host has before the thread starts, taken once, before the intent is recorded: they are not the thread's to follow (`refuseOrbBranch`). Null when the host can't be read.
+		const prior = thread.provisioning as { key?: string; baseline?: string[] | null } | null;
+		const baseline = prior?.key === key && prior.baseline !== undefined ? prior.baseline : await this.branchesNow(thread);
 		await store.fenced(thread.threadId, epoch, async (q, t) => {
-			if (!t.provisioning || t.provisioning.key !== key) await store.patch(q, thread.threadId, { provisioning: { kind: "orb", client: client.id, key, phase: "intent", at: this.clock() } });
+			if (!t.provisioning || t.provisioning.key !== key) await store.patch(q, thread.threadId, { provisioning: { kind: "orb", client: client.id, key, phase: "intent", at: this.clock(), baseline } });
 		});
 		let handle;
 		try {
@@ -769,12 +772,22 @@ export class ForgeWorker {
 			return "done";
 		}
 		await store.fenced(thread.threadId, epoch, async (q) => {
-			await store.patch(q, thread.threadId, { orb: { threadId: handle.threadId, url: handle.url, client: client.id, turn: thread.startOperation }, provisioning: { kind: "orb", client: client.id, key, phase: "ready", at: this.clock() } });
+			await store.patch(q, thread.threadId, { orb: { threadId: handle.threadId, url: handle.url, client: client.id, turn: thread.startOperation, ...(baseline ? { baseline } : {}) }, provisioning: { kind: "orb", client: client.id, key, phase: "ready", at: this.clock() } });
 			await store.setState(q, thread.threadId, "running");
 			await store.appendEvent(q, thread.threadId, { kind: "thread.turn_started", data: { operationId: thread.startOperation, provider: client.id, orb: handle.threadId } });
 			await q.query("insert into pim_forge.forge_inbox (thread_id, operation_id, kind, payload, status) values ($1,$2,'start','{}','done') on conflict do nothing", [thread.threadId, thread.startOperation]);
 		});
 		return "done";
+	}
+
+	/** The names of the repository's branches on the git host now, or null when it can't be read (capped, so a repository with thousands of branches costs the row little). */
+	private async branchesNow(thread: ThreadRow): Promise<string[] | null> {
+		try {
+			const branches = await this.d.git?.branches?.(thread.repo);
+			return branches ? [...branches.keys()].slice(0, 5000) : null;
+		} catch {
+			return null;
+		}
 	}
 
 	/** Adoption and polling: reads the remote thread as it is. Nothing here starts, or re-sends the prompt of, a session. */
@@ -862,7 +875,8 @@ export class ForgeWorker {
 			const baseRef = thread.ref ?? null;
 			const from = branches.get(baseRef ?? defaultBranch) ?? branches.get(defaultBranch) ?? null;
 			const found = await pushedByAgent({ texts, branches, from, defaultBranch, baseRef, resolveCommit: git.resolveCommit ? (ref) => git.resolveCommit!(thread.repo, ref) : undefined });
-			return found && found !== thread.orb?.branch ? found : null;
+			// Only a branch this thread may follow is recorded: what the agent says is not enough to make another thread's branch this one's.
+			return found && found !== thread.orb?.branch && (await refuseOrbBranch({ db: this.d.store.db, git }, thread, found)) === null ? found : null;
 		} catch {
 			// A host that can't be read leaves the branch unknown for now: what the agent said is read again with the next messages.
 			return null;

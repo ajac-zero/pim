@@ -1,4 +1,6 @@
 import { execFileSync } from "node:child_process";
+import { chmodSync, cpSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -7,6 +9,7 @@ import { parse, parseAllDocuments } from "yaml";
 import { DEFAULT_POOL_BUDGETS } from "@pim/v2-contracts/db";
 import { loadProcessConfig } from "@pim/v2-contracts/platform";
 import { createPimMetrics } from "../src/observability/signals.ts";
+import { BACKEND_PATHS } from "../../../web-host/src/routes.js";
 
 const ROOT = new URL("../../../", import.meta.url).pathname;
 const read = (path: string) => readFileSync(join(ROOT, path), "utf8");
@@ -14,6 +17,82 @@ const metricNames = new Set(createPimMetrics().registry.names());
 // Histogram series carry these suffixes; the registry knows the base name.
 const baseMetric = (name: string) => name.replace(/_(bucket|sum|count)$/, "");
 const metricsIn = (expr: string) => [...expr.matchAll(/\b(pim_[a-z0-9_]+|cnpg_[a-z0-9_]+|up)\b/g)].map((m) => m[1]!);
+
+describe("the workflows", () => {
+	const workflow = (name: string) => parse(read(`.github/workflows/${name}.yml`)) as any;
+	const ci = workflow("ci");
+	const publish = workflow("publish");
+	const compose = workflow("compose");
+
+	it("starts CI for every pull request, however little changed, so a required check is never left pending", () => {
+		for (const w of [ci, compose, publish]) for (const trigger of Object.values<any>(w.on ?? {})) expect(trigger?.paths, "no path filter on a trigger").toBeUndefined();
+		expect(Object.keys(ci.on)).toEqual(expect.arrayContaining(["pull_request", "push", "workflow_dispatch"]));
+		// One run per change: a branch with a pull request is not also run for its push.
+		expect(ci.on.push.branches).toEqual(["main"]);
+	});
+
+	it("selects each job from the one table, and reports one check that always runs and fails unless every selected job passed", () => {
+		const jobs = ci.jobs as Record<string, any>;
+		for (const [name, job] of Object.entries(jobs)) {
+			if (name === "changes" || name === "ci") continue;
+			expect(job.needs, name).toBe("changes");
+			expect(job.if, name).toMatch(/^fromJSON\(needs\.changes\.outputs\.scope\)\.jobs\./);
+		}
+		expect(jobs.ci.name).toBe("CI result");
+		expect(jobs.ci.if).toBe("always()");
+		expect(jobs.ci.needs).toEqual(["changes", ...Object.keys(jobs).filter((n) => n !== "changes" && n !== "ci")]);
+		expect(jobs.changes.steps[0].with["fetch-depth"]).toBe(0);
+	});
+
+	it("cancels what a newer push to a pull request replaces, and never a run on main", () => {
+		expect(ci.concurrency["cancel-in-progress"]).toMatch(/github\.event_name == 'pull_request'/);
+		expect(compose.concurrency["cancel-in-progress"]).toMatch(/github\.ref != 'refs\/heads\/main'/);
+		// Publishing is production: nothing in it is ever cancelled, not a build, not a retag, not the wait for CI.
+		expect(publish.concurrency["cancel-in-progress"]).toBe(false);
+		for (const job of ["edge", "bootstrap-edge", "release", "rollback-stable"]) expect(publish.jobs[job].concurrency["cancel-in-progress"], job).toBe(false);
+		expect(JSON.stringify(publish)).not.toMatch(/"cancel-in-progress":(true|"\$\{\{)/);
+	});
+
+	it("builds an image only when its identity is new, and tags a reused one without claiming a build", () => {
+		expect(publish.jobs.image.if).toMatch(/needs\.plan\.outputs\.build != '\[\]'/);
+		expect(publish.jobs.image.strategy.matrix.include).toMatch(/fromJSON\(needs\.plan\.outputs\.build\)/);
+		const build = publish.jobs.image.steps.find((s: any) => s.uses?.startsWith("docker/build-push-action"));
+		expect(build.with.tags).toBe("${{ steps.tags.outputs.tags }}");
+		expect(build.with.labels).toMatch(/dev\.pim\.image-identity=\$\{\{ matrix\.identity \}\}/);
+		const tag = publish.jobs.image.steps.find((s: any) => s.name === "Tags");
+		expect(tag.run).toContain("input-$IDENTITY");
+		// The reused image is given tags with `imagetools create` from its identity tag (same manifest, same labels), never with a build.
+		const reuse = publish.jobs.reuse.steps.find((s: any) => s.name === "Tag the reused images");
+		expect(reuse.run).toContain('docker buildx imagetools create $tags "$repository:input-$identity"');
+		expect(reuse.run).toContain("reused (built at");
+		// Edge follows all three images, and a run where nothing was built still reaches it.
+		expect(publish.jobs.edge.if).toMatch(/!cancelled\(\)/);
+		expect(publish.jobs.edge.steps.find((s: any) => s.name === "Move edge").run).toContain("edge-promote.mjs promote");
+		// Every writer of the edge record shares one group, and every writer of stable and X.Y another, so each record is read, judged and written by one run at a time.
+		expect([publish.jobs.edge, publish.jobs["bootstrap-edge"]].map((j: any) => j.concurrency.group)).toEqual(["publish-edge", "publish-edge"]);
+		expect([publish.jobs.release, publish.jobs["rollback-stable"]].map((j: any) => j.concurrency.group)).toEqual(["publish-stable", "publish-stable"]);
+		// The image job writes the immutable version only; stable and X.Y are the release job's, decided by version precedence.
+		expect(publish.jobs.plan.steps.find((s: any) => s.id === "meta").run).not.toMatch(/stable|\$\{version%\.\*\}/);
+		expect(publish.jobs.release.steps.at(-1).run).toContain("release-promote.mjs reconcile");
+		// A release is promoted only after CI and Compose passed on its commit, waited for outside the group; the CI job that checks the adapter against a real registry is part of the aggregate.
+		expect(publish.jobs.release.needs).toEqual(["qualify"]);
+		expect(publish.jobs.qualify.concurrency).toBeUndefined();
+		expect(publish.jobs.qualify.steps.at(-1).run).toContain("ci-status.mjs wait");
+		expect(ci.jobs.registry.services.registry.image).toBe("registry:2");
+		expect(ci.jobs.registry.steps.at(-1).env.PIM_TEST_REGISTRY).toBe("localhost:5000");
+		expect(publish.jobs.plan.if).toMatch(/inputs\.bootstrap_edge_commit == ''/);
+		// Every image the plan names is one that Compose and Kubernetes use.
+		expect(compose.jobs.smoke.if).toMatch(/\.smoke/);
+	});
+
+	it("shares one setup, caches the package store by the lockfile, and installs only the web app's closure for its jobs", () => {
+		const setup = parse(read(".github/actions/setup/action.yml")) as any;
+		expect(setup.runs.steps.find((s: any) => s.uses?.startsWith("actions/setup-node")).with.cache).toBe("pnpm");
+		for (const name of ["web", "web-build"]) expect(ci.jobs[name].steps.find((s: any) => s.uses === "./.github/actions/setup").with.filter).toBe("pim-web...");
+		const text = read(".github/workflows/ci.yml");
+		expect(text).not.toMatch(/uses: pnpm\/action-setup/);
+	});
+});
 
 describe("the Compose homelab profile", () => {
 	const compose = parse(read("deploy/compose/compose.yaml"), { merge: true }) as any;
@@ -28,7 +107,7 @@ describe("the Compose homelab profile", () => {
 	});
 
 	it("has the core services, and the optional ones only behind profiles, so Pim starts with computer and coding off", () => {
-		const core = ["caddy", "postgres", "pgbouncer", "nats", "seaweedfs", "objects-init", "migrator", "gate", "live", "runner", "forge", "maintenance"];
+		const core = ["caddy", "postgres", "pgbouncer", "nats", "seaweedfs", "objects-init", "migrator", "gate", "live", "runner", "forge", "maintenance", "web"];
 		for (const name of core) expect(compose.services[name], name).toBeDefined();
 		for (const name of core) expect(compose.services[name].profiles, `${name} is core`).toBeUndefined();
 		const profiled: Record<string, string[]> = { canvas: ["canvas"], relay: ["computer"], coturn: ["computer"], "sandbox-manager": ["coding"], prometheus: ["observability"], grafana: ["observability"] };
@@ -36,6 +115,134 @@ describe("the Compose homelab profile", () => {
 		// Nothing in the core waits for an optional service.
 		for (const name of core) for (const dep of Object.keys(compose.services[name].depends_on ?? {})) expect(core, `${name} depends on ${dep}`).toContain(dep);
 		expect(Object.keys(compose.services.runner.depends_on)).toEqual(expect.arrayContaining(["migrator", "pgbouncer", "nats", "objects-init"]));
+	});
+
+	it("makes the web app its own component: its own image, container and volume, no dependency on the backend, and nothing of it in the backend's image or services", () => {
+		const web = compose.services.web;
+		expect(web.image).toMatch(/PIM_WEB_IMAGE/);
+		expect(web.image).not.toMatch(/\$\{PIM_IMAGE/);
+		expect(web.volumes).toEqual(["pim-web:/web-releases"]);
+		expect(compose.volumes).toHaveProperty("pim-web");
+		// It has no secret, no database and no service to wait for, so it starts and is replaced alone.
+		expect(web.env_file).toBeUndefined();
+		expect(web.depends_on).toBeUndefined();
+		expect(JSON.stringify(web.environment)).not.toMatch(/PASSWORD|SECRET|KEK|DATABASE|NATS|S3/);
+		expect(web.read_only).toBe(true);
+		expect(web.cap_drop).toEqual(["ALL"]);
+		// Nothing else mounts the volume or is told where a build is.
+		for (const [name, service] of Object.entries<any>(compose.services)) {
+			if (name !== "web") expect(JSON.stringify([service.volumes ?? [], service.environment ?? {}]), name).not.toMatch(/pim-web|PIM_WEB_/);
+		}
+		expect(compose.services.caddy.depends_on.web.condition).toBe("service_healthy");
+		expect(compose.services["web-release"]).toBeUndefined();
+		// The backend image has no web stage, no web build and no variable that points at one.
+		const backend = read("deploy/Dockerfile.v2");
+		expect(backend).not.toMatch(/AS web\b|web\/dist|PIM_WEB_DIR|PIM_WEB_RELEASES|\/web-releases/);
+		const frontend = read("deploy/Dockerfile.web");
+		expect(frontend).toMatch(/COPY --from=web \/app\/web\/dist \/app\/dist/);
+		expect(frontend).toMatch(/ENTRYPOINT \["node", "src\/main\.js"\]/);
+		expect(frontend).not.toMatch(/packages\/v2-server\/src|COPY computer|COPY displayd/);
+		expect(env).toMatch(/^PIM_WEB_IMAGE=ghcr\.io\/ajac-zero\/pim-web:stable$/m);
+	});
+
+	it("sends the backend's paths to the Gate and every other path to the web app, from one list that Caddy, Kubernetes and the preview share", () => {
+		const caddy = read("deploy/compose/caddy/Caddyfile");
+		const matcher = /@backend path ([^\n]+)/.exec(caddy)![1]!.split(" ");
+		expect(matcher).toEqual(BACKEND_PATHS.flatMap((p) => [p, `${p}/*`]));
+		// The content origin answers only published pages and the scripts their frames run.
+		expect(caddy).toMatch(/@published path \/p \/p\/\*\n\s*handle @published \{\s*reverse_proxy gate:8080/);
+		expect(caddy).toMatch(/handle \/artifact-runtime\/\* \{\s*reverse_proxy web:8080/);
+		expect(caddy).toMatch(/handle \{\s*respond 404/);
+		const preview = read("scripts/v2-dev/preview.mjs");
+		expect(preview).toContain('import { isBackendPath } from "../../web-host/src/routes.js"');
+	});
+
+	it("releases the web app by its own tag: a pim.sh command that replaces only the web container, and rolls its image back on failure", () => {
+		const directory = mkdtempSync(join(tmpdir(), "pim-sh-"));
+		const compose_ = join(directory, "deploy", "compose");
+		execFileSync("mkdir", ["-p", compose_, join(directory, "bin")]);
+		cpSync(join(ROOT, "deploy/compose/pim.sh"), join(compose_, "pim.sh"));
+		writeFileSync(join(compose_, "compose.yaml"), "services: {}\n");
+		writeFileSync(join(compose_, ".env"), "PIM_IMAGE=ghcr.io/ajac-zero/pim:stable@sha256:backend\nPIM_WEB_IMAGE=ghcr.io/ajac-zero/pim-web:stable@sha256:old\nPIM_PUBLIC_URL=https://pim.example.test\n");
+		// A docker that records what it is asked, knows the registry's digest for the web image, and fails `up` while FAIL_UP is set.
+		const docker = join(directory, "bin", "docker");
+		writeFileSync(docker, `#!/bin/sh\necho "$@" >> "$DOCKER_LOG"\ncase "$1" in\n  pull) exit 0 ;;\n  image) echo "ghcr.io/ajac-zero/pim-web@sha256:new" ;;\n  compose) case "$*" in *" up "*) [ -z "\${FAIL_UP:-}" ] ;; esac ;;\nesac\n`);
+		chmodSync(docker, 0o755);
+		const run = (extra: Record<string, string>) => {
+			try {
+				return { out: execFileSync("sh", [join(compose_, "pim.sh"), "update-web"], { cwd: compose_, env: { PATH: `${join(directory, "bin")}:${process.env.PATH}`, DOCKER_LOG: join(directory, "log"), ...extra }, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }), code: 0 };
+			} catch (error: any) {
+				return { out: String(error.stdout ?? ""), code: error.status as number };
+			}
+		};
+		const envFile = () => readFileSync(join(compose_, ".env"), "utf8");
+		// Succeeds: only the web image is moved, and only the `web` container is replaced, without its dependencies.
+		const updated = run({});
+		expect(updated.code).toBe(0);
+		expect(JSON.parse(updated.out.trim().split("\n").at(-1)!)).toMatchObject({ event: "pim.update.web", result: "updated", to: "ghcr.io/ajac-zero/pim-web:stable@sha256:new" });
+		expect(envFile()).toContain("PIM_WEB_IMAGE=ghcr.io/ajac-zero/pim-web:stable@sha256:new");
+		expect(envFile()).toContain("PIM_WEB_IMAGE_PREVIOUS=ghcr.io/ajac-zero/pim-web:stable@sha256:old");
+		expect(envFile()).toContain("PIM_IMAGE=ghcr.io/ajac-zero/pim:stable@sha256:backend");
+		const log = readFileSync(join(directory, "log"), "utf8");
+		expect(log).toContain("compose -f compose.yaml up -d --no-deps --wait web");
+		expect(log).not.toMatch(/backup|pim:stable|up -d --wait\n/);
+		// Fails: the previous image is put back.
+		writeFileSync(join(compose_, ".env"), "PIM_IMAGE=ghcr.io/ajac-zero/pim:stable@sha256:backend\nPIM_WEB_IMAGE=ghcr.io/ajac-zero/pim-web:stable@sha256:old\nPIM_PUBLIC_URL=https://pim.example.test\n");
+		const failed = run({ FAIL_UP: "1" });
+		expect(failed.code).toBe(1);
+		expect(JSON.parse(failed.out.trim().split("\n").at(-1)!)).toMatchObject({ result: "rolled_back" });
+		expect(envFile()).toContain("PIM_WEB_IMAGE=ghcr.io/ajac-zero/pim-web:stable@sha256:old");
+		rmSync(directory, { recursive: true, force: true });
+	});
+
+	it("updates the backend and the web app together, and a web image that cannot be pulled, or a stack that does not come up, leaves or puts back both pins", () => {
+		const directory = mkdtempSync(join(tmpdir(), "pim-sh-update-"));
+		try {
+			const compose_ = join(directory, "deploy", "compose");
+			execFileSync("mkdir", ["-p", compose_, join(directory, "bin"), join(directory, "scripts", "v2-backup")]);
+			cpSync(join(ROOT, "deploy/compose/pim.sh"), join(compose_, "pim.sh"));
+			writeFileSync(join(compose_, "compose.yaml"), "services: {}\n");
+			writeFileSync(join(directory, "scripts", "v2-backup", "compose-backup.sh"), "#!/bin/sh\nmkdir -p \"$1\"\necho backup >> \"$DOCKER_LOG\"\n");
+			chmodSync(join(directory, "scripts", "v2-backup", "compose-backup.sh"), 0o755);
+			const docker = join(directory, "bin", "docker");
+			writeFileSync(docker, `#!/bin/sh\necho "$@" >> "$DOCKER_LOG"\ncase "$1" in\n  pull) case "$*" in *pim-web*) [ -z "\${PULL_FAIL_WEB:-}" ] ;; esac ;;\n  image) echo "ghcr.io/ajac-zero/pim@sha256:newbackend"; echo "ghcr.io/ajac-zero/pim-web@sha256:newweb" ;;\n  compose) case "$*" in *" up "*) [ -z "\${FAIL_UP:-}" ] ;; esac ;;\nesac\n`);
+			chmodSync(docker, 0o755);
+			const before = "PIM_IMAGE=ghcr.io/ajac-zero/pim:stable@sha256:oldbackend\nPIM_WEB_IMAGE=ghcr.io/ajac-zero/pim-web:stable@sha256:oldweb\nPIM_PUBLIC_URL=https://pim.example.test\n";
+			const envFile = () => readFileSync(join(compose_, ".env"), "utf8");
+			const run = (extra: Record<string, string>) => {
+				writeFileSync(join(compose_, ".env"), before);
+				writeFileSync(join(directory, "log"), "");
+				try {
+					return { out: execFileSync("sh", [join(compose_, "pim.sh"), "update"], { cwd: compose_, env: { PATH: `${join(directory, "bin")}:${process.env.PATH}`, DOCKER_LOG: join(directory, "log"), ...extra }, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }), code: 0 };
+				} catch (error: any) {
+					return { out: String(error.stdout ?? ""), code: error.status as number };
+				}
+			};
+			const last = (out: string) => JSON.parse(out.trim().split("\n").at(-1)!);
+			const log = () => readFileSync(join(directory, "log"), "utf8");
+			// Both images are pulled, backed up first, and both pins move in the one `up` that recreates the stack.
+			const updated = run({});
+			expect(updated.code).toBe(0);
+			expect(last(updated.out)).toMatchObject({ result: "updated" });
+			expect(envFile()).toContain("PIM_IMAGE=ghcr.io/ajac-zero/pim:stable@sha256:newbackend");
+			expect(envFile()).toContain("PIM_WEB_IMAGE=ghcr.io/ajac-zero/pim-web:stable@sha256:newweb");
+			expect(envFile()).toContain("PIM_WEB_IMAGE_PREVIOUS=ghcr.io/ajac-zero/pim-web:stable@sha256:oldweb");
+			expect(log().split("\n").filter((l) => /^pull|backup|compose .* up/.test(l))).toEqual(["pull -q ghcr.io/ajac-zero/pim:stable", "pull -q ghcr.io/ajac-zero/pim-web:stable", "backup", "compose -f compose.yaml up -d --wait"]);
+			// A web image that cannot be pulled (not published yet) stops the update before anything is backed up, pinned or recreated: the running stack is as it was.
+			const unpublished = run({ PULL_FAIL_WEB: "1" });
+			expect(unpublished.code).toBe(1);
+			expect(last(unpublished.out)).toMatchObject({ result: "failed" });
+			expect(envFile()).toBe(before);
+			expect(log()).not.toMatch(/backup|compose/);
+			// A stack that does not come up with the new pair goes back to the old backend and the old web app together.
+			const broken = run({ FAIL_UP: "1" });
+			expect(broken.code).toBe(1);
+			expect(last(broken.out)).toMatchObject({ result: "rolled_back" });
+			expect(envFile()).toContain("PIM_IMAGE=ghcr.io/ajac-zero/pim:stable@sha256:oldbackend");
+			expect(envFile()).toContain("PIM_WEB_IMAGE=ghcr.io/ajac-zero/pim-web:stable@sha256:oldweb");
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
 	});
 
 	it("orders startup by health: postgres, then pooler and migrator, then roles; roles wait for the migrator to finish", () => {
@@ -120,7 +327,8 @@ describe("the Compose homelab profile", () => {
 		expect(caddy).toMatch(/@live path \/api\/ws[^\n]*\n\s*handle @live \{\s*reverse_proxy live:8080/);
 		expect(caddy).toMatch(/\/api\/notes\/live[\s\S]*reverse_proxy canvas:8080/);
 		expect(caddy).toMatch(/\/api\/computer[\s\S]*reverse_proxy relay:8080/);
-		expect(caddy).toMatch(/handle \{\s*reverse_proxy gate:8080/);
+		expect(caddy).toMatch(/handle @backend \{\s*reverse_proxy gate:8080/);
+		expect(caddy).toMatch(/handle \{\s*reverse_proxy web:8080/);
 		expect(caddy).toContain("header_up X-Pim-Ingress-Secret {env.PIM_INGRESS_SECRET}");
 	});
 
@@ -191,7 +399,7 @@ describe("the Kubernetes manifests (Kustomize)", () => {
 			// The login's secret key names its role: a Runner gets the runtime login, never the migrator's.
 			expect(env.PIM_DATABASE_URL).not.toContain("migrator");
 		}
-		const keys = Object.fromEntries(kind("Deployment").map((d) => [d.metadata.name, d.spec.template.spec.containers[0].env.find((e: any) => e.name === "PIM_DATABASE_URL").valueFrom.secretKeyRef.key]));
+		const keys = Object.fromEntries(kind("Deployment").filter((d) => d.metadata.name !== "pim-web").map((d) => [d.metadata.name, d.spec.template.spec.containers[0].env.find((e: any) => e.name === "PIM_DATABASE_URL").valueFrom.secretKeyRef.key]));
 		expect(keys).toMatchObject({ "pim-gate": "gate-url", "pim-live": "live-url", "pim-runner": "runtime-url", "pim-forge": "forge-url", "pim-maintenance": "maintenance-url" });
 		const cluster = kind("Cluster")[0];
 		const roles = new Map<string, any>(cluster.spec.managed.roles.map((r: any) => [r.name, r]));
@@ -200,6 +408,33 @@ describe("the Kubernetes manifests (Kustomize)", () => {
 			expect(roles.get(`pim_${r}_login`)).toMatchObject({ login: true, inRoles: [`pim_${r}`], superuser: false, bypassrls: false });
 		}
 		for (const r of roles.values()) expect(r.superuser).toBe(false);
+	});
+
+	it("serves the web app from its own Deployment and image, and routes to it every path the backend does not own", () => {
+		const web = kind("Deployment").find((d) => d.metadata.name === "pim-web");
+		const spec = web.spec.template.spec;
+		const container = spec.containers[0];
+		expect(container.image).toMatch(/\/pim-web:/);
+		expect(container.envFrom).toBeUndefined();
+		expect(JSON.stringify(container.env)).not.toMatch(/secretKeyRef|configMapRef/);
+		expect(spec.serviceAccountName).toBeUndefined();
+		expect(spec.automountServiceAccountToken).toBe(false);
+		expect(container.securityContext.readOnlyRootFilesystem).toBe(true);
+		expect(kind("PersistentVolumeClaim").find((c) => c.metadata.name === "pim-web-releases").spec.accessModes).toEqual(["ReadWriteMany"]);
+		// Only the web app's image is the web app's: no backend Deployment mounts its volume, and the backend images carry no web variable.
+		for (const d of kind("Deployment").filter((d) => d.metadata.name !== "pim-web")) expect(JSON.stringify(d.spec.template.spec), d.metadata.name).not.toMatch(/pim-web-releases|PIM_WEB_/);
+		const ingress = kind("Ingress")[0];
+		const rules = new Map<string, any[]>(ingress.spec.rules.map((r: any) => [r.host, r.http.paths]));
+		const to = (paths: any[], path: string) => paths.find((p) => p.path === path)?.backend.service.name;
+		const main = rules.get("pim.example.test")!;
+		for (const path of BACKEND_PATHS) expect(to(main, path), path).toBe("pim-gate");
+		expect(to(main, "/")).toBe("pim-web");
+		expect(to(main, "/api/ws")).toBe("pim-live");
+		const content = rules.get("content.pim.example.test")!;
+		expect(content.map((p) => [p.path, p.backend.service.name])).toEqual([["/p", "pim-gate"], ["/artifact-runtime", "pim-web"]]);
+		expect(JSON.stringify(kind("NetworkPolicy"))).toMatch(/"values":\["gate","live","canvas","relay","web"\]/);
+		const images = (parse(read("deploy/k8s/base/kustomization.yaml")) as any).images;
+		expect(images.map((i: any) => i.name)).toEqual(expect.arrayContaining(["registry.example.test/pim", "registry.example.test/pim-web"]));
 	});
 
 	it("drains a Runner: SIGTERM and a preStop hook leave time to hand leases back, bounded below the grace period", () => {

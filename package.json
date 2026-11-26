@@ -17,7 +17,7 @@
     "test:packages": "pnpm --filter \"./packages/*\" --no-sort test",
     "test:packages:v2-server": "pnpm --filter @pim/v2-server test",
     "test:packages:rest": "pnpm --filter \"./packages/*\" --filter \"!@pim/v2-server\" --no-sort test",
-    "test:daemons": "node --test \"displayd/test/*.test.js\" \"sandbox-manager/test/*.test.js\" \"sandbox-manager/hostopsd/test/*.test.js\" \"workspace-agentd/test/*.test.mjs\"",
+    "test:daemons": "node --test \"displayd/test/*.test.js\" \"sandbox-manager/test/*.test.js\" \"sandbox-manager/hostopsd/test/*.test.js\" \"workspace-agentd/test/*.test.mjs\" \"web-host/test/*.test.js\"",
     "test:changed": "node scripts/test-changed.mjs"
   },
   "dependencies": {

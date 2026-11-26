@@ -4,19 +4,20 @@
 #
 #   deploy/compose/pim.sh update [TAG]      pull the published image (TAG: a channel, a version or sha-…; default PIM_CHANNEL from .env, else stable), back up, switch, roll back on failure
 #   deploy/compose/pim.sh update --check    say whether a newer image exists for the channel, changing nothing
-# `update` prints one JSON line last: {"event":"pim.update","from":…,"to":…,"result":"updated|unchanged|rolled_back|failed"}; it exits non-zero for rolled_back and failed.
+#   deploy/compose/pim.sh update-web [TAG]  release only the web app: pull the pim-web image of the channel and replace the `web` container, leaving every other service running
+# `update` (which moves the web image to the same tag as the backend's) and `update-web` print one JSON line last: {"event":"pim.update","from":…,"to":…,"result":"updated|unchanged|rolled_back|failed"}; it exits non-zero for rolled_back and failed.
 set -eu
 cd "$(dirname "$0")"
 files="-f compose.yaml"
 # PIM_LOCAL=1 is for a stack behind a tunnel or portal: an https PIM_PUBLIC_URL, with Caddy still on plain HTTP on 127.0.0.1:8088 (PIM_DOMAIN=:8088).
 if grep -q '^PIM_PUBLIC_URL=http://' .env || [ "${PIM_LOCAL:-}" = 1 ]; then files="$files -f compose.local.yaml"; fi
 if [ "${PIM_DEV:-}" = 1 ]; then
-	# compose.dev.yaml mounts ../../web/dist; Docker would create a missing one empty and owned by root, and the Gate would serve 404 at /.
+	# compose.dev.yaml mounts ../../web/dist into the web container; Docker would create a missing one empty and owned by root, and the web host would have no build to publish.
 	[ -f ../../web/dist/index.html ] || { echo "PIM_DEV=1 needs the built web app: run pnpm --filter pim-web build first" >&2; exit 1; }
 	files="$files -f compose.dev.yaml"
 fi
-[ "${1:-}" = update ] || exec docker compose $files "$@"
-
+case "${1:-}" in update | update-web) ;; *) exec docker compose $files "$@" ;; esac
+command="$1"
 shift
 env_get() { sed -n "s/^$1=//p" .env | tail -1; }
 # Sets KEY=VALUE in .env (replacing the line, or appending one), keeping the file's owner and mode.
@@ -28,8 +29,12 @@ say() { printf '{"event":"pim.update","from":"%s","to":"%s","result":"%s"}\n' "$
 repo="$(env_get PIM_REPOSITORY)"; repo="${repo:-ghcr.io/ajac-zero/pim}"
 from="$(env_get PIM_IMAGE)"; to="$from"
 check=0
-if [ "${1:-}" = --check ]; then check=1; shift; fi
+if [ "$command" = update ] && [ "${1:-}" = --check ]; then check=1; shift; fi
 tag="${1:-$(env_get PIM_CHANNEL)}"; tag="${tag:-stable}"
+webrepo="${repo}-web"
+web_from="$(env_get PIM_WEB_IMAGE)"; web_from="${web_from:-$webrepo:stable}"
+say_web() { printf '{"event":"pim.update.web","from":"%s","to":"%s","result":"%s"}\n' "$web_from" "$web_to" "$1"; }
+web_to="$web_from"
 [ -n "$from" ] || { echo "PIM_IMAGE is not set in .env" >&2; exit 1; }
 
 # The digest an image reference points at, as this host knows it: pinned in the reference, else the one its pulled copy came from.
@@ -44,6 +49,28 @@ remote_digest() {
 	{ raw="$(docker buildx imagetools inspect --raw "$repo:$tag" 2>/dev/null)" && [ -n "$raw" ] && printf 'sha256:%s\n' "$(printf %s "$raw" | sha256sum | cut -d' ' -f1)"; } \
 		|| { docker pull -q "$repo:$tag" >/dev/null 2>&1 && local_digest "$repo:$tag"; }
 }
+
+# The web app on its own: nothing but the `web` container is replaced, so no role restarts, no migration runs and no backup is needed. The pages open on the release before it keep
+# the scripts they still ask for (the web container keeps earlier releases), and the stack's API, sockets and sessions are untouched.
+if [ "$command" = update-web ]; then
+	echo "Pulling $webrepo:$tag" >&2
+	if ! docker pull -q "$webrepo:$tag" >/dev/null; then echo "cannot pull $webrepo:$tag" >&2; say_web failed; exit 1; fi
+	digest="$(local_digest "$webrepo:$tag")"
+	[ -n "$digest" ] || { echo "no digest for $webrepo:$tag" >&2; say_web failed; exit 1; }
+	web_to="$webrepo:$tag@$digest"
+	if [ "$(local_digest "$web_from")" = "$digest" ]; then web_to="$web_from"; say_web unchanged; exit 0; fi
+	web_previous="$(env_get PIM_WEB_IMAGE_PREVIOUS)"
+	env_set PIM_WEB_IMAGE_PREVIOUS "$web_from"
+	env_set PIM_WEB_IMAGE "$web_to"
+	echo "Starting $web_to" >&2
+	if "$0" up -d --no-deps --wait web >&2; then say_web updated; exit 0; fi
+	echo "The new web image did not come up; putting $web_from back" >&2
+	env_set PIM_WEB_IMAGE "$web_from"
+	env_set PIM_WEB_IMAGE_PREVIOUS "$web_previous"
+	"$0" up -d --no-deps --wait web >&2 || echo "the previous web image did not come up either; check pim.sh ps and logs web" >&2
+	say_web rolled_back
+	exit 1
+fi
 
 if [ "$check" = 1 ]; then
 	latest="$(remote_digest)" || latest=""
@@ -60,6 +87,10 @@ digest="$(local_digest "$repo:$tag")"
 [ -n "$digest" ] || { echo "no digest for $repo:$tag" >&2; say failed; exit 1; }
 to="$repo:$tag@$digest"
 if [ "$(local_digest "$from")" = "$digest" ]; then to="$from"; say unchanged; exit 0; fi
+
+# The web image follows the same tag: the backend and the interface of one release are updated together, and `update-web` moves the interface alone.
+docker pull -q "$webrepo:$tag" >/dev/null || { echo "cannot pull $webrepo:$tag" >&2; say failed; exit 1; }
+web_to="$webrepo:$tag@$(local_digest "$webrepo:$tag")"
 
 # The pim-computer image follows the same tag when the local-computer profile is in use.
 computer="$(env_get PIM_COMPUTER_URL)"
@@ -82,8 +113,11 @@ fi
 
 previous="$(env_get PIM_IMAGE_PREVIOUS)"
 previous_computer="$(env_get PIM_COMPUTER_IMAGE)"
+web_previous="$(env_get PIM_WEB_IMAGE_PREVIOUS)"
 env_set PIM_IMAGE_PREVIOUS "$from"
 env_set PIM_IMAGE "$to"
+env_set PIM_WEB_IMAGE_PREVIOUS "$web_from"
+env_set PIM_WEB_IMAGE "$web_to"
 if [ -n "$computer" ]; then env_set PIM_COMPUTER_IMAGE "$crepo:$tag@$(local_digest "$crepo:$tag")"; fi
 echo "Starting $to" >&2
 if "$0" up -d --wait >&2; then say updated; exit 0; fi
@@ -91,6 +125,8 @@ if "$0" up -d --wait >&2; then say updated; exit 0; fi
 echo "The new image did not come up; putting $from back" >&2
 env_set PIM_IMAGE "$from"
 env_set PIM_IMAGE_PREVIOUS "$previous"
+env_set PIM_WEB_IMAGE "$web_from"
+env_set PIM_WEB_IMAGE_PREVIOUS "$web_previous"
 env_set PIM_COMPUTER_IMAGE "$previous_computer"
 "$0" up -d --wait >&2 || echo "the previous image did not come up either; check pim.sh ps and logs" >&2
 say rolled_back

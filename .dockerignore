@@ -7,3 +7,10 @@ web/dist
 **/bench-results
 **/*.log
 deploy/compose/.env
+# Tests are not part of an image: a change to one is not a change to what it runs (and does not rebuild it, scripts/image-identity.mjs).
+packages/*/test
+**/*.test.ts
+**/*.test.tsx
+**/*.test.js
+**/*.test.mjs
+web-host/test

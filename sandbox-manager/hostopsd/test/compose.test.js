@@ -13,11 +13,11 @@ let h
 let nextId = 0
 afterEach(() => h?.close())
 
-async function start(opts) {
+async function start(opts, env = 'PIM_IMAGE=pim:test\nPIM_WEB_IMAGE=pim-web:test\n') {
 	h = await setup(opts)
 	const dir = path.join(h.tmp, 'compose')
 	mkdirSync(dir)
-	writeFileSync(path.join(dir, '.env'), 'PIM_IMAGE=pim:test\nPOSTGRES_PASSWORD="db-password-value-123"\n')
+	writeFileSync(path.join(dir, '.env'), `${env}POSTGRES_PASSWORD="db-password-value-123"\n`)
 	writeFileSync(path.join(dir, 'pim.sh'), `#!/bin/sh\nexec "${process.execPath}" "${FAKES}" pimsh "${path.join(h.tmp, 'fake')}" "$@"\n`)
 	chmodSync(path.join(dir, 'pim.sh'), 0o755)
 	const d = createDaemon(loadConfig({ ...h.env, HOSTOPSD_STACK: 'compose', PIM_COMPOSE_DIR: dir, MANAGER_ENV_FILE: path.join(h.tmp, 'no-manager-env') }), { log: () => {} })
@@ -43,13 +43,17 @@ describe('the stack on Docker Compose', () => {
 		assert.equal(validateOp({ id: 'a', name: 'restart', args: { service: 'egress-proxy' } }).error, undefined)
 	})
 
-	test('deploys a commit by building the Pim image under its name and bringing the stack up healthy', async () => {
+	test('deploys a commit by building the backend and the web images under their names and bringing the stack up healthy', async () => {
 		const d = await start()
 		const r = await op(d, 'deploy', { ref: h.repo.c3 })
 		assert.equal(r.state, 'succeeded', r.summary)
 		assert.equal(h.head(), h.repo.c3)
-		const build = ran('docker', (a) => a[0] === 'build')[0]
+		const builds = ran('docker', (a) => a[0] === 'build')
+		const build = builds[0]
 		assert.deepEqual(build.args, ['build', '-f', 'deploy/Dockerfile.v2', '--build-arg', `PIM_REVISION=${h.repo.c3}`, '-t', 'pim:test', '.'])
+		// The interface is built from the same commit, so a deploy never leaves the backend running without its web app or with another commit's.
+		assert.deepEqual(builds.map((b) => b.args.slice(0, 3)), [['build', '-f', 'deploy/Dockerfile.v2'], ['build', '-f', 'deploy/Dockerfile.web']])
+		assert.deepEqual(builds[1].args, ['build', '-f', 'deploy/Dockerfile.web', '--build-arg', `PIM_REVISION=${h.repo.c3}`, '-t', 'pim-web:test', '.'])
 		assert.equal(build.cwd, await import('node:fs').then((fs) => fs.realpathSync(h.repo.checkout)))
 		const up = ran('pimsh', (a) => a[0] === 'up')[0]
 		assert.deepEqual(up.args.slice(0, 3), ['up', '-d', '--wait'])
@@ -102,6 +106,28 @@ describe('the stack on Docker Compose', () => {
 		const r = await op(d, 'deploy', { ref: h.repo.c3 })
 		assert.equal(r.state, 'rolled_back')
 		assert.equal(ran('pimsh', (a) => a[0] === 'up').length, 1)
+	})
+
+	test('goes back to the previous commit when the web app does not build, so the backend is never left without its interface', async () => {
+		const d = await start()
+		h.setFake({ webBuildFail: [h.short(h.repo.c3)] })
+		const r = await op(d, 'deploy', { ref: h.repo.c3 })
+		assert.equal(r.state, 'rolled_back', r.summary)
+		assert.equal(h.head(), h.repo.c2)
+		// The stack was brought up once, for the commit it went back to: nothing started on the commit whose interface did not build.
+		assert.equal(ran('pimsh', (a) => a[0] === 'up').length, 1)
+	})
+
+	test('refuses a deploy that could not build the web app with the backend: PIM_WEB_IMAGE missing, or a pulled digest', async () => {
+		for (const env of ['PIM_IMAGE=pim:test\n', 'PIM_IMAGE=pim:test\nPIM_WEB_IMAGE=ghcr.io/ajac-zero/pim-web:stable@sha256:abc\n']) {
+			const d = await start(undefined, env)
+			const r = await op(d, 'deploy', { ref: h.repo.c3 })
+			assert.notEqual(r.state, 'succeeded')
+			assert.match(r.summary, /PIM_WEB_IMAGE/)
+			assert.equal(ran('docker', (a) => a[0] === 'build').length, 0)
+			assert.equal(ran('pimsh', (a) => a[0] === 'up').length, 0)
+			h.close()
+		}
 	})
 
 	test('restarts and reads the logs of a service through the stack, redacting its secrets', async () => {

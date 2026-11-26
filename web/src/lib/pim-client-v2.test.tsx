@@ -308,6 +308,101 @@ describe("a chat and the sidebar on Pim v2, with the socket still connecting", (
     expect(client.getState()).toMatchObject({ session: "c1", loaded: true });
   });
 
+  it("reads no list again when the person only moves between chats, but does after the socket really dropped", async () => {
+    const { fetchImpl } = server({
+      c1: { messages: [user(1, "one")], nextBefore: null, liveCursor: at(1) },
+      c2: { messages: [user(1, "two")], nextBefore: null, liveCursor: at(1) },
+    });
+    vi.stubGlobal("fetch", fetchImpl);
+    vi.useFakeTimers({ toFake: ["setTimeout"] });
+    try {
+      const reread = {
+        onSessions: vi.fn(),
+        onSettings: vi.fn(),
+        onComputer: vi.fn(),
+        onVisits: vi.fn(),
+      };
+      const client = new PimClient();
+      client.handlers = {
+        ...reread,
+        loadSidebar: async () => ({ liveCursor: null, sessions: [] }),
+      };
+      client.followSidebar(true);
+      client.open("c1");
+      await vi.advanceTimersByTimeAsync(0);
+      LiveSocket.at(0).open();
+      for (const chat of ["c2", "c1", "c2", "c1"]) {
+        client.open(chat);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(client.getState().connection).toBe("open");
+      }
+      for (const handler of Object.values(reread)) {
+        expect(handler).not.toHaveBeenCalled();
+      }
+      // A socket that went down missed what was said meanwhile: those are read again, once it is back.
+      LiveSocket.at(0).drop();
+      await vi.advanceTimersByTimeAsync(20_000);
+      LiveSocket.at(1).open();
+      await vi.advanceTimersByTimeAsync(0);
+      for (const handler of Object.values(reread)) {
+        expect(handler).toHaveBeenCalledTimes(1);
+      }
+      client.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("forgets the chats it held when access ends, and shows nothing of a snapshot that arrives after", async () => {
+    const { fetchImpl } = server({
+      c1: {
+        messages: [user(1, "ada's private chat")],
+        nextBefore: null,
+        liveCursor: at(1),
+      },
+    });
+    vi.stubGlobal("fetch", fetchImpl);
+    const client = new PimClient();
+    client.open("c1");
+    await flush();
+    expect(JSON.stringify(textOf(client))).toContain("ada's private chat");
+    client.stopLive();
+    // Whoever is signed in next opens the same chat: it is empty until its own snapshot.
+    expect(client.getState()).toMatchObject({ loaded: false, pending: [] });
+    expect(client.getState().view.entries).toHaveLength(0);
+    client.close();
+    client.open("c1");
+    expect(client.getState()).toMatchObject({ session: "c1", loaded: false });
+    expect(client.getState().view.entries).toHaveLength(0);
+
+    // A snapshot still on its way when access ended is not drawn.
+    let release: (value: Response) => void = () => {};
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => new Promise<Response>((resolve) => (release = resolve))),
+    );
+    const late = new PimClient();
+    late.open("c1");
+    await flush();
+    late.stopLive();
+    release({
+      ok: true,
+      status: 200,
+      type: "basic",
+      json: async () => ({
+        messages: [user(1, "arrived late")],
+        nextBefore: null,
+        liveCursor: at(1),
+      }),
+    } as Response);
+    await flush();
+    expect(late.getState().loaded).toBe(false);
+    expect(late.getState().view.entries).toHaveLength(0);
+    // Left open, a client would reopen its chat when the next test sets the server's generation.
+    late.close();
+    client.close();
+  });
+
   it("pages a long chat: the snapshot holds the newest messages, and older ones come on request", async () => {
     const { fetchImpl } = server({
       c1: {

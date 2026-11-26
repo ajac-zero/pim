@@ -218,6 +218,8 @@ real("Forge's worker role with the Gate and Maintenance", () => {
 		});
 		expect(transcript.map((m) => m.role)).toEqual(["user", "assistant", "tool", "assistant"]);
 		expect(transcript.at(-1)!.text).toBe("Built it.");
+		// The last message is written before the thread's state turns idle: wait for the state again, or a read in between sees it running.
+		await threadIs(id, "idle");
 		// The web app reads the same thread in its own shapes: an id, a repository object, a held slot, a creator, the whole transcript, and the list.
 		const page = (await web.call("GET", `/api/coding/threads/${id}`)).json;
 		expect(page).toMatchObject({ id, state: "idle", harness: "pi", repo: { url: REPO }, slot: "held", pool: "default", createdBy: { type: "person" }, spentUsd: expect.any(Number), createdAt: expect.any(Number) });

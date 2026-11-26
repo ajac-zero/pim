@@ -4,7 +4,7 @@
 
 export const SERVICES = ['sandbox-manager', 'egress-proxy', 'docker-socket-proxy', 'hostopsd']
 // The services of the Pim stack on Docker Compose (HOSTOPSD_STACK=compose), which packages/v2-server's HOST_SERVICES must list too.
-export const COMPOSE_SERVICES = ['caddy', 'postgres', 'pgbouncer', 'nats', 'seaweedfs', 'gate', 'live', 'runner', 'forge', 'maintenance', 'canvas', 'relay', 'pim-computer', 'sandbox-manager', 'hostopsd']
+export const COMPOSE_SERVICES = ['caddy', 'postgres', 'pgbouncer', 'nats', 'seaweedfs', 'gate', 'live', 'runner', 'forge', 'maintenance', 'web', 'canvas', 'relay', 'pim-computer', 'sandbox-manager', 'hostopsd']
 export const REF = /^[A-Za-z0-9._/-]{1,100}$/
 export const COMMIT = /^[0-9a-fA-F]{7,40}$/
 const OP_ID = /^[A-Za-z0-9_.:-]{1,128}$/

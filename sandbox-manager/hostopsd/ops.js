@@ -223,16 +223,22 @@ export function createOps(cfg, { state, save, log = () => {} }) {
 	const composeMode = cfg.stack === 'compose'
 	const pimSh = (args, timeoutMs) => run(path.join(cfg.composeDir, 'pim.sh'), args, { cwd: cfg.composeDir, env: { ...baseEnv, ...(cfg.pimDev ? { PIM_DEV: '1' } : {}) }, timeoutMs })
 
-	// Checks out a commit, builds the Pim image from it under the name the stack's .env gives (PIM_IMAGE), recreates the stack's containers and waits for them to be healthy
+	// Checks out a commit, builds both images from it under the names the stack's .env gives (PIM_IMAGE for the backend, PIM_WEB_IMAGE for the web app, which are separate images released
+	// separately and are always built here together, so what is deployed is one commit's backend and interface), recreates the stack's containers and waits for them to be healthy
 	// (`up --wait`, which runs the migrator first). Database migrations are not undone by going back.
 	async function composeCheckoutAndUp(sha) {
 		const image = cfg.composeEnv.PIM_IMAGE
 		if (!image) return { ok: false, step: 'checkout', error: `PIM_IMAGE is not set in ${path.join(cfg.composeDir, '.env')}` }
+		// Without the web image named here the stack would start the published one, which is some other commit's interface, or none: a backend without its web app.
+		const webImage = cfg.composeEnv.PIM_WEB_IMAGE
+		if (!webImage || webImage.includes('@')) return { ok: false, step: 'checkout', error: `PIM_WEB_IMAGE must name an image to build from source (such as pim-web:v2) in ${path.join(cfg.composeDir, '.env')}; a deploy builds the web app with the backend` }
 		const co = await git(['checkout', '--detach', '--quiet', sha], t.git)
 		if (co.code !== 0) return { ok: false, step: 'checkout', error: failText(`git checkout ${short(sha)}`, co) }
 		// The image says which commit it is (shown in Settings → Deployment); a source build has no release version.
 		const build = await run('docker', ['build', '-f', 'deploy/Dockerfile.v2', '--build-arg', `PIM_REVISION=${sha}`, '-t', image, '.'], { cwd: checkout, env: baseEnv, timeoutMs: t.up })
 		if (build.code !== 0) return { ok: false, step: 'build', error: failText('docker build', build) }
+		const web = await run('docker', ['build', '-f', 'deploy/Dockerfile.web', '--build-arg', `PIM_REVISION=${sha}`, '-t', webImage, '.'], { cwd: checkout, env: baseEnv, timeoutMs: t.up })
+		if (web.code !== 0) return { ok: false, step: 'build', error: failText('docker build (web app)', web) }
 		const up = await pimSh(['up', '-d', '--wait', '--wait-timeout', String(Math.ceil(cfg.healthTimeoutMs / 1000))], t.up)
 		if (up.code !== 0) return { ok: false, step: 'up', error: failText('docker compose up', up) }
 		const ps = await pimSh(['ps', '--format', '{{json .}}'], t.compose)

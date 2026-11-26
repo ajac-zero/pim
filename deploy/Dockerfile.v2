@@ -8,39 +8,7 @@
 # the update check reads from the registry. A local build without them is `dev` at an unknown revision, which is never offered an update.
 #
 # The sources run under tsx, which keeps every package's own paths (its migrations, its SQL) where the code expects them; there is no bundle.
-# The web app (web/) is built in its own stage and served by the Gate from PIM_WEB_DIR (packages/v2-server/src/web-assets.ts).
-FROM node:26-bookworm-slim AS web
-
-# Node 26 no longer ships corepack; pnpm is the version package.json pins.
-RUN npm install -g pnpm@12.0.0
-WORKDIR /app
-# Install layers come first and take only manifests (the lockfile, the workspace file, patches and each workspace package's package.json, at their own paths), so a source change reuses the
-# cached install, native modules such as sharp included. Add a line here when a workspace package is added; `pnpm install --frozen-lockfile` fails if one is missing.
-COPY pnpm-lock.yaml pnpm-workspace.yaml package.json ./
-COPY patches ./patches
-COPY web/package.json ./web/
-COPY packages/coding/package.json ./packages/coding/
-COPY packages/shared/package.json ./packages/shared/
-COPY packages/triggers/package.json ./packages/triggers/
-COPY packages/ui-lang/package.json ./packages/ui-lang/
-COPY packages/v2-app/package.json ./packages/v2-app/
-COPY packages/v2-contracts/package.json ./packages/v2-contracts/
-COPY packages/v2-forge/package.json ./packages/v2-forge/
-COPY packages/v2-live/package.json ./packages/v2-live/
-COPY packages/v2-ops/package.json ./packages/v2-ops/
-COPY packages/v2-runtime/package.json ./packages/v2-runtime/
-COPY packages/v2-server/package.json ./packages/v2-server/
-RUN pnpm install --frozen-lockfile --filter "pim-web..."
-COPY packages ./packages
-# The web build reads the computer's sources (web/vite.config.ts).
-COPY web ./web
-COPY computer ./computer
-COPY displayd ./displayd
-# Run through npm, not pnpm: `pnpm run` first checks that node_modules matches every workspace manifest and, when it thinks they differ (the sources were copied after the install),
-# installs the whole workspace again, which fails on the test-only Postgres binaries and is not needed here.
-WORKDIR /app/web
-RUN npm run build
-
+# The image carries no web app: that is its own image (deploy/Dockerfile.web), served by the web host, so the interface and the backend are released separately.
 FROM node:26-bookworm-slim AS build
 
 # Node 26 no longer ships corepack; pnpm is the version package.json pins.
@@ -71,12 +39,13 @@ LABEL org.opencontainers.image.version=$PIM_VERSION org.opencontainers.image.rev
 ENV NODE_ENV=production PIM_VERSION=$PIM_VERSION PIM_REVISION=$PIM_REVISION
 WORKDIR /app/packages/v2-server
 COPY --from=build /app /app
-COPY --from=web /app/web/dist /app/web/dist
 # pim-computer, pim-host and the triggers runtime: the Gate serves them (/pim-computer.ts, /pim-host.ts, /triggers-host.ts, ...; machines update themselves from them), and the `local-computer` profile and a container host run them.
 COPY computer /app/computer
+# displayd's files, which the Gate serves as /displayd.tar.gz for a computer to get displayd from the same Pim (displayd/bundle.js).
+COPY displayd/package.json displayd/bundle.js /app/displayd/
+COPY displayd/src /app/displayd/src
 # The folder a computer's files are mounted on, owned by `node`: a new volume takes the owner this folder has in the image.
 RUN mkdir -p /workspace && chown node:node /workspace
-ENV PIM_WEB_DIR=/app/web/dist
 # The roles listen on PIM_HTTP_PORT (8080) and PIM_METRICS_PORT (9464); the filesystem is read-only in both deployments, and /tmp is a tmpfs.
 USER node
 EXPOSE 8080 9464

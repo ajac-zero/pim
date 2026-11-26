@@ -227,7 +227,7 @@ real("the vertical slice", () => {
 
 	it("runs a coding thread under an explicit grant and a standing approval, wakes the chat that started it, and records its spend", async () => {
 		const forgeDb = d.stack.admin as unknown as ForgeDb;
-		const authz = new Authz(forgeDb, { branchPrefix: "pim/" });
+		const authz = new Authz(forgeDb);
 		const actor = { ownerId, role: "admin" as const };
 		// A person's harness logins are on the Gate too, sealed under the deployment's keys: none connected yet, and no key material in the answer.
 		const vault = await web.call("GET", "/api/coding/vault");

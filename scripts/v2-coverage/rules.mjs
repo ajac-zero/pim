@@ -139,7 +139,7 @@ export const RULES = [
 	["B5", /^Scheduler/, "Replaced", "ForgeScheduler (slots, queue, breakers, login locks)", forge("scheduler"), V, ""],
 	["B5", /^Thread index/, "Replaced", "forge store, stall supervisor, Live sidebar", [forge("lifecycle", "http"), srv("forge-bridge")].join(", "), V, ""],
 	["B5", /^Thread transcript/, "Replaced", "forge_events, transcript paging, Live coding topic", [forge("transcript"), srv("forge-bridge")].join(", "), V, ""],
-	["B5", /^Normal-agent ↔ coding/, "Changed", "coding_wake into the chat's partition; spend to the ledger; the coding agent pushes its own pim/ branch and opens its own pull request through the broker, and merge stays a person's (Forge.merge, gated by permission)", [srv("forge-bridge"), slice, host, forge("lifecycle")].join(", "), V, "A real git host was not run."],
+	["B5", /^Normal-agent ↔ coding/, "Changed", "coding_wake into the chat's partition; spend to the ledger; the coding agent pushes its own branch and opens its own pull request through the broker, and merge stays a person's (Forge.merge, gated by permission)", [srv("forge-bridge"), slice, host, forge("lifecycle")].join(", "), V, "A real git host was not run."],
 	["B5", /^Harness: `pi`/, "Preserved", "PiTurnPort over pi-durable on PgPiStorage", forge("pi"), V, ""],
 	["B5", /^Harness: `claude-code`/, "Preserved", "CliTurnPort", forge("cli-e2e"), V, "Interactive login not run."],
 	["B5", /^Harness: `codex`/, "Preserved", "CliTurnPort", forge("cli-e2e"), V, "Interactive login not run."],

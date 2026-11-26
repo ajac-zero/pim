@@ -1,129 +1,179 @@
 name: CI
 
+# Each run does only what the change can reach. `changes` reads the diff (a pull request's merge base up to its head, a push's range) and the repository's real dependency graph
+# (scripts/ci-scope.mjs) and says which jobs run; every other job is skipped, and `CI result` is the one check that always reports: it fails unless every selected job succeeded
+# (scripts/ci-aggregate.mjs). A change to the toolchain, the lockfile, these workflows, a file no component owns, or a diff that cannot be made runs everything.
+# Require `CI result` in branch protection: it exists on every run, whatever was selected, so a skipped job never leaves a required check pending.
+#
+# There is no `paths:` filter on purpose: a workflow that does not start leaves its required checks pending forever.
 on:
   pull_request:
   push:
-    branches: [main, "pim/**"]
+    branches: [main]
+  workflow_dispatch:
 
+# A newer push to a pull request replaces its run. Runs on main are never cancelled: the image publish waits for this workflow on each commit (publish.yml).
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-# Every job runs on every change, side by side, and each is sized to finish in about a minute and a half with its setup, so CI as a whole
-# answers in under two. The Compose smoke test runs after a push to main, in compose.yml.
+permissions:
+  contents: read
+
 jobs:
-  # Biome over web/, and the check that the repository names no deployment's internal hosts or identifiers.
+  # Reads the diff and the graph. Everything below waits for it and reads its `scope`.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      scope: ${{ steps.scope.outputs.scope }}
+    steps:
+      # The whole history: the merge base of a pull request, and a push's range, need commits a shallow clone does not have. A missing base is not an error: it runs everything.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: scope
+        run: node scripts/ci-scope.mjs --event "$EVENT" --base "$BASE" --head "$HEAD"
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+
+  # The check that the repository names no deployment's internal hosts or identifiers, always; Biome over web/ when the web app is reached.
   lint:
+    needs: changes
+    if: fromJSON(needs.changes.outputs.scope).jobs.lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - run: node scripts/check-internal-identifiers.mjs
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - if: fromJSON(needs.changes.outputs.scope).jobs.lint-web
+        uses: ./.github/actions/setup
         with:
-          node-version-file: .nvmrc
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm lint
+          filter: pim-web...
+      - if: fromJSON(needs.changes.outputs.scope).jobs.lint-web
+        run: pnpm lint
 
+  # The root's TypeScript project (the computer and the scripts), each reached package's, and the web app's.
   typecheck:
+    needs: changes
+    if: fromJSON(needs.changes.outputs.scope).jobs.typecheck
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version-file: .nvmrc
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm typecheck
+      - uses: ./.github/actions/setup
+      - if: fromJSON(needs.changes.outputs.scope).typecheck.root
+        run: pnpm exec tsc --noEmit
+      - name: Reached packages
+        run: |
+          filters="$(printf '%s' "$SCOPE" | jq -r '.typecheck.packages | map("--filter @pim/" + .) | join(" ")')"
+          [ -z "$filters" ] || pnpm $filters --workspace-concurrency=4 typecheck
+        env:
+          SCOPE: ${{ needs.changes.outputs.scope }}
+      - if: fromJSON(needs.changes.outputs.scope).typecheck.web
+        run: pnpm --filter pim-web typecheck
 
   web:
+    needs: changes
+    if: fromJSON(needs.changes.outputs.scope).jobs.web
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: ./.github/actions/setup
         with:
-          node-version-file: .nvmrc
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
+          filter: pim-web...
       - run: pnpm --filter pim-web test
 
-  # The standalone daemons (displayd, sandbox-manager and its hostopsd, workspace-agentd): `node --test`.
-  daemons:
+  # The web app builds, as its image will build it (deploy/Dockerfile.web); its image is verified by `image-web`.
+  web-build:
+    needs: changes
+    if: fromJSON(needs.changes.outputs.scope).jobs.web-build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: ./.github/actions/setup
         with:
-          node-version-file: .nvmrc
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm test:daemons
+          filter: pim-web...
+      - run: pnpm --filter pim-web build
 
-  # The root's Node project: the computer's tests, which start real processes (computer/test, the supervisor of apps), and the repository's own scripts (scripts/*.test.ts), four files at a time on this runner.
-  node:
+  # The standalone daemons that were reached (displayd, sandbox-manager and its hostopsd, workspace-agentd, the web host): `node --test`, each one's own tests.
+  daemons:
+    needs: changes
+    if: fromJSON(needs.changes.outputs.scope).jobs.daemons
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version-file: .nvmrc
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm exec vitest run --maxWorkers=4
+      - uses: ./.github/actions/setup
+      - run: |
+          globs=""
+          for daemon in $(printf '%s' "$SCOPE" | jq -r '.daemons[]'); do
+            case "$daemon" in
+              displayd) globs="$globs displayd/test/*.test.js" ;;
+              sandbox-manager) globs="$globs sandbox-manager/test/*.test.js sandbox-manager/hostopsd/test/*.test.js" ;;
+              workspace-agentd) globs="$globs workspace-agentd/test/*.test.mjs" ;;
+              web-host) globs="$globs web-host/test/*.test.js" ;;
+              *) echo "no tests known for $daemon" >&2; exit 1 ;;
+            esac
+          done
+          node --test $globs
+        env:
+          SCOPE: ${{ needs.changes.outputs.scope }}
+
+  # The root's Node project: the computer's tests when the computer is reached (they start real processes: the supervisor of apps), and the repository's own scripts' tests (the import
+  # rules, the coverage matrix, this selection) for anything but prose.
+  node:
+    needs: changes
+    if: fromJSON(needs.changes.outputs.scope).jobs.node
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+      - run: |
+          if [ "$COMPUTER" = true ]; then pnpm exec vitest run --maxWorkers=4; else pnpm exec vitest run scripts/ --maxWorkers=4; fi
+        env:
+          COMPUTER: ${{ fromJSON(needs.changes.outputs.scope).node.computer }}
 
   # Pim's desktop driver on a real display: displayd starts Xvnc, openbox, the accessibility bus and the driver, as in the computer image (deploy/Dockerfile.computer),
   # and the test drives a GTK app with it. The node job skips the file, which has no display there.
   desktop:
+    needs: changes
+    if: fromJSON(needs.changes.outputs.scope).jobs.desktop
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version-file: .nvmrc
-          cache: pnpm
+      - uses: ./.github/actions/setup
       - run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends tigervnc-standalone-server openbox dbus at-spi2-core xauth xdotool wmctrl python3-gi gir1.2-atspi-2.0 gir1.2-gtk-3.0
-      - run: pnpm install --frozen-lockfile
       - run: pnpm exec vitest run computer/test/desktop-driver.test.ts
         env:
           PIM_REQUIRE_DESKTOP: "1"
 
-  # Every package's own tests but @pim/v2-server's, all packages at once rather than in dependency order (their tests don't depend on each other's).
+  # The reached packages' own tests but @pim/v2-server's, all at once rather than in dependency order (their tests don't depend on each other's).
   packages:
+    needs: changes
+    if: fromJSON(needs.changes.outputs.scope).jobs.packages
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version-file: .nvmrc
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
+      - uses: ./.github/actions/setup
       # The v2 packages' tests run against a real PostgreSQL and NATS; a missing binary fails them rather than skipping them.
       - run: packages/v2-runtime/scripts/ensure-postgres.sh
       - run: packages/v2-server/scripts/ensure-nats.sh
-      # `pnpm test:packages:rest`, with every package started at once rather than four at a time, which this runner holds.
-      - run: pnpm --filter "./packages/*" --filter "!@pim/v2-server" --no-sort --workspace-concurrency=16 test
+      - run: |
+          filters="$(printf '%s' "$SCOPE" | jq -r '.packages.rest | map("--filter @pim/" + .) | join(" ")')"
+          pnpm $filters --no-sort --workspace-concurrency=16 test
         env:
+          SCOPE: ${{ needs.changes.outputs.scope }}
           PIM_V2_REQUIRE_INFRA: "1"
           PIM_NATS_BIN: /usr/local/bin/nats-server
 
-  # The integration tests of @pim/v2-server, the longest package, four files at a time, each in a database copied from a template.
+  # The integration tests of @pim/v2-server, the longest package, four files at a time, each in a database copied from a template. They run when anything the server imports,
+  # spawns or serves is reached; a change to the web app alone does not reach them.
   v2-server:
+    needs: changes
+    if: fromJSON(needs.changes.outputs.scope).jobs.v2-server
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version-file: .nvmrc
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
+      - uses: ./.github/actions/setup
       - run: packages/v2-runtime/scripts/ensure-postgres.sh
       - run: packages/v2-server/scripts/ensure-nats.sh
       - run: pnpm test:packages:v2-server
@@ -131,3 +181,85 @@ jobs:
           PIM_V2_REQUIRE_INFRA: "1"
           PIM_NATS_BIN: /usr/local/bin/nats-server
           PIM_V2_TEST_WORKERS: "4"
+
+  # The images build, each only when something its Dockerfile copies changed (scripts/ci-scope.mjs reads the Dockerfile's COPY sources). Nothing is pushed: the images that are
+  # published are built, or found already built, by publish.yml. The layer cache is the one publish.yml writes, per image.
+  image-backend:
+    needs: changes
+    if: fromJSON(needs.changes.outputs.scope).jobs.image-backend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile.v2
+          push: false
+          cache-from: type=gha,scope=pim
+          cache-to: type=gha,mode=max,scope=pim
+
+  image-web:
+    needs: changes
+    if: fromJSON(needs.changes.outputs.scope).jobs.image-web
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile.web
+          push: false
+          cache-from: type=gha,scope=pim-web
+          cache-to: type=gha,mode=max,scope=pim-web
+
+  # The registry adapter and the publish promotions (scripts/registry.mjs, edge-promote.mjs, release-promote.mjs) against a real buildx and a throwaway local registry, with the production
+  # adapter: what `docker buildx imagetools` really prints, labels of a multi-platform image, tagging a reused image, records. Nothing is published anywhere.
+  registry:
+    needs: changes
+    if: fromJSON(needs.changes.outputs.scope).jobs.registry
+    runs-on: ubuntu-latest
+    services:
+      registry:
+        image: registry:2
+        ports:
+          - 5000:5000
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: network=host
+      - uses: ./.github/actions/setup
+      - run: pnpm exec vitest run scripts/registry.integration.test.ts
+        env:
+          PIM_TEST_REGISTRY: localhost:5000
+
+  image-computer:
+    needs: changes
+    if: fromJSON(needs.changes.outputs.scope).jobs.image-computer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile.computer
+          push: false
+          cache-from: type=gha,scope=pim-computer
+          cache-to: type=gha,mode=max,scope=pim-computer
+
+  # The one required check. It always runs, and fails if `changes` failed or if any job fails, is cancelled, or was selected and did not succeed.
+  ci:
+    name: CI result
+    if: always()
+    needs: [changes, lint, typecheck, web, web-build, daemons, node, desktop, packages, v2-server, image-backend, image-web, registry, image-computer]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts
+      - run: node scripts/ci-aggregate.mjs
+        env:
+          NEEDS: ${{ toJSON(needs) }}

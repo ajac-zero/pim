@@ -1,6 +1,5 @@
 import { dispatch, type Route } from "@pim/shared/http";
 import { type BrokerClaims, brokerKey, checkPushScope, GitBrokerError, MAX_PUSH_BYTES, parseAdvertisement, parseReceivePackRequest, type RepoRef, repoRef, issueBrokerToken, verifyBrokerToken, ZERO } from "./broker";
-import { type BrokerPolicy } from "./config";
 import { GiteaNotConnectedError } from "./gitea-connection";
 import { type Fetch, GitHubApp } from "./github-app";
 import { GitHubProvider } from "./github-provider";
@@ -35,7 +34,6 @@ export type GitBrokerDeps = {
 	readonly key: CryptoKey;
 	/** The deployment's GitHub App; null when it isn't configured. */
 	readonly app: GitHubApp | null;
-	readonly policy: BrokerPolicy;
 	/** The deployment's git providers; without them, only GitHub's. */
 	readonly providers?: ProviderRegistry;
 	readonly fetch?: Fetch;
@@ -285,9 +283,9 @@ async function receivePack(deps: GitBrokerDeps, admitted: { repo: RepoRef; claim
 	const branch = claims.pushBranch!;
 	const ref = `refs/heads/${branch}`;
 	// Scope first, so a push of any other ref is refused without asking the host anything; then against the host's tip.
-	checkPushScope(commands, capabilities, branch, commands[0]?.old === ZERO ? null : commands[0]?.old ?? null, deps.policy);
+	checkPushScope(commands, capabilities, branch, commands[0]?.old === ZERO ? null : commands[0]?.old ?? null);
 	const tip = await remoteTip(deps, provider, repo, ref);
-	const command = checkPushScope(commands, capabilities, branch, tip, deps.policy);
+	const command = checkPushScope(commands, capabilities, branch, tip);
 	const answer = await proxy(deps, admitted, request, "/git-receive-pack", {
 		method: "POST",
 		body,

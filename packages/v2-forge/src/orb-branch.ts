@@ -1,5 +1,9 @@
 // What an Amp thread pushed, found as v1 found it: Pim never sees the orb's git, so what the agent said it pushed (a branch the host has, or a commit it has) is what its diff, pull request and merge follow.
+import { checkBranch } from "@pim/coding/git-broker/broker";
 import { type OrbMessage } from "@pim/coding/orb/types";
+import { type Db } from "./db";
+import { type GitHost } from "./ports";
+import { type ThreadRow } from "./store";
 
 /** What an orb message says, with the steps it took: a push is more often in a command or its output than in the agent's words. */
 export const orbMessageText = (m: OrbMessage): string =>
@@ -34,5 +38,39 @@ export async function pushedByAgent(o: { texts: readonly string[]; branches: Rea
 			if (sha && sha !== o.from) return sha;
 		}
 	}
+	return null;
+}
+
+/** A commit ID, which names no branch: a thread's diff may follow one, but no write is ever made to it. */
+const COMMIT = /^[0-9a-f]{40}$/;
+
+/**
+ * Why a branch an Amp thread already follows may not be used for a write or a pull request now, or null when it may: it is an ordinary valid branch that is not the default branch
+ * (`checkBranch`) and no other thread follows it. This is asked again every time Pim acts on a recorded branch (a merge, a pull request), because a recorded row is not an authority: it
+ * might predate these rules, or have been edited. It does not ask for the baseline, which a thread that began before baselines were taken does not have; that is asked only when a branch is first recorded.
+ */
+export async function refuseFollowedBranch(c: { db: Db; git?: GitHost | undefined }, t: ThreadRow, branch: string): Promise<string | null> {
+	if (COMMIT.test(branch)) return null;
+	try {
+		checkBranch(branch, c.git ? await c.git.defaultBranch(t.repo) : null);
+	} catch (error) {
+		return error instanceof Error ? error.message : "that isn't a branch Pim may follow";
+	}
+	const taken = await c.db.query("select 1 from pim_forge.forge_threads where thread_id <> $1 and lower(repo) = lower($2) and (branch = $3 or orb ->> 'branch' = $3) limit 1", [t.threadId, t.repo, branch]);
+	return taken.rows.length ? `${branch} belongs to another thread` : null;
+}
+
+/**
+ * Why a branch the orb is said to have pushed may not be followed by this thread yet, or null when it may. An Amp thread chooses its own branch names, so Pim does not name them; what keeps it
+ * from following someone else's branch, or from merging into anything it did not make, is what the thread itself shows: the name passes `refuseFollowedBranch`, and it did not exist on the git host when
+ * the thread began (`orb.baseline`, taken before the thread was started). A thread whose baseline could not be taken follows nothing new.
+ */
+export async function refuseOrbBranch(c: { db: Db; git?: GitHost | undefined }, t: ThreadRow, branch: string): Promise<string | null> {
+	if (COMMIT.test(branch)) return null;
+	const refused = await refuseFollowedBranch(c, t, branch);
+	if (refused !== null) return refused;
+	const baseline = t.orb?.baseline;
+	if (!Array.isArray(baseline)) return "the branches that existed when this thread began are not known";
+	if (baseline.includes(branch) && branch !== t.orb?.branch) return `${branch} existed before this thread began`;
 	return null;
 }

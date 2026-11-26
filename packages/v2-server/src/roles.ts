@@ -48,7 +48,6 @@ import { vapidFromEnv } from "./push.ts";
 import { startApprovalReviews } from "./approval-review.ts";
 import { startTaskSettler } from "./task-settler.ts";
 import { sweepApprovals, sweepErasures, sweepHeldRetries, tickSchedules, tickTriggers, trimForgeOutbox } from "./sweeps.ts";
-import { webAssets } from "./web-assets.ts";
 import { poolRoutes } from "./compat/admin.ts";
 import { webCompatRoutes } from "./compat/index.ts";
 import { gateBefore, limitGuestMessages } from "./limits.ts";
@@ -146,8 +145,6 @@ export async function startGate(config: ProcessConfig, env: Env, host: Host, nat
 		first: [...webCompatRoutes], before: gateBefore(app, env) };
 	const gate = createGate(app, options);
 	const listener = gate.listeners("request")[0] as (req: never, res: never) => void;
-	const web = webAssets(env.PIM_WEB_DIR);
-	if (web) host.handle(web);
 	host.handle((req, res) => (listener(req as never, res as never), true));
 	// The host owns the server's `upgrade` event and destroys a socket none of its handlers claims, so the Gate's sockets (a computer connecting, the desktop,
 	// the browser, notes, a hosted app's own) are claimed by path here rather than listened for on the server.

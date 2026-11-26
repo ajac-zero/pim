@@ -47,7 +47,7 @@ describe("git broker over smart HTTP", () => {
 	const hostRef = (ref: string) => execFileSync("git", ["--git-dir", s.bare, "rev-parse", ref], { encoding: "utf8" }).trim();
 	const sandbox = () => mkdtempSync(join(tmpdir(), "sbx-"));
 
-	it("clones with a token, pushes the thread's own pim/* branch, records it, and hides the host's credential", async () => {
+	it("clones with a token, pushes the thread's own branch, records it, and hides the host's credential", async () => {
 		const t = await thread();
 		const dir = sandbox();
 		const push = s.credentials.gitToken(t, { repo: "acme/app", scope: "push" });
@@ -80,7 +80,7 @@ describe("git broker over smart HTTP", () => {
 		await git(w, null, "add", ".");
 		await git(w, null, "commit", "-m", "c");
 		const mainBefore = hostRef("main");
-		for (const ref of ["refs/heads/main", "refs/heads/feature/x", "refs/heads/pim/someone-elses-1234", "refs/tags/v1"]) {
+		for (const ref of ["refs/heads/main", "refs/heads/feature/x", "refs/heads/someone-elses-1234", "refs/heads/pim-staging/x", `refs/heads/${t.branch}-2`, "refs/tags/v1"]) {
 			const r = await git(w, push, "push", "origin", `HEAD:${ref}`);
 			expect(r.status, ref).not.toBe(0);
 			expect(r.stderr, ref).toMatch(/403|refused|denied/i);
@@ -116,7 +116,7 @@ describe("git broker over smart HTTP", () => {
 		expect(((await early.json()) as { code: string }).code).toBe("not_pushed");
 		await pushed(t, push);
 		const before = s.git.pullRequests.length;
-		const res = await openPr(push, { title: "  Add the thing ", body: "Changed a; ran the tests.", head: "main", base: "release", branch: "pim/other", repo: "evil/x" });
+		const res = await openPr(push, { title: "  Add the thing ", body: "Changed a; ran the tests.", head: "main", base: "release", branch: "other-branch", repo: "evil/x" });
 		expect(res.status).toBe(200);
 		const answer = (await res.json()) as { url: string; number: number; title: string; base: string; head: string };
 		expect(answer).toMatchObject({ title: "Add the thing", base: "main", head: t.branch });
@@ -153,7 +153,7 @@ describe("git broker over smart HTTP", () => {
 		await git(w, null, "commit", "-m", "z");
 		const main = hostRef("main");
 		const mine = hostRef(`refs/heads/${t.branch}`);
-		for (const ref of ["refs/heads/main", "refs/heads/pim/not-mine", "refs/heads/feature"]) expect((await git(w, push, "push", "origin", `HEAD:${ref}`)).status, ref).not.toBe(0);
+		for (const ref of ["refs/heads/main", "refs/heads/not-mine", "refs/heads/feature"]) expect((await git(w, push, "push", "origin", `HEAD:${ref}`)).status, ref).not.toBe(0);
 		expect((await git(w, push, "push", "origin", `:refs/heads/${t.branch}`)).status).not.toBe(0);
 		expect(hostRef("main")).toBe(main);
 		expect(hostRef(`refs/heads/${t.branch}`)).toBe(mine);
@@ -296,8 +296,8 @@ describe("git broker over smart HTTP", () => {
 		const line = (text: string) => new TextEncoder().encode((text.length + 4).toString(16).padStart(4, "0") + text);
 		const a = "a".repeat(40);
 		const b = "b".repeat(40);
-		const body = new Uint8Array([...line(`${a} ${b} refs/heads/pim/x\0report-status`), ...new TextEncoder().encode("0000"), 1, 2, 3]);
-		expect(pushCommands(body)).toEqual([{ old: a, next: b, ref: "refs/heads/pim/x" }]);
+		const body = new Uint8Array([...line(`${a} ${b} refs/heads/x\0report-status`), ...new TextEncoder().encode("0000"), 1, 2, 3]);
+		expect(pushCommands(body)).toEqual([{ old: a, next: b, ref: "refs/heads/x" }]);
 		expect(() => pushCommands(new TextEncoder().encode("zzzz"))).toThrow();
 	});
 });

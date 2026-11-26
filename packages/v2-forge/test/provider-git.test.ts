@@ -45,7 +45,7 @@ describe("ProviderGitHost", () => {
 		await s.close();
 	});
 
-	it("merges an Amp thread's pushed pim/* branch by fast-forward, then by rebase, signing in with the deployment's credential", async () => {
+	it("merges an Amp thread's own pushed branch by fast-forward, then by rebase, signing in with the deployment's credential", async () => {
 		const clone = await s.sandboxes.create("amp-pusher-2");
 		await s.sandboxes.exec(clone, ["git", "clone", s.bare, "."]);
 		const mk = async (branch: string, file: string) => {
@@ -55,23 +55,25 @@ describe("ProviderGitHost", () => {
 			await s.sh(clone, "commit", "-m", branch);
 			await s.sh(clone, "push", s.bare, `${branch}:refs/heads/${branch}`);
 		};
-		await mk("pim/amp-a-1111", "a.txt");
-		await mk("pim/amp-b-2222", "b.txt");
-		const orbs = async (n: string, branch: string) => {
+		const orbs = async (n: string) => {
 			const { threadId } = await forge.start(ada, startReq(n, { harness: "amp" }));
-			await s.worker().step(threadId);
-			await forge.recordOrbBranch(threadId, branch);
+			// The thread begins first: what the host holds then is not its to follow, what it pushes after is.
+			await s.worker({ git: (forge as any).c.git }).step(threadId);
 			return threadId;
 		};
-		const a = await orbs("pg-1", "pim/amp-a-1111");
-		const b = await orbs("pg-2", "pim/amp-b-2222");
+		const a = await orbs("pg-1");
+		const b = await orbs("pg-2");
+		await mk("amp-a-1111", "a.txt");
+		await mk("amp-b-2222", "b.txt");
+		expect(await forge.recordOrbBranch(a, "amp-a-1111")).toBe(true);
+		expect(await forge.recordOrbBranch(b, "amp-b-2222")).toBe(true);
 		credentialCalls = [];
 		expect(await forge.merge(ada, a)).toMatchObject({ outcome: "merged", method: "fast-forward" });
-		expect(hostGit("show", "main:a.txt")).toBe("pim/amp-a-1111");
+		expect(hostGit("show", "main:a.txt")).toBe("amp-a-1111");
 		// main moved under b: it rebases.
 		expect(await forge.merge(ada, b)).toMatchObject({ outcome: "merged", method: "rebase" });
-		expect(hostGit("show", "main:b.txt")).toBe("pim/amp-b-2222");
-		expect(hostGit("show", "main:a.txt")).toBe("pim/amp-a-1111");
+		expect(hostGit("show", "main:b.txt")).toBe("amp-b-2222");
+		expect(hostGit("show", "main:a.txt")).toBe("amp-a-1111");
 		expect(credentialCalls).toContain("write");
 		expect(host.requests.some((r) => r.auth === AUTH)).toBe(true);
 		// Its diff and pull request come from the provider's API.

@@ -929,6 +929,16 @@ export type Provenance = {
   emitter: ModelIdentity | null;
   contributors: ModelIdentity[];
   complete: boolean;
+  /** Said by another agent in a group chat: its request is in that agent's own chat, and this chat holds no record of its model. */
+  elsewhere?: true;
+};
+
+/** What a group chat's post by another agent carries: nothing of its model reaches this chat (see docs/reference.md). */
+export const POSTED: Provenance = {
+  emitter: null,
+  contributors: [],
+  complete: false,
+  elsewhere: true,
 };
 
 const sameModel = (a: ModelIdentity, b: ModelIdentity) =>
@@ -1026,6 +1036,8 @@ export function layoutThread(
   entries: readonly ThreadEntry[],
   options: {
     shown: (call: FunctionCallItem) => boolean;
+    /** The transcript starts mid-work: older messages are on the server, so work before its first boundary may be missing requests. */
+    truncated?: boolean;
     /** A `send_to_user` call the tool refused (an unknown widget, an email that couldn't go): nothing reached the person. */
     refused?: (call: FunctionCallItem) => boolean;
     work?: {
@@ -1050,14 +1062,34 @@ export function layoutThread(
   /** When the work's latest step ended. */
   let until: number | null = null;
   /*
-   * Provenance. The work toward a message is every successful model request since the last thing that opened a new turn of work: a person's message, a notice, or another
-   * agent's post, or the previous message sent. Failed requests and the retries after them are entries of their own that do not count, and a retry or a continuation after a
-   * failure is part of the same stretch. The requests of one message are one point, by its entry id, and a request that made several `send_to_user` calls gave them all one
-   * provenance, and what it sent is not counted as work toward the next message.
+   * Provenance. The work toward a message is every successful model request since the last thing that opened new work: a person's message, a context reset, another agent's
+   * post, or the previous message sent (a compaction is not one: what came before it is still in the transcript). Failed requests, and the retries and continuations after
+   * them, are entries of their own: only successful requests count. A request is counted once, by its entry id. When it made `send_to_user` calls, those share one provenance,
+   * and the request counts toward the next message only if it also made another tool call, whose result that message rests on; text it wrote after its sends leads nowhere.
+   * Where the loaded transcript starts mid-work (`truncated`: older messages are still on the server), the work before its first boundary may have requests that are not here,
+   * so what is built from it is never complete.
    */
   let worked = new Map<string, ModelIdentity | null>();
-  const emitted = new Map<string, ModelIdentity | null>();
+  let open = options.truncated ?? false;
+  const emitted = new Map<
+    string,
+    { model: ModelIdentity | null; ok: boolean }
+  >();
   const sentFrom = new Map<string, Provenance>();
+  /** The requests that made a tool call that is not a send: their work goes on after what they sent. */
+  const forward = new Set(
+    entries.flatMap((entry) =>
+      entry.kind === "item" &&
+      entry.item.type === "function_call" &&
+      !sentOf(entry.item as FunctionCallItem)
+        ? [entry.key.split(":")[0] as string]
+        : [],
+    ),
+  );
+  const opened = () => {
+    worked = new Map();
+    open = false;
+  };
   const provenanceOf = (id: string): Provenance => {
     const known = sentFrom.get(id);
     if (known) return known;
@@ -1068,12 +1100,14 @@ export function layoutThread(
       }
     }
     const provenance = {
-      emitter: emitted.get(id) ?? null,
+      emitter: emitted.get(id)?.model ?? null,
       contributors,
-      complete: ![...worked.values()].includes(null),
+      complete: !open && ![...worked.values()].includes(null),
     };
     sentFrom.set(id, provenance);
-    worked = new Map();
+    opened();
+    const by = emitted.get(id);
+    if (by?.ok && forward.has(id)) worked.set(id, by.model);
     return provenance;
   };
   const lines = options.work?.lines ?? {};
@@ -1117,21 +1151,24 @@ export function layoutThread(
   };
   for (const entry of entries) {
     if (entry.kind === "notice" || entry.kind === "post") {
-      worked = new Map();
+      if (entry.kind === "post" || entry.notice.kind !== "compaction") {
+        opened();
+      }
       own(entry);
       continue;
     }
     const { item } = entry;
     const id = entry.key.split(":")[0] as string;
     if (entry.by) {
-      emitted.set(id, entry.by.model);
-      if (entry.by.ok) worked.set(id, entry.by.model);
+      emitted.set(id, entry.by);
+      // Before its sends; after them, a request counts only through `forward`.
+      if (entry.by.ok && !sentFrom.has(id)) worked.set(id, entry.by.model);
     }
     switch (item.type) {
       case "message":
       case "reasoning":
         if ((item as MessageItem).role === "user") {
-          worked = new Map();
+          opened();
           own(entry);
         } else if (entry.source === "agent") {
           if (steps.length === 0) workKey = entry.key;
@@ -1156,8 +1193,6 @@ export function layoutThread(
             at: entry.at,
             provenance: provenanceOf(id),
           });
-          // A request that made several sends is not work toward what follows the first of them.
-          worked.delete(id);
           since = entry.at;
         } else if (options.shown(call)) own(entry);
         else {

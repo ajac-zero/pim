@@ -365,6 +365,8 @@ const translations = {
     modelAlsoWorked: "Also worked on it: {models}",
     modelStepsUnknown: "Some steps before it have no recorded model.",
     modelNotRecorded: "This message has no recorded model.",
+    modelElsewhere:
+      "Another agent wrote this in its own chat, and this chat doesn't record its model.",
     forkChat: "Fork from here",
     editMessage: "Edit message",
     retryFromHere: "Retry from here",
@@ -2511,6 +2513,8 @@ const translations = {
     modelAlsoWorked: "También trabajaron en él: {models}",
     modelStepsUnknown: "Algunos pasos anteriores no tienen modelo registrado.",
     modelNotRecorded: "Este mensaje no tiene modelo registrado.",
+    modelElsewhere:
+      "Otro agente lo escribió en su propio chat, y este chat no registra su modelo.",
     forkChat: "Bifurcar desde aquí",
     editMessage: "Editar mensaje",
     retryFromHere: "Reintentar desde aquí",

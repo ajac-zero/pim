@@ -1,7 +1,14 @@
 import type { ModelIdentity } from "@pim/shared/transcript";
 import { splitUiResponse, type UiResponse } from "@pim/ui-lang";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { memo, type ReactNode, useEffect, useMemo, useState } from "react";
+import {
+  memo,
+  type ReactNode,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { toast } from "sonner";
 import { AppIcon } from "~/components/app-icon";
 import { imageContent } from "~/components/chat/composer";
@@ -60,11 +67,10 @@ import {
   DropdownMenuTrigger,
 } from "~/components/ui/dropdown-menu";
 import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "~/components/ui/tooltip";
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "~/components/ui/popover";
 import {
   type ApprovalField,
   approvalView,
@@ -406,41 +412,60 @@ const modelName = (model: ModelIdentity) =>
  */
 function ModelBadge({ provenance }: { provenance: Provenance }) {
   const { t } = useI18n();
-  const { emitter, contributors, complete } = provenance;
+  const [open, setOpen] = useState(false);
+  const hovered = useRef(false);
+  const { emitter, contributors, complete, elsewhere } = provenance;
   const others = contributors.filter(
     (model) => !emitter || modelName(model) !== modelName(emitter),
   );
+  // A popover, not a tooltip: a tap or a key opens it as a hover does, and the mouse opens it by hovering.
   return (
-    <TooltipProvider>
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <span
-            data-model={emitter ? modelName(emitter) : "unknown"}
-            // biome-ignore lint/a11y/noNoninteractiveTabindex: a focusable trigger shows the models to keyboard users too.
-            tabIndex={0}
-            className="min-w-0 max-w-48 truncate rounded outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          >
-            {emitter ? emitter.model : t("modelUnknown")}
-            {others.length > 0 && ` +${others.length}`}
-          </span>
-        </TooltipTrigger>
-        <TooltipContent className="max-w-80 space-y-0.5">
-          <div>
-            {emitter
-              ? t("modelSentBy", { model: modelName(emitter) })
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          data-model={emitter ? modelName(emitter) : "unknown"}
+          className="min-w-0 max-w-48 cursor-default truncate rounded outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          onPointerEnter={(event) => {
+            if (event.pointerType !== "mouse") return;
+            hovered.current = true;
+            setOpen(true);
+          }}
+          onPointerLeave={(event) => {
+            if (event.pointerType !== "mouse") return;
+            hovered.current = false;
+            setOpen(false);
+          }}
+          // A click on what hovering opened keeps it open, instead of toggling it shut.
+          onClick={(event) => {
+            if (hovered.current) event.preventDefault();
+          }}
+        >
+          {emitter ? emitter.model : t("modelUnknown")}
+          {others.length > 0 && ` +${others.length}`}
+        </button>
+      </PopoverTrigger>
+      <PopoverContent
+        className="w-auto max-w-80 space-y-0.5 p-2.5 text-xs"
+        onOpenAutoFocus={(event) => event.preventDefault()}
+      >
+        <div>
+          {emitter
+            ? t("modelSentBy", { model: modelName(emitter) })
+            : elsewhere
+              ? t("modelElsewhere")
               : t("modelNotRecorded")}
+        </div>
+        {others.length > 0 && (
+          <div>
+            {t("modelAlsoWorked", {
+              models: others.map(modelName).join(", "),
+            })}
           </div>
-          {others.length > 0 && (
-            <div>
-              {t("modelAlsoWorked", {
-                models: others.map(modelName).join(", "),
-              })}
-            </div>
-          )}
-          {emitter && !complete && <div>{t("modelStepsUnknown")}</div>}
-        </TooltipContent>
-      </Tooltip>
-    </TooltipProvider>
+        )}
+        {!complete && !elsewhere && <div>{t("modelStepsUnknown")}</div>}
+      </PopoverContent>
+    </Popover>
   );
 }
 

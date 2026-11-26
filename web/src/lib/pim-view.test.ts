@@ -534,6 +534,82 @@ describe("layoutThread", () => {
       ).toEqual([["gpt-6-sol", "gemini-4-neon"], ["gemini-4-neon"]]);
     });
 
+    it("counts a request once: its sends share one answer, trailing text leads nowhere, and a tool call it also made carries it forward", () => {
+      const note = { type: "text", text: "Done." };
+      // A request that sent twice and then wrote private text does not leak into what comes next.
+      expect(
+        sent([
+          user(1, "Go"),
+          assistant(2, [send("a", "One"), send("b", "Two"), note], by(neon)),
+          toolResult(3, "a", "Sent."),
+          toolResult(4, "b", "Sent."),
+          assistant(5, [send("c", "Three")], by(sol)),
+        ]).map((row) => [row.key, row.contributors]),
+      ).toEqual([
+        ["2:0", ["gemini-4-neon"]],
+        ["2:1", ["gemini-4-neon"]],
+        ["5:0", ["gpt-6-sol"]],
+      ]);
+      // One that sent and also called a tool did work the next message rests on.
+      expect(
+        sent([
+          user(1, "Go"),
+          assistant(
+            2,
+            [send("a", "One"), send("b", "Two"), search],
+            by(neon, { stopReason: "toolUse" }),
+          ),
+          toolResult(3, "a", "Sent."),
+          toolResult(4, "b", "Sent."),
+          toolResult(5, "s", "x"),
+          assistant(6, [send("c", "Three")], by(sol)),
+        ]).map((row) => [row.key, row.contributors]),
+      ).toEqual([
+        ["2:0", ["gemini-4-neon"]],
+        ["2:1", ["gemini-4-neon"]],
+        ["6:0", ["gemini-4-neon", "gpt-6-sol"]],
+      ]);
+    });
+
+    it("never calls work complete when the loaded transcript starts mid-work, until a boundary", () => {
+      const entries = [
+        assistant(4, [send("a", "A")], by(neon)),
+        user(5, "Next"),
+        assistant(6, [send("b", "B")], by(neon)),
+        assistant(7, [send("c", "C")], by(sol)),
+      ];
+      const complete = (truncated: boolean) =>
+        layoutThread(run([snapshot({ entries })]).view.entries, {
+          shown: () => false,
+          truncated,
+        }).flatMap((row) =>
+          row.kind === "sent" ? [row.provenance.complete] : [],
+        );
+      expect(complete(true)).toEqual([false, true, true]);
+      expect(complete(false)).toEqual([true, true, true]);
+    });
+
+    it("keeps work from before a mid-turn compaction, but not from before a context reset", () => {
+      const compaction = {
+        id: 4,
+        kind: "pi.compaction",
+        model: [{ role: "user", content: "summary", timestamp: 4 }],
+      } as unknown as EntryRecord;
+      const reset = { id: 4, kind: "pi.reset" } as unknown as EntryRecord;
+      const contributorsAfter = (boundary: EntryRecord) =>
+        sent([
+          user(1, "Go"),
+          assistant(2, [search], by(sol, { stopReason: "toolUse" })),
+          toolResult(3, "s", "x"),
+          boundary,
+          assistant(5, [send("a", "A")], by(neon)),
+        ]).map((row) => row.contributors);
+      expect(contributorsAfter(compaction)).toEqual([
+        ["gpt-6-sol", "gemini-4-neon"],
+      ]);
+      expect(contributorsAfter(reset)).toEqual([["gemini-4-neon"]]);
+    });
+
     it("leaves a message stored without a model unknown, and says so when it is among the work", () => {
       expect(
         sent([

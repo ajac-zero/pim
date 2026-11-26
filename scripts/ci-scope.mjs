@@ -34,8 +34,8 @@ const PROSE = [/^README\.md$/, /^LICENSE$/, /^AGENTS\.md$/, /^docs\/(?!architect
  * (scripts/ci-scope.test.ts) fails when a test of a package names a path of the repository that is neither imported nor declared here.
  */
 export const DECLARED_INPUTS = {
-	// The deployment checks read the Compose and Kubernetes files, the Caddyfile and the Dockerfiles (all of deploy/), and the development preview.
-	"packages/v2-ops": ["deploy", "scripts/v2-dev/preview.mjs"],
+	// The deployment checks read the Compose and Kubernetes files, the Caddyfile and the Dockerfiles (all of deploy/), and the development preview; the Langfuse checks run the smoke script.
+	"packages/v2-ops": ["deploy", "scripts/v2-dev/preview.mjs", "scripts/langfuse-smoke.mjs"],
 };
 
 const SOURCE = /\.(?:[cm]?[jt]sx?)$/;

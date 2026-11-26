@@ -40,8 +40,14 @@ x-pim: &pim
     # Envelope-encryption key ring: PIM_KEK_<id> is a base64 32-byte key, PIM_KEK_CURRENT names the one that wraps new keys.
     PIM_KEK_CURRENT: ${PIM_KEK_CURRENT:-k1}
     PIM_KEK_k1: ${PIM_KEK_K1:?}
+    # Optional traces of what agents do (docs/v2-operations.md, "Traces and Langfuse"): the Runner sends pi's spans to this OTLP/HTTP endpoint, with these headers (a secret). Empty sends nothing and starts nothing.
     OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
-    OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT: ${OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT:-false}
+    OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: ${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:-}
+    OTEL_EXPORTER_OTLP_HEADERS: ${OTEL_EXPORTER_OTLP_HEADERS:-}
+    OTEL_EXPORTER_OTLP_TRACES_HEADERS: ${OTEL_EXPORTER_OTLP_TRACES_HEADERS:-}
+    OTEL_EXPORTER_OTLP_PROTOCOL: ${OTEL_EXPORTER_OTLP_PROTOCOL:-}
+    OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-}
+    PIM_TRACES_PROFILE: ${PIM_TRACES_PROFILE:-}
     PIM_METRICS_PORT: "9464"
     # The proxy sets the client address and this secret on every request; roles answer only requests that carry it.
     PIM_INGRESS_SECRET: ${PIM_INGRESS_SECRET:?}
@@ -218,6 +224,8 @@ services:
     command: ["runner"]
     # Scale with --scale runner=N. A stop gives a Runner time to hand its partition leases back before it is killed.
     stop_grace_period: 120s
+    # `traces` is where a self-hosted Langfuse (deploy/langfuse) can be reached from; nothing waits for it.
+    networks: [internal, traces]
     environment: { <<: *pim-env, PIM_ROLE: runner, PIM_HTTP_PORT: "8080", PIM_DRAIN_WINDOW_SECONDS: "90", PIM_DATABASE_URL: "postgres://pim_runtime_login:${PIM_RUNTIME_DB_PASSWORD:?}@pgbouncer:6432/pim", PIM_APP_DATABASE_URL: "postgres://pim_gate_login:${PIM_GATE_DB_PASSWORD:?}@pgbouncer:6432/pim", PIM_FORGE_DATABASE_URL: "postgres://pim_forge_login:${PIM_FORGE_DB_PASSWORD:?}@pgbouncer:6432/pim" }
     depends_on: *pim-deps
     healthcheck: *http-health
@@ -377,6 +385,8 @@ networks:
   # `control` carries the manager's calls to the socket proxy and the egress proxy's admin port: no route out. `outbound` is the egress proxy's way to the internet.
   control: { internal: true }
   outbound: {}
+  # Only the Runner and a trace backend share it: deploy/langfuse's web container joins this network and Pim never needs it to exist elsewhere.
+  traces: { name: pim-traces }
   # pim-computer's own: it reaches the host (and so the stack's published ports) and the internet, and nothing inside the stack.
   computer: {}
 

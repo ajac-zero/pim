@@ -72,6 +72,42 @@ describe("stable and X.Y", () => {
 		expect(at(d, "1.1")).toBeUndefined();
 	});
 
+	it("does not infer which release stable is on from the digests of images reused between releases", () => {
+		// 1.0.1 is qualified; 2.0.0 is not, and both reuse 1.0.0's web and computer images.
+		const publish = (d: FakeDocker, v: string) => {
+			d.publish(`${BASE}/pim:${v}`, `sha256:pim-${v}`);
+			for (const n of ["pim-web", "pim-computer"]) d.publish(`${BASE}/${n}:${v}`, `sha256:${n}-shared`);
+		};
+		const tags = ["v1.0.0", "v1.0.1", "v2.0.0"];
+		const qualified = (v: string) => v !== "2.0.0";
+		const setup = () => {
+			const d = new FakeDocker();
+			const reg = registry(d.run);
+			publish(d, "1.0.0");
+			promoteStable({ owner: "o", tags: ["v1.0.0"], qualified, reg });
+			publish(d, "1.0.1");
+			publish(d, "2.0.0");
+			return { d, reg };
+		};
+		const probe = setup();
+		const before = probe.d.writes;
+		const result = promoteStable({ owner: "o", tags, qualified, reg: probe.reg });
+		expect(result).toMatchObject({ action: "set", stable: "1.0.1" });
+		expect(at(probe.d, "stable")).toBe("sha256:pim-1.0.1");
+		const writes = probe.d.writes - before;
+		// a partial newer promotion, stopped at any write, is finished by the next run, and never lands on the unqualified release
+		for (let n = 1; n <= writes; n++) {
+			const { d, reg } = setup();
+			d.failWrite = d.writes + n;
+			expect(() => promoteStable({ owner: "o", tags, qualified, reg })).toThrow();
+			expect(promoteStable({ owner: "o", tags, qualified, reg }).action, `write ${n}`).not.toBe("refuse");
+			expect(at(d, "stable"), `write ${n}`).toBe("sha256:pim-1.0.1");
+			expect(at(d, "2.0")).toBeUndefined();
+		}
+		// stable on the backend of 1.0.1 with the unqualified 2.0.0 sharing the web image: nothing to do, nothing refused
+		expect(promoteStable({ owner: "o", tags, qualified, reg: probe.reg }).action).toBe("keep");
+	});
+
 	it("refuses to move stable down by itself, and a stable it cannot identify", () => {
 		const d = new FakeDocker();
 		const reg = registry(d.run);
@@ -81,9 +117,9 @@ describe("stable and X.Y", () => {
 		// 1.1.0 stopped being qualified: stable is above what is eligible
 		expect(promoteStable({ owner: "o", tags: ["v1.0.0", "v1.1.0"], qualified: (v) => v === "1.0.0", reg }).action).toBe("refuse");
 		expect(at(d, "stable")).toBe("sha256:pim-1.1.0");
-		d.tags.set(`${BASE}/pim-web:stable`, "sha256:something-else");
+		d.tags.set(`${BASE}/pim:stable`, "sha256:something-else");
 		expect(promoteStable({ owner: "o", tags: ["v1.0.0", "v1.1.0"], qualified: all, reg }).action).toBe("refuse");
-		expect(at(d, "stable", "pim-web")).toBe("sha256:something-else");
+		expect(at(d, "stable")).toBe("sha256:something-else");
 	});
 
 	it("does not take a registry outage for a registry with no releases", () => {

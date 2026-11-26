@@ -24,20 +24,15 @@ export function completeVersions({ base, reg, tags }) {
 }
 
 /**
- * Where each image's `stable` is, as the highest complete version that has its digest (an image reused between releases has the digest of several). `unknown` is true when an image has a `stable`
- * that no complete version has.
+ * The version `stable` is on, from the backend image alone: it is rebuilt for every release (its version is baked in), so its digest names exactly one release. The web and computer images are reused
+ * between releases whose inputs did not change, so their digests say nothing about which release they came from and are never used to infer it; they are repaired to the decided version instead.
+ * `unknown` is true when the backend's `stable` is none of the complete releases.
  */
 function currentStable({ base, reg, complete }) {
-	let current = null;
-	let unknown = false;
-	for (const name of IMAGE_NAMES) {
-		const digest = reg.digest(`${base}/${name}:stable`);
-		if (!digest) continue;
-		const matches = complete.filter((v) => reg.digest(`${base}/${name}:${v}`) === digest);
-		if (!matches.length) unknown = true;
-		for (const v of matches) if (!current || compare(v, current) > 0) current = v;
-	}
-	return { current, unknown };
+	const digest = reg.digest(`${base}/pim:stable`);
+	if (!digest) return { current: null, unknown: false };
+	const match = complete.find((v) => reg.digest(`${base}/pim:${v}`) === digest);
+	return { current: match ?? null, unknown: !match };
 }
 
 export function promoteStable({ owner, tags, qualified, host = "ghcr.io", reg = registry() }) {

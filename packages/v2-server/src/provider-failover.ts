@@ -4,10 +4,16 @@
  * fallbacks, then the owner's, then `PIM_DEFAULT_MODEL`). Events are held back until the first content, so nothing of a failed attempt reaches the transcript, and once
  * content has been shown the attempt is final: a stream that fails midway is never retried, which would duplicate committed output or tool calls. A model on cooldown is
  * skipped by the next requests while another candidate is available.
+ *
+ * A stream that goes silent before it has shown anything (the idle limit, `DEFAULT_STREAM_STALL_MS`) is asked again once on the same model, after a short pause, before the request falls
+ * to the next one: a stall is often one dropped connection. Quota, a refused credential and a request the provider calls invalid never get that second try. The worst case before a
+ * fallback answers is then two idle limits and the pause, a little over four minutes. A fallback that answers is kept for the rest of the turn (`turnOf`), so a turn does not bounce
+ * between the agent's model and its fallback; the next message of the person starts on the agent's own model again.
  */
 import { type Models, createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import type { AssistantMessage, AssistantMessageEvent } from "@earendil-works/pi-ai";
 import { isContextOverflow } from "@earendil-works/pi-ai/utils/overflow";
+import { isDeliveryReminder } from "@pim/shared/transcript";
 import { isUsageLimitError, limitCooldown, type LimitState } from "./usage-limits.ts";
 import { type CallDetail, type FailedAttempt, keepCall, SLOW_CALL_MS, trackAttempt } from "./call-details.ts";
 
@@ -32,6 +38,32 @@ const refKey = (ownerId: string, provider: string, id: string) => `${ownerId}\u0
 /** How long a model stream may stay silent, before its first event or between two, before the request is cut off as stalled. */
 export const DEFAULT_STREAM_STALL_MS = 120_000;
 
+/** How long a stalled model rests before the one second try on the same model. */
+export const DEFAULT_STALL_RETRY_MS = 2_000;
+/** What the events say when a stall is tried again, so an admin reading diagnostics finds it by its words. */
+export const STALL_RETRY_NOTE = "model stalled; retrying once";
+
+/** Turns that have a fallback kept, at most; the oldest is forgotten first. */
+const STICKY_KEPT = 1_000;
+
+/**
+ * The turn a model request belongs to: from the last message a person (or a trigger, a task or a room) put in front of the agent to the answer that ends it, which every request of the
+ * run shares, its tool rounds and the harness's own retries included. Delivery reminders are the harness's, not a new message. Named by how many such messages the context holds and
+ * when the last was written, so a new message, a compaction and a conversation carried on elsewhere are each another turn; a held run asked again is the same one.
+ */
+export function turnOf(context: { messages?: readonly any[] } | undefined): string | undefined {
+	let count = 0;
+	let at: unknown;
+	for (const m of context?.messages ?? []) {
+		if (m?.role !== "user") continue;
+		const text = typeof m.content === "string" ? m.content : Array.isArray(m.content) ? m.content.map((part: any) => (part?.type === "text" ? part.text : "")).join("") : "";
+		if (isDeliveryReminder(text)) continue;
+		count++;
+		at = m.timestamp;
+	}
+	return count === 0 ? undefined : `${count}:${String(at)}`;
+}
+
 const UNSHOWN = new Set(["start", "thinking_start", "thinking_delta", "thinking_end"]);
 
 export const failureMessage = (model: any, text: string, stopReason: "error" | "aborted", at: number): AssistantMessage =>
@@ -43,8 +75,11 @@ export type CooldownStore = {
 	save(ownerId: string, provider: string, id: string, untilMs: number, reason: string): Promise<void>;
 };
 
-export function createFailover(options: { now?: (() => number) | undefined; cooldowns?: Partial<Cooldowns> | undefined; stallMs?: number | undefined; store?: CooldownStore | undefined; syncMs?: number | undefined; subscription?: ((ownerId: string, provider: string) => boolean) | undefined; /** Told what happened to a request that an admin reading diagnostics would want to find: a model that failed over, a cooldown, a request that failed for good or was slow. Never throws into the request. */ event?: ((ownerId: string, kind: string, detail: Record<string, unknown>) => void) | undefined } = {}) {
+export function createFailover(options: { now?: (() => number) | undefined; cooldowns?: Partial<Cooldowns> | undefined; stallMs?: number | undefined; /** The pause before a stalled model is asked once more. */ stallRetryMs?: number | undefined; store?: CooldownStore | undefined; syncMs?: number | undefined; subscription?: ((ownerId: string, provider: string) => boolean) | undefined; /** Told what happened to a request that an admin reading diagnostics would want to find: a model that failed over, a cooldown, a request that failed for good or was slow. Never throws into the request. */ event?: ((ownerId: string, kind: string, detail: Record<string, unknown>) => void) | undefined } = {}) {
 	const stallMs = options.stallMs ?? DEFAULT_STREAM_STALL_MS;
+	const stallRetryMs = options.stallRetryMs ?? DEFAULT_STALL_RETRY_MS;
+	/** The model that answered in place of the requested one, for the rest of the turn it was found in, by the provider's session of the conversation. */
+	const sticky = new Map<string, { turn: string; model: string }>();
 	const now = options.now ?? Date.now;
 	const cooldowns = { ...DEFAULT_COOLDOWNS, ...options.cooldowns };
 	const until = new Map<string, number>();
@@ -143,11 +178,41 @@ export function createFailover(options: { now?: (() => number) | undefined; cool
 	async function run(models: Models, ownerId: string, model: any, rest: any[], call: (model: unknown, ...rest: unknown[]) => AsyncIterable<AssistantMessageEvent> & { result(): Promise<AssistantMessage> }, out: ReturnType<typeof createAssistantMessageEventStream>): Promise<void> {
 		const signal = (rest[1] as { signal?: AbortSignal } | undefined)?.signal;
 		await sync(ownerId);
-		const list = await candidates(models, ownerId, model);
+		let list = await candidates(models, ownerId, model);
+		const requested = `${model.provider}/${model.id}`;
+		const turn = turnOf(rest[0]);
+		const sessionId = (rest[1] as { sessionId?: string } | undefined)?.sessionId;
+		const stuckKey = turn !== undefined && sessionId ? `${ownerId}\u0000${sessionId}` : undefined;
+		const stuck = stuckKey === undefined ? undefined : sticky.get(stuckKey);
+		// What answered for this turn already goes first, unless it is cooling (another request of the owner found it down) or is not one of this request's models.
+		if (stuck && stuck.turn === turn) {
+			const found = list.find((m) => `${m.provider}/${m.id}` === stuck.model && !cooling(ownerId, m));
+			if (found) list = [found, ...list.filter((m) => m !== found)];
+			else sticky.delete(stuckKey!);
+		}
+		/** After a request is answered: a fallback that answered is kept for the turn, the requested model answering ends that. A model that fails for good is not kept. */
+		const settle = (current: any, answered: boolean) => {
+			if (stuckKey === undefined) return;
+			const name = `${current.provider}/${current.id}`;
+			const kept = sticky.get(stuckKey)?.model;
+			if (!answered) {
+				if (kept === name) sticky.delete(stuckKey);
+				return;
+			}
+			sticky.delete(stuckKey);
+			if (name === requested) return;
+			if (kept !== name) tell(ownerId, "failover", { provider: current.provider, model: current.id, from: requested, until: "the next message" });
+			sticky.set(stuckKey, { turn: turn!, model: name });
+			if (sticky.size > STICKY_KEPT) sticky.delete(sticky.keys().next().value as string);
+		};
+		/** Whether this candidate was already asked again after a stall. */
+		let askedAgain = false;
 		/** The attempts that failed and went on to the next model, which the request's own record then carries. */
 		const failures: FailedAttempt[] = [];
 		for (let i = 0; i < list.length; i++) {
 			const current = list[i];
+			const again = askedAgain;
+			askedAgain = false;
 			const last = i === list.length - 1 || signal?.aborted === true;
 			const held: AssistantMessageEvent[] = [];
 			let shown = false;
@@ -175,6 +240,8 @@ export function createFailover(options: { now?: (() => number) | undefined; cool
 				}
 				if (next.done) break;
 				const event = next.value;
+				// A fallback is kept before the caller sees the answer end, so the request that follows it already finds it.
+				if (event.type === "done") settle(current, true);
 				if (shown) {
 					out.push(event);
 					continue;
@@ -191,10 +258,27 @@ export function createFailover(options: { now?: (() => number) | undefined; cool
 				}
 			}
 			signal?.removeEventListener("abort", forward);
+			// A silent stream that has shown nothing is asked once more on the same model, after a pause the person's stop cuts short. The second stall, or any other failure, is as before.
+			if (stalled && !shown && !again && stalled.stopReason === "error" && !signal?.aborted) {
+				const detail = attempt.finish(stalled);
+				failures.push({ provider: current.provider, model: current.id, detail });
+				tell(ownerId, "model_call_failed", { provider: current.provider, model: current.id, latencyMs: detail.latencyMs, error: detail.error ?? "", tryingNext: false, retrying: true, note: STALL_RETRY_NOTE });
+				if (await pause(stallRetryMs, signal)) {
+					failures.pop();
+					const aborted = failureMessage(current, "Request was aborted", "aborted", now());
+					finished(ownerId, aborted, { ...detail, stopReason: "aborted", error: "Request was aborted" }, failures);
+					out.push({ type: "error", reason: "aborted", error: aborted } as AssistantMessageEvent);
+					return;
+				}
+				askedAgain = true;
+				i--;
+				continue;
+			}
 			if (stalled && !shown && !last && stalled.stopReason === "error") failed = stalled;
 			if (stalled && !failed) {
 				// Nothing more can be retried: content was shown, or the caller stopped the request. The chat ends with the error, not with a stream that never finishes.
 				if (!shown) for (const e of held) out.push(e);
+				settle(current, false);
 				finished(ownerId, stalled, attempt.finish(stalled), failures);
 				out.push({ type: "error", reason: stalled.stopReason as "error" | "aborted", error: stalled } as AssistantMessageEvent);
 				return;
@@ -202,7 +286,8 @@ export function createFailover(options: { now?: (() => number) | undefined; cool
 			if (failed) {
 				const detail = attempt.finish(failed);
 				failures.push({ provider: current.provider, model: current.id, detail });
-				tell(ownerId, "model_call_failed", { provider: current.provider, model: current.id, latencyMs: detail.latencyMs, error: detail.error ?? "", tryingNext: true });
+				tell(ownerId, "model_call_failed", { provider: current.provider, model: current.id, latencyMs: detail.latencyMs, error: detail.error ?? "", tryingNext: true, ...(failed === stalled ? { note: "model stalled twice; falling back" } : {}) });
+				settle(current, false);
 				coolFor(ownerId, current, failed, failureKind(failed) === "auth" ? "auth" : "transient");
 				continue;
 			}
@@ -212,8 +297,24 @@ export function createFailover(options: { now?: (() => number) | undefined; cool
 			const kind = failureKind(message);
 			if (kind && !shown) coolFor(ownerId, current, message, kind);
 			finished(ownerId, message, attempt.finish(message), failures);
+			if (message.stopReason === "error" || message.stopReason === "aborted") settle(current, false);
 			out.end(message);
 			return;
 		}
 	}
+}
+
+/** Waits `ms`; true when `signal` stopped it first. */
+function pause(ms: number, signal: AbortSignal | undefined): Promise<boolean> {
+	if (signal?.aborted) return Promise.resolve(true);
+	return new Promise((resolve) => {
+		const done = (stopped: boolean) => {
+			clearTimeout(timer);
+			signal?.removeEventListener("abort", stop);
+			resolve(stopped);
+		};
+		const stop = () => done(true);
+		const timer = setTimeout(() => done(false), ms);
+		signal?.addEventListener("abort", stop, { once: true });
+	});
 }

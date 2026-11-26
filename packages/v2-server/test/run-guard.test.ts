@@ -5,6 +5,7 @@ import { createModels } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 import { defineTool } from "@earendil-works/pi-durable";
+import { DELIVERY_REMINDER } from "@pim/shared/transcript";
 import { stoppable } from "../src/agent-tools.ts";
 import { type CooldownStore, createFailover } from "../src/provider-failover.ts";
 
@@ -21,9 +22,10 @@ describe("a silent model stream", () => {
 
 	it("goes to the next model when it stalls before any output, and cools the one that stalled", async () => {
 		const { faux, models } = rig();
-		const failover = createFailover({ stallMs: 150 });
+		const failover = createFailover({ stallMs: 150, stallRetryMs: 10 });
 		failover.setChain("o", { provider: "faux", id: "a" }, [{ provider: "faux", id: "a" }, { provider: "faux", id: "b" }]);
-		faux.setResponses([never, fauxAssistantMessage("from b")]);
+		// The silent model is asked once more before the next one is.
+		faux.setResponses([never, never, fauxAssistantMessage("from b")]);
 		const message = await ask(failover.wrap(models, "o"), "a");
 		expect(message.stopReason).toBe("stop");
 		expect(JSON.stringify(message.content)).toContain("from b");
@@ -34,8 +36,8 @@ describe("a silent model stream", () => {
 
 	it("ends with a visible error when nothing else can answer, and with an aborted message when the person stops it", async () => {
 		const { faux, models } = rig();
-		const failover = createFailover({ stallMs: 150 });
-		faux.setResponses([never]);
+		const failover = createFailover({ stallMs: 150, stallRetryMs: 10 });
+		faux.setResponses([never, never]);
 		const message = await ask(failover.wrap(models, "o"), "a");
 		expect(message.stopReason).toBe("error");
 		expect(message.errorMessage).toMatch(/timed out.*nothing/);
@@ -45,6 +47,107 @@ describe("a silent model stream", () => {
 		const pending = ask(createFailover({ stallMs: 60_000 }).wrap(models, "o"), "a", stop.signal);
 		setTimeout(() => stop.abort(), 50);
 		expect((await pending).stopReason).toBe("aborted");
+	});
+});
+
+describe("a stalled model is asked once more, then replaced for the rest of the turn", () => {
+	const rig = () => {
+		const faux = fauxProvider({ provider: "faux", models: [{ id: "a" }, { id: "b" }] });
+		const models = createModels();
+		models.setProvider(faux.provider);
+		return { faux, models };
+	};
+	const events: { kind: string; detail: Record<string, unknown> }[] = [];
+	const failover = (extra: Parameters<typeof createFailover>[0] = {}) => {
+		events.length = 0;
+		const f = createFailover({ stallMs: 100, stallRetryMs: 20, event: (_o, kind, detail) => void events.push({ kind, detail }), ...extra });
+		f.setChain("o", { provider: "faux", id: "a" }, [{ provider: "faux", id: "a" }, { provider: "faux", id: "b" }]);
+		return f;
+	};
+	const user = (text: string, timestamp: number) => ({ role: "user", content: text, timestamp });
+	const ask = (models: any, messages: unknown[], signal?: AbortSignal) => models.stream(models.getModel("faux", "a"), { messages }, { signal, sessionId: "s1" }).result();
+	const from = (m: any) => JSON.stringify(m.content);
+	const limited = (text: string) => fauxAssistantMessage([], { stopReason: "error", errorMessage: text });
+
+	it("asks the same model again after a stall, and says so, without cooling it", async () => {
+		const { faux, models } = rig();
+		const f = failover();
+		faux.setResponses([never, fauxAssistantMessage("from a")]);
+		const message = await ask(f.wrap(models, "o"), [user("hi", 1)]);
+		expect(from(message)).toContain("from a");
+		expect(faux.state.callCount).toBe(2);
+		expect(f.isCooling("o", { provider: "faux", id: "a" })).toBe(false);
+		expect(events.map((e) => e.kind)).toEqual(["model_call_failed"]);
+		expect(events[0]!.detail).toMatchObject({ retrying: true, tryingNext: false, note: "model stalled; retrying once" });
+	});
+
+	it("falls back after the second stall, about two idle limits and a pause later", async () => {
+		const { faux, models } = rig();
+		const f = failover();
+		faux.setResponses([never, never, fauxAssistantMessage("from b")]);
+		const started = Date.now();
+		const message = await ask(f.wrap(models, "o"), [user("hi", 1)]);
+		const took = Date.now() - started;
+		expect(from(message)).toContain("from b");
+		expect(took).toBeGreaterThanOrEqual(2 * 100 + 20 - 10);
+		expect(took).toBeLessThan(2 * 100 + 20 + 400);
+		expect(f.isCooling("o", { provider: "faux", id: "a" })).toBe(true);
+		expect(events.map((e) => e.kind)).toEqual(["model_call_failed", "model_call_failed", "provider_cooldown", "failover"]);
+		expect(events.filter((e) => e.kind === "model_call_failed").map((e) => e.detail.note)).toEqual(["model stalled; retrying once", "model stalled twice; falling back"]);
+	});
+
+	it("ends with the timeout error when the only model stalls twice", async () => {
+		const { faux, models } = rig();
+		const f = createFailover({ stallMs: 80, stallRetryMs: 10 });
+		faux.setResponses([never, never]);
+		const message = await ask(f.wrap(models, "o"), [user("hi", 1)]);
+		expect(message.stopReason).toBe("error");
+		expect(message.errorMessage).toMatch(/timed out/);
+		expect(faux.state.callCount).toBe(2);
+	});
+
+	it("does not ask again after quota, a refused credential or an invalid request", async () => {
+		for (const [text, next] of [["429 rate limit reached: usage limit", true], ["401 unauthorized", true], ["400 invalid_request_error: bad", false]] as const) {
+			const { faux, models } = rig();
+			faux.setResponses([limited(text), fauxAssistantMessage("from b")]);
+			const message = await ask(failover().wrap(models, "o"), [user("hi", 1)]);
+			expect(faux.state.callCount, text).toBe(next ? 2 : 1);
+			expect(message.stopReason, text).toBe(next ? "stop" : "error");
+			expect(events.some((e) => e.detail.retrying), text).toBe(false);
+		}
+	});
+
+	it("keeps the fallback for the rest of the turn, and goes back to the agent's model on the next message", async () => {
+		const { faux, models } = rig();
+		const f = failover({ cooldowns: { transientMs: 1 } });
+		const wrapped = f.wrap(models, "o");
+		faux.setResponses([never, never, fauxAssistantMessage("b1")]);
+		const turn = [user("hi", 1)];
+		const first: any = await ask(wrapped, turn);
+		expect(first.model).toBe("b");
+		await new Promise((r) => setTimeout(r, 30));
+		expect(f.isCooling("o", { provider: "faux", id: "a" })).toBe(false);
+		// A later request of the same turn (after a tool round and a delivery reminder) is b's, though a's cooldown has ended.
+		const round = [...turn, first, { role: "toolResult", toolCallId: "t", toolName: "x", content: [], isError: false, timestamp: 2 }, user(DELIVERY_REMINDER, 3)];
+		faux.setResponses([fauxAssistantMessage("b2")]);
+		expect(((await ask(wrapped, round)) as any).model).toBe("b");
+		// The person's next message is another turn: a is asked first again.
+		faux.setResponses([fauxAssistantMessage("a3")]);
+		expect(((await ask(wrapped, [...round, user("again", 9)])) as any).model).toBe("a");
+		expect(events.filter((e) => e.kind === "failover")).toHaveLength(1);
+	});
+
+	it("stops at once when the person stops it during the pause", async () => {
+		const { faux, models } = rig();
+		const f = createFailover({ stallMs: 50, stallRetryMs: 60_000 });
+		faux.setResponses([never, fauxAssistantMessage("never asked")]);
+		const stop = new AbortController();
+		setTimeout(() => stop.abort(), 200);
+		const started = Date.now();
+		const message = await ask(f.wrap(models, "o"), [user("hi", 1)], stop.signal);
+		expect(message.stopReason).toBe("aborted");
+		expect(Date.now() - started).toBeLessThan(2_000);
+		expect(faux.state.callCount).toBe(1);
 	});
 });
 

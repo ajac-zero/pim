@@ -1,18 +1,28 @@
-# Publishes the Pim images to GHCR (docs/v2-operations.md "Installing and updating"):
-#   - a push to main: sha-<12 characters> is built and pushed while CI runs on the same commit, and `edge` is moved to that image only once CI and the Compose smoke test (compose.yml) have succeeded
-#   - a tag vX.Y.Z: X.Y.Z, X.Y and stable
-# The slow part is the multi-arch build, so it does not wait for CI: both run at once, and what is left after CI is a retag that takes seconds. The sha tag
-# is harmless on its own (nothing follows it but `pim.sh update sha-<12>`), so a commit whose CI failed leaves an unused image and never gets `edge`.
-# It never runs for pim/* branches or pull requests: the trigger is limited to main and release tags. Workflows are read from the pushed commit, so this one can
-# only be exercised by a push to main.
+# Publishes the Pim images to GHCR (docs/v2-operations.md "Installing and updating"), each only when its inputs are new:
+#   - an image is identified by a hash of everything its Dockerfile can read (scripts/image-identity.mjs) and tagged `input-<identity>` when built. A commit whose image has an identity
+#     already in the registry builds nothing for it: its `sha-<12>` tag (or release tags) points at the image that already exists. That image keeps the labels of the commit that built it,
+#     so it is never presented as built by the newer one; the run's summary says which images were built and which reused.
+#   - a push to main: new images are built and pushed as sha-<12 characters> while CI runs, and `edge` is moved to each image's sha tag only once CI and the Compose smoke test
+#     have succeeded on the commit
+#   - a tag vX.Y.Z: X.Y.Z, X.Y and stable; the backend is always built (its version is baked in), the web app and the computer image are reused when unchanged
+#   - run by hand with `force`: every image is built again (for a security update of a base image; bumping deploy/IMAGE_EPOCH does the same on the next push)
+# The slow part is the multi-arch build, so it does not wait for CI: both run at once, and what is left after CI is a retag that takes seconds. The sha tag is harmless on its own (nothing
+# follows it but `pim.sh update sha-<12>`), so a commit whose CI failed leaves an unused image and never gets `edge`.
+# It never runs for pim/* branches or pull requests. Workflows are read from the pushed commit, so this one can only be exercised by a push to main or a run by hand on main.
 name: Publish
 
 on:
   push:
     branches: [main]
     tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Build every image again, even those already published from the same inputs
+        type: boolean
+        default: false
 
-# One build per commit; builds of different commits may overlap, and nothing is cancelled (CI on main is not cancelled either).
+# One publish per commit; publishes of different commits may overlap, and nothing is cancelled: a build or a retag in flight is a production artifact.
 concurrency:
   group: publish-${{ github.sha }}
   cancel-in-progress: false
@@ -23,45 +33,75 @@ permissions:
   actions: read
 
 jobs:
-  image:
+  # What there is to build: each image's identity, and whether the registry has it.
+  plan:
+    if: github.ref == 'refs/heads/main' || github.ref_type == 'tag'
     runs-on: ubuntu-latest
-    timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - image: pim
-            dockerfile: deploy/Dockerfile.v2
-          - image: pim-web
-            dockerfile: deploy/Dockerfile.web
-          - image: pim-computer
-            dockerfile: deploy/Dockerfile.computer
+    outputs:
+      plan: ${{ steps.plan.outputs.plan }}
+      build: ${{ steps.plan.outputs.build }}
+      version: ${{ steps.meta.outputs.version }}
+      suffixes: ${{ steps.meta.outputs.suffixes }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Work out the tags
+      - name: Work out the version
         id: meta
         env:
           SHA: ${{ github.sha }}
           REF_NAME: ${{ github.ref_name }}
-          IMAGE: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
         run: |
           set -eu
-          image="$(printf %s "$IMAGE" | tr '[:upper:]' '[:lower:]')"
           if [ "${{ github.ref_type }}" = tag ]; then
             # A release is a tag on a commit of main, which is the code CI has passed.
             git fetch --quiet origin main
             git merge-base --is-ancestor "$SHA" origin/main || { echo "::error::$REF_NAME is not on main"; exit 1; }
             version="${REF_NAME#v}"
-            tags="$image:$version,$image:${version%.*},$image:stable"
+            suffixes="$version ${version%.*} stable"
           else
-            # `edge` is added later, by the retag job below, by pointing it at this image.
+            # `edge` is added later, by the retag job below, by pointing it at the image's sha tag.
             version="sha-$(printf %s "$SHA" | cut -c1-12)"
-            tags="$image:$version"
+            suffixes="$version"
           fi
-          echo "tags=$tags" >> "$GITHUB_OUTPUT"
+          echo "suffixes=$suffixes" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: plan
+        run: node scripts/image-identity.mjs plan
+        env:
+          IMAGE_OWNER: ${{ github.repository_owner }}
+          RELEASE: ${{ github.ref_type == 'tag' }}
+          FORCE: ${{ inputs.force || false }}
+
+  # The images whose identity the registry does not have, side by side. An unchanged image is not here at all.
+  image:
+    needs: plan
+    if: needs.plan.outputs.build != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.build) }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tags
+        id: tags
+        env:
+          REPOSITORY: ${{ matrix.repository }}
+          IDENTITY: ${{ matrix.identity }}
+          SUFFIXES: ${{ needs.plan.outputs.suffixes }}
+        run: |
+          set -eu
+          tags="$REPOSITORY:input-$IDENTITY"
+          for suffix in $SUFFIXES; do tags="$tags,$REPOSITORY:$suffix"; done
+          echo "tags=$tags" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
@@ -75,23 +115,63 @@ jobs:
           file: ${{ matrix.dockerfile }}
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          # Baked into the image as PIM_VERSION and PIM_REVISION, which Settings → Deployment shows and the update check compares.
+          tags: ${{ steps.tags.outputs.tags }}
+          # Baked into the image as PIM_VERSION and PIM_REVISION, which Settings → Deployment shows and the update check compares; the identity is not in the build, only in a label.
           build-args: |
-            PIM_VERSION=${{ steps.meta.outputs.version }}
+            PIM_VERSION=${{ needs.plan.outputs.version }}
             PIM_REVISION=${{ github.sha }}
           labels: |
-            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
+            org.opencontainers.image.version=${{ needs.plan.outputs.version }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            dev.pim.image-identity=${{ matrix.identity }}
           cache-from: type=gha,scope=${{ matrix.image }}
           cache-to: type=gha,mode=max,scope=${{ matrix.image }}
 
-  # Moves `edge` to the sha image once CI on the commit has succeeded. `imagetools create` writes a new tag for the same manifest list, so the
-  # digest, both architectures and the labels the update check reads (version sha-<12>, revision) are exactly those of the image that was built.
+  # Gives this commit's tags to the images that were not rebuilt: `imagetools create` writes the tags for the same manifest list, so the digest, both architectures and the labels are exactly
+  # those of the image that was built, and that image's revision label is still the commit that built it. Nothing here is a build, and none is claimed.
+  reuse:
+    needs: [plan, image]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.image.result != 'failure' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Tag the reused images
+        env:
+          PLAN: ${{ needs.plan.outputs.plan }}
+          SUFFIXES: ${{ needs.plan.outputs.suffixes }}
+        run: |
+          set -eu
+          {
+            echo "| image | identity | this run |"
+            echo "| --- | --- | --- |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          printf '%s' "$PLAN" | jq -c '.[]' | while read -r entry; do
+            image="$(printf '%s' "$entry" | jq -r .image)"
+            repository="$(printf '%s' "$entry" | jq -r .repository)"
+            identity="$(printf '%s' "$entry" | jq -r .identity)"
+            if [ "$(printf '%s' "$entry" | jq -r .build)" = true ]; then
+              echo "| $image | \`$identity\` | built |" >> "$GITHUB_STEP_SUMMARY"
+              continue
+            fi
+            tags=""
+            for suffix in $SUFFIXES; do tags="$tags --tag $repository:$suffix"; done
+            docker buildx imagetools create $tags "$repository:input-$identity"
+            built="$(docker buildx imagetools inspect "$repository:input-$identity" --format '{{ json .Image }}' | jq -r '.. | .Labels? // empty | ."org.opencontainers.image.revision" // empty' | head -n1)"
+            echo "| $image | \`$identity\` | reused (built at \`${built:-unknown}\`) |" >> "$GITHUB_STEP_SUMMARY"
+          done
+
+  # Moves `edge` to each image's sha tag once CI and the Compose smoke test on the commit have succeeded. Both always run for a push to main (a run that selects nothing succeeds), so
+  # this never waits for one that will not exist.
   edge:
-    if: github.ref_type == 'branch'
-    needs: image
+    # `image` is skipped when every image was reused, which would skip this job too without an explicit condition.
+    if: ${{ !cancelled() && github.ref_type == 'branch' && github.event_name == 'push' && needs.plan.result == 'success' && needs.image.result != 'failure' && needs.reuse.result == 'success' }}
+    needs: [plan, image, reuse]
     runs-on: ubuntu-latest
     timeout-minutes: 60
     # One retag at a time and none cancelled, so a run waiting for its CI is not dropped by a newer push.
@@ -108,7 +188,7 @@ jobs:
           SHA: ${{ github.sha }}
         run: |
           set -eu
-          # A run for this push may not exist yet when the image is ready, and may still be running: look every 15 s, for up to 50 minutes.
+          # A run for this push may not exist yet when the images are ready, and may still be running: look every 15 s, for up to 50 minutes.
           for workflow in ci.yml compose.yml; do
             for i in $(seq 201); do
               [ "$i" -le 200 ] || { echo "::error::$workflow on $SHA did not finish in time"; exit 1; }
@@ -137,7 +217,7 @@ jobs:
           sha12="$(printf %s "$SHA" | cut -c1-12)"
           for name in pim pim-web pim-computer; do
             image="ghcr.io/$owner/$name"
-            # Pushes to main can finish out of order. Leave `edge` alone when it is already on this commit or a later one.
+            # Pushes to main can finish out of order. Leave `edge` alone when it is already on this commit or a later one (by the revision label of the image it points at).
             current="$(docker buildx imagetools inspect "$image:edge" --format '{{ json .Image }}' 2>/dev/null | jq -r '.. | .Labels? // empty | ."org.opencontainers.image.revision" // empty' | head -n1 || true)"
             if [ -n "$current" ] && git merge-base --is-ancestor "$SHA" "$current" 2>/dev/null; then
               echo "$name: edge is already at $current, which includes $SHA"

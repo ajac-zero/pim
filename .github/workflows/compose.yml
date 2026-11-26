@@ -1,6 +1,8 @@
-# Pim v2 as it is deployed: builds deploy/Dockerfile.v2 and deploy/Dockerfile.web, boots deploy/compose (Caddy, PostgreSQL behind PgBouncer, NATS, SeaweedFS and every
-# role), then signs up, chats, approves a tool, stores an object, and backs up and restores (scripts/v2-compose/smoke.sh). It takes about two
-# minutes, so it runs after a push to main rather than in CI on every change; publish.yml moves `edge` only once it and CI have both succeeded.
+# Pim v2 as it is deployed: boots deploy/compose (Caddy, PostgreSQL behind PgBouncer, NATS, SeaweedFS, every role and the web host), then signs up, chats, approves a tool, stores
+# an object, replaces the web container alone, and backs up and restores (scripts/v2-compose/smoke.sh). It takes about two minutes, so it runs after a push to main rather than in
+# CI on every change, and only when the change can reach the stack: an image's inputs, the Compose files or the smoke and backup scripts (scripts/ci-scope.mjs). It always starts, so
+# publish.yml, which waits for it on each commit, never waits on a run that does not exist; a run that selects nothing succeeds without booting anything.
+# The images it boots are the ones the commit publishes: pulled by their identity when already built, built here (with the layer cache publish.yml keeps) when not.
 # Run it on a branch from the Actions tab.
 name: Compose
 
@@ -13,15 +15,60 @@ concurrency:
   group: compose-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
+permissions:
+  contents: read
+  packages: read
+
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      scope: ${{ steps.scope.outputs.scope }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: scope
+        run: node scripts/ci-scope.mjs --event "$EVENT" --base "$BASE" --head "$HEAD"
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.before }}
+          HEAD: ${{ github.sha }}
+
   smoke:
+    needs: changes
+    if: fromJSON(needs.changes.outputs.scope).smoke
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
-      # The image smoke.sh boots, built with the layer cache publish.yml keeps for the same Dockerfile, so an unchanged dependency layer is not rebuilt.
-      - uses: docker/build-push-action@v6
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # What this commit's images are, and which already exist.
+      - id: plan
+        run: node scripts/image-identity.mjs plan
+        env:
+          IMAGE_OWNER: ${{ github.repository_owner }}
+      # An image that was built from the same inputs is pulled, not built again.
+      - name: Pull the images already built
+        run: |
+          for i in 0 1; do
+            built="$(printf '%s' "$PLAN" | jq -r ".[$i].build")"
+            [ "$built" = false ] || continue
+            repository="$(printf '%s' "$PLAN" | jq -r ".[$i].repository")"
+            identity="$(printf '%s' "$PLAN" | jq -r ".[$i].identity")"
+            name="$(printf '%s' "$PLAN" | jq -r ".[$i].name")"
+            docker pull "$repository:input-$identity"
+            if [ "$name" = backend ]; then docker tag "$repository:input-$identity" pim:v2-smoke; else docker tag "$repository:input-$identity" "pim-$name:v2-smoke"; fi
+          done
+        env:
+          PLAN: ${{ steps.plan.outputs.plan }}
+      - if: fromJSON(steps.plan.outputs.plan)[0].build
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: deploy/Dockerfile.v2
@@ -31,7 +78,8 @@ jobs:
             type=gha,scope=compose
             type=gha,scope=pim
           cache-to: type=gha,mode=max,scope=compose
-      - uses: docker/build-push-action@v6
+      - if: fromJSON(steps.plan.outputs.plan)[1].build
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: deploy/Dockerfile.web

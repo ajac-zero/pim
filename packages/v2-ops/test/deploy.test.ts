@@ -18,6 +18,69 @@ const metricNames = new Set(createPimMetrics().registry.names());
 const baseMetric = (name: string) => name.replace(/_(bucket|sum|count)$/, "");
 const metricsIn = (expr: string) => [...expr.matchAll(/\b(pim_[a-z0-9_]+|cnpg_[a-z0-9_]+|up)\b/g)].map((m) => m[1]!);
 
+describe("the workflows", () => {
+	const workflow = (name: string) => parse(read(`.github/workflows/${name}.yml`)) as any;
+	const ci = workflow("ci");
+	const publish = workflow("publish");
+	const compose = workflow("compose");
+
+	it("starts CI for every pull request, however little changed, so a required check is never left pending", () => {
+		for (const w of [ci, compose, publish]) for (const trigger of Object.values<any>(w.on ?? {})) expect(trigger?.paths, "no path filter on a trigger").toBeUndefined();
+		expect(Object.keys(ci.on)).toEqual(expect.arrayContaining(["pull_request", "push", "workflow_dispatch"]));
+		// One run per change: a branch with a pull request is not also run for its push.
+		expect(ci.on.push.branches).toEqual(["main"]);
+	});
+
+	it("selects each job from the one table, and reports one check that always runs and fails unless every selected job passed", () => {
+		const jobs = ci.jobs as Record<string, any>;
+		for (const [name, job] of Object.entries(jobs)) {
+			if (name === "changes" || name === "ci") continue;
+			expect(job.needs, name).toBe("changes");
+			expect(job.if, name).toMatch(/^fromJSON\(needs\.changes\.outputs\.scope\)\.jobs\./);
+		}
+		expect(jobs.ci.name).toBe("CI result");
+		expect(jobs.ci.if).toBe("always()");
+		expect(jobs.ci.needs).toEqual(["changes", ...Object.keys(jobs).filter((n) => n !== "changes" && n !== "ci")]);
+		expect(jobs.changes.steps[0].with["fetch-depth"]).toBe(0);
+	});
+
+	it("cancels what a newer push to a pull request replaces, and never a run on main", () => {
+		expect(ci.concurrency["cancel-in-progress"]).toMatch(/github\.event_name == 'pull_request'/);
+		expect(compose.concurrency["cancel-in-progress"]).toMatch(/github\.ref != 'refs\/heads\/main'/);
+		// Publishing is production: nothing in it is ever cancelled, not a build, not a retag, not the wait for CI.
+		expect(publish.concurrency["cancel-in-progress"]).toBe(false);
+		expect(publish.jobs.edge.concurrency["cancel-in-progress"]).toBe(false);
+		expect(JSON.stringify(publish)).not.toMatch(/"cancel-in-progress":(true|"\$\{\{)/);
+	});
+
+	it("builds an image only when its identity is new, and tags a reused one without claiming a build", () => {
+		expect(publish.jobs.image.if).toMatch(/needs\.plan\.outputs\.build != '\[\]'/);
+		expect(publish.jobs.image.strategy.matrix.include).toMatch(/fromJSON\(needs\.plan\.outputs\.build\)/);
+		const build = publish.jobs.image.steps.find((s: any) => s.uses?.startsWith("docker/build-push-action"));
+		expect(build.with.tags).toBe("${{ steps.tags.outputs.tags }}");
+		expect(build.with.labels).toMatch(/dev\.pim\.image-identity=\$\{\{ matrix\.identity \}\}/);
+		const tag = publish.jobs.image.steps.find((s: any) => s.name === "Tags");
+		expect(tag.run).toContain("input-$IDENTITY");
+		// The reused image is given tags with `imagetools create` from its identity tag (same manifest, same labels), never with a build.
+		const reuse = publish.jobs.reuse.steps.find((s: any) => s.name === "Tag the reused images");
+		expect(reuse.run).toContain('docker buildx imagetools create $tags "$repository:input-$identity"');
+		expect(reuse.run).toContain("reused (built at");
+		// Edge follows all three images, and a run where nothing was built still reaches it.
+		expect(publish.jobs.edge.if).toMatch(/!cancelled\(\)/);
+		expect(publish.jobs.edge.steps.find((s: any) => s.name === "Move edge").run).toContain("for name in pim pim-web pim-computer");
+		// Every image the plan names is one that Compose and Kubernetes use.
+		expect(compose.jobs.smoke.if).toMatch(/\.smoke/);
+	});
+
+	it("shares one setup, caches the package store by the lockfile, and installs only the web app's closure for its jobs", () => {
+		const setup = parse(read(".github/actions/setup/action.yml")) as any;
+		expect(setup.runs.steps.find((s: any) => s.uses?.startsWith("actions/setup-node")).with.cache).toBe("pnpm");
+		for (const name of ["web", "web-build"]) expect(ci.jobs[name].steps.find((s: any) => s.uses === "./.github/actions/setup").with.filter).toBe("pim-web...");
+		const text = read(".github/workflows/ci.yml");
+		expect(text).not.toMatch(/uses: pnpm\/action-setup/);
+	});
+});
+
 describe("the Compose homelab profile", () => {
 	const compose = parse(read("deploy/compose/compose.yaml"), { merge: true }) as any;
 	const text = read("deploy/compose/compose.yaml");

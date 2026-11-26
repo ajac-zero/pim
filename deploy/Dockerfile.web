@@ -31,7 +31,9 @@ COPY packages/v2-ops/package.json ./packages/v2-ops/
 COPY packages/v2-runtime/package.json ./packages/v2-runtime/
 COPY packages/v2-server/package.json ./packages/v2-server/
 RUN pnpm install --frozen-lockfile --filter "pim-web..."
-COPY packages ./packages
+# Only what the web app imports (@pim/shared, @pim/ui-lang): a change to any other package is not a change to this image.
+COPY packages/shared ./packages/shared
+COPY packages/ui-lang ./packages/ui-lang
 COPY web ./web
 # Run through npm, not pnpm: `pnpm run` first checks that node_modules matches every workspace manifest and, when it thinks they differ (the sources were copied after the install),
 # installs the whole workspace again, which fails on the test-only Postgres binaries and is not needed here.

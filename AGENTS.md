@@ -40,16 +40,16 @@ The root's Node tests (`vitest.config.ts`) are `computer/test/*.test.ts`, which 
 
 ## Testing
 
-Cut the wall-clock you spend waiting for tests. While iterating, run the one file that covers your change, or `pnpm test:changed`, plus any other file that covers it; never run tests in the background and poll for them with sleep. The full suite runs in GitHub CI on the pushed branch (`.github/workflows/ci.yml`), and CI is the authority for whether it passes: don't run it locally just to check a fix. After fixing one failing file, rerun only that file, and the files that cover a change to shared code.
+Cut the wall-clock you spend waiting for tests. While iterating, run the one file that covers your change, or `pnpm test:changed`, plus any other file that covers it; never run tests in the background and poll for them with sleep. CI runs on the pull request (`.github/workflows/ci.yml`; a branch without one can be run from the Actions tab), only the jobs the change can reach (`scripts/ci-scope.mjs`, docs/v2-operations.md "What CI runs"), and CI is the authority for whether they pass: don't run the full suite locally just to check a fix. After fixing one failing file, rerun only that file, and the files that cover a change to shared code.
 
 ```sh
 pnpm exec vitest run computer/test/displays.test.ts   # one file, while iterating
 (cd packages/v2-server && pnpm exec vitest run test/hostops.test.ts)   # one file of a package
 pnpm test:changed                         # what a diff since origin/main reaches
-# the full suite: GitHub CI, on the pushed branch
+# the jobs a change reaches: GitHub CI, on the pull request
 ```
 
-`pnpm test:changed` (`scripts/test-changed.mjs`) diffs against origin/main, or HEAD~1 without it, and runs the whole suite when `package.json`, `pnpm-lock.yaml` or any vitest or tsconfig config changed, or when nothing maps to a test; otherwise it runs vitest's own `--changed` over the root's Node tests, the web app's tests too when `web/`, `@pim/shared` or `@pim/ui-lang` changed, each changed package's own tests (all of them for `@pim/shared`), and the daemons' tests when one of them changed. CI runs every job on every change, side by side, in under two minutes; the Compose smoke test (`.github/workflows/compose.yml`) runs after a push to `main`.
+`pnpm test:changed` (`scripts/test-changed.mjs`) diffs against origin/main, or HEAD~1 without it, and runs the whole suite when `package.json`, `pnpm-lock.yaml` or any vitest or tsconfig config changed, or when nothing maps to a test; otherwise it runs vitest's own `--changed` over the root's Node tests, the web app's tests too when `web/`, `@pim/shared` or `@pim/ui-lang` changed, each changed package's own tests (all of them for `@pim/shared`), and the daemons' tests when one of them changed. CI selects its jobs from the diff and the repository's dependency graph, runs them side by side, and reports one check, `CI result`, that always runs (require that one in branch protection); a change to the toolchain, the lockfile or the workflows runs everything. The Compose smoke test (`.github/workflows/compose.yml`) runs after a push to `main`, when the stack's inputs changed. Images are built once per identity (`scripts/image-identity.mjs`), not per commit.
 
 ## Running Pim
 

@@ -322,10 +322,18 @@ describe("Amp: a remote orb Forge adopts and never restarts", () => {
 		await w.step(blind);
 		expect((await s.store.get(blind))!.orb!.branch).toBeUndefined();
 		expect(await s.forge.recordOrbBranch(blind, `late-${tag}`)).toBe(false);
-		// A row that was made to name the default branch, or another thread's, is not merged: the merge asks the same questions again.
-		await s.pool.query("update pim_forge.forge_threads set orb = jsonb_set(orb, '{branch}', '\"main\"') where thread_id = $1", [other]);
+		// A branch that was already recorded is not trusted for that: the merge and the pull request ask the same questions again. A row that names the default branch, a protected name, Pim's staging
+		// namespace or another thread's branch is refused, whatever it holds as a baseline.
 		await s.grantAll("ada");
-		await expect(s.forge.merge(ada, other)).rejects.toMatchObject({ code: "push_refused" });
+		for (const [name, why] of [["main", "default"], ["master", "protected"], [`mine-${tag}`, "another thread's"], ["pim-staging/x", "staging"]] as const) {
+			await s.pool.query("update pim_forge.forge_threads set orb = jsonb_set(orb - 'baseline', '{branch}', to_jsonb($2::text)) where thread_id = $1", [other, name]);
+			await expect(s.forge.merge(ada, other), `merge: ${why}`).rejects.toMatchObject({ code: expect.stringMatching(/push_refused|not_pushed/) });
+			await expect(s.forge.openPullRequest(ada, other), `pull request: ${why}`).rejects.toMatchObject({ code: expect.stringMatching(/push_refused|not_pushed/) });
+		}
+		// A recorded branch of its own, with no baseline (a thread from before baselines), still merges: it is held to the guards above, not to the baseline.
+		await push(`legacy-own-${tag}`, "o.txt");
+		await s.pool.query("update pim_forge.forge_threads set orb = jsonb_set(orb - 'baseline', '{branch}', to_jsonb($2::text)) where thread_id = $1", [other, `legacy-own-${tag}`]);
+		await expect(s.forge.merge(ada, other)).resolves.toMatchObject({ outcome: "merged" });
 	});
 
 	it("takes no slot and consumes no sandbox quota, even at a concurrency quota of zero", async () => {

@@ -14,7 +14,7 @@ import { ForgeScheduler } from "./scheduler";
 import { ForgeStore, type OutboxTopic, ownBranch, type ThreadRow } from "./store";
 import { type Credentials } from "./tokens";
 import { threadRef } from "./identity";
-import { refuseOrbBranch } from "./orb-branch";
+import { refuseFollowedBranch, refuseOrbBranch } from "./orb-branch";
 import { StallSupervisor } from "./stall";
 import { MAX_DIFF_CHARS, autosaveWorkspace, checkpointWorkspace, ensureBase, gitIn, keepDiff, latestCheckpoint, makeDiff } from "./checkpoint";
 import { REPO_DIR } from "./git-checkout";
@@ -51,10 +51,15 @@ export type Gated<T> = ({ status: "done" } & T) | { status: "approval_required";
  * Opens the pull request for the thread's own pushed branch, into the branch the thread started from (or the default branch when it started from a commit or from main), and records it on the thread.
  * The one place this is decided, for the REST route and for the sandbox's own request through the git broker; it never merges, and the branch is the thread's, never a caller's.
  */
-export async function openThreadPullRequest(c: { git: GitHost; store: ForgeStore }, t: ThreadRow, title?: string, body?: string): Promise<{ url: string; number: number; title: string; base: string; head: string }> {
+export async function openThreadPullRequest(c: { git: GitHost; store: ForgeStore; db?: Db }, t: ThreadRow, title?: string, body?: string): Promise<{ url: string; number: number; title: string; base: string; head: string }> {
 	const branch = (t.branch ?? (t.orb?.branch as string | undefined)) ?? null;
 	if (!branch || !(await c.git.hasBranch(t.repo, branch))) throw new ForgeError("not_pushed", "The thread's branch isn't on the git host yet");
 	assertPushBranch(branch, await c.git.defaultBranch(t.repo), t.branch ? ownBranch(t) : branch);
+	if (!t.branch) {
+		if (!c.db) throw new ForgeError("push_refused", "An Amp thread's branch can't be checked here");
+		const refused = await refuseFollowedBranch({ db: c.db, git: c.git }, t, branch);
+		if (refused !== null) throw new ForgeError("push_refused", refused);
+	}
 	const base = !t.ref || t.ref === "main" || /^[0-9a-f]{40}$/i.test(t.ref) ? await c.git.defaultBranch(t.repo) : t.ref;
 	const first = t.task.split("\n")[0]!.trim().slice(0, 100) || branch;
 	const named = title?.trim() || first;
@@ -569,6 +574,11 @@ export class Forge {
 		if (!ws && (!branch || !(await this.c.git.hasBranch(t.repo, branch)))) throw new ForgeError("not_pushed", remote ? "The Amp thread's branch isn't on the git host yet" : "The thread's branch isn't on the git host yet");
 		if (branch === base) throw new ForgeError("push_refused", `${base} is the default branch`);
 		assertPushBranch(branch!, base, remote ? branch : ownBranch(t));
+		// A branch an Amp thread follows was chosen by the agent and recorded earlier: it is checked again, not trusted from the row.
+		if (remote) {
+			const refused = await refuseFollowedBranch({ db: this.c.db, git: this.c.git }, t, branch!);
+			if (refused !== null) throw new ForgeError("push_refused", refused);
+		}
 		if (ws) {
 			await this.commitWork((await this.c.store.get(t.threadId)) ?? t);
 			const pushed = await this.c.git.push(ws, t.repo, branch!);

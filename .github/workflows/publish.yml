@@ -4,8 +4,11 @@
 #     so it is never presented as built by the newer one; the run's summary says which images were built and which reused.
 #   - a push to main: new images are built and pushed as sha-<12 characters> while CI runs, and `edge` is moved to each image's sha tag only once CI and the Compose smoke test
 #     have succeeded on the commit
-#   - a tag vX.Y.Z: X.Y.Z, X.Y and stable; the backend is always built (its version is baked in), the web app and the computer image are reused when unchanged
+#   - a tag vX.Y.Z: X.Y.Z only; the backend is always built (its version is baked in), the web app and the computer image are reused when unchanged. `stable` and `X.Y` are then moved by the
+#     `release` job, by version precedence and not by the order releases finish in (scripts/release-order.mjs)
 #   - run by hand with `force`: every image is built again (for a security update of a base image; bumping deploy/IMAGE_EPOCH does the same on the next push)
+#   - run by hand with `bootstrap_edge_commit`: writes the first record of which commit promoted `edge`, for an `edge` that predates the record; builds and moves nothing else
+#   - run by hand with `rollback_stable_to`: moves `stable` down to a published version and holds it there until a higher one is released
 # The slow part is the multi-arch build, so it does not wait for CI: both run at once, and what is left after CI is a retag that takes seconds. The sha tag is harmless on its own (nothing
 # follows it but `pim.sh update sha-<12>`), so a commit whose CI failed leaves an unused image and never gets `edge`.
 # It never runs for branches other than main or for pull requests. Workflows are read from the pushed commit, so this one can only be exercised by a push to main or a run by hand on main.
@@ -21,6 +24,14 @@ on:
         description: Build every image again, even those already published from the same inputs
         type: boolean
         default: false
+      bootstrap_edge_commit:
+        description: "First record of the commit edge serves (full ID, in main's history); only when edge exists and no record does. Builds nothing."
+        type: string
+        default: ""
+      rollback_stable_to:
+        description: "Move stable down to this published version (X.Y.Z) and hold it there until a higher one is released. Builds nothing."
+        type: string
+        default: ""
 
 # One publish per commit; publishes of different commits may overlap, and nothing is cancelled: a build or a retag in flight is a production artifact.
 concurrency:
@@ -35,7 +46,7 @@ permissions:
 jobs:
   # What there is to build: each image's identity, and whether the registry has it.
   plan:
-    if: github.ref == 'refs/heads/main' || github.ref_type == 'tag'
+    if: (github.ref == 'refs/heads/main' || github.ref_type == 'tag') && inputs.bootstrap_edge_commit == '' && inputs.rollback_stable_to == ''
     runs-on: ubuntu-latest
     outputs:
       plan: ${{ steps.plan.outputs.plan }}
@@ -58,7 +69,7 @@ jobs:
             git fetch --quiet origin main
             git merge-base --is-ancestor "$SHA" origin/main || { echo "::error::$REF_NAME is not on main"; exit 1; }
             version="${REF_NAME#v}"
-            suffixes="$version ${version%.*} stable"
+            suffixes="$version"
           else
             # `edge` is added later, by the retag job below, by pointing it at the image's sha tag.
             version="sha-$(printf %s "$SHA" | cut -c1-12)"
@@ -208,25 +219,81 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       # `edge` moves only forward, by the commits that promote it, not by what the images say: an image that was reused keeps the labels of the commit that built it (scripts/edge-order.mjs).
-      # The commit that last promoted `edge` is the label of `pim:edge-commit`, written after each promotion; promotions run one at a time (the `publish-edge` group above), so reading it and writing it is safe.
+      # The commit that last promoted `edge` is the label of `pim:edge-commit`, written after each promotion. Promotions and bootstraps share the `publish-edge` group, so reading it, judging and writing it is one run at a time.
       - name: Move edge
         env:
-          SHA: ${{ github.sha }}
           OWNER: ${{ github.repository_owner }}
-        run: |
-          set -eu
-          owner="$(printf %s "$OWNER" | tr '[:upper:]' '[:lower:]')"
-          sha12="$(printf %s "$SHA" | cut -c1-12)"
-          record="ghcr.io/$owner/pim:edge-commit"
-          promoted="$(docker buildx imagetools inspect "$record" --format '{{ json .Image }}' 2>/dev/null | jq -r '.. | .Labels? // empty | ."dev.pim.edge-commit" // empty' | head -n1 || true)"
-          decision="$(node scripts/edge-order.mjs decide "$SHA" "$promoted")"
-          if [ "$decision" != promote ]; then
-            echo "edge stays: $decision (promoted for ${promoted:-nothing})"
-            exit 0
-          fi
-          for name in pim pim-web pim-computer; do
-            image="ghcr.io/$owner/$name"
-            docker buildx imagetools create --tag "$image:edge" "$image:sha-$sha12"
-            docker buildx imagetools inspect "$image:edge"
-          done
-          printf 'FROM scratch\nLABEL dev.pim.edge-commit=%s\n' "$SHA" | docker buildx build --provenance=false --push -t "$record" -f - .
+        run: node scripts/edge-promote.mjs promote "$OWNER" "$GITHUB_SHA"
+
+  # The first record for an `edge` that predates it (the `edge` job refuses to guess). Run by hand, by a person who checked which commit edge serves.
+  bootstrap-edge:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.bootstrap_edge_commit != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: publish-edge
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - env:
+          OWNER: ${{ github.repository_owner }}
+          COMMIT: ${{ inputs.bootstrap_edge_commit }}
+        run: node scripts/edge-promote.mjs bootstrap "$OWNER" "$COMMIT"
+
+  # Moves `stable` and the `X.Y` aliases once a release is published: to the highest published version, from the registry and the git tags as they are now (scripts/release-promote.mjs), so
+  # releases that finish out of order, or a run replaced while it waited, end on the same tags. A group keeps one pending run, and the newest is enough because each run reads everything again.
+  release:
+    if: ${{ !cancelled() && github.ref_type == 'tag' && needs.plan.result == 'success' && needs.image.result != 'failure' && needs.reuse.result == 'success' }}
+    needs: [plan, image, reuse]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    concurrency:
+      group: publish-stable
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Fetch every release tag
+        run: git fetch --quiet --tags origin
+      - env:
+          OWNER: ${{ github.repository_owner }}
+        run: node scripts/release-promote.mjs reconcile "$OWNER"
+
+  # An explicit rollback of `stable`, by hand. It shares the `publish-stable` group with `release`.
+  rollback-stable:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.rollback_stable_to != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    concurrency:
+      group: publish-stable
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - run: git fetch --quiet --tags origin
+      - env:
+          OWNER: ${{ github.repository_owner }}
+          VERSION: ${{ inputs.rollback_stable_to }}
+        run: node scripts/release-promote.mjs rollback "$OWNER" "$VERSION"

@@ -49,7 +49,7 @@ describe("the workflows", () => {
 		expect(compose.concurrency["cancel-in-progress"]).toMatch(/github\.ref != 'refs\/heads\/main'/);
 		// Publishing is production: nothing in it is ever cancelled, not a build, not a retag, not the wait for CI.
 		expect(publish.concurrency["cancel-in-progress"]).toBe(false);
-		expect(publish.jobs.edge.concurrency["cancel-in-progress"]).toBe(false);
+		for (const job of ["edge", "bootstrap-edge", "release", "rollback-stable"]) expect(publish.jobs[job].concurrency["cancel-in-progress"], job).toBe(false);
 		expect(JSON.stringify(publish)).not.toMatch(/"cancel-in-progress":(true|"\$\{\{)/);
 	});
 
@@ -67,7 +67,14 @@ describe("the workflows", () => {
 		expect(reuse.run).toContain("reused (built at");
 		// Edge follows all three images, and a run where nothing was built still reaches it.
 		expect(publish.jobs.edge.if).toMatch(/!cancelled\(\)/);
-		expect(publish.jobs.edge.steps.find((s: any) => s.name === "Move edge").run).toContain("for name in pim pim-web pim-computer");
+		expect(publish.jobs.edge.steps.find((s: any) => s.name === "Move edge").run).toContain("edge-promote.mjs promote");
+		// Every writer of the edge record shares one group, and every writer of stable and X.Y another, so each record is read, judged and written by one run at a time.
+		expect([publish.jobs.edge, publish.jobs["bootstrap-edge"]].map((j: any) => j.concurrency.group)).toEqual(["publish-edge", "publish-edge"]);
+		expect([publish.jobs.release, publish.jobs["rollback-stable"]].map((j: any) => j.concurrency.group)).toEqual(["publish-stable", "publish-stable"]);
+		// The image job writes the immutable version only; stable and X.Y are the release job's, decided by version precedence.
+		expect(publish.jobs.plan.steps.find((s: any) => s.id === "meta").run).not.toMatch(/stable|\$\{version%\.\*\}/);
+		expect(publish.jobs.release.steps.at(-1).run).toContain("release-promote.mjs reconcile");
+		expect(publish.jobs.plan.if).toMatch(/inputs\.bootstrap_edge_commit == ''/);
 		// Every image the plan names is one that Compose and Kubernetes use.
 		expect(compose.jobs.smoke.if).toMatch(/\.smoke/);
 	});

@@ -4,7 +4,10 @@
 // promotion), and from git's history of those commits. It never comes from an image: an image that was reused carries the labels of the commit that built it, which says nothing
 // about which commit released it, so a promotion judged by those labels can move `edge` to the content of an older commit.
 //
-//   node scripts/edge-order.mjs decide <commit> [<promoted commit>]     prints `promote`, or `skip` and why
+// The record is the only thing that can say where `edge` stands, so a missing one is not "nothing was promoted" when `edge` already exists: that is refused, and an operator writes the first
+// record by hand (the Publish workflow's `bootstrap_edge_commit`) after checking which commit `edge` serves. Only a registry with no `edge` at all starts without one.
+//
+//   node scripts/edge-order.mjs decide <commit> [<promoted commit>] [<edge exists: true|false>]    prints `promote`, `skip` or `refuse`
 import { execFileSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 
@@ -13,8 +16,8 @@ import { pathToFileURL } from "node:url";
  * (`known` says whether a commit is in the history at all). A commit already promoted or older than the one that was is skipped; one that comes after it is promoted; a promoted
  * commit that history no longer holds (main was rewritten) cannot be newer than anything, so it is replaced.
  */
-export function decide({ sha, promoted, isAncestor, known }) {
-	if (!promoted) return { action: "promote", why: "nothing was promoted before" };
+export function decide({ sha, promoted, isAncestor, known, edgeExists = false }) {
+	if (!promoted) return edgeExists ? { action: "refuse", why: "edge exists but no commit is recorded as having promoted it: write the first record with Publish's bootstrap_edge_commit" } : { action: "promote", why: "nothing was promoted before" };
 	if (promoted === sha) return { action: "skip", why: "edge was promoted for this commit already" };
 	if (!known(promoted)) return { action: "promote", why: `${promoted.slice(0, 12)} is not in this history` };
 	if (isAncestor(sha, promoted)) return { action: "skip", why: `edge was promoted for ${promoted.slice(0, 12)}, which comes after ${sha.slice(0, 12)}` };
@@ -23,7 +26,7 @@ export function decide({ sha, promoted, isAncestor, known }) {
 }
 
 /** `decide` against the repository in `cwd`. */
-export function decideInRepo(sha, promoted, cwd = process.cwd()) {
+export function decideInRepo(sha, promoted, cwd = process.cwd(), edgeExists = false) {
 	const git = (...args) => {
 		try {
 			execFileSync("git", args, { cwd, stdio: "ignore" });
@@ -32,13 +35,13 @@ export function decideInRepo(sha, promoted, cwd = process.cwd()) {
 			return false;
 		}
 	};
-	return decide({ sha, promoted: promoted || undefined, isAncestor: (a, b) => git("merge-base", "--is-ancestor", a, b), known: (c) => git("cat-file", "-e", `${c}^{commit}`) });
+	return decide({ sha, promoted: promoted || undefined, edgeExists, isAncestor: (a, b) => git("merge-base", "--is-ancestor", a, b), known: (c) => git("cat-file", "-e", `${c}^{commit}`) });
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-	const [command, sha, promoted] = process.argv.slice(2);
-	if (command !== "decide" || !sha) throw new Error("usage: edge-order.mjs decide <commit> [<promoted commit>]");
-	const result = decideInRepo(sha, promoted);
+	const [command, sha, promoted, edgeExists] = process.argv.slice(2);
+	if (command !== "decide" || !sha) throw new Error("usage: edge-order.mjs decide <commit> [<promoted commit>] [<edge exists: true|false>]");
+	const result = decideInRepo(sha, promoted, process.cwd(), edgeExists === "true");
 	console.error(`${result.action}: ${result.why}`);
 	console.log(result.action);
 }

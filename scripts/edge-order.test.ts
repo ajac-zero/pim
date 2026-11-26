@@ -80,6 +80,10 @@ describe("edge only moves forward", () => {
 		expect(d("b", "zzz")).toBe("promote");
 		const forked = decide({ sha: "x", promoted: "y", isAncestor: () => false, known: () => true });
 		expect(forked.action).toBe("skip");
+		// No record while `edge` already exists says nothing about where it stands: refused, never assumed to be the start. With no `edge` at all, the first promotion starts the record.
+		expect(decide({ sha: "b", promoted: undefined, isAncestor, known, edgeExists: true }).action).toBe("refuse");
+		expect(decide({ sha: "b", promoted: undefined, isAncestor, known, edgeExists: false }).action).toBe("promote");
+		expect(decide({ sha: "b", promoted: "a", isAncestor, known, edgeExists: true }).action).toBe("promote");
 	});
 
 	// A web change, another, and a revert to the first: the third commit's web image is the first one's, reused, with the label of the commit that built it.
@@ -145,6 +149,7 @@ describe("edge only moves forward", () => {
 			expect(decideInRepo(c, b, h.dir).action).toBe("promote");
 			expect(decideInRepo(c, c, h.dir).action).toBe("skip");
 			expect(decideInRepo(c, "1".repeat(40), h.dir).action).toBe("promote");
+			expect(decideInRepo(c, undefined, h.dir, true).action).toBe("refuse");
 		} finally {
 			h.cleanup();
 		}

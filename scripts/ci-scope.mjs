@@ -35,7 +35,7 @@ const PROSE = [/^README\.md$/, /^LICENSE$/, /^AGENTS\.md$/, /^docs\/(?!architect
  */
 export const DECLARED_INPUTS = {
 	// The deployment checks read the Compose and Kubernetes files, the Caddyfile and the Dockerfiles (all of deploy/), and the development preview; the Langfuse checks run the smoke script.
-	"packages/v2-ops": ["deploy", "scripts/v2-dev/preview.mjs", "scripts/langfuse-smoke.mjs"],
+	"packages/v2-ops": ["deploy", "scripts/v2-dev/preview.mjs", "scripts/langfuse-smoke.mjs", "scripts/langfuse-qualify.sh"],
 };
 
 const SOURCE = /\.(?:[cm]?[jt]sx?)$/;

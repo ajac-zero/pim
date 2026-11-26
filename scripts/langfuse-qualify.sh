@@ -21,7 +21,11 @@ lf() { (cd "$WORK/deploy/langfuse" && docker compose -p "$PROJECT" "$@"); }
 cleanup() {
 	status=$?
 	if [ "$STARTED" = 1 ]; then
-		[ "$status" -eq 0 ] || lf logs --no-color --tail 80 2>&1 | sed -E 's/(sk-lf-|pk-lf-)[0-9a-f]+/\1.../g' || true
+		if [ "$status" -ne 0 ]; then
+			# Why a container is not healthy: the last results of its own healthcheck, then the tail of every log.
+			for c in $(lf ps -a -q 2>/dev/null); do docker inspect --format '{{.Name}} {{json .State.Health}}' "$c" 2>/dev/null | cut -c1-700 || true; done
+		fi
+		[ "$status" -eq 0 ] || lf logs --no-color --tail 40 2>&1 | sed -E 's/(sk-lf-|pk-lf-)[0-9a-f]+/\1.../g' || true
 		lf down -v --remove-orphans >/dev/null 2>&1 || true
 	fi
 	if [ "$NETWORK_CREATED" = 1 ]; then docker network rm "$NETWORK" >/dev/null 2>&1 || true; fi

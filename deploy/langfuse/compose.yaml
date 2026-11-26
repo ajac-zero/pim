@@ -75,8 +75,9 @@ services:
     networks:
       default: {}
       pim-traces: { aliases: [langfuse-web] }
+    # The container's own address, not 127.0.0.1: the Next.js server listens on its hostname's interface.
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/public/health').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      test: ["CMD", "node", "-e", "fetch('http://' + require('os').hostname() + ':3000/api/public/health').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -87,7 +88,7 @@ services:
     image: docker.io/langfuse/langfuse-worker:4.86.0@sha256:cc6a5dbdcf0e164f94f3a78bcee97e971f7f22ed3ac374ea9c40e64455903811
     networks: [default]
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3030/api/health').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      test: ["CMD", "node", "-e", "fetch('http://' + require('os').hostname() + ':3030/api/health').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
       interval: 10s
       timeout: 5s
       retries: 12

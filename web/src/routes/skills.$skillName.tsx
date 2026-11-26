@@ -4,7 +4,7 @@ import { useState } from "react";
 import type { BundledLanguage } from "shiki";
 import { toast } from "sonner";
 import { AgentIcon } from "~/components/agent-icon";
-import { Markdown } from "~/components/chat/markdown";
+import { Markdown } from "~/components/chat/markdown-lazy";
 import { useI18n } from "~/components/i18n";
 import {
   ArrowLeft,

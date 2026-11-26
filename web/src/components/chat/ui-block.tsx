@@ -30,7 +30,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { Markdown } from "~/components/chat/markdown";
+import { Markdown } from "~/components/chat/markdown-lazy";
 import { Reply } from "~/components/chat/reply-blocks";
 import type { ChartPoint } from "~/components/chat/ui-chart";
 import { useI18n } from "~/components/i18n";

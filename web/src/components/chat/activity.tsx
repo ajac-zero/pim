@@ -13,7 +13,7 @@ import {
   PinChat,
 } from "~/components/chat/copy-conversation";
 import { ApprovalBlock } from "~/components/chat/items";
-import { Markdown } from "~/components/chat/markdown";
+import { Markdown } from "~/components/chat/markdown-lazy";
 import { RoomMenu } from "~/components/chat/room";
 import { SessionCostMenu } from "~/components/chat/session-cost";
 import { useI18n } from "~/components/i18n";

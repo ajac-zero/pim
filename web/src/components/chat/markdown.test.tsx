@@ -9,12 +9,9 @@ import {
 } from "@tanstack/react-router";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  Markdown,
-  mentionsUser,
-  UNTRUSTED_SCHEMA,
-} from "~/components/chat/markdown";
+import { Markdown, UNTRUSTED_SCHEMA } from "~/components/chat/markdown";
 import { ReplyImages } from "~/components/chat/reply-blocks";
+import { mentionsUser } from "~/components/chat/user-names";
 import {
   embedAddress,
   videoFileAddress,

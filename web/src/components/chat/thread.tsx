@@ -26,7 +26,6 @@ import {
   UserMessage,
   WorkedSteps,
 } from "~/components/chat/items";
-import { mentionsUser, useUserNames } from "~/components/chat/markdown";
 import { sentImages } from "~/components/chat/reply-blocks";
 import { MembersWorking, Speaker } from "~/components/chat/room";
 import {
@@ -36,6 +35,7 @@ import {
   TaskCard,
   TaskJump,
 } from "~/components/chat/tasks";
+import { mentionsUser, useUserNames } from "~/components/chat/user-names";
 import { CHATGPT_USAGE_URL } from "~/components/chatgpt-logo";
 import { type TranslationKey, useI18n } from "~/components/i18n";
 import { AlertCircle, ArrowUp, ChevronRight, Clock } from "~/components/icons";

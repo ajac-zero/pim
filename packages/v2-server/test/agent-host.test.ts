@@ -2,6 +2,7 @@
 // faux one, as a deployment's own provider would be) and the databases the tools write through. The agent keeps notes and goals, creates a note and an app, makes an
 // HTTP request that is sent at once and only once, and starts a coding thread under an admin's grant; every model call lands in the cost ledger.
 import { createHash, randomBytes } from "node:crypto";
+import { createServer, type Server } from "node:http";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { App } from "@pim/v2-app/app";
@@ -32,6 +33,9 @@ real("the default agent host", () => {
 	let chatId: string;
 	let n = 0;
 	const faux = fauxProvider({ provider: "faux", models: [{ id: "m" }, { id: "m2" }] });
+	/** A trace collector the Runner reports to, as Langfuse's OTLP endpoint: the generations it was sent, as `[chat, output tokens]`. */
+	const collected: { session: string; output: number; model: string }[] = [];
+	let collector: Server;
 	const prompts: string[] = [];
 	const sent: { url: string; method: string; headers: Record<string, string>; body: unknown }[] = [];
 	let failNext = false;
@@ -76,6 +80,18 @@ real("the default agent host", () => {
 	beforeAll(async () => {
 		const stack = await createStack();
 		d = { stack, nats: await startNats(), s3: await startS3(), gatePort: await freePort(), ingressSecret: "ingress" };
+		collector = createServer((req, res) => {
+			const chunks: Buffer[] = [];
+			req.on("data", (c) => chunks.push(c));
+			req.on("end", () => {
+				for (const rs of JSON.parse(Buffer.concat(chunks).toString() || "{}").resourceSpans ?? []) for (const ss of rs.scopeSpans) for (const span of ss.spans) {
+					const attrs = Object.fromEntries(span.attributes.map((a: { key: string; value: { stringValue?: string } }) => [a.key, a.value.stringValue]));
+					if (attrs["langfuse.observation.type"] === "generation" && attrs["langfuse.observation.usage_details"]) collected.push({ session: attrs["langfuse.session.id"] ?? "", output: JSON.parse(attrs["langfuse.observation.usage_details"]).output, model: attrs["langfuse.observation.model.name"] });
+				}
+				res.writeHead(200).end("{}");
+			});
+		});
+		await new Promise<void>((resolve) => collector.listen(0, "127.0.0.1", resolve));
 		app = new App(connectApp(stack.url("gate"), 4), new MemoryObjectStore());
 		gate = await start(d, "gate", {}, KEK);
 		web = new Client(base(gate), d.ingressSecret);
@@ -113,7 +129,7 @@ real("the default agent host", () => {
 					return new Response('{"ok":true}', { status: 201, headers: { "content-type": "application/json" } });
 				}) as typeof fetch,
 			},
-			{ PIM_DEFAULT_MODEL: "faux/m", PIM_APP_DATABASE_URL: stack.url("gate"), PIM_FORGE_DATABASE_URL: stack.url("forge"), ...KEK },
+			{ PIM_DEFAULT_MODEL: "faux/m", PIM_APP_DATABASE_URL: stack.url("gate"), PIM_FORGE_DATABASE_URL: stack.url("forge"), OTEL_EXPORTER_OTLP_ENDPOINT: `http://127.0.0.1:${(collector.address() as { port: number }).port}/api/public/otel`, ...KEK },
 		);
 		// Maintenance applies approval timeouts, as the auto policy needs.
 		maintenance = await start(d, "maintenance", { pollMs: 100 });
@@ -121,6 +137,7 @@ real("the default agent host", () => {
 		live = await start(d, "live", { pollMs: 40 });
 	}, 180_000);
 	afterAll(async () => {
+		collector?.close();
 		await Promise.allSettled([live?.close(), maintenance?.close(), runner?.close(), gate?.close()]);
 		await app?.db.end();
 		d?.nats.stop();
@@ -1261,4 +1278,14 @@ const agentId = (await d.stack.admin.query("SELECT id FROM pim_app.agents WHERE 
 		expect((await web.call("POST", "/api/triggers", { ...body, label: "Other" }, { "idempotency-key": "k-1" })).status).toBe(409);
 		expect((await d.stack.admin.query("SELECT count(*)::int AS n FROM pim_app.triggers WHERE title = 'Once'")).rows[0].n).toBe(1);
 	}, 240_000);
+
+	it("sends the chat's model requests to the trace collector, each as the ledger recorded it", async () => {
+		// With tracing on for every test above, whatever the agents did was traced; the generations of this chat are its ledger rows' tokens, once each.
+		const ledger = async () => Number((await d.stack.admin.query("SELECT coalesce(sum(output_tokens), 0) AS n FROM pim_app.model_calls WHERE public_chat_id = $1 AND run_kind = 'chat'", [chatId])).rows[0].n);
+		const sent = () => collected.filter((c) => c.session === chatId).reduce((n, c) => n + c.output, 0);
+		const expected = await ledger();
+		expect(expected).toBeGreaterThan(0);
+		await waitFor("the generations to reach the collector", async () => (sent() === expected ? true : undefined), 30_000);
+		expect(collected.filter((c) => c.session === chatId).every((c) => c.model === "m" || c.model === "m2")).toBe(true);
+	}, 60_000);
 });

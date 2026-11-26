@@ -317,6 +317,7 @@ export async function startRunner(config: ProcessConfig, env: Env, host: Host, h
 			await settler?.stop();
 			await stopNap?.();
 			await runner.stop();
+			await host_?.shutdownTelemetry();
 			await runtimePool.end();
 			await appDb?.end();
 			await forgePool?.end();

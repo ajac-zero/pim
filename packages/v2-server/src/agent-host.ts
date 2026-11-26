@@ -20,6 +20,7 @@ import { anthropicMessagesApi } from "@earendil-works/pi-ai/api/anthropic-messag
 import { createProvider } from "@earendil-works/pi-ai/models";
 import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
 import { googleProvider } from "@earendil-works/pi-ai/providers/google";
+import type { TelemetrySpan } from "@earendil-works/pi-telemetry";
 import { createRegistry, defineExtension, GenerationTask, hook, section, type HarnessOptions } from "@earendil-works/pi-durable";
 import { deliveryOwed, DELIVERY_REMINDER, enforceDelivery, LENGTH_REMINDER, NOT_DELIVERED, ROOM_POST } from "@pim/shared/transcript";
 import type { App } from "@pim/v2-app/app";
@@ -50,6 +51,7 @@ import { fallbackMaxTokens } from "@pim/v2-app/web-providers";
 import { memoryLinesOf, offeredModels } from "./deployment.ts";
 import { memoryView } from "./memory-tree.ts";
 import { type VisitBrief, visitMemory, visitPreamble } from "./visit-brief.ts";
+import { createTelemetry, type TelemetryInput } from "./telemetry.ts";
 
 type Env = Record<string, string | undefined>;
 type ModelRef = { provider: string; id: string };
@@ -86,6 +88,8 @@ export type AgentHostOptions = {
 	stallMs?: { stream?: number; tool?: number } | undefined;
 	fetch?: typeof fetch | undefined;
 	now?: (() => number) | undefined;
+	/** Where traces go instead of the collector the environment names; tests. */
+	telemetry?: Pick<TelemetryInput, "exporter" | "immediate"> | undefined;
 };
 
 /** What the catalog calls a provider the deployment shares with everyone. */
@@ -446,6 +450,21 @@ export function createAgentHost(options: AgentHostOptions) {
 	const publicChatId = async (ownerId: string, conversationId: number | string): Promise<string | null> =>
 		(await db.read<{ public_chat_id: string }>(ownerId, "SELECT public_chat_id FROM pim_runtime.conversation_partitions WHERE owner_id = $1 AND conversation_id = $2", [ownerId, conversationId])).rows[0]?.public_chat_id ?? null;
 
+	/**
+	 * Tracing, when the deployment sends traces: pi's own spans, given to each partition's Harness and to the model calls no chat asked for. The chat a span's conversation is, and the
+	 * agent it runs as, are read just before export, never while an agent runs.
+	 */
+	const telemetry = createTelemetry(env, {
+		role: env.PIM_ROLE ?? "runner",
+		...options.telemetry,
+		conversation: async (ownerId, conversationId) => {
+			const chat = await publicChatId(ownerId, conversationId);
+			if (!chat) return undefined;
+			const [context, started] = await Promise.all([readContext(ownerId, chat).catch(() => undefined), db.read<{ s: { session?: string; task?: string } | null }>(ownerId, "SELECT pim_app.task_started_by($1, $2) AS s", [ownerId, chat]).then((r) => r.rows[0]?.s ?? null, () => null)]);
+			return { chat, agent: context?.agent?.id ?? null, startedByChat: started?.session ?? null, startedByTask: started?.task ?? null };
+		},
+	});
+
 	/** The owner's providers: what the catalog offers, with their keys opened once, so a model call never waits on the application's database. */
 	async function buildModels(ownerId: string): Promise<Models> {
 		const { models, plan } = await ownerCatalog({ db, crypto: options.crypto, env, chatgpt: chatgptOptions, providers: options.providers }, ownerId);
@@ -719,7 +738,7 @@ export function createAgentHost(options: AgentHostOptions) {
 		// A request that failed for good, with nothing left to retry or fail over to, holds the run where it stopped: the person's Try again on the error card asks the model again (`POST /api/sessions/:id/retry`), so they need not say it twice.
 		// A request the provider rejected as invalid (a 400), or an agent that would not deliver its reply after two reminders, fails the same way when asked again, so such a run ends instead: the chat is not at work, and Try again sends the message again.
 		// pi 1.5 stores a streamed answer and running tool output up to a second late; the live projector reads them from PostgreSQL, so each is stored as it is committed, as in pi 1.1.
-		return { models: metered, registry, settings: { retry: { suspend: (message: unknown, conversationId: unknown) => {
+		return { ...(telemetry ? { telemetry: telemetry.partition(ownerId, partition.partitionId) } : {}), models: metered, registry, settings: { retry: { suspend: (message: unknown, conversationId: unknown) => {
 			if (taskConversations.has(`${ownerId}\u0000${conversationId}`) || rejectedAsInvalid(message as FailedAnswer)) return false;
 			holdUntilReset(ownerId, message as FailedAnswer, conversationId);
 			return true;
@@ -761,7 +780,8 @@ export function createAgentHost(options: AgentHostOptions) {
 		const pick = await choose(ownerId, [await chosenModel(ownerId), ...(c?.fallbacks ?? []).map(asModelRef)]);
 		const model = models.getModel(pick.provider, pick.modelId);
 		if (!model) throw new Error(`The model ${pick.provider}/${pick.modelId} is not available`);
-		const message: any = await failover.wrap(models, ownerId).completeSimple(model, { systemPrompt: system, messages: [{ role: "user", content: question, timestamp: now() }] } as never, { signal } as never);
+		const call = (span?: TelemetrySpan) => failover.wrap(models, ownerId).completeSimple(model, { systemPrompt: system, messages: [{ role: "user", content: question, timestamp: now() }] } as never, { signal, ...(span ? { telemetry: span } : {}) } as never);
+		const message: any = await (telemetry ? telemetry.background(ownerId, "approval_review", call) : call());
 		if (message.stopReason === "error" || message.stopReason === "aborted") throw new Error(message.errorMessage ?? "The model did not answer");
 		return (message.content as { type: string; text?: string }[]).filter((p) => p.type === "text").map((p) => p.text ?? "").join("");
 	}
@@ -777,12 +797,13 @@ export function createAgentHost(options: AgentHostOptions) {
 		const wanted = [asModelRef(env.PIM_MEMORY_MODEL), utility, await chosenModel(ownerId), asModelRef(env.PIM_DEFAULT_MODEL)].filter((m): m is ModelRef => m !== null);
 		const model = wanted.map((w) => available.find((a) => a.provider === w.provider && a.id === w.id)).find((m) => m !== undefined);
 		if (!model) return undefined;
-		const answer = await models.completeSimple(model as never, { systemPrompt: system, messages: [{ role: "user", content: prompt, timestamp: now() }] } as never, { maxTokens } as never);
+		const call = (span?: TelemetrySpan) => models.completeSimple(model as never, { systemPrompt: system, messages: [{ role: "user", content: prompt, timestamp: now() }] } as never, { maxTokens, ...(span ? { telemetry: span } : {}) } as never);
+		const answer = await (telemetry ? telemetry.background(ownerId, "background", call) : call());
 		const usage = (answer as any)?.usage;
 		await recordCall(ownerId, "background", null, null, `mc_${randomUUID()}`, answer, model);
 		if ((answer as any)?.stopReason === "error") throw new Error(String((answer as any).errorMessage ?? "The model failed"));
 		return ((answer as any).content as { type: string; text?: string }[]).flatMap((c) => (c.type === "text" ? [c.text ?? ""] : [])).join("").trim();
 	}
 
-	return { harnessOptions, homeRoot, chatAgent, beforeUserMessage, ask, complete, context: (ownerId: string, chat: string | null) => readContext(ownerId, chat) };
+	return { harnessOptions, homeRoot, chatAgent, beforeUserMessage, ask, complete, shutdownTelemetry: async () => telemetry?.shutdown(), flushTelemetry: async () => telemetry?.flush(), context: (ownerId: string, chat: string | null) => readContext(ownerId, chat) };
 }

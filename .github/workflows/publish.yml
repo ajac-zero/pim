@@ -8,7 +8,7 @@
 #   - run by hand with `force`: every image is built again (for a security update of a base image; bumping deploy/IMAGE_EPOCH does the same on the next push)
 # The slow part is the multi-arch build, so it does not wait for CI: both run at once, and what is left after CI is a retag that takes seconds. The sha tag is harmless on its own (nothing
 # follows it but `pim.sh update sha-<12>`), so a commit whose CI failed leaves an unused image and never gets `edge`.
-# It never runs for pim/* branches or pull requests. Workflows are read from the pushed commit, so this one can only be exercised by a push to main or a run by hand on main.
+# It never runs for branches other than main or for pull requests. Workflows are read from the pushed commit, so this one can only be exercised by a push to main or a run by hand on main.
 name: Publish
 
 on:
@@ -207,6 +207,8 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      # `edge` moves only forward, by the commits that promote it, not by what the images say: an image that was reused keeps the labels of the commit that built it (scripts/edge-order.mjs).
+      # The commit that last promoted `edge` is the label of `pim:edge-commit`, written after each promotion; promotions run one at a time (the `publish-edge` group above), so reading it and writing it is safe.
       - name: Move edge
         env:
           SHA: ${{ github.sha }}
@@ -215,14 +217,16 @@ jobs:
           set -eu
           owner="$(printf %s "$OWNER" | tr '[:upper:]' '[:lower:]')"
           sha12="$(printf %s "$SHA" | cut -c1-12)"
+          record="ghcr.io/$owner/pim:edge-commit"
+          promoted="$(docker buildx imagetools inspect "$record" --format '{{ json .Image }}' 2>/dev/null | jq -r '.. | .Labels? // empty | ."dev.pim.edge-commit" // empty' | head -n1 || true)"
+          decision="$(node scripts/edge-order.mjs decide "$SHA" "$promoted")"
+          if [ "$decision" != promote ]; then
+            echo "edge stays: $decision (promoted for ${promoted:-nothing})"
+            exit 0
+          fi
           for name in pim pim-web pim-computer; do
             image="ghcr.io/$owner/$name"
-            # Pushes to main can finish out of order. Leave `edge` alone when it is already on this commit or a later one (by the revision label of the image it points at).
-            current="$(docker buildx imagetools inspect "$image:edge" --format '{{ json .Image }}' 2>/dev/null | jq -r '.. | .Labels? // empty | ."org.opencontainers.image.revision" // empty' | head -n1 || true)"
-            if [ -n "$current" ] && git merge-base --is-ancestor "$SHA" "$current" 2>/dev/null; then
-              echo "$name: edge is already at $current, which includes $SHA"
-              continue
-            fi
             docker buildx imagetools create --tag "$image:edge" "$image:sha-$sha12"
             docker buildx imagetools inspect "$image:edge"
           done
+          printf 'FROM scratch\nLABEL dev.pim.edge-commit=%s\n' "$SHA" | docker buildx build --provenance=false --push -t "$record" -f - .

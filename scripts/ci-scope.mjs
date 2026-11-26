@@ -24,7 +24,7 @@ const TOP_LEVEL = ["web", "web-host", "computer", "displayd", "sandbox-manager",
 const IGNORED_TOP_LEVEL = [".agents", ".amp", ".pim"];
 
 /** Files at the root that change what everything is built, installed or checked with. */
-const TOOLCHAIN = [/^package\.json$/, /^pnpm-lock\.yaml$/, /^pnpm-workspace\.yaml$/, /^\.nvmrc$/, /^tsconfig[^/]*\.json$/, /^vitest[^/]*\.config\.[^/]+$/, /^workerd-runtime\.d\.ts$/, /^\.dockerignore$/, /^\.gitignore$/, /^patches\//, /^\.github\//, /^scripts\/(ci-|image-)[^/]+$/, /^deploy\/IMAGE_EPOCH$/];
+const TOOLCHAIN = [/^package\.json$/, /^pnpm-lock\.yaml$/, /^pnpm-workspace\.yaml$/, /^\.nvmrc$/, /^tsconfig[^/]*\.json$/, /^vitest[^/]*\.config\.[^/]+$/, /^workerd-runtime\.d\.ts$/, /^\.dockerignore$/, /^\.gitignore$/, /^patches\//, /^\.github\//, /^scripts\/(ci-|image-|edge-)[^/]+$/, /^deploy\/IMAGE_EPOCH$/];
 
 /** What is only to be read: no job's result depends on it. */
 const PROSE = [/^README\.md$/, /^LICENSE$/, /^AGENTS\.md$/, /^docs\/(?!architecture\/).+/, /\.md$/];

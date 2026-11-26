@@ -17,7 +17,7 @@ const root = path.resolve(__dirname, "..");
 const graph = buildGraph(root);
 const scope = (...files: string[]) => selectScope(files, graph, { root });
 const jobs = (s: ReturnType<typeof scope>) => Object.entries(s.jobs as Record<string, boolean>).filter(([, on]) => on).map(([name]) => name).sort();
-const ALL_JOBS = ["daemons", "desktop", "image-backend", "image-computer", "image-web", "lint", "lint-web", "node", "packages", "typecheck", "v2-server", "web", "web-build"];
+const ALL_JOBS = ["daemons", "desktop", "image-backend", "image-computer", "image-web", "lint", "lint-web", "node", "packages", "registry", "typecheck", "v2-server", "web", "web-build"];
 
 describe("what a change reaches", () => {
 	it("runs only the web app's jobs, and publishes only its image, for a change to the interface", () => {

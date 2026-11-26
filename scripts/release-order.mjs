@@ -30,7 +30,7 @@ const minorOf = (v) => v.split(".").slice(0, 2).join(".");
  * What `stable` and the `X.Y` aliases should name. `published` is every version whose images all exist; `current` the version `stable` is on now (null when none, or when it is on an image that
  * is no published version); `pin` an explicit rollback, `<target>@<above>`.
  * `action` says what happens to `stable` (set, keep or refuse); the `X.Y` aliases are set to `minors` unless it refuses.
- * @returns {{ action: "set" | "keep" | "refuse", stable: string | null, minors: Record<string, string>, why: string }}
+ * @returns {{ action: "set" | "keep" | "refuse", pinned?: boolean, stable: string | null, minors: Record<string, string>, why: string }}
  */
 export function reconcile({ published, current = null, pin = null }) {
 	const versions = [...new Set(published.filter((v) => VERSION.test(v)))];
@@ -43,10 +43,10 @@ export function reconcile({ published, current = null, pin = null }) {
 	const minors = {};
 	for (const v of versions) if (!minors[minorOf(v)] || compare(v, minors[minorOf(v)]) > 0) minors[minorOf(v)] = v;
 	if (pinned) minors[minorOf(target)] = target;
-	if (current && VERSION.test(current) && compare(stable, current) < 0) {
+	if (!pinned && current && VERSION.test(current) && compare(stable, current) < 0) {
 		return { action: "refuse", stable: current, minors, why: `stable is on ${current}, above ${stable}: moving it down is a rollback, which is explicit (Publish's rollback_stable_to)` };
 	}
-	return { action: current === stable ? "keep" : "set", stable, minors, why: pinned ? `stable is held on ${target} by a rollback until a version above ${above} is published` : `${top} is the highest published version` };
+	return { action: current === stable ? "keep" : "set", pinned: Boolean(pinned), stable, minors, why: pinned ? `stable is held on ${target} by a rollback until a version above ${above} is published` : `${top} is the highest published version` };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

@@ -203,6 +203,8 @@ export function selectScope(files, graph = buildGraph(), options = {}) {
 				"image-backend": images.backend,
 				"image-web": images.web,
 				"image-computer": images.computer,
+				// The registry adapter and the promotions against a real buildx and registry.
+				registry: full || changed.some((f) => /^scripts\/(registry|edge-|release-|ci-status|fake-docker)/.test(f)),
 			},
 			// What each job runs. Biome covers the web app only; the root's TypeScript project is the computer's and the scripts'.
 			typecheck: checks.typecheck,

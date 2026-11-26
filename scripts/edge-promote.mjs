@@ -1,8 +1,14 @@
 #!/usr/bin/env node
 // Moves `edge` to a commit's images, or writes the first record of where it stands (publish.yml, the `edge` and `bootstrap-edge` jobs). Both run in the one `publish-edge` concurrency group, so
-// the record is read, judged and written by one run at a time; nothing else in the repository writes `edge` or `edge-commit`. The judgement itself is scripts/edge-order.mjs.
+// the records are read, judged and written by one run at a time; nothing else in the repository writes `edge` or the records. The judgement of order is scripts/edge-order.mjs.
 //
-//   node scripts/edge-promote.mjs promote <owner> <commit>        moves edge if the commit comes after the one that last promoted it
+// Moving `edge` is three alias writes and cannot be one step, so a promotion is written down before it starts. Two records, each the label of a scratch image:
+//   `pim:edge-intent`  the commit being promoted, written BEFORE the first alias moves
+//   `pim:edge-commit`  the commit whose promotion finished, written AFTER the last
+// A run first finishes any promotion whose intent is not yet the finished commit, then judges its own commit against the intent (which is never behind the finished one), so a promotion that stopped
+// halfway is completed by whichever run comes next, and an older commit arriving in between can never move an alias back.
+//
+//   node scripts/edge-promote.mjs promote <owner> <commit>        moves edge if the commit comes after the one that was promoted last
 //   node scripts/edge-promote.mjs bootstrap <owner> <commit>      writes the first record, for an edge that predates it, after a person checked which commit edge serves
 import { execFileSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
@@ -10,37 +16,53 @@ import { decideInRepo } from "./edge-order.mjs";
 import { IMAGE_NAMES, registry } from "./registry.mjs";
 
 export const RECORD_LABEL = "dev.pim.edge-commit";
+export const INTENT_LABEL = "dev.pim.edge-intent";
 const sha12 = (sha) => sha.slice(0, 12);
 
+/** Every image's `edge` on the commit's image, written only where it is not already. */
+function moveEdge({ base, sha, reg }) {
+	for (const name of IMAGE_NAMES) if (!reg.exists(`${base}/${name}:sha-${sha12(sha)}`)) throw new Error(`${base}/${name}:sha-${sha12(sha)} does not exist: edge is not moved to an image that was not published for this commit`);
+	for (const name of IMAGE_NAMES) {
+		const image = `${base}/${name}`;
+		if (reg.digest(`${image}:edge`) !== reg.digest(`${image}:sha-${sha12(sha)}`)) reg.tag(`${image}:sha-${sha12(sha)}`, `${image}:edge`);
+	}
+}
+
 /** @returns {{ action: "promoted" | "skipped" | "refused", why: string }} */
-export function promoteEdge({ owner, sha, reg = registry(), decide = decideInRepo, cwd }) {
-	const record = `ghcr.io/${owner}/pim:edge-commit`;
-	const promoted = reg.label(record, RECORD_LABEL) ?? undefined;
-	const edgeExists = IMAGE_NAMES.some((name) => reg.exists(`ghcr.io/${owner}/${name}:edge`));
+export function promoteEdge({ owner, sha, host = "ghcr.io", reg = registry(), decide = decideInRepo, cwd }) {
+	const base = `${host}/${owner}`;
+	const record = `${base}/pim:edge-commit`;
+	const intentRef = `${base}/pim:edge-intent`;
+	const finished = reg.label(record, RECORD_LABEL) ?? undefined;
+	const intent = reg.label(intentRef, INTENT_LABEL) ?? undefined;
+	// A promotion that stopped partway is finished first, whoever comes next.
+	if (intent && intent !== finished) {
+		moveEdge({ base, sha: intent, reg });
+		reg.writeRecord(record, RECORD_LABEL, intent);
+	}
+	const promoted = intent ?? finished;
+	const edgeExists = IMAGE_NAMES.some((name) => reg.exists(`${base}/${name}:edge`));
 	const decision = decide(sha, promoted, cwd, edgeExists);
 	if (decision.action !== "promote") return { action: decision.action === "refuse" ? "refused" : "skipped", why: decision.why };
-	for (const name of IMAGE_NAMES) {
-		const image = `ghcr.io/${owner}/${name}`;
-		if (!reg.exists(`${image}:sha-${sha12(sha)}`)) throw new Error(`${image}:sha-${sha12(sha)} does not exist: edge is not moved to an image that was not published for this commit`);
-	}
-	for (const name of IMAGE_NAMES) reg.tag(`ghcr.io/${owner}/${name}:sha-${sha12(sha)}`, `ghcr.io/${owner}/${name}:edge`);
-	// Written last: a promotion that stopped halfway leaves the record on the commit before it, so the next run does it again rather than believing it done.
+	for (const name of IMAGE_NAMES) if (!reg.exists(`${base}/${name}:sha-${sha12(sha)}`)) throw new Error(`${base}/${name}:sha-${sha12(sha)} does not exist: edge is not moved to an image that was not published for this commit`);
+	reg.writeRecord(intentRef, INTENT_LABEL, sha);
+	moveEdge({ base, sha, reg });
 	reg.writeRecord(record, RECORD_LABEL, sha);
 	return { action: "promoted", why: decision.why };
 }
 
 /** The first record: refused when one exists (it would be a rewrite of history), when edge does not exist (there is nothing to record) or when the commit is not on this history. */
-export function bootstrapEdge({ owner, commit, head, reg = registry(), cwd }) {
-	const record = `ghcr.io/${owner}/pim:edge-commit`;
-	if (reg.exists(record)) throw new Error(`${record} exists: it already says which commit promoted edge, and a bootstrap would rewrite it`);
-	if (!IMAGE_NAMES.some((name) => reg.exists(`ghcr.io/${owner}/${name}:edge`))) throw new Error("there is no edge to record: the first promotion needs no bootstrap");
+export function bootstrapEdge({ owner, commit, head, host = "ghcr.io", reg = registry(), cwd }) {
+	const base = `${host}/${owner}`;
+	if (reg.exists(`${base}/pim:edge-commit`) || reg.exists(`${base}/pim:edge-intent`)) throw new Error(`${base}/pim already has an edge record: it says which commit promoted edge, and a bootstrap would rewrite it`);
+	if (!IMAGE_NAMES.some((name) => reg.exists(`${base}/${name}:edge`))) throw new Error("there is no edge to record: the first promotion needs no bootstrap");
 	if (!/^[0-9a-f]{40}$/.test(commit)) throw new Error("bootstrap_edge_commit must be a full commit ID");
 	try {
 		execFileSync("git", ["merge-base", "--is-ancestor", commit, head], { cwd, stdio: "ignore" });
 	} catch {
 		throw new Error(`${commit} is not in the history of ${head}`);
 	}
-	reg.writeRecord(record, RECORD_LABEL, commit);
+	reg.writeRecord(`${base}/pim:edge-commit`, RECORD_LABEL, commit);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

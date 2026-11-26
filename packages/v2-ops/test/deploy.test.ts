@@ -74,6 +74,12 @@ describe("the workflows", () => {
 		// The image job writes the immutable version only; stable and X.Y are the release job's, decided by version precedence.
 		expect(publish.jobs.plan.steps.find((s: any) => s.id === "meta").run).not.toMatch(/stable|\$\{version%\.\*\}/);
 		expect(publish.jobs.release.steps.at(-1).run).toContain("release-promote.mjs reconcile");
+		// A release is promoted only after CI and Compose passed on its commit, waited for outside the group; the CI job that checks the adapter against a real registry is part of the aggregate.
+		expect(publish.jobs.release.needs).toEqual(["qualify"]);
+		expect(publish.jobs.qualify.concurrency).toBeUndefined();
+		expect(publish.jobs.qualify.steps.at(-1).run).toContain("ci-status.mjs wait");
+		expect(ci.jobs.registry.services.registry.image).toBe("registry:2");
+		expect(ci.jobs.registry.steps.at(-1).env.PIM_TEST_REGISTRY).toBe("localhost:5000");
 		expect(publish.jobs.plan.if).toMatch(/inputs\.bootstrap_edge_commit == ''/);
 		// Every image the plan names is one that Compose and Kubernetes use.
 		expect(compose.jobs.smoke.if).toMatch(/\.smoke/);

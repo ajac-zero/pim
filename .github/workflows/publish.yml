@@ -248,11 +248,25 @@ jobs:
           COMMIT: ${{ inputs.bootstrap_edge_commit }}
         run: node scripts/edge-promote.mjs bootstrap "$OWNER" "$COMMIT"
 
-  # Moves `stable` and the `X.Y` aliases once a release is published: to the highest published version, from the registry and the git tags as they are now (scripts/release-promote.mjs), so
-  # releases that finish out of order, or a run replaced while it waited, end on the same tags. A group keeps one pending run, and the newest is enough because each run reads everything again.
-  release:
+  # A release is promoted only for a commit CI and the Compose smoke test passed on: that a tag is on main's history is not evidence of that. Waits outside the `publish-stable` group, so a long wait
+  # never holds up another release's promotion, and fails when either did not succeed (scripts/ci-status.mjs). `release` also reads this for every other release it considers.
+  qualify:
     if: ${{ !cancelled() && github.ref_type == 'tag' && needs.plan.result == 'success' && needs.image.result != 'failure' && needs.reuse.result == 'success' }}
     needs: [plan, image, reuse]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - run: node scripts/ci-status.mjs wait "$GITHUB_SHA"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  # Moves `stable` and the `X.Y` aliases once a release is published and qualified: to the highest eligible version (images complete, CI and Compose passed on its commit), from the registry, the git tags
+  # and the workflows' results as they are now (scripts/release-promote.mjs), so releases that finish out of order, or a run replaced while it waited, end on the same tags. A group keeps one pending
+  # run, and the newest is enough because each run reads everything again. Every alias of every image is checked and repaired on each run, not only when the decision changed.
+  release:
+    if: ${{ !cancelled() && github.ref_type == 'tag' && needs.qualify.result == 'success' }}
+    needs: [qualify]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     concurrency:
@@ -272,6 +286,7 @@ jobs:
         run: git fetch --quiet --tags origin
       - env:
           OWNER: ${{ github.repository_owner }}
+          GH_TOKEN: ${{ github.token }}
         run: node scripts/release-promote.mjs reconcile "$OWNER"
 
   # An explicit rollback of `stable`, by hand. It shares the `publish-stable` group with `release`.
@@ -296,4 +311,5 @@ jobs:
       - env:
           OWNER: ${{ github.repository_owner }}
           VERSION: ${{ inputs.rollback_stable_to }}
+          GH_TOKEN: ${{ github.token }}
         run: node scripts/release-promote.mjs rollback "$OWNER" "$VERSION"

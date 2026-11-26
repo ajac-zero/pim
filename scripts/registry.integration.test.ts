@@ -29,7 +29,7 @@ describe.skipIf(!host)("the registry adapter against a real registry", () => {
 		expect(digest).toBe(raw.digest);
 		expect(JSON.parse(run("buildx", "imagetools", "inspect", ref("pim", "built"), "--format", "{{ json .Image }}"))).toHaveProperty(["linux/arm64"]);
 		expect(reg.label(ref("pim", "built"), "org.opencontainers.image.revision")).toBe("abc123");
-		reg.tag(ref("pim", "built"), ref("pim", "reused"), ref("pim", "stable"));
+		reg.tag(ref("pim", "built"), ref("pim", "reused"), ref("pim", "alias"));
 		expect(reg.digest(ref("pim", "reused"))).toBe(digest);
 		expect(reg.label(ref("pim", "reused"), "org.opencontainers.image.revision")).toBe("abc123");
 	});
@@ -53,7 +53,7 @@ describe.skipIf(!host)("the registry adapter against a real registry", () => {
 			build(name, "sha-aaaaaaaaaaaa", { "org.opencontainers.image.revision": "a" });
 		}
 		const result = promoteStable({ owner, host, tags: ["v1.0.0", "v1.1.0"], qualified: () => true });
-		expect(result.stable).toBe("1.1.0");
+		expect(result, "stable moved").toMatchObject({ action: "set", stable: "1.1.0" });
 		for (const name of IMAGE_NAMES) {
 			expect(reg.digest(ref(name, "stable"))).toBe(reg.digest(ref(name, "1.1.0")));
 			expect(reg.digest(ref(name, "1.1"))).toBe(reg.digest(ref(name, "1.1.0")));

@@ -5,7 +5,7 @@
  */
 import type { JsonValue } from "@earendil-works/pi-ai";
 import type { EntryRecord } from "@earendil-works/pi-durable";
-import type { TranscriptMessage } from "@pim/shared/transcript";
+import type { Provenance, TranscriptMessage } from "@pim/shared/transcript";
 import type { OwnerId } from "@pim/v2-contracts/identity";
 import { type ProjectionCursor, pulseSubjects } from "@pim/v2-contracts/live-seam";
 
@@ -17,7 +17,7 @@ export type { RuntimeOutboxEvent } from "@pim/v2-contracts/runtime-seam";
 /** `eventKind`s of a `RuntimeOutboxEvent` that Live projects, and their `payload`s. Other kinds are skipped. */
 export type OutboxPayloads = {
 	/** A message committed to a chat or coding thread (`publicChatId`, or `payload.threadId` for coding); `partial` while it streams. The final commit replaces the partial. */
-	"chat.entry": { /** A pi entry, which Live projects into a message; or `message`, already one (a coding thread's events are not pi entries). */ entry?: EntryRecord; message?: TranscriptMessage; partial?: boolean; stream?: "chat" | "coding"; threadId?: string; /** Where the message sorts, when its entry id does not say (a streaming partial has no entry yet). */ position?: number; /** The id of the partial message this one replaces, which is dropped from the transcript. */ replaces?: string };
+	"chat.entry": { /** A pi entry, which Live projects into a message; or `message`, already one (a coding thread's events are not pi entries). */ entry?: EntryRecord; message?: TranscriptMessage; partial?: boolean; stream?: "chat" | "coding"; threadId?: string; /** Where the message sorts, when its entry id does not say (a streaming partial has no entry yet). */ position?: number; /** The id of the partial message this one replaces, which is dropped from the transcript. */ replaces?: string; /** For an assistant entry: who is behind each `send_to_user` call, by call id, as the server worked it out; kept in the projected message. */ provenance?: Record<string, Provenance>; /** For a user entry that is another agent's post in a group chat: the models behind it, carried from where it was written. */ post?: Provenance };
 	/** What the sidebar shows of a chat: a merge into its summary. */
 	"chat.meta": { title?: string | null; busy?: boolean; unread?: boolean; stalled?: boolean; updatedAt?: number; summary?: Record<string, JsonValue>; /** The inputs queued behind the running turn (pi's inbox items, without its passive writes): replaces what was queued. */ queue?: JsonValue[] };
 	/** The state a person gave an interactive `ui` block, keyed by the message that holds it. */

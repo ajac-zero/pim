@@ -9,7 +9,7 @@
  * shows as lag) rather than being skipped.
  */
 import type { JsonValue } from "@earendil-works/pi-ai";
-import { projectEntries } from "@pim/shared/transcript";
+import { projectEntries, withProvenance } from "@pim/shared/transcript";
 import { serializeCursor } from "@pim/v2-contracts/live-seam";
 import type { PoolClient, Pool } from "pg";
 import { type OutboxPayloads, type OwnerId, type RuntimeOutboxEvent, SIDEBAR_TOPIC, PROJECTED_KINDS, chatTopic, codingTopic } from "../contracts.ts";
@@ -142,7 +142,8 @@ export class Projector {
 				const partial = payload.partial === true;
 				// A final message takes the place of the partial that showed it while it streamed.
 				if (payload.replaces !== undefined) await client.query("DELETE FROM pim_projection.chat_transcript_projection WHERE owner_id = $1 AND stream_kind = $2 AND chat_id = $3 AND entry_id = $4 AND partial", [ownerId, stream, id, payload.replaces]);
-				for (const message of payload.message ? [payload.message] : projectEntries([payload.entry!])) {
+				for (const projected of payload.message ? [payload.message] : projectEntries([payload.entry!])) {
+					const message = withProvenance(projected, payload.provenance, payload.post);
 					await client.query(
 						`INSERT INTO pim_projection.chat_transcript_projection (owner_id, stream_kind, chat_id, entry_id, position, partial, message, partition_id, commit_seq, projection_version)
 						 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)

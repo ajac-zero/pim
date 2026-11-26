@@ -20,7 +20,9 @@ function piMessage(m: V2Message): Message | null {
         (part) => part.type === "text" || part.type === "image",
       ) as never,
       timestamp: m.timestamp,
-    };
+      // What another agent's post carries, for the chat to show who is behind it.
+      ...(m.provenance ? { provenance: m.provenance } : {}),
+    } as Message;
   }
   if (m.role === "assistant") return assistantOf(m);
   if (m.role === "tool") {
@@ -54,14 +56,17 @@ export function assistantOf(m: V2Message): AssistantMessage {
             id: part.id,
             name: part.name,
             arguments: part.arguments as never,
+            ...(part.provenance ? { provenance: part.provenance } : {}),
           },
         ];
       }
       return [];
     }),
-    api: "v2",
-    provider: "v2",
-    model: "v2",
+    api: "",
+    // What the request recorded, or nothing: a message stored without its model stays unknown here.
+    provider: m.model?.provider ?? "",
+    model: m.model?.model ?? "",
+    ...(m.model?.served === undefined ? {} : { responseModel: m.model.served }),
     usage: {} as never,
     stopReason: (m.stopReason ?? "stop") as never,
     ...(m.error === undefined ? {} : { errorMessage: m.error }),

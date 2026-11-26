@@ -929,6 +929,13 @@ const agentId = (await d.stack.admin.query("SELECT id FROM pim_app.agents WHERE 
 		expect((await resultsIn(seat, "read_chat"))[1]).toMatch(/^Chat "Room":\n\n/);
 		await waitFor("the host to answer Ada", async () => ((await resultsIn(room, "send_to_user")).length === 2 ? true : undefined), 90_000);
 		await waitFor("Ada's post in the room", async () => ((await said(room)).includes("[From Ada]\\n@Pim over to you") ? true : undefined), 30_000);
+		// The models behind Ada's post come with it from her seat's chat as data beside the message, never in what it says or what the other agents read; the host's own send keeps its own.
+		const projected = (await d.stack.admin.query("SELECT message FROM pim_projection.chat_transcript_projection WHERE chat_id = $1 AND NOT partial ORDER BY position", [room])).rows.map((r) => r.message as { role: string; parts: { text?: string; name?: string; provenance?: { emitter: { provider: string }; contributors: unknown[]; complete: boolean } }[]; provenance?: { emitter: { provider: string }; contributors: unknown[]; complete: boolean } });
+		const post = projected.find((m) => m.role === "user" && m.parts[0]?.text === "[From Ada]\n@Pim over to you");
+		expect(post?.provenance).toMatchObject({ emitter: { provider: "faux" }, complete: true });
+		expect(post?.provenance?.contributors.length).toBeGreaterThan(0);
+		expect(JSON.stringify(post?.parts)).not.toContain("provenance");
+		expect(projected.flatMap((m) => m.parts.filter((p) => p.name === "send_to_user").map((p) => p.provenance?.emitter.provider))).toContain("faux");
 		expect((await web.call("PUT", `/api/sessions/${chat0}/room`, { mode: "open" })).status).toBe(404);
 		// Only the host takes agents out; an agent that is not there is said not to be.
 		faux.setResponses([toolUse(fauxToolCall("remove_from_chat", { agents: ["@Ada", "Nobody"] })), toolUse(fauxToolCall("send_to_user", { message: "removed" }))] as never);

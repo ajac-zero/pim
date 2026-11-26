@@ -438,6 +438,30 @@ describe("layoutThread", () => {
     ).toEqual(["entry 1", "sent 4:0: It's sunny."]);
   });
 
+  it("shows the provenance the server kept with each send, and says it is unknown for a send that has none", () => {
+    const neon = { provider: "ai-gateway", model: "gemini-4-neon" };
+    const kept = { emitter: neon, contributors: [neon], complete: true };
+    const rows = layoutThread(
+      [
+        ...projectMessage(
+          {
+            role: "assistant",
+            content: [{ ...send("a", "Kept"), provenance: kept }],
+          } as never,
+          "2",
+        ),
+        ...projectMessage(
+          { role: "assistant", content: [send("b", "Older")] } as never,
+          "4",
+        ),
+      ],
+      { shown: () => false },
+    );
+    expect(
+      rows.flatMap((row) => (row.kind === "sent" ? [row.provenance] : [])),
+    ).toEqual([kept, { emitter: null, contributors: [], complete: false }]);
+  });
+
   it("times the person's message by when they sent it, and an agent's by when it finished writing it", () => {
     const rows = layoutThread(
       run([

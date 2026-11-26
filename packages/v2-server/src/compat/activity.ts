@@ -112,6 +112,38 @@ export function activityOf(turns: readonly Turn[], now: number, options: { runni
 /** How many of a chat's newest messages are read for its latest turn. */
 const MESSAGES = 200;
 
+export type LedgerRow = { id: string; provider: string | null; model: string | null; latency_ms: number | string | null; error: string | null; at: number | string };
+
+/**
+ * The model calls the ledger kept for a chat, as the turns show them. A request that was answered is keyed by when it started (the answer's own time, in its id), and its latency says how long
+ * it took. A request that failed and went to the next model is a row of its own, written when the request that followed it ended (`at` is that moment), so it is placed by what it led to: it
+ * ended when the next attempt began, the first of which began when the answered request did (the stamp in its id), and each began its latency before that. Placed by its row's time instead,
+ * every failed attempt shows later than it ran, by as long as the answered request took, and so overlaps it.
+ */
+export function callsOf(ledger: readonly LedgerRow[]): { calls: Map<number, { model: string; ms: number | null }>; failed: FailedCall[] } {
+	const calls = new Map<number, { model: string; ms: number | null }>();
+	const failed: FailedCall[] = [];
+	const attempts = new Map<string, { n: number; row: LedgerRow }[]>();
+	for (const row of ledger) {
+		const model = [row.provider, row.model].filter(Boolean).join("/");
+		const ms = row.latency_ms === null ? null : Number(row.latency_ms);
+		const stamp = /^mc_c.+_(\d+)$/.exec(row.id)?.[1];
+		if (stamp) calls.set(Number(stamp), { model, ms });
+		const attempt = /^(mc_c.+_\d+)_f(\d+)$/.exec(row.id);
+		if (attempt) attempts.set(attempt[1]!, [...(attempts.get(attempt[1]!) ?? []), { n: Number(attempt[2]), row }]);
+		else if (/_f\d+$/.test(row.id)) failed.push({ at: Number(row.at) - (ms ?? 0), ms, model, error: row.error ? scrub(row.error) : null });
+	}
+	for (const [base, list] of attempts) {
+		let began = Number(/_(\d+)$/.exec(base)![1]);
+		for (const { row } of list.sort((a, b) => b.n - a.n)) {
+			const ms = row.latency_ms === null ? null : Number(row.latency_ms);
+			began -= ms ?? 0;
+			failed.push({ at: began, ms, model: [row.provider, row.model].filter(Boolean).join("/"), error: row.error ? scrub(row.error) : null });
+		}
+	}
+	return { calls, failed };
+}
+
 /** A chat's turns, as of `now`, with the ledger's and the approvals' side of them. Null when there is no such chat or it has said nothing. */
 export async function chatTurns(app: App, ownerId: string, chat: string, now = Date.now()): Promise<{ turns: Turn[]; busy: boolean; updatedAt: number }> {
 	const page = await transcriptPage(app.db.pool, ownerId, chat, { limit: MESSAGES });
@@ -123,15 +155,7 @@ export async function chatTurns(app: App, ownerId: string, chat: string, now = D
 		approvals: (await tx.query("SELECT id, state, args->>'callId' AS call, created_at, decided_at, decided_by FROM pim_app.approvals WHERE public_chat_id = $1 AND args ? 'callId' AND created_at >= $2", [chat, new Date(from - MINUTE)])).rows,
 		ledger: (await tx.query("SELECT id, provider, model, latency_ms, error, stop_reason, (extract(epoch FROM at) * 1000)::bigint AS at FROM pim_app.model_calls WHERE public_chat_id = $1 AND at >= $2", [chat, new Date(from - MINUTE)])).rows,
 	}));
-	const calls = new Map<number, { model: string; ms: number | null }>();
-	const failed: FailedCall[] = [];
-	for (const row of ledger) {
-		const model = [row.provider, row.model].filter(Boolean).join("/");
-		const ms = row.latency_ms === null ? null : Number(row.latency_ms);
-		const stamp = /^mc_c.+_(\d+)$/.exec(row.id as string)?.[1];
-		if (stamp) calls.set(Number(stamp), { model, ms });
-		else if (/_f\d+$/.test(row.id as string)) failed.push({ at: Number(row.at) - (ms ?? 0), ms, model, error: row.error ? scrub(row.error as string) : null });
-	}
+	const { calls, failed } = callsOf(ledger as LedgerRow[]);
 	const bound = new Map<string, CallApproval>(approvals.map((r) => [r.call as string, { id: r.id as string, status: r.state === "waiting" ? "pending" : (r.state as string), createdAt: new Date(r.created_at).getTime(), decidedAt: r.decided_at ? new Date(r.decided_at).getTime() : null, decidedBy: (r.decided_by as string | null) ?? null }]));
 	return { turns: turnsOf(messages, bound, now, busy, calls, failed), busy, updatedAt };
 }

@@ -17,6 +17,7 @@ import type { Actor } from "@pim/v2-forge/authz";
 import { BRANCH_OR_COMMIT, COMMIT, MAX_DIFF_CHARS, MAX_TEST_RUNS, brief, diffText, latestTests, listing, testRun, threadArg } from "./coding-tools.ts";
 import type { RelayBus } from "@pim/v2-app/relay";
 import { hostSpeaks, postToRoom } from "./rooms.ts";
+import { provenanceOfCall } from "./send-provenance.ts";
 import { computerTools, filesPath } from "./computer-tools.ts";
 import { type ImageSources, imageTools } from "./image-tools.ts";
 import type { ForgeParts } from "./forge-assembly.ts";
@@ -342,11 +343,13 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 							images[url] = `/api/images/${id}`;
 						}
 						// An agent in a group chat speaks into the host chat, where the person reads it; its own seat is not a chat they open.
-						const posted = await postToRoom(app, p, chat, `${api.taskId}:${api.callId}`, message);
+						// Who is behind what is said travels with it to the chats that hear it, as data, not as words.
+						const provenance = await provenanceOfCall((sql, params) => runtime.read(ownerId, sql, params), ownerId, api.conversationId, String(api.callId)).catch(() => undefined);
+						const posted = await postToRoom(app, p, chat, `${api.taskId}:${api.callId}`, message, provenance);
 						if (!posted) {
 							await app.conversations.markResponse(ownerId, chat);
 							// A room's host speaks to the agents in its seats too.
-							await hostSpeaks(app, p, chat, `${api.taskId}:${api.callId}`, message);
+							await hostSpeaks(app, p, chat, `${api.taskId}:${api.callId}`, message, provenance);
 						}
 						// What an agent sends in a chat a task started is its answer to the agent that asked, once its turn ends.
 						await app.conversations.taskSaid(ownerId, chat, `${api.taskId}:${api.callId}`, message);

@@ -66,6 +66,56 @@ live("projections over PostgreSQL", () => {
 		expect(page.liveCursor).toBe(`${P1}:1:7`);
 	});
 
+	it("keeps the model an assistant message recorded, on the partial that shows it streaming and on the stored page, and none for one that recorded none", async () => {
+		const recorded = (id: number, fields: Record<string, unknown>) => entry(id, "pi.message", { role: "assistant", content: [{ type: "text", text: "Hi" }], stopReason: "stop", timestamp: 1000 + id, ...fields });
+		await outbox.entry(P1, ADA, C1, user(10, "hello"));
+		await outbox.entry(P1, ADA, C1, recorded(-1, { provider: "ai-gateway", model: "gemini-4-neon" }), true);
+		await outbox.entry(P1, ADA, C1, recorded(11, { provider: "openai", model: "gpt-6-sol", responseModel: "gpt-6-sol-2" }));
+		await outbox.entry(P1, ADA, C1, recorded(12, {}));
+		await new Projector(db.pool).drainAll();
+		const page = await transcriptPage(db.pool, ADA, C1);
+		expect(page.messages.map((message) => [message.id, message.model ?? null])).toEqual([
+			["-1", { provider: "ai-gateway", model: "gemini-4-neon" }],
+			["10", null],
+			["11", { provider: "openai", model: "gpt-6-sol", served: "gpt-6-sol-2" }],
+			["12", null],
+		]);
+	});
+
+	it("keeps the provenance the server worked out with the message it is for, on the streaming partial and the stored message, so a page of older messages carries it as well as the newest", async () => {
+		const neon = { provider: "ai-gateway", model: "gemini-4-neon" };
+		const behind = { emitter: neon, contributors: [{ provider: "openai", model: "gpt-6-sol" }, neon], complete: true };
+		const send = (id: number, call: string) => entry(id, "pi.message", { role: "assistant", content: [{ type: "toolCall", id: call, name: "send_to_user", arguments: { message: "Hi" } }], stopReason: "toolUse", timestamp: 1000 + id });
+		await outbox.entry(P1, ADA, C1, user(10, "hello"));
+		await outbox.commit(P1, ADA, C1, "chat.entry", { entry: send(-1, "c1"), partial: true, provenance: { c1: behind } });
+		await outbox.commit(P1, ADA, C1, "chat.entry", { entry: send(11, "c1"), replaces: "-1", provenance: { c1: behind } });
+		await outbox.entry(P1, ADA, C1, send(12, "c2"));
+		// Another agent's post, with the models behind it carried beside its text.
+		await outbox.commit(P1, ADA, C1, "chat.entry", { entry: user(13, "[From Ada]\nOver to you"), post: behind });
+		await outbox.entry(P1, ADA, C1, user(14, "[From Ada]\nOlder, with nothing kept"));
+		await new Projector(db.pool).drainAll();
+		const whole = (await transcriptPage(db.pool, ADA, C1)).messages;
+		const provenance = (m: (typeof whole)[number]) => (m.role === "assistant" ? m.parts.map((part) => ("provenance" in part ? part.provenance : undefined))[0] : m.provenance);
+		expect(whole.map((m) => [m.id, provenance(m) ?? null])).toEqual([
+			["10", null],
+			["11", behind],
+			["12", null],
+			["13", behind],
+			["14", null],
+		]);
+		// An older page reads it from the stored row, not from the newest messages around it.
+		const newest = await transcriptPage(db.pool, ADA, C1, { limit: 2 });
+		const older = await transcriptPage(db.pool, ADA, C1, { limit: 2, before: newest.nextBefore });
+		expect(newest.messages.map((m) => [m.id, provenance(m) ?? null])).toEqual([
+			["13", behind],
+			["14", null],
+		]);
+		expect(older.messages.map((m) => [m.id, provenance(m) ?? null])).toEqual([
+			["11", behind],
+			["12", null],
+		]);
+	});
+
 	it("is idempotent: applying commits again, from one projector or two at once, changes nothing", async () => {
 		await history();
 		const a = new Projector(db.pool);

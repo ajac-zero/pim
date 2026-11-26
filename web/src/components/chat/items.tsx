@@ -1,6 +1,14 @@
+import type { ModelIdentity, Provenance } from "@pim/shared/transcript";
 import { splitUiResponse, type UiResponse } from "@pim/ui-lang";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { memo, type ReactNode, useEffect, useMemo, useState } from "react";
+import {
+  memo,
+  type ReactNode,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { toast } from "sonner";
 import { AppIcon } from "~/components/app-icon";
 import { imageContent } from "~/components/chat/composer";
@@ -58,6 +66,11 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "~/components/ui/dropdown-menu";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "~/components/ui/popover";
 import {
   type ApprovalField,
   approvalView,
@@ -389,6 +402,70 @@ export const UserMessage = memo(function UserMessage({
 
 /* --------------------------- assistant message --------------------------- */
 
+const modelName = (model: ModelIdentity) =>
+  `${model.provider}/${model.model}${model.served ? ` (${model.served})` : ""}`;
+
+/**
+ * The model that ran the request that made a message, as it was recorded then (not the chat's current choice, which a fallback can have replaced), and a count of the other
+ * models whose successful requests the message rests on. A message with no recorded model says so and names none.
+ */
+function ModelBadge({ provenance }: { provenance: Provenance }) {
+  const { t } = useI18n();
+  const [open, setOpen] = useState(false);
+  const hovered = useRef(false);
+  const { emitter, contributors, complete } = provenance;
+  const others = contributors.filter(
+    (model) => !emitter || modelName(model) !== modelName(emitter),
+  );
+  // A popover, not a tooltip: a tap or a key opens it as a hover does, and the mouse opens it by hovering.
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          data-model={emitter ? modelName(emitter) : "unknown"}
+          className="min-w-0 max-w-48 cursor-default truncate rounded outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          onPointerEnter={(event) => {
+            if (event.pointerType !== "mouse") return;
+            hovered.current = true;
+            setOpen(true);
+          }}
+          onPointerLeave={(event) => {
+            if (event.pointerType !== "mouse") return;
+            hovered.current = false;
+            setOpen(false);
+          }}
+          // A click on what hovering opened keeps it open, instead of toggling it shut.
+          onClick={(event) => {
+            if (hovered.current) event.preventDefault();
+          }}
+        >
+          {emitter ? emitter.model : t("modelUnknown")}
+          {others.length > 0 && ` +${others.length}`}
+        </button>
+      </PopoverTrigger>
+      <PopoverContent
+        className="w-auto max-w-80 space-y-0.5 p-2.5 text-xs"
+        onOpenAutoFocus={(event) => event.preventDefault()}
+      >
+        <div>
+          {emitter
+            ? t("modelSentBy", { model: modelName(emitter) })
+            : t("modelNotRecorded")}
+        </div>
+        {others.length > 0 && (
+          <div>
+            {t("modelAlsoWorked", {
+              models: others.map(modelName).join(", "),
+            })}
+          </div>
+        )}
+        {!complete && emitter && <div>{t("modelStepsUnknown")}</div>}
+      </PopoverContent>
+    </Popover>
+  );
+}
+
 export const AssistantMessage = memo(function AssistantMessage({
   item,
   at,
@@ -404,8 +481,11 @@ export const AssistantMessage = memo(function AssistantMessage({
   uiSend,
   submitted,
   messageId,
+  provenance,
 }: {
   item: MessageItem;
+  /** The models behind it, when it is a message the agent sent; none for what others said in a group chat. */
+  provenance?: Provenance;
   /** Opens a new chat with what was said through this message; without it, it can't be forked. */
   onFork?: () => Promise<void>;
   /** Keeps its time and copy button showing, rather than only on hover: for the latest message of a chat. */
@@ -464,6 +544,7 @@ export const AssistantMessage = memo(function AssistantMessage({
       <div className="mt-1 flex h-7 items-center gap-1.5 text-muted-foreground text-xs">
         {!streaming && (
           <>
+            {provenance && <ModelBadge provenance={provenance} />}
             {at !== undefined && (
               <MessageTime
                 at={at}

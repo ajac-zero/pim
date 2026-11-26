@@ -1,7 +1,7 @@
 import { codingWakeText } from "@pim/shared/coding-wake";
 import { DELIVERY_REMINDER, NOT_DELIVERED } from "@pim/shared/transcript";
 import { describe, expect, it } from "vitest";
-import { codingNoticeOf, EMPTY_STREAM } from "~/lib/pim-view";
+import { codingNoticeOf, EMPTY_STREAM, layoutThread } from "~/lib/pim-view";
 import {
   applyBusy,
   applyMessage,
@@ -447,6 +447,54 @@ describe("a coding thread's wake in a v2 chat", () => {
     expect(stream.view.entries[0]).toMatchObject({
       kind: "notice",
       notice: { kind: "coding", coding: { state: "idle" } },
+    });
+  });
+});
+
+describe("the provenance a message carries", () => {
+  const neon = { provider: "ai-gateway", model: "gemini-4-neon" };
+  const sol = { provider: "openai", model: "gpt-6-sol" };
+  const kept = { emitter: neon, contributors: [sol, neon], complete: true };
+  const send = (id: number, provenance?: typeof kept, partial = false) =>
+    assistant(
+      id,
+      "",
+      [
+        {
+          type: "tool-call",
+          id: `c${id}`,
+          name: "send_to_user",
+          arguments: { message: "Hello" },
+          ...(provenance ? { provenance } : {}),
+        },
+      ],
+      partial,
+    );
+  const provenances = (entries: Parameters<typeof layoutThread>[0]) =>
+    layoutThread(entries, { shown: () => false }).flatMap((row) =>
+      row.kind === "sent" ? [row.provenance] : [],
+    );
+
+  it("reaches a message loaded from history and one still streaming, and is unknown for one that kept none", () => {
+    const history = streamOf([user(1, "Hi"), send(2, kept), send(3)]);
+    expect(provenances(history.view.entries)).toEqual([
+      kept,
+      { emitter: null, contributors: [], complete: false },
+    ]);
+    const live = applyMessage(streamOf([user(1, "Hi")]), send(-1, kept, true));
+    expect(provenances(live.view.live)).toEqual([kept]);
+  });
+
+  it("reaches a post another agent made in a group chat, carried beside its text", () => {
+    const post: V2Message = {
+      ...user(5, "[From Ada]\nOver to you"),
+      provenance: kept,
+    };
+    const [entry] = streamOf([post]).view.entries;
+    expect(entry).toMatchObject({
+      kind: "post",
+      from: "Ada",
+      provenance: kept,
     });
   });
 });

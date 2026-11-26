@@ -5,9 +5,10 @@ import { transcriptPage } from "@pim/v2-live/projections/snapshots";
 import { estimateMessageTokens } from "@earendil-works/pi-ai/utils/estimate";
 import type { EntryRecord } from "@earendil-works/pi-durable";
 import { contextTokens, runtimeOutboxSource } from "../src/runtime-source.ts";
+import { onlyNative, provenanceOfEntry } from "../src/send-provenance.ts";
 import { readTranscript, waitFor } from "../../v2-runtime/test/support/rig.ts";
 import { createStack, type Stack } from "./support/stack.ts";
-import { ADA, createTurnRig, fauxAssistantMessage, LEAD } from "./support/turn.ts";
+import { ADA, createTurnRig, fauxAssistantMessage, fauxToolCall, LEAD } from "./support/turn.ts";
 
 type Rig = Awaited<ReturnType<typeof createTurnRig>>;
 
@@ -70,6 +71,53 @@ describe("Live's projector over the runtime's own tables", () => {
 		expect(JSON.stringify((await transcriptPage(stack.live, ADA, chat)).messages)).toBe(JSON.stringify(shown.messages));
 		expect((await stack.admin.query("SELECT count(*) AS n FROM pim_runtime.entries")).rows[0].n).toBe(entries);
 		expect(rig.echoRuns).toEqual(["ping"]);
+	});
+
+	it("keeps with each send_to_user the models behind it, worked out from the conversation's own entries: the answer that made the call and the requests of the turn before it; a rebuild gives the same", async () => {
+		const sent = (text: string) => fauxToolCall("send_to_user", { message: text });
+		rig.faux.setResponses([
+			fauxAssistantMessage([{ type: "text", text: "Looking." }, fauxToolCall("echo", { text: "pong" })], { stopReason: "toolUse" }),
+			fauxAssistantMessage([sent("It said pong.")], { stopReason: "toolUse" }),
+			fauxAssistantMessage("Done."),
+		]);
+		await rig.submit("c3", "say pong");
+		const chat = await waitFor("the home conversation's public id", () => rig.chatId());
+		const faux = { provider: "faux", model: "m" };
+		const sends = async () => (await transcriptPage(stack.live, ADA, chat)).messages.filter((m) => !m.partial).flatMap((m) => m.parts.flatMap((p) => (p.type === "tool-call" && p.name === "send_to_user" ? [p.provenance ?? null] : [])));
+		await waitFor("the send's provenance", async () => ((await sends()).length > 0 ? true : undefined), 30_000);
+		// Its own request and the one before it that called a tool; the faux model is `m` for both, so the list is one model.
+		expect(await sends()).toEqual([{ emitter: faux, contributors: [faux], complete: true }]);
+		// The turn ends with the scripted last answer: until it is committed the transcript is still growing, and a rebuild would show more than the page did.
+		await waitFor("the turn to end", async () => { const { messages } = await transcriptPage(stack.live, ADA, chat); return messages.every((m) => !m.partial) && messages.some((m) => m.parts.some((p) => "text" in p && p.text === "Done.")) ? true : undefined; }, 30_000);
+		await waitFor("the projector to catch up", async () => ((await projector.lag()).every((l) => l.lagCommits === 0) ? true : undefined));
+		const before = JSON.stringify((await transcriptPage(stack.live, ADA, chat)).messages);
+		await projector.rebuild(ADA);
+		expect(JSON.stringify((await transcriptPage(stack.live, ADA, chat)).messages)).toBe(before);
+	});
+
+	it("reads an entry the runtime did not commit itself, as an import from the Cloudflare version is stored (verbatim, with no commit receipt), as recording no model, so no identity of it reaches a message", async () => {
+		const client = await stack.admin.connect();
+		try {
+			await client.query("BEGIN");
+			const read = (sql: string, params: unknown[]) => client.query(sql, params);
+			const entries = (await client.query("SELECT id, record FROM pim_runtime.entries WHERE owner_id = $1 AND conversation_id = 1 ORDER BY id", [ADA])).rows;
+			const echo = entries.find((row) => row.record.includes('"name":"echo"') && row.record.includes('"pong"'));
+			const answers = (list: { record: string }[]) => list.flatMap((row) => (JSON.parse(row.record).model ?? []).filter((m: { role: string }) => m.role === "assistant").map((m: { provider: string; model: string }) => `${m.provider}/${m.model}`));
+			// As written by the runtime, the turn's request that called a tool recorded its model, and a send after it names it among the contributors.
+			const send = { id: 1_000_000_000, kind: "pi.assistant", model: [{ role: "assistant", content: [{ type: "toolCall", id: "z", name: "send_to_user", arguments: { message: "x" } }], provider: "faux", model: "m", stopReason: "toolUse", timestamp: 1 }] } as never;
+			const before = await provenanceOfEntry(read, ADA, 1, send);
+			expect(before.z).toMatchObject({ emitter: { provider: "faux", model: "m" }, contributors: [{ provider: "faux", model: "m" }], complete: true });
+			// Take away the receipts of the commits that wrote the turn, as an import has none: what it recorded is not read.
+			await client.query("DELETE FROM pim_runtime.commit_receipts WHERE owner_id = $1 AND commit_seq IN (SELECT commit_seq FROM pim_runtime.entries WHERE owner_id = $1 AND id >= $2)", [ADA, echo.id]);
+			const after = await provenanceOfEntry(read, ADA, 1, send);
+			expect(after.z).toMatchObject({ emitter: { provider: "faux", model: "m" }, contributors: [{ provider: "faux", model: "m" }], complete: false });
+			const kept = await onlyNative(read, ADA, entries.map((row) => JSON.parse(row.record)));
+			expect(answers(kept.map((entry) => ({ record: JSON.stringify(entry) })))).toContain("/");
+			expect(answers(entries)).not.toContain("/");
+		} finally {
+			await client.query("ROLLBACK");
+			client.release();
+		}
 	});
 
 	it("counts a conversation's context as pi-durable does: the newest answer's own count after the last marker, and an estimate of what came after it", () => {

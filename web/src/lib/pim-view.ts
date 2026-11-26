@@ -15,6 +15,7 @@ import {
   INTRODUCTION,
   isDeliveryReminder,
   NOTICE_PREFIXES,
+  type Provenance,
   ROOM_POST,
   reasoningHeadings,
   withoutFileChanges,
@@ -111,11 +112,21 @@ export type ThreadEntry =
       source: "user" | "agent";
       /** When it was said, in ms: when the person sent it, or when the agent finished writing it. */
       at: number;
+      /** For a `send_to_user` call: who is behind what it sent, as the server kept it with the message; absent when none was kept. */
+      provenance?: Provenance;
     }
   /** `at` is when Pim gave it, except for a reset. */
   | { key: string; kind: "notice"; notice: PimNotice; at?: number }
   /** What another agent in a group chat said there, by its name. */
-  | { key: string; kind: "post"; from: string; text: string; at: number };
+  | {
+      key: string;
+      kind: "post";
+      from: string;
+      text: string;
+      at: number;
+      /** Who is behind it, carried from the chat where the other agent wrote it; absent when none was kept. */
+      provenance?: Provenance;
+    };
 
 export type RunningTool = { callId: string; name: string; output: string };
 
@@ -448,6 +459,19 @@ function blockItem(
   }
 }
 
+/** The provenance the server kept with a message or one of its calls, which the projection carries on the pi message it was put back into. */
+const provenanceOf = (carrier: object): { provenance?: Provenance } => {
+  const { provenance } = carrier as { provenance?: Provenance };
+  return provenance ? { provenance } : {};
+};
+
+/** What a message says of its models when the server kept nothing: that they are not known. Never worked out from anything else. */
+export const UNKNOWN_PROVENANCE: Provenance = {
+  emitter: null,
+  contributors: [],
+  complete: false,
+};
+
 /** One pi message as thread entries, keyed under `key`. */
 export function projectMessage(message: Message, key: string): ThreadEntry[] {
   switch (message.role) {
@@ -469,6 +493,7 @@ export function projectMessage(message: Message, key: string): ThreadEntry[] {
             from: post[1] as string,
             text: text.slice(post[0].length),
             at: message.timestamp,
+            ...provenanceOf(message),
           },
         ];
       return [
@@ -496,6 +521,7 @@ export function projectMessage(message: Message, key: string): ThreadEntry[] {
                 source: "agent",
                 item,
                 at,
+                ...provenanceOf(block),
               },
             ]
           : [];
@@ -923,6 +949,8 @@ export type ThreadRow =
       sent: Sent;
       /** When it was sent, in ms. */
       at: number;
+      /** Who is behind it, as the server kept it with the message. */
+      provenance: Provenance;
     }
   /** The work the agent did before the next row, or is doing now (`live`). */
   | {
@@ -1095,6 +1123,7 @@ export function layoutThread(
             call,
             sent: message,
             at: entry.at,
+            provenance: entry.provenance ?? UNKNOWN_PROVENANCE,
           });
           since = entry.at;
         } else if (options.shown(call)) own(entry);

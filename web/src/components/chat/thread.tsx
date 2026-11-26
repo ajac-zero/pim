@@ -67,6 +67,7 @@ import {
   type ThreadEntry,
   taskHistory,
   thinkingSince,
+  UNKNOWN_PROVENANCE,
   userItem,
   type ViewError,
 } from "~/lib/pim-view";
@@ -539,6 +540,7 @@ export const Thread = memo(function Thread({
     rows.length,
   );
   const earlierRows = windowStart;
+
   const earlierOnServer = usePimClient((state) => state.earlier);
 
   const empty =
@@ -604,6 +606,7 @@ export const Thread = memo(function Thread({
                   content: [{ type: "output_text", text: row.sent.message }],
                 }}
                 at={row.at}
+                provenance={row.provenance}
                 mention={mention(row.key, row.sent.message)}
                 streaming={liveKeys.has(row.key)}
                 pinned={row.key === latestKey}
@@ -658,6 +661,7 @@ export const Thread = memo(function Thread({
                   content: [{ type: "output_text", text: entry.text }],
                 }}
                 at={entry.at}
+                provenance={entry.provenance ?? UNKNOWN_PROVENANCE}
                 mention={mention(entry.key, entry.text)}
                 pinned={entry.key === latestKey}
                 images={postedImages(entry.text)}

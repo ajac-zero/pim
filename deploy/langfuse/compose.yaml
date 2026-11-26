@@ -7,7 +7,7 @@
 # Pim does not depend on this stack: its Compose file never mentions it, Pim starts and runs the same when it is down, and a Pim that cannot reach it loses spans, never work. They meet on one
 # Docker network, `pim-traces`, which Pim's Runner joins and this stack's web container joins, so Pim reaches it as http://langfuse-web:3000 and nothing else of Pim shares a network with it.
 #
-# Pinned to Langfuse 4.86.0 (web and worker, by digest), the release this was qualified against: OTLP at /api/public/otel with `x-langfuse-ingestion-version: 4`, and ClickHouse 26.3
+# Pinned to Langfuse 4.86.0 (web and worker, by digest), the release `scripts/langfuse-qualify.sh` passed against in CI (docs/v2-operations.md, "Qualification"): OTLP at /api/public/otel with `x-langfuse-ingestion-version: 4`, and ClickHouse 26.3
 # (Langfuse 4 needs 25.12 or later). Upgrade by changing the two tags and digests together, reading Langfuse's release notes, and running scripts/langfuse-smoke.mjs.
 #
 # Storage is this stack's own: its PostgreSQL (user `langfuse`, database `langfuse`), ClickHouse, Redis and bucket are not Pim's, so neither can read or fill the other's.

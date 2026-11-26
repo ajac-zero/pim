@@ -131,6 +131,11 @@ export class LiveClient {
 		return this.#status;
 	}
 
+	/** Whether the socket itself is up, as opposed to `status`, which is also "syncing" while a newly followed topic loads over a socket that never dropped. */
+	get connected(): boolean {
+		return this.#open;
+	}
+
 	/** The cursor a topic would resume from, for tests and diagnostics. */
 	cursor(topic: string): string | null | undefined {
 		return this.#topics.get(topic)?.cursor;

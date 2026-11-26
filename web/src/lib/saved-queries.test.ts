@@ -57,6 +57,25 @@ describe("account-isolated saved queries", () => {
     expect(storage.data.has("pim-queries:ada")).toBe(false);
   });
 
+  it("keeps no approval or task on the device, so none is shown as current after a restart", async () => {
+    const storage = memoryStorage();
+    const ada = client();
+    await restoreSavedQueries(ada, "b1", storage);
+    await adoptOwner(ada, "b1", "ada", storage);
+    ada.setQueryData(["sessions"], [{ id: "chat-1" }]);
+    ada.setQueryData(["approvals"], [{ id: "approval-pending-1" }]);
+    ada.setQueryData(["tasks", "chat-1"], [{ id: "task-running-1" }]);
+    await flush();
+    const kept = JSON.stringify(storage.data.get("pim-queries:ada"));
+    expect(kept).toContain("chat-1");
+    expect(kept).not.toContain("approval-pending-1");
+    expect(kept).not.toContain("task-running-1");
+    const reopened = client();
+    await restoreSavedQueries(reopened, "b1", storage);
+    expect(reopened.getQueryData(["sessions"])).toBeDefined();
+    expect(reopened.getQueryData(["approvals"])).toBeUndefined();
+  });
+
   it("wipes every kept list, and what was read, when access ends", async () => {
     const storage = memoryStorage();
     storage.data.set("pim-queries:someone-else", "stale");

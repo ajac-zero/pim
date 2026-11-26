@@ -276,12 +276,33 @@ export class PimClient {
     }
   }
 
-  /** Signing out: the Live connection and what it followed go. */
+  /** Signing out: the Live connection and what it followed go, and so does everything this tab kept of chats. */
   stopLive() {
     this.#sidebarLive = false;
     this.#v2?.stop();
     this.#v2 = null;
     this.#v2Following = false;
+    this.forget();
+  }
+
+  /**
+   * Drops what was kept of chats in memory: the last views, the messages not yet in a transcript and the requests sending them. Access
+   * ended or another account is signed in, and their chats are not for whoever comes next; what is on screen is empty until its own snapshot.
+   */
+  forget() {
+    for (const controller of this.#sending.values()) controller.abort();
+    this.#sending.clear();
+    this.#remembered.clear();
+    this.#warmed.clear();
+    this.#pending.clear();
+    this.#stream = EMPTY_STREAM;
+    this.#set({
+      view: EMPTY_STREAM.view,
+      loaded: false,
+      synced: false,
+      pending: [],
+      earlier: false,
+    });
   }
 
   /** Pim v2: fetches the next page of older messages. */

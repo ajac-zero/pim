@@ -215,8 +215,11 @@ function SignedIn({
   // An open socket would keep streaming after signing out. The sign-in screen takes the
   // app's place, which unmounts every app frame; everything read of the space goes
   // too, with what this device kept of it, for every account (see `saved-queries.ts`).
+  const lastOwner = useRef<string | undefined>(undefined);
   useEffect(() => {
     if (!signedOut) return;
+    // Signing out drops everything held of the account, so whoever signs in next is not "another account".
+    lastOwner.current = undefined;
     pimClient.close();
     pimClient.stopLive();
     closeScreen();
@@ -225,7 +228,17 @@ function SignedIn({
   // Lists this device kept belong to one account: a different one signing in is never shown them.
   const owner = data?.signedIn ? data.account?.username : undefined;
   useEffect(() => {
-    if (owner) void adoptOwner(queryClient, import.meta.env.PIM_BUILD, owner);
+    if (!owner) return;
+    // Another account in this tab: the chats this tab held of the one before are not shown to it, and its chat is read afresh.
+    if (lastOwner.current && lastOwner.current !== owner) {
+      const open = pimClient.getState().session;
+      pimClient.close();
+      pimClient.stopLive();
+      pimClient.followSidebar(true);
+      if (open) pimClient.open(open);
+    }
+    lastOwner.current = owner;
+    void adoptOwner(queryClient, import.meta.env.PIM_BUILD, owner);
   }, [owner, queryClient]);
   if (error) {
     return (

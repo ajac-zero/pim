@@ -164,8 +164,8 @@ services:
 
 networks:
   default: {}
-  # Created by Pim's Compose file (`traces` there); this stack only joins it. Start Pim first, or `docker network create pim-traces`.
-  pim-traces: { external: true, name: pim-traces }
+  # Created by Pim's Compose file (`traces` there); this stack only joins it. Start Pim first, or `docker network create pim-traces`. LANGFUSE_TRACES_NETWORK names another (scripts/langfuse-qualify.sh uses one of its own).
+  pim-traces: { external: true, name: "${LANGFUSE_TRACES_NETWORK:-pim-traces}" }
 
 volumes:
   langfuse-postgres: {}

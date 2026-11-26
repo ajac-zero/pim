@@ -48,7 +48,7 @@ describe("redaction", () => {
 	it("keeps secrets out of exported spans: attributes, events, status messages and names", async () => {
 		const exported: ReadableSpan[] = [];
 		const inner: SpanExporter = { export: (spans, done) => (exported.push(...spans), done({ code: ExportResultCode.SUCCESS })), shutdown: async () => undefined };
-		const made = createTracerProvider({ serviceName: "test", exporter: inner, sync: true })!;
+		const made = createTracerProvider({ serviceName: "test", exporter: inner, scheduledDelayMs: 1 });
 		const tracer = made.provider.getTracer("t");
 		const span = tracer.startSpan(`GET /hosted/own_ada/app/${SECRETS[1]}/x`);
 		span.setAttribute("gen_ai.prompt", "my private question");

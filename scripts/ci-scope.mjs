@@ -34,8 +34,8 @@ const PROSE = [/^README\.md$/, /^LICENSE$/, /^AGENTS\.md$/, /^docs\/(?!architect
  * (scripts/ci-scope.test.ts) fails when a test of a package names a path of the repository that is neither imported nor declared here.
  */
 export const DECLARED_INPUTS = {
-	// The deployment checks read the Compose and Kubernetes files, the Caddyfile and the Dockerfiles (all of deploy/), and the development preview.
-	"packages/v2-ops": ["deploy", "scripts/v2-dev/preview.mjs"],
+	// The deployment checks read the Compose and Kubernetes files, the Caddyfile and the Dockerfiles (all of deploy/), and the development preview; the Langfuse checks run the smoke script.
+	"packages/v2-ops": ["deploy", "scripts/v2-dev/preview.mjs", "scripts/langfuse-smoke.mjs", "scripts/langfuse-qualify.sh"],
 };
 
 const SOURCE = /\.(?:[cm]?[jt]sx?)$/;
@@ -204,6 +204,8 @@ export function selectScope(files, graph = buildGraph(), options = {}) {
 				"image-web": images.web,
 				"image-computer": images.computer,
 				// The registry adapter and the promotions against a real buildx and registry.
+				// The self-hosted Langfuse recipe against real Docker: what it renders, pins and starts, and the exporter that feeds it. Not on every full run: the images are heavy.
+				langfuse: changed.some((f) => inside(f, "deploy/langfuse") || inside(f, "deploy/compose") || inside(f, "packages/v2-ops/src/observability") || f === "packages/v2-server/src/telemetry.ts" || f === "scripts/langfuse-smoke.mjs" || f === "scripts/langfuse-qualify.sh"),
 				registry: full || changed.some((f) => /^scripts\/(registry|edge-|release-|ci-status|fake-docker)/.test(f)),
 			},
 			// What each job runs. Biome covers the web app only; the root's TypeScript project is the computer's and the scripts'.

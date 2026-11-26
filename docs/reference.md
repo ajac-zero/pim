@@ -312,18 +312,20 @@ Prices are in [`config/model-prices.json`](../config/model-prices.json), in doll
 
 ### Traces
 
-Pim sends [OpenTelemetry](https://opentelemetry.io/) traces of what the agents do to any backend that takes OTLP over HTTP as JSON: Langfuse, Arize Phoenix, Honeycomb, Grafana, Jaeger, or an OpenTelemetry Collector. They follow the [semantic conventions for generative AI](https://github.com/open-telemetry/semantic-conventions-genai): each run of a conversation is an `invoke_agent` span, each model request in it a `chat` span with the model, finish reason and tokens, and each tool call an `execute_tool` span. Work a tool call starts in another conversation is that call's child, so one trace holds everything a message led to: the tasks it handed out, and the majordomo's review of an approval request, with its decision.
+Pim can send traces of what its agents do to any backend that takes OpenTelemetry's OTLP over HTTP as JSON: Langfuse, Arize Phoenix, Honeycomb, Grafana Tempo, or an OpenTelemetry Collector. Nothing is sent unless you set an endpoint. What is sent are the spans of the agent runtime itself ([pi](https://github.com/earendil-works/pi)): `pi.durable.submit` for each message that starts a run, `pi.durable.phase` for each step of a run (a model request's phases, a tool call's), and `pi.ai.request` for each attempt at a model request, so a request retried or answered by a fallback shows every attempt with the model it asked, its tokens (cache reads and writes included) and its cost. All of a run is one trace, and work that resumes after an approval or a restart continues the same trace, with the wait between left empty.
+
+They hold no prompts, messages, tool arguments or results, file contents, credentials or error messages: only ids and numbers. A person is an opaque reference, not their id; a chat and an agent are their public ids, so a chat's runs group as one session in Langfuse. Work outside the runtime is not traced: titles and other utility calls made by the web server, coding threads and the coding tools' own CLIs. A chat an agent starts for a task is its own trace, tied to the chat that started it by ids, not a parent link. `docs/v2-operations.md` ("Traces and Langfuse") says exactly what is and is not covered, how failures of the collector are contained, and how to run Langfuse yourself (`deploy/langfuse`).
 
 Set the endpoint and its key in `.env`, like the settings above, with the standard OpenTelemetry variables (the Compose stack passes them to every role):
 
 | Variable | Meaning |
 | --- | --- |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | The backend's OTLP base URL; traces go to `/v1/traces` under it. Or set `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` to the full URL. Empty sends no traces |
-| `OTEL_EXPORTER_OTLP_HEADERS` | A secret: headers as `key=value,key=value`, such as `Authorization=Basic ...` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | The backend's OTLP base URL; traces go to `/v1/traces` under it. Or set `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` to the full URL. Empty sends no traces. Langfuse's is `https://<host>/api/public/otel` |
+| `OTEL_EXPORTER_OTLP_HEADERS` | A secret: headers as `key=value,key=value`, such as `Authorization=Basic ...`; quote the value in `.env`. `OTEL_EXPORTER_OTLP_TRACES_HEADERS` wins when set |
 | `OTEL_SERVICE_NAME` | The traces' service name; `pim` when unset |
-| `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` | `true` adds prompts, messages, and tool arguments and results. They are people's private conversations: set it only for a backend that may hold them |
+| `PIM_TRACES_PROFILE` | `langfuse` or `generic`; chosen from the endpoint when unset. Langfuse gets its own attributes (generations, tools, session, user) and its real-time ingestion header |
 
-Each span's `gen_ai.conversation.id` is its conversation's id; for a chat, the one in `/chat/<id>`. Spans are sent in batches by the process that made them; any not yet sent are lost if it is killed.
+Spans are sent in batches by the process that made them, from a bounded queue: a collector that is slow or down loses spans and never slows or changes an agent, and any not yet sent are lost if the process is killed. `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` is no longer read: Pim's traces carry no message content, whatever it is set to.
 
 For local development, run the preview (`node scripts/v2-dev/preview.mjs`, or `amp orb services ensure` in an orb): every role in one process on a private PostgreSQL, NATS and S3 server, with a stand-in model and a passkey-free sign-in, at `http://localhost:8787` (use `localhost`: passkeys don't work on an IP address). AGENTS.md describes it. For the web app with hot reload, make an API token in Settings and run `PIM_API_TOKEN=... pnpm dev:web` (port 3000), which signs in with it.
 

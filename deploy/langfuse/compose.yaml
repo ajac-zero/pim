@@ -1,0 +1,176 @@
+# Langfuse, self-hosted, beside Pim and apart from it: the trace backend for Pim's agents (docs/v2-operations.md, "Traces and Langfuse").
+#
+#   ./init-env.sh                     # once: makes .env with random secrets and a project key pair, and prints the lines Pim's .env needs
+#   docker compose up -d --wait       # web, worker and their own PostgreSQL, ClickHouse, Redis and S3 (MinIO), each with a healthcheck
+#   docker compose down               # stops it; the volumes stay (down -v deletes every trace)
+#
+# Pim does not depend on this stack: its Compose file never mentions it, Pim starts and runs the same when it is down, and a Pim that cannot reach it loses spans, never work. They meet on one
+# Docker network, `pim-traces`, which Pim's Runner joins and this stack's web container joins, so Pim reaches it as http://langfuse-web:3000 and nothing else of Pim shares a network with it.
+#
+# Pinned to Langfuse 4.86.0 (web and worker, by digest), the release `scripts/langfuse-qualify.sh` passed against in CI (docs/v2-operations.md, "Qualification"): OTLP at /api/public/otel with `x-langfuse-ingestion-version: 4`, and ClickHouse 26.3
+# (Langfuse 4 needs 25.12 or later). Upgrade by changing the two tags and digests together, reading Langfuse's release notes, and running scripts/langfuse-smoke.mjs.
+#
+# Storage is this stack's own: its PostgreSQL (user `langfuse`, database `langfuse`), ClickHouse, Redis and bucket are not Pim's, so neither can read or fill the other's.
+# Nothing but the web UI is published, on 127.0.0.1 unless LANGFUSE_BIND says otherwise; put TLS in front of it before exposing it (LANGFUSE_URL is the address people use).
+
+name: pim-langfuse
+
+x-langfuse: &langfuse
+  restart: unless-stopped
+  depends_on:
+    postgres: { condition: service_healthy }
+    clickhouse: { condition: service_healthy }
+    redis: { condition: service_healthy }
+    minio: { condition: service_healthy }
+  environment: &langfuse-env
+    NEXTAUTH_URL: ${LANGFUSE_URL:-http://localhost:3100}
+    DATABASE_URL: postgresql://langfuse:${LANGFUSE_POSTGRES_PASSWORD:?run ./init-env.sh}@postgres:5432/langfuse
+    SALT: ${LANGFUSE_SALT:?run ./init-env.sh}
+    ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:?run ./init-env.sh}
+    # Langfuse's own usage reporting to its maintainers: off.
+    TELEMETRY_ENABLED: "false"
+    CLICKHOUSE_URL: http://clickhouse:8123
+    CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
+    CLICKHOUSE_USER: langfuse
+    CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD:?run ./init-env.sh}
+    CLICKHOUSE_CLUSTER_ENABLED: "false"
+    REDIS_HOST: redis
+    REDIS_PORT: "6379"
+    REDIS_AUTH: ${LANGFUSE_REDIS_PASSWORD:?run ./init-env.sh}
+    LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+    LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+    LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9000
+    LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: langfuse
+    LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_MINIO_PASSWORD:?run ./init-env.sh}
+    LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+    LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+    # Pim's traces carry no media; uploads from the UI would need MinIO published to browsers, which it is not.
+    LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+    LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+    LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://minio:9000
+    LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: langfuse
+    LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_MINIO_PASSWORD:?run ./init-env.sh}
+    LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+    LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+
+services:
+  langfuse-web:
+    <<: *langfuse
+    image: docker.io/langfuse/langfuse:4.86.0@sha256:514f9851ce7c8c8288a12620f99911f80aecc5aa49a43fe07eecf02cfc96546e
+    ports: ["${LANGFUSE_BIND:-127.0.0.1}:${LANGFUSE_PORT:-3100}:3000"]
+    environment:
+      <<: *langfuse-env
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:?run ./init-env.sh}
+      # The UI is for the people this stack was made for: sign-up is off, and the first organization, project, user and API keys come from the LANGFUSE_INIT_* values in .env.
+      AUTH_DISABLE_SIGNUP: "true"
+      LANGFUSE_INIT_ORG_ID: pim
+      LANGFUSE_INIT_ORG_NAME: Pim
+      LANGFUSE_INIT_PROJECT_ID: pim
+      LANGFUSE_INIT_PROJECT_NAME: Pim agents
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:?run ./init-env.sh}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_SECRET_KEY:?run ./init-env.sh}
+      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_ADMIN_EMAIL:?run ./init-env.sh}
+      LANGFUSE_INIT_USER_NAME: Admin
+      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_ADMIN_PASSWORD:?run ./init-env.sh}
+    networks:
+      default: {}
+      pim-traces: { aliases: [langfuse-web] }
+    # The container's own address, not 127.0.0.1: the Next.js server listens on its hostname's interface.
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://' + require('os').hostname() + ':3000/api/public/health').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+
+  langfuse-worker:
+    <<: *langfuse
+    image: docker.io/langfuse/langfuse-worker:4.86.0@sha256:cc6a5dbdcf0e164f94f3a78bcee97e971f7f22ed3ac374ea9c40e64455903811
+    networks: [default]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://' + require('os').hostname() + ':3030/api/health').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+
+  postgres:
+    image: docker.io/postgres:17.2-alpine@sha256:7e5df973a74872482e320dcbdeb055e178d6f42de0558b083892c50cda833c96
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: langfuse
+      POSTGRES_PASSWORD: ${LANGFUSE_POSTGRES_PASSWORD:?run ./init-env.sh}
+      POSTGRES_DB: langfuse
+      TZ: UTC
+      PGTZ: UTC
+    volumes: ["langfuse-postgres:/var/lib/postgresql/data"]
+    networks: [default]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U langfuse -d langfuse"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  clickhouse:
+    image: docker.io/clickhouse/clickhouse-server:26.3.62.3@sha256:de3e47c64078aa196dae2349e048fc98ba81947f651f5c20e06e46baea8ae40a
+    restart: unless-stopped
+    user: "101:101"
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: langfuse
+      CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD:?run ./init-env.sh}
+    volumes:
+      - langfuse-clickhouse:/var/lib/clickhouse
+      - langfuse-clickhouse-logs:/var/log/clickhouse-server
+    networks: [default]
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:8123/ping || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
+  redis:
+    image: docker.io/redis:7.4.1-alpine@sha256:c1e88455c85225310bbea54816e9c3f4b5295815e6dbf80c34d40afc6df28275
+    restart: unless-stopped
+    # noeviction: the queue's jobs must never be evicted to make room.
+    command: ["redis-server", "--requirepass", "${LANGFUSE_REDIS_PASSWORD:?run ./init-env.sh}", "--maxmemory-policy", "noeviction", "--appendonly", "yes"]
+    environment:
+      REDISCLI_AUTH: ${LANGFUSE_REDIS_PASSWORD:?run ./init-env.sh}
+    volumes: ["langfuse-redis:/data"]
+    networks: [default]
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # Langfuse stores raw events and media in S3. MinIO is what Langfuse is tested with; the image is Chainguard's, by digest (it publishes `latest` only, so refresh the digest on purpose).
+  minio:
+    image: cgr.dev/chainguard/minio@sha256:b9b1cce81a4a6cc9bf250e68d621cc0b9fb8ed15aefe18fcd1840525eab6a81a
+    restart: unless-stopped
+    entrypoint: sh
+    command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data'
+    environment:
+      MINIO_ROOT_USER: langfuse
+      MINIO_ROOT_PASSWORD: ${LANGFUSE_MINIO_PASSWORD:?run ./init-env.sh}
+    volumes: ["langfuse-minio:/data"]
+    networks: [default]
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 2s
+
+networks:
+  default: {}
+  # Created by Pim's Compose file (`traces` there); this stack only joins it. Start Pim first, or `docker network create pim-traces`. LANGFUSE_TRACES_NETWORK names another (scripts/langfuse-qualify.sh uses one of its own).
+  pim-traces: { external: true, name: "${LANGFUSE_TRACES_NETWORK:-pim-traces}" }
+
+volumes:
+  langfuse-postgres: {}
+  langfuse-clickhouse: {}
+  langfuse-clickhouse-logs: {}
+  langfuse-redis: {}
+  langfuse-minio: {}

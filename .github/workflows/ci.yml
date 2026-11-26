@@ -235,6 +235,20 @@ jobs:
         env:
           PIM_TEST_REGISTRY: localhost:5000
 
+  # The self-hosted Langfuse recipe (deploy/langfuse) on this runner's Docker, with secrets generated for the run and nothing of anyone's data: renders and validates both Compose files, pulls
+  # the pinned images, checks the binaries its healthchecks use, starts Langfuse alone, and runs the smoke script against it (scripts/langfuse-qualify.sh). One job, about six containers, all removed after.
+  langfuse:
+    needs: changes
+    if: fromJSON(needs.changes.outputs.scope).jobs.langfuse
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+        with:
+          filter: "@pim/v2-ops..."
+      - run: scripts/langfuse-qualify.sh
+
   image-computer:
     needs: changes
     if: fromJSON(needs.changes.outputs.scope).jobs.image-computer
@@ -254,7 +268,7 @@ jobs:
   ci:
     name: CI result
     if: always()
-    needs: [changes, lint, typecheck, web, web-build, daemons, node, desktop, packages, v2-server, image-backend, image-web, registry, image-computer]
+    needs: [changes, lint, typecheck, web, web-build, daemons, node, desktop, packages, v2-server, image-backend, image-web, registry, langfuse, image-computer]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

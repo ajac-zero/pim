@@ -2,7 +2,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
-import { pim, type UserContent } from "~/lib/pim-api";
+import { type ModelInfo, pim, type UserContent } from "~/lib/pim-api";
 import { pimClient } from "~/lib/pim-client";
 import { sessionsQuery } from "~/lib/queries";
 
@@ -11,9 +11,13 @@ import { sessionsQuery } from "~/lib/queries";
  * with its first message: the chat is made only when there is something to
  * send, then sent to and opened together, in place of the page that started
  * it, so Back skips New chat. `starting` is true from the moment the message
- * is sent until the chat opens, or fails to.
+ * is sent until the chat opens, or fails to. With `model`, the chat is set to
+ * it before its first message, so it runs on it from the first turn.
  */
-export function useStartChat(agent: string | undefined) {
+export function useStartChat(
+  agent: string | undefined,
+  model?: Pick<ModelInfo, "provider" | "id"> | null,
+) {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const [starting, setStarting] = useState(false);
@@ -22,6 +26,8 @@ export function useStartChat(agent: string | undefined) {
     setStarting(true);
     try {
       const session = await pim.createSession(agent ? { agent } : {});
+      // Chosen before the first message goes, so its first turn already runs on it.
+      if (model) await pim.chooseSessionModel(session.id, model);
       // The chat's page finds the chat in the list at once, rather than
       // fetching the list, which sending's own refresh of it would cancel.
       queryClient.setQueryData(

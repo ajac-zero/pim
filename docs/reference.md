@@ -580,7 +580,7 @@ Your majordomo knows everything you tell it; your other agents know only what co
 
 ### Memory and the prompt cache
 
-pi never edits what it already sent, so the provider's prompt cache keeps hitting. A changed system-prompt section is appended to the transcript as a whole new copy, and old copies stay until a compaction writes a fresh baseline. The same rule applies to every section: one that appears later than sections after it makes pi remove and re-send all of them.
+pi never edits what it already sent, so the provider's prompt cache keeps hitting. A changed system-prompt section is stored in the transcript as a patch, at the point it was first seen, and old patches stay until a compaction writes a fresh baseline. The sections that change while a chat runs (`memory` and `room`, in `stable-prefix.ts`) are not folded back into the start of the request: the system message keeps them as the chat began, and each patch of one is sent as a "[Context update]" message at its own place in the history. A change is therefore sent once, with only the sections that changed, and every later request carries it unchanged as part of the cached history. A section that appears later than sections after it still makes pi remove and re-send all of them.
 
 Forgetting removes a memory from the list and from future prompts. It does not erase the conversation where it came up: that stays in the session's transcript until you reset the session.
 

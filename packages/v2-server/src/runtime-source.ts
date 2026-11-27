@@ -5,7 +5,7 @@
  * Live projects:
  *
  * - a committed entry becomes `chat.entry`, and an assistant entry replaces the partial that showed it streaming;
- * - a change of the conversation's live document becomes the in-flight answer as a partial `chat.entry`, and `chat.meta` with `busy`;
+ * - a change of the conversation's live document becomes the in-flight answer as a partial `chat.entry`, and `chat.meta` with `busy`, and whether a compaction is under way (`compacting`) or the last one failed (`compactionFailure`, with its task, which tells one failure from the next);
  * - a forked conversation's first commit adds the entries it inherits from its parent as `chat.entry` too;
  * - every conversation a commit touched gets `chat.meta` with when it last changed;
  * - a commit that answers, compacts or resets a conversation says in `chat.meta` how many tokens its context holds now (`contextTokens`), and which model answered (`contextModel`).
@@ -168,6 +168,7 @@ async function translate(pool: Pool, storage: PgPiStorage, ownerId: OwnerId, par
 		}
 	}
 	let busy: boolean | undefined;
+	let compaction: { compacting: boolean; compactionFailure: { task: number; error: string } | null } | undefined;
 	let queue: unknown[] | undefined;
 	for (const change of changes.filter((c) => c.type === "document.change")) {
 		const kind = await documentKind(pool, ownerId, partitionId, change.id);
@@ -180,6 +181,7 @@ async function translate(pool: Pool, storage: PgPiStorage, ownerId: OwnerId, par
 		const live = (await storage.document(change.id as never, "current", BACKGROUND_CONTEXT))?.value as LiveState | undefined;
 		if (live === undefined) continue;
 		busy = live.run !== undefined;
+		compaction = { compacting: (live.compactions?.length ?? 0) > 0, compactionFailure: live.compactionFailure === undefined ? null : { task: Number(live.compactionFailure.taskId), error: live.compactionFailure.error } };
 		const message = live.generation?.message;
 		if (message !== undefined) {
 			const top = await withOwner(pool, ownerId, (client) => client.query<{ top: string | null }>("SELECT max(id) AS top FROM pim_runtime.entries WHERE owner_id = $1 AND conversation_id = $2", [ownerId, conversationId]));
@@ -189,7 +191,7 @@ async function translate(pool: Pool, storage: PgPiStorage, ownerId: OwnerId, par
 		}
 	}
 	const context = await contextOf(storage, conversationId, written);
-	const summary = { ...(queue === undefined ? {} : { queued: queue.length }), ...context };
+	const summary = { ...(queue === undefined ? {} : { queued: queue.length }), ...compaction, ...context };
 	if (events.length > 0 || busy !== undefined || queue !== undefined) {
 		events.push(event("chat.meta", { updatedAt: committedAt.getTime(), ...(busy === undefined ? {} : { busy }), ...(queue === undefined ? {} : { queue }), ...(Object.keys(summary).length === 0 ? {} : { summary }) }));
 	}
@@ -218,7 +220,7 @@ async function contextOf(storage: PgPiStorage, conversationId: number, written: 
 	return { contextTokens: tokens, ...(answer ? { contextModel: { provider: answer.provider, id: answer.model } } : {}) };
 }
 
-type LiveState = { run?: unknown; generation?: { message?: unknown } };
+type LiveState = { run?: unknown; generation?: { message?: unknown }; compactions?: unknown[]; compactionFailure?: { taskId: unknown; error: string } };
 
 /** What kind of document `id` is (`pi.live`, `pi.inbox`), when it is not retired. */
 async function documentKind(pool: Pool, ownerId: OwnerId, partitionId: PartitionId, id: number): Promise<string | undefined> {

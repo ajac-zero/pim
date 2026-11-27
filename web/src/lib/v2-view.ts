@@ -251,6 +251,14 @@ export function sessionOf(row: SidebarRow): Session {
     ...(typeof summary.contextTokens === "number"
       ? { contextTokens: summary.contextTokens }
       : {}),
+    ...(summary.compacting === true ? { compacting: true } : {}),
+    ...(typeof summary.compactionFailure === "object" &&
+    summary.compactionFailure !== null
+      ? {
+          compactionFailure:
+            summary.compactionFailure as Session["compactionFailure"],
+        }
+      : {}),
     ...(typeof summary.model === "object" && summary.model !== null
       ? { model: summary.model as Session["model"] }
       : {}),

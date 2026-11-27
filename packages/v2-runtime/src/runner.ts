@@ -602,6 +602,20 @@ const retryFromCommand: CommandHandler = async (resident, command, context) => {
 	await conversation.submit({ type: "continue", requestId: command.piRequestId }, context);
 };
 
+/**
+ * Summarizes the older part of the conversation now, in place: pi-durable's own compaction (`Conversation.compact`), the one it runs by itself near the end of the model's context
+ * window. The entries all stay; the summary entry names the first one the model still reads, so it is sent the summary and what came after. The conversation is not at work
+ * meanwhile (a run, or a compaction already under way, is refused: the person asks again), and one with too little to summarize is left as it was. The summary is written once the
+ * model has answered, which is after this command is done; a failed one is in the conversation's live document (`compactionFailure`).
+ */
+const compactCommand: CommandHandler = async (resident, command, context) => {
+	const conversation = await conversationOf(resident, command, context);
+	const live = await resident.harness.snapshot(LiveDoc, conversation.id, context);
+	if (live?.run !== undefined || (live?.compactions?.length ?? 0) > 0) throw new CommandRejected(`Conversation ${command.conversationId} is at work`);
+	await refreshAgent(resident, conversation, command, context);
+	await conversation.compact(undefined, context);
+};
+
 /** approval_decision and task_wake become durable signals: the decision is in PostgreSQL before anything acts on it, and is applied now and at every later activation. */
 const signalCommand: CommandHandler = async (resident, command, context) => {
 	const taskId = Number(command.payload.taskId);
@@ -675,6 +689,7 @@ const BUILTIN_COMMANDS: Readonly<Record<string, CommandHandler>> = {
 	fork: forkCommand,
 	queue_change: queueChangeCommand,
 	retry_from: retryFromCommand,
+	compact: compactCommand,
 };
 
 /**

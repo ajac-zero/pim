@@ -154,6 +154,7 @@ export const Flower2 = themedIcon(
   Lucide.Flower2,
   pixelPath("M9 7V3h6v4h6v6h-6v4H9v-4H3V7h6Zm2 2h2v2h-2V9Zm1 8v6m0-2h6v-4h-4"),
 );
+export const FoldVertical = themedIcon(Lucide.FoldVertical, Pixel.Collapse);
 export const Folder = themedIcon(Lucide.Folder, Pixel.Folder);
 export const Footprints = themedIcon(
   Lucide.Footprints,

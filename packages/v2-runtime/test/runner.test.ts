@@ -487,3 +487,59 @@ describe("retry from a message", () => {
 		await runner.stop();
 	});
 });
+
+describe("compacting on demand", () => {
+	const summarizing = (ctx: { messages: { role: string; content: unknown }[] }) => JSON.stringify(ctx.messages[0]?.content ?? "").includes("context summarization assistant");
+	const words = (count: number) => Array.from({ length: count }, (_, i) => `w${i}`).join(" ");
+
+	it("summarizes the older part of the context in place, leaves a conversation with too little alone, and refuses one at work", async () => {
+		const ownerId = uniqueOwner();
+		const rig = createRig(database.db, ownerId);
+		const home = await new PartitionDirectory(database.db).createPartition(ownerId, { kind: "home" });
+		const seen: string[] = [];
+		const reply = (text: string) => (ctx: { messages: unknown[] }) => (seen.push(JSON.stringify(ctx.messages)), fauxAssistantMessage(text));
+		const gate = latch();
+		const runner = rig.runner({ idleUnloadMs: 60_000 });
+		await runner.start();
+		const entries = () => readTranscript(database.db, ownerId, home, 1);
+		const done = async (id: string) => (await database.db.read(ownerId, "SELECT 1 FROM pim_runtime.command_inbox WHERE owner_id = $1 AND command_id = $2 AND done_at IS NOT NULL", [ownerId, id])).rowCount === 1 || undefined;
+		const sent = async (id: string, text: string, answer: string) => {
+			rig.faux.setResponses([reply(answer)] as never);
+			await command(runner.inbox, ownerId, home, id, 1, { content: text });
+			await waitFor(answer, async () => (await entries()).some((e) => textOf(e) === answer) || undefined);
+		};
+		// Less than pi keeps as it is: nothing older to summarize, so nothing is asked of the model and nothing is written.
+		await sent("m1", "one", "a1");
+		await command(runner.inbox, ownerId, home, "compact-small", 1, {}, "compact");
+		await waitFor("the command", () => done("compact-small"));
+		await new Promise((resolve) => setTimeout(resolve, 300));
+		expect((await entries()).some((e) => e.kind === "pi.compaction")).toBe(false);
+		// A conversation at work is refused, and nothing is summarized.
+		rig.faux.setResponses([(async () => (await gate.promise, fauxAssistantMessage("held answer")))] as never);
+		await command(runner.inbox, ownerId, home, "m-held", 1, { content: "hold on" });
+		await waitFor("the run", async () => (seen.length === 1 ? true : undefined));
+		await command(runner.inbox, ownerId, home, "compact-busy", 1, {}, "compact");
+		await waitFor("the refusal", () => done("compact-busy"));
+		gate.release();
+		await waitFor("the held answer", async () => (await entries()).some((e) => textOf(e) === "held answer") || undefined);
+		expect((await entries()).some((e) => e.kind === "pi.compaction")).toBe(false);
+		// With two long messages, the first is older than the last ~20,000 tokens pi keeps: it is summarized, the model asked once to do it, and every entry stays.
+		await sent("m2", `two ${words(25_000)}`, "a2");
+		await sent("m3", `three ${words(25_000)}`, "a3");
+		let asked = 0;
+		rig.faux.setResponses([(ctx: { messages: { role: string; content: unknown }[] }) => (summarizing(ctx) ? (asked++, fauxAssistantMessage("SUMMARY of one and two")) : fauxAssistantMessage("unexpected"))] as never);
+		await command(runner.inbox, ownerId, home, "compact-1", 1, {}, "compact");
+		const compaction = await waitFor("the summary", async () => (await entries()).find((e) => e.kind === "pi.compaction"));
+		expect(asked).toBe(1);
+		expect(JSON.stringify(compaction.model)).toContain("SUMMARY of one and two");
+		const log = await entries();
+		expect(log.filter((e) => e.kind === "pi.user")).toHaveLength(4);
+		// The next turn is sent the summary and what was kept, not the messages before it.
+		seen.length = 0;
+		await sent("m4", "four", "a4");
+		expect(seen[0]).toContain("SUMMARY of one and two");
+		expect(seen[0]).toContain("three w0");
+		expect(seen[0]).not.toContain("two w0");
+		await runner.stop();
+	}, 60_000);
+});

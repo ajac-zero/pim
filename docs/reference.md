@@ -304,7 +304,7 @@ Every model call a space makes is one row in `pim_app.model_calls`, the cost led
 | --- | --- |
 | `chat` | A chat's runs, including those a person's message, an approval or a coding thread's wake started, tasks and triggers' runs |
 | `background` | Calls with no conversation (naming a chat, the utility model, memory compression) and compaction summaries |
-| `coding_thread` | A coding thread's own model calls, as Forge's cost ledger reports them |
+| `coding_thread` | A coding thread's own model calls, as Forge's cost ledger reports them, recorded under the chat that started the thread (its cost meter lists them apart, by harness) |
 
 Prices are in [`config/model-prices.json`](../config/model-prices.json), in dollars per million tokens by model id (an id with a gateway prefix such as `anthropic/` matches the model without it). A call is priced when it is recorded; a model with no price counts as unpriced, and calls on the person's own plans and providers cost nothing to the deployment. Prices the catalog flags as estimated are `estimated` there, as are the 1-hour cache write prices, which the catalog doesn't have and which are twice the input price. To change a price, edit the file and bump `version`.
 

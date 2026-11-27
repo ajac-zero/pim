@@ -4,6 +4,7 @@
  * leaves the rest of `/api/coding/**` (harness logins, the git broker, Gitea, the model gateway) to the inner handler. The live `events` stream follows the thread's transcript as Forge records it (a message at a time: a
  * command's output as it prints is not streamed). Not served: an environment build, which Forge has no counterpart for.
  */
+import { eventMessages } from "@pim/v2-forge/event-messages";
 import type { Forge, ThreadView } from "@pim/v2-forge/forge";
 import { json, type Authenticate, type Handler } from "@pim/v2-forge/http/common";
 
@@ -115,20 +116,25 @@ function view(t: Thread, progress: Progress, unpushed: { commits: number; sha: s
 /** How many of a thread's latest messages the live stream's snapshot carries. */
 const SNAPSHOT_ENTRIES = 100;
 
-/** A message the thread recorded, as the pi entry the page's stream folds into its transcript (the page's own reducer reads `entry.model[0]`). */
-const entryOf = (e: { seq: number | string; role: string | null; data: any; at: string | Date }) => {
-	const timestamp = new Date(e.at).getTime();
-	const d = e.data ?? {};
-	const model =
-		e.role === "user"
-			? { role: "user", content: String(d.text ?? ""), timestamp }
-			: e.role === "tool"
-				? { role: "toolResult", toolCallId: String(d.toolCallId ?? ""), toolName: String(d.name ?? "tool"), content: [{ type: "text", text: String(d.text ?? "") }], isError: d.isError === true, timestamp }
-				: e.role === "assistant"
-					? { role: "assistant", content: [...(d.text ? [{ type: "text", text: String(d.text) }] : []), ...((d.toolCalls ?? []) as { id: string; name: string; arguments: unknown }[]).map((c) => ({ type: "toolCall", id: String(c.id), name: String(c.name), arguments: c.arguments ?? {} }))], timestamp, stopReason: "stop" }
-					: null;
-	return model ? { id: Number(e.seq), kind: "pi.message", model: [model] } : null;
-};
+/**
+ * A message the thread recorded, as the pi entries the page's stream folds into its transcript (the page's own reducer reads `entry.model[0]`): the message, then each tool result it carries as an entry of its own,
+ * whose id is the message's with the call's after it.
+ */
+const entriesOf = (e: { seq: number | string; role: string | null; data: any; at: string | Date }) =>
+	eventMessages(e).flatMap((m) => {
+		const model: Record<string, unknown> | null =
+			m.role === "user"
+				? { role: "user", content: m.parts.flatMap((p) => (p.type === "text" ? [p.text] : [])).join("\n"), timestamp: m.timestamp }
+				: m.role === "tool"
+					? (() => {
+							const r = m.parts.find((p) => p.type === "tool-result");
+							return r?.type === "tool-result" ? { role: "toolResult", toolCallId: r.id, toolName: r.name, content: r.content, isError: r.error, timestamp: m.timestamp } : null;
+						})()
+					: m.role === "assistant"
+						? { role: "assistant", content: m.parts.flatMap((p): Record<string, unknown>[] => (p.type === "text" ? [{ type: "text", text: p.text }] : p.type === "tool-call" ? [{ type: "toolCall", id: p.id, name: p.name, arguments: p.arguments ?? {} }] : [])), timestamp: m.timestamp, stopReason: "stop" }
+						: null;
+		return model ? [{ id: m.id === String(e.seq) ? Number(e.seq) : m.id, kind: "pi.message", model: [model] }] : [];
+	});
 
 /**
  * The page's live stream (`GET …/events`, newline-delimited JSON): a snapshot of the conversation so far, then each message the thread records as it does, with the run's start and end. Forge records a message when
@@ -142,13 +148,12 @@ function follow(forge: Forge, actor: Parameters<Forge["status"]>[0], id: string,
 			const send = (message: object) => controller.enqueue(encoder.encode(`${JSON.stringify(message)}\n`));
 			let after = 0;
 			const drain = async () => {
-				const entries: NonNullable<ReturnType<typeof entryOf>>[] = [];
+				const entries: ReturnType<typeof entriesOf> = [];
 				for (;;) {
 					const rows = await forge.eventsAfter(actor, id, after, 500);
 					for (const row of rows) {
 						after = Number(row.seq);
-						const entry = row.kind === "message" ? entryOf(row as never) : null;
-						if (entry) entries.push(entry);
+						if (row.kind === "message") entries.push(...entriesOf(row as never));
 					}
 					if (rows.length < 500) return entries;
 				}

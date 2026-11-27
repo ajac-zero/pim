@@ -216,7 +216,7 @@ describe("chats and the account", () => {
 	it("renames and deletes a chat, answers cost and tasks, and lists tokens without secrets", async () => {
 		const chat = (await call(ada, "POST", "/api/sessions", { agentId: agent, title: "First" })).body.id as string;
 		expect((await call(ada, "PUT", `/api/sessions/${chat}`, { title: "Second" })).body).toMatchObject({ id: chat, title: "Second" });
-		expect((await call(ada, "GET", `/api/sessions/${chat}/cost`)).body).toEqual({ total: 0, cacheHitRatio: null, models: [] });
+		expect((await call(ada, "GET", `/api/sessions/${chat}/cost`)).body).toEqual({ total: 0, cacheHitRatio: null, models: [], coding: [] });
 		expect((await call(ada, "GET", `/api/sessions/${chat}/tasks`)).body).toEqual({ tasks: [] });
 		expect((await call(bob, "GET", `/api/sessions/${chat}/cost`)).status).toBe(404);
 		expect((await call(ada, "POST", "/api/prompts/improve", { text: "x" })).status).toBe(501);
@@ -225,17 +225,33 @@ describe("chats and the account", () => {
 		await app.usage.record(owner, { id: "cc1", runKind: "chat", chatId: chat, provider: "gateway", model: "m", inputTokens: 1000, outputTokens: 200, cacheReadTokens: 800, cacheWriteTokens: 50, costMicroUsd: 12_000 });
 		await app.usage.record(owner, { id: "cc2", runKind: "chat", chatId: chat, provider: "gateway", model: "m", inputTokens: 10, outputTokens: 20, costMicroUsd: 3_000 });
 		const costed = (await call(ada, "GET", `/api/sessions/${chat}/cost`)).body;
-		expect(costed).toEqual({ total: 0.015, cacheHitRatio: expect.closeTo(800 / 1860, 6), models: [{ provider: "gateway", model: "m", input: 1010, output: 220, cacheRead: 800, cacheWrite: 50, cost: 0.015 }] });
+		expect(costed).toEqual({ total: 0.015, cacheHitRatio: expect.closeTo(800 / 1860, 6), models: [{ provider: "gateway", model: "m", input: 1010, output: 220, cacheRead: 800, cacheWrite: 50, cost: 0.015 }], coding: [] });
+		// The coding threads the chat started are a line of their own, by harness and model, and count toward the total. Recording a call again counts nothing more. A harness that reports no cache tiers
+		// adds its spend but not its tokens to the hit rate, which would otherwise read them as a full miss.
+		const amp = { runKind: "coding_thread" as const, chatId: chat, provider: "amp", model: "claude-opus-4-5", threadId: "T-1" };
+		expect(await app.usage.record(owner, { ...amp, id: "cc3", inputTokens: 100, outputTokens: 10, cacheReadTokens: 900, costMicroUsd: 20_000 })).toBe(true);
+		expect(await app.usage.record(owner, { ...amp, id: "cc3", inputTokens: 100, outputTokens: 10, cacheReadTokens: 900, costMicroUsd: 20_000 })).toBe(false);
+		await app.usage.record(owner, { ...amp, id: "cc4", provider: "claude-code", model: "", threadId: "T-2", inputTokens: 5000, outputTokens: 50, costMicroUsd: 5_000 });
+		await app.usage.record(owner, { ...amp, id: "cc5", model: "", threadId: "T-3", inputTokens: 0, outputTokens: 0, costMicroUsd: 1_000 });
+		const withCoding = (await call(ada, "GET", `/api/sessions/${chat}/cost`)).body;
+		expect(withCoding.total).toBeCloseTo(0.041, 9);
+		expect(withCoding.cacheHitRatio).toBeCloseTo(1700 / (1110 + 1700 + 50), 6);
+		expect(withCoding.models).toHaveLength(1);
+		expect(withCoding.coding).toEqual([
+			{ provider: "amp", harness: "amp", model: "claude-opus-4-5", threads: 1, input: 100, output: 10, cacheRead: 900, cacheWrite: 0, cost: 0.02 },
+			{ provider: "claude-code", harness: "claude-code", model: "", threads: 1, input: 5000, output: 50, cacheRead: 0, cacheWrite: 0, cost: 0.005 },
+			{ provider: "amp", harness: "amp", model: "", threads: 1, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0.001 },
+		]);
 		// The history lists each call newest first, with the cache tiers and a hit rate that is null where the provider reported no cache; another person's chat is not reachable.
 		await stack.admin.query("UPDATE pim_app.model_calls SET at = now() - interval '1 minute' WHERE id = 'cc1'");
 		const history = (await call(ada, "GET", `/api/sessions/${chat}/turns`)).body.turns;
-		expect(history.map((t: { id: string }) => t.id)).toEqual(["cc2", "cc1"]);
-		expect(history[0]).toMatchObject({ input: 10, output: 20, cacheRead: 0, cacheWrite: 0, hitRatio: null, cost: 0.003 });
-		expect(history[1]).toMatchObject({ input: 1000, cacheRead: 800, cacheWrite: 50, hitRatio: expect.closeTo(800 / 1850, 6) });
+		expect(history.map((t: { id: string }) => t.id)).toEqual(["cc4", "cc3", "cc2", "cc1"]);
+		expect(history[2]).toMatchObject({ input: 10, output: 20, cacheRead: 0, cacheWrite: 0, hitRatio: null, cost: 0.003 });
+		expect(history[3]).toMatchObject({ input: 1000, cacheRead: 800, cacheWrite: 50, hitRatio: expect.closeTo(800 / 1850, 6) });
 		expect((await call(bob, "GET", `/api/sessions/${chat}/turns`)).status).toBe(404);
 		// A chat's activity is its latest turn, read from its transcript: calls the ledger has and the transcript has not are no steps of it.
 		expect((await call(ada, "GET", `/api/sessions/${chat}/activity`)).body).toMatchObject({ running: false, steps: [], current: [], stalls: [] });
-		await stack.admin.query("DELETE FROM pim_app.model_calls WHERE id IN ('cc1', 'cc2')");
+		await stack.admin.query("DELETE FROM pim_app.model_calls WHERE id IN ('cc1', 'cc2', 'cc3', 'cc4', 'cc5')");
 		expect((await call(ada, "DELETE", `/api/sessions/${chat}`)).body).toEqual({ deleted: true });
 		expect((await call(ada, "GET", `/api/sessions/${chat}/summary`)).status).toBe(404);
 		const token = (await call(ada, "POST", "/auth/tokens", { name: "cli" })).body;

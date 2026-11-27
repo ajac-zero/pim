@@ -10,6 +10,7 @@ import { sessionsQuery } from "~/lib/queries";
 const cost = (cacheHitRatio: number | null): SessionCost => ({
   total: 0.5,
   cacheHitRatio,
+  coding: [],
   models: [
     {
       provider: "p",
@@ -81,4 +82,47 @@ it("shows the cache hit rate and asks for the turn history only when it is opene
 it("says the hit rate is not reported when the provider reports no cache", async () => {
   open(cost(null));
   expect(await screen.findByText("Cache hit rate: not reported")).toBeTruthy();
+});
+
+it("lists what coding threads spent apart from the chat's models, named for their harness, and shows no tokens where the harness reported none", async () => {
+  open({
+    ...cost(0.75),
+    total: 0.58,
+    coding: [
+      {
+        harness: "amp",
+        model: "claude-opus-4-5",
+        threads: 1,
+        input: 10,
+        output: 220,
+        cacheRead: 16000,
+        cacheWrite: 900,
+        cost: 0.07,
+      },
+      {
+        harness: "claude-code",
+        model: "",
+        threads: 1,
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        cost: 0.01,
+      },
+    ],
+  });
+  expect(await screen.findByText("Total: $0.58")).toBeTruthy();
+  expect(screen.getByText(/^Coding threads/)).toBeTruthy();
+  expect(screen.getByText("Amp · claude-opus-4-5")).toBeTruthy();
+  expect(screen.getByText("$0.07")).toBeTruthy();
+  expect(screen.getByText("16,900 cached", { exact: false })).toBeTruthy();
+  // A harness that reported dollars only: its line, with no token count of zeros.
+  expect(screen.getByText("Claude Code")).toBeTruthy();
+  expect(screen.getAllByText(/ cached/)).toHaveLength(2);
+});
+
+it("offers no coding section when no coding thread reported a cost", async () => {
+  open(cost(0.75));
+  expect(await screen.findByText(/Cache hit rate: 75%/)).toBeTruthy();
+  expect(screen.queryByText(/^Coding threads/)).toBeNull();
 });

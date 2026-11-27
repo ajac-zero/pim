@@ -289,10 +289,18 @@ real("Forge's worker role with the Gate and Maintenance", () => {
 		await d.stack.admin.query("insert into pim_forge.forge_events (thread_id, seq, kind, role, data) select $1, max(seq) + 1, 'message', 'assistant', $2 from pim_forge.forge_events where thread_id = $1", [id, { text: "Live now." }]);
 		const live = await next();
 		expect(live).toMatchObject({ type: "events", events: [{ type: "entry_appended", entry: { kind: "pi.message", model: [{ role: "assistant", content: [{ type: "text", text: "Live now." }] }] } }] });
+		// An Amp thread's messages carry their tool steps in `parts`: the call on the assistant's, the result on the wordless user message after it.
+		const add = (role: string, data: object) => d.stack.admin.query("insert into pim_forge.forge_events (thread_id, seq, kind, role, data) select $1, max(seq) + 1, 'message', $2, $3 from pim_forge.forge_events where thread_id = $1", [id, role, data]);
+		await add("assistant", { text: "", parts: [{ type: "toolCall", id: "toolu_1", name: "Bash", arguments: { cmd: "ls" } }] });
+		await add("user", { text: "", parts: [{ type: "toolResult", id: "toolu_1", name: "Bash", text: "a.ts", isError: false }] });
+		const amp = (await next()).events.map((e: any) => e.entry);
+		expect(amp.map((e: any) => [typeof e.id, e.model[0].role])).toEqual([["number", "assistant"], ["string", "toolResult"]]);
+		expect(amp[0].model[0].content).toEqual([{ type: "toolCall", id: "toolu_1", name: "Bash", arguments: { cmd: "ls" } }]);
+		expect(amp[1].model[0]).toMatchObject({ toolCallId: "toolu_1", toolName: "Bash", content: [{ type: "text", text: "a.ts" }], isError: false });
 		await reader.cancel();
 		// A caller that doesn't ask for a stream gets the log, from `since`, with where to ask next.
 		const log = (await web.call("GET", `/api/coding/threads/${id}/log?since=0`)).json;
-		expect(log.events.at(-1)).toMatchObject({ kind: "message", data: { text: "Live now." } });
+		expect(log.events.at(-3)).toMatchObject({ kind: "message", data: { text: "Live now." } });
 		expect(log.next).toBe(Number(log.events.at(-1).seq));
 		expect((await web.call("GET", `/api/coding/threads/${id}/log?since=${log.next}`)).json).toEqual({ events: [], next: log.next });
 		expect((await web.call("GET", `/api/coding/threads/${id}/diff`)).json).toEqual({ since: null, head: null, diff: "", truncated: false });

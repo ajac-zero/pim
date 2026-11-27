@@ -39,6 +39,9 @@ export type OrbPart =
 	| { readonly type: "toolCall"; readonly id: string; readonly name: string; readonly arguments: Record<string, unknown> }
 	| { readonly type: "toolResult"; readonly id: string; readonly name: string; readonly text: string; readonly isError: boolean };
 
+/** What one assistant message cost, as the agent's cloud reports it: dollars only when it says so (never a price Pim worked out), and the tokens it counted. */
+export type OrbMessageUsage = { readonly usd?: number; readonly model?: string; readonly input?: number; readonly output?: number; readonly cacheRead?: number; readonly cacheWrite?: number };
+
 /** One message of a thread's transcript, as the agent's cloud reports it. */
 export type OrbMessage = {
 	/** The agent's own id of the message, which `messages` pages by. */
@@ -49,6 +52,8 @@ export type OrbMessage = {
 	readonly text: string;
 	/** The message's text and tool steps in order, set when it has tool steps; `text` is then only its words. */
 	readonly parts?: readonly OrbPart[];
+	/** What the message cost, when the cloud says (`usd` is absent when it reports tokens only). */
+	readonly usage?: OrbMessageUsage;
 	/** Original provider JSON when its transcript format is not stable. */
 	readonly raw?: unknown;
 };

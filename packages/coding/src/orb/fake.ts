@@ -173,9 +173,9 @@ export class FakeOrbClient implements OrbClient {
 	}
 
 	/** Adds a message to the thread's transcript, as the agent's reply or the person's words would. */
-	say(threadId: string, role: "user" | "assistant", text: string, parts?: OrbMessage["parts"]): void {
+	say(threadId: string, role: "user" | "assistant", text: string, parts?: OrbMessage["parts"], usage?: OrbMessage["usage"]): void {
 		const thread = this.#live(threadId);
-		const message: OrbMessage = { id: `m-${++this.#messagesMade}`, role, at: this.#now(), text, ...(parts ? { parts } : {}) };
+		const message: OrbMessage = { id: `m-${++this.#messagesMade}`, role, at: this.#now(), text, ...(parts ? { parts } : {}), ...(usage ? { usage } : {}) };
 		thread.messages.push(message);
 		this.#touch(thread);
 	}

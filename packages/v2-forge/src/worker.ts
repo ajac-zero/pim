@@ -836,12 +836,16 @@ export class ForgeWorker {
 			for (const { m, text } of mirrored) {
 				const split = m.role === "assistant" ? splitSuggestedReplies(text) : { text, replies: [] as string[] };
 				const sentByPim = m.role === "user" && (await q.query("select 1 from pim_forge.forge_events where thread_id = $1 and role = 'user' and data ->> 'text' = $2 and source_cursor is null", [t.threadId, m.text])).rows.length > 0;
-				const external = m.role === "user" && !sentByPim && m.text !== t.task;
+				// A user message with no words is Amp handing tool results back to the agent, not a person steering it.
+				const external = m.role === "user" && m.text !== "" && !sentByPim && m.text !== t.task;
 				if (external) {
 					turn = `external-${m.id}`;
 					await store.appendEvent(q, t.threadId, { kind: "thread.turn_started", data: { operationId: turn, provider: client.id, orb: orb.threadId, external: true } });
 				}
 				await store.appendEvent(q, t.threadId, { kind: "message", role: m.role, sourceCursor: `orb:${m.id}`, data: { text: split.text, at: m.at, ...(split.replies.length ? { suggestedReplies: split.replies } : {}), ...(m.parts ? { parts: m.parts } : {}), ...(external ? { external: true } : {}) } });
+				// What the cloud says this message cost, once per message: the cursor makes a message seen again, or its usage read again, count nothing more. A message that reports no dollars adds no cost row.
+				const spend = m.usage;
+				if (spend?.usd !== undefined && spend.usd > 0) await store.appendEvent(q, t.threadId, { kind: "model_call", costUsd: spend.usd, tokensIn: spend.input ?? 0, tokensOut: spend.output ?? 0, sourceCursor: `usage:msg:${m.id}`, data: { via: "orb", harness: t.harness, ...(spend.model ? { model: spend.model } : {}), ...(spend.cacheRead ? { cacheReadTokens: spend.cacheRead } : {}), ...(spend.cacheWrite ? { cacheWriteTokens: spend.cacheWrite } : {}) } });
 			}
 			const reported = (t.orb as { reportedUsd?: number } | null)?.reportedUsd ?? 0;
 			if (usd !== null && usd > reported) await store.appendEvent(q, t.threadId, { kind: "model_call", costUsd: usd - reported, sourceCursor: `usage:${usd}`, data: { via: "orb", harness: "amp", reportedTotalUsd: usd } });

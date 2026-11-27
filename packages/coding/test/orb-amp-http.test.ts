@@ -214,6 +214,29 @@ describe("AmpHttpOrbClient contract", () => {
 		expect(all[0]!.parts).toBeUndefined();
 	});
 
+	it("reports what each assistant message cost only when Amp says so, and shows a tool still running as a call without a result", async () => {
+		const { client, fetcher } = fixture();
+		fetcher.mockImplementation(async () => json({ ok: true, result: { thread: {}, messages: [
+			{ role: "user", content: [{ type: "text", text: "Fix it" }], messageId: 0, usage: { credits: 99 } },
+			{ role: "assistant", content: [{ type: "text", text: "a" }], messageId: 1, usage: { model: "claude-opus-4-5", inputTokens: 10, outputTokens: 220, cacheCreationInputTokens: 6904, cacheReadInputTokens: 16371, credits: 0.0425 } },
+			{ role: "assistant", content: [{ type: "text", text: "b" }], messageId: 2, usage: { model: "gpt-x", inputTokens: 5, outputTokens: 6 } },
+			{ role: "assistant", content: [{ type: "text", text: "c" }], messageId: 3 },
+			{ role: "assistant", content: [{ type: "text", text: "d" }], messageId: 4, usage: { credits: -3, inputTokens: "many" } },
+			{ role: "assistant", content: [{ type: "tool_use", id: "t1", name: "Bash", input: { cmd: "sleep 9" } }], messageId: 5 },
+			{ role: "user", content: [{ type: "tool_result", toolUseID: "t1", run: { status: "in-progress" } }], messageId: 6 },
+		] } }));
+		const all = await client.messages("T-abc-1");
+		expect(all[0]!.usage).toBeUndefined();
+		expect(all[1]!.usage).toEqual({ usd: 0.0425, model: "claude-opus-4-5", input: 10, output: 220, cacheRead: 16371, cacheWrite: 6904 });
+		// Tokens without credits carry no dollars; no usage block, or a malformed one, carries nothing.
+		expect(all[2]!.usage).toEqual({ model: "gpt-x", input: 5, output: 6 });
+		expect(all[3]!.usage).toBeUndefined();
+		expect(all[4]!.usage).toBeUndefined();
+		expect(all[5]!.parts).toEqual([{ type: "toolCall", id: "t1", name: "Bash", arguments: { cmd: "sleep 9" } }]);
+		expect(all[6]).toMatchObject({ text: "" });
+		expect(all[6]!.parts).toBeUndefined();
+	});
+
 	it("truncates long tool inputs and outputs with a marker", async () => {
 		const { client, fetcher } = fixture();
 		const long = "x".repeat(AMP_MAX_TOOL_OUTPUT_CHARS + 50);

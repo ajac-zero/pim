@@ -188,17 +188,15 @@ real("a chat over its life", () => {
 		faux.setResponses([async () => (await held, toolUse(fauxToolCall("send_to_user", { message: "Slow." })))] as never);
 		expect((await web.call("POST", `/api/sessions/${chat}/messages`, { commandId: "compact-busy", text: "slowly" })).status).toBe(202);
 		expect(await compact()).toMatchObject({ status: 409, json: { error: "busy" } });
+		// The sidebar follows the runtime a little behind. Once it shows the chat at work, the idle it shows after the turn is the turn's end, not the idle from before it began.
+		await waitFor("the sidebar to show the chat at work", async () => ((await listed(chat)).busy === true ? true : undefined), 30_000);
 		release();
 		await waitFor("the slow turn to end", async () => (sentAndAnswered(await transcript(chat), "Slow.") ? true : undefined), 60_000);
 		expect((await transcript(chat)).some((e) => e.kind.includes("compaction"))).toBe(false);
 		await waitFor("the chat to be idle", async () => ((await listed(chat)).busy === false && (await web.call("GET", `/api/sessions/${chat}/pending`)).json.commands.every((c: { inboxAccepted: boolean }) => !c.inboxAccepted) ? true : undefined), 30_000);
 		// Idle, it is compacted: the model is asked to summarise, the summary is in the transcript, and the context is smaller.
 		faux.setResponses([(ctx: { messages?: unknown[] }) => (JSON.stringify(ctx.messages?.[0] ?? "").includes("context summarization assistant") ? fauxAssistantMessage("SUMMARY: gamma words and a slow turn.") : fauxAssistantMessage("unexpected"))] as never);
-		// The chat can show busy for a moment after its last turn ends (the projection catches up), so it is asked until it takes the command.
-		const accepted = await waitFor("the compaction to be accepted", async () => {
-			const answer = await compact({ commandId: "compact-1" });
-			return answer.status === 409 && answer.json.error === "busy" ? undefined : answer;
-		}, 30_000);
+		const accepted = await compact({ commandId: "compact-1" });
 		expect(accepted).toMatchObject({ status: 202, json: { session: chat, commandId: "compact-1", duplicate: false } });
 		await waitFor("the compaction", async () => ((await transcript(chat)).some((e) => e.kind.includes("compaction")) ? true : undefined), 60_000);
 		const after = (await contextOf(chat, (tokens) => tokens < before)).tokens;

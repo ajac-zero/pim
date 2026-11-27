@@ -194,7 +194,11 @@ real("a chat over its life", () => {
 		await waitFor("the chat to be idle", async () => ((await listed(chat)).busy === false && (await web.call("GET", `/api/sessions/${chat}/pending`)).json.commands.every((c: { inboxAccepted: boolean }) => !c.inboxAccepted) ? true : undefined), 30_000);
 		// Idle, it is compacted: the model is asked to summarise, the summary is in the transcript, and the context is smaller.
 		faux.setResponses([(ctx: { messages?: unknown[] }) => (JSON.stringify(ctx.messages?.[0] ?? "").includes("context summarization assistant") ? fauxAssistantMessage("SUMMARY: gamma words and a slow turn.") : fauxAssistantMessage("unexpected"))] as never);
-		const accepted = await compact({ commandId: "compact-1" });
+		// The chat can show busy for a moment after its last turn ends (the projection catches up), so it is asked until it takes the command.
+		const accepted = await waitFor("the compaction to be accepted", async () => {
+			const answer = await compact({ commandId: "compact-1" });
+			return answer.status === 409 && answer.json.error === "busy" ? undefined : answer;
+		}, 30_000);
 		expect(accepted).toMatchObject({ status: 202, json: { session: chat, commandId: "compact-1", duplicate: false } });
 		await waitFor("the compaction", async () => ((await transcript(chat)).some((e) => e.kind.includes("compaction")) ? true : undefined), 60_000);
 		const after = (await contextOf(chat, (tokens) => tokens < before)).tokens;

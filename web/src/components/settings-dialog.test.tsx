@@ -1,8 +1,15 @@
 // @vitest-environment happy-dom
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "~/components/i18n";
+import { ProvidersSection } from "~/components/model-providers";
 import {
   SettingsDialog,
   WorkspaceFallbacks,
@@ -98,5 +105,85 @@ describe("Workspace fallbacks", () => {
       </QueryClientProvider>,
     );
     expect(await screen.findByText("gemini-4-argon")).toBeTruthy();
+  });
+});
+
+describe("Refreshing a provider's models", () => {
+  const provider = {
+    id: "pv_1",
+    provider: "own:pv_1",
+    name: "Gateway",
+    url: "https://gw.test/anthropic",
+    hasKey: true,
+    chosen: ["claude"],
+    models: [{ id: "claude", name: "claude" }],
+    shared: false,
+  };
+  const show = (refresh: () => Response) => {
+    const calls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string, init?: RequestInit) => {
+        calls.push(`${init?.method ?? "GET"} ${input}`);
+        if (input === "/api/providers/pv_1/refresh-models") return refresh();
+        if (input === "/api/providers/pv_1")
+          return Response.json({
+            provider: { ...provider, chosen: ["claude", "newer"] },
+          });
+        return new Response("{}", { status: 404 });
+      }),
+    );
+    render(
+      <QueryClientProvider client={new QueryClient()}>
+        <I18nProvider>
+          <ProvidersSection
+            settings={
+              {
+                providers: [provider],
+                choices: [],
+                chatgpt: { connected: false },
+                chatgptImages: { connected: false },
+              } as never
+            }
+            admin={false}
+          />
+        </I18nProvider>
+      </QueryClientProvider>,
+    );
+    return calls;
+  };
+
+  it("offers the ids that are new and adds one without dropping the chosen", async () => {
+    const calls = show(() =>
+      Response.json({
+        provider,
+        available: ["newer"],
+        url: "https://gw.test/v1/models",
+      }),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Refresh the models of Gateway" }),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Add newer" }));
+    await waitFor(() => expect(calls).toContain("PUT /api/providers/pv_1"));
+    expect(calls).toContain("POST /api/providers/pv_1/refresh-models");
+  });
+
+  it("shows why the server could not be read", async () => {
+    show(() =>
+      Response.json(
+        {
+          message:
+            "Pim couldn't read the models at https://gw.test: it answered 400",
+        },
+        { status: 400 },
+      ),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Refresh the models of Gateway" }),
+    );
+    expect((await screen.findByRole("alert")).textContent).toContain(
+      "it answered 400",
+    );
   });
 });

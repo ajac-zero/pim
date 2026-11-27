@@ -1643,6 +1643,12 @@ export type ModelProvider = {
 };
 
 /** A provider as adding or changing it answers. */
+export type RefreshedModels = {
+  provider: SavedProvider;
+  available: string[];
+  url: string;
+};
+
 export type SavedProvider = Omit<ModelProvider, "provider" | "shared">;
 
 /** Adding or changing a provider; a field left out stays as it was, and an empty key takes it away. */
@@ -2506,6 +2512,15 @@ export const pim = {
       method: "PUT",
       body: JSON.stringify(input),
     }),
+  /** Reads a custom endpoint's models again; `available` are the ids it lists that aren't offered yet. */
+  refreshProviderModels: (id: string) =>
+    call<RefreshedModels>(
+      `/providers/${encodeURIComponent(id)}/refresh-models`,
+      {
+        method: "POST",
+        body: "{}",
+      },
+    ),
   removeProvider: (id: string) =>
     call<{ deleted: boolean }>(`/providers/${encodeURIComponent(id)}`, {
       method: "DELETE",
@@ -2927,6 +2942,11 @@ export const admin = {
     call<{ provider: SavedProvider }>(
       `/admin/providers/${encodeURIComponent(id)}`,
       { method: "PUT", body: JSON.stringify(input) },
+    ),
+  refreshProviderModels: (id: string) =>
+    call<RefreshedModels>(
+      `/admin/providers/${encodeURIComponent(id)}/refresh-models`,
+      { method: "POST", body: "{}" },
     ),
   removeProvider: (id: string) =>
     call<{ deleted: boolean }>(`/admin/providers/${encodeURIComponent(id)}`, {

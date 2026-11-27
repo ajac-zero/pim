@@ -239,5 +239,28 @@ describe("the web app's apps, gallery and admin routes", () => {
 		const provider = (await call("ada", "POST", "/api/admin/providers", { name: "Local", url: "http://127.0.0.1:1/v1", key: "sk-secret", models: ["local"] })).json.provider;
 		expect(JSON.stringify(provider)).not.toContain("sk-secret");
 		expect(provider.hasKey).toBe(true);
+		// Refreshing reads the endpoint again, at the gateway's root when its own path has no list: the chosen model keeps its price, the other listed ones are offered, none is added.
+		const { createServer } = await import("node:http");
+		const gateway = createServer((req, res) => {
+			res.statusCode = req.url === "/v1/models" ? 200 : 400;
+			res.end(JSON.stringify(req.url === "/v1/models" ? { object: "list", data: [{ id: "local", context_length: 9_000 }, { id: "newer" }] } : {}));
+		});
+		await new Promise<void>((resolve) => gateway.listen(0, "127.0.0.1", resolve));
+		const root = `http://127.0.0.1:${(gateway.address() as { port: number }).port}`;
+		try {
+			const own = (await call("ada", "POST", "/api/admin/providers", { name: "Gateway", url: `${root}/anthropic`, api: "anthropic-messages", key: "sk-secret", models: ["local"], overrides: { local: { cost: { input: 3 } } } })).json.provider;
+			const refreshed = await call("ada", "POST", `/api/admin/providers/${own.id}/refresh-models`, {});
+			expect(refreshed).toMatchObject({ status: 200, json: { available: ["newer"], url: `${root}/v1/models`, provider: { chosen: ["local"] } } });
+			const shown = (await call("ada", "GET", "/api/providers")).json.providers.find((p: any) => p.id === own.id);
+			expect(shown.config.models).toEqual([{ id: "local", contextWindow: 9_000, cost: { input: 3, output: 0, cacheRead: 0, cacheWrite: 0 } }]);
+			// A member's own provider is refreshed by its owner alone.
+			const mine = (await call("bob", "POST", "/api/providers", { name: "Mine", url: `${root}/anthropic`, api: "anthropic-messages", key: "k", models: ["local"] })).json.provider;
+			expect(await call("bob", "POST", `/api/providers/${mine.id}/refresh-models`, {})).toMatchObject({ status: 200, json: { available: ["newer"], url: `${root}/v1/models` } });
+			expect((await call("ada", "POST", `/api/providers/${mine.id}/refresh-models`, {})).status).toBe(404);
+			expect((await call("bob", "POST", `/api/admin/providers/${own.id}/refresh-models`, {})).status).toBe(403);
+			expect((await call("ada", "POST", "/api/admin/providers/nope/refresh-models", {})).status).toBe(404);
+		} finally {
+			gateway.close();
+		}
 	});
 });

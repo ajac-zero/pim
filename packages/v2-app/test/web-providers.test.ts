@@ -1,6 +1,6 @@
 // What adding or changing a provider checks before it is kept (v1's `test/providers.test.ts`): a built-in service's key and models, a custom endpoint's listing, and what the listing says of each model.
 import { describe, expect, it } from "vitest";
-import { providerCatalog, toServiceInput, toWebProvider } from "../src/web-providers.ts";
+import { providerCatalog, refreshModels, toServiceInput, toWebProvider } from "../src/web-providers.ts";
 import type { Provider } from "../src/providers.ts";
 
 const answer = (status: number, body: unknown = {}) => (async () => new Response(JSON.stringify(body), { status })) as unknown as typeof fetch;
@@ -78,5 +78,57 @@ describe("a provider's form", () => {
 		} finally {
 			providerCatalog.known = undefined;
 		}
+	});
+
+	describe("reading a server's models", () => {
+		const gateway = (urls: string[]) => (async (url: string) => (urls.push(url), url === "https://gw.test/v1/models" ? new Response(JSON.stringify({ object: "list", data: [{ id: "claude", context_length: 5_000 }, { id: "other" }] })) : new Response("{}", { status: 400 }))) as unknown as typeof fetch;
+
+		it("tries the address, then each parent path for Anthropic's API, and says which answered", async () => {
+			const urls: string[] = [];
+			const made = await toServiceInput({ name: "GW", url: "https://gw.test/anthropic", api: "anthropic-messages", key: "k", models: ["claude"] }, undefined, { fetcher: gateway(urls) });
+			expect(urls).toEqual(["https://gw.test/anthropic/v1/models", "https://gw.test/v1/models"]);
+			expect(made.config.models).toEqual([{ id: "claude", contextWindow: 5_000 }]);
+			const refreshed = await refreshModels(stored(made.config), "k", gateway([]));
+			expect(refreshed).toMatchObject({ url: "https://gw.test/v1/models", available: ["other"] });
+		});
+
+		it("tries /models, then the origin's /v1/models for an OpenAI-style server, and no more than four addresses", async () => {
+			const urls: string[] = [];
+			await toServiceInput({ name: "GW", url: "https://gw.test/openai/deep", key: "k", models: ["claude"] }, undefined, { fetcher: gateway(urls) });
+			expect(urls).toEqual(["https://gw.test/openai/deep/models", "https://gw.test/v1/models"]);
+			const many: string[] = [];
+			await rejected({ name: "GW", url: "https://gw.test/a/b/c/d/e", api: "anthropic-messages", key: "k" }, undefined, { fetcher: (async (url: string) => (many.push(url), new Response("", { status: 404 }))) as unknown as typeof fetch });
+			expect(many).toHaveLength(4);
+		});
+
+		it("lists every address it tried and what each answered when none works", async () => {
+			const message = await rejected({ name: "GW", url: "https://gw.test/anthropic", api: "anthropic-messages", key: "k" }, undefined, { fetcher: answer(400) });
+			expect(message).toBe("Pim couldn't read the models at https://gw.test/anthropic: https://gw.test/anthropic/v1/models: it answered 400; https://gw.test/v1/models: it answered 400. Check the address and key, or name the models to use.");
+			const unparsable = (async (url: string) => (url.endsWith("/anthropic/v1/models") ? new Response("<html>") : new Response("{}", { status: 500 }))) as unknown as typeof fetch;
+			expect(await rejected({ name: "GW", url: "https://gw.test/anthropic", api: "anthropic-messages", key: "k" }, undefined, { fetcher: unparsable })).toContain("anthropic/v1/models: its answer isn't a list of models; https://gw.test/v1/models: it answered 500");
+		});
+
+		it("sends both the Bearer token and x-api-key to an Anthropic-style server", async () => {
+			let sent: Record<string, string> = {};
+			const fetcher = (async (_url: string, init?: RequestInit) => ((sent = init?.headers as Record<string, string>), new Response(JSON.stringify({ data: [{ id: "claude" }] })))) as unknown as typeof fetch;
+			await refreshModels(stored({ baseUrl: "https://gw.test", api: "anthropic-messages", models: [] }), "sk", fetcher);
+			expect(sent).toMatchObject({ authorization: "Bearer sk", "x-api-key": "sk" });
+		});
+
+		it("refreshes what is stored without adding, removing or overriding the chosen models", async () => {
+			const existing = stored({
+				baseUrl: "https://gw.test",
+				chosen: ["claude", "gone"],
+				models: [{ id: "claude", contextWindow: 1_000 }, { id: "gone", contextWindow: 2_000 }],
+				overrides: { claude: { maxTokens: 777, cost: { input: 3, output: 15, cacheRead: 0, cacheWrite: 0 } } },
+			});
+			const { config, available } = await refreshModels(existing, "k", gateway([]));
+			expect(config.chosen).toEqual(["claude", "gone"]);
+			expect(config.overrides).toEqual(existing.config.overrides);
+			expect(config.models).toEqual([{ id: "claude", contextWindow: 5_000, maxTokens: 777, cost: { input: 3, output: 15, cacheRead: 0, cacheWrite: 0 } }, { id: "gone", contextWindow: 2_000 }]);
+			expect(available).toEqual(["other"]);
+			await expect(refreshModels(existing, "k", answer(401))).rejects.toThrow("it answered 401");
+			await expect(refreshModels(stored({ builtin: "openai" }), "k")).rejects.toThrow("Only a custom endpoint");
+		});
 	});
 });

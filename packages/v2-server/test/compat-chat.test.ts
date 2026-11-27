@@ -216,7 +216,7 @@ describe("chats and the account", () => {
 	it("renames and deletes a chat, answers cost and tasks, and lists tokens without secrets", async () => {
 		const chat = (await call(ada, "POST", "/api/sessions", { agentId: agent, title: "First" })).body.id as string;
 		expect((await call(ada, "PUT", `/api/sessions/${chat}`, { title: "Second" })).body).toMatchObject({ id: chat, title: "Second" });
-		expect((await call(ada, "GET", `/api/sessions/${chat}/cost`)).body).toEqual({ total: 0, models: [] });
+		expect((await call(ada, "GET", `/api/sessions/${chat}/cost`)).body).toEqual({ total: 0, cacheHitRatio: null, models: [] });
 		expect((await call(ada, "GET", `/api/sessions/${chat}/tasks`)).body).toEqual({ tasks: [] });
 		expect((await call(bob, "GET", `/api/sessions/${chat}/cost`)).status).toBe(404);
 		expect((await call(ada, "POST", "/api/prompts/improve", { text: "x" })).status).toBe(501);
@@ -225,7 +225,14 @@ describe("chats and the account", () => {
 		await app.usage.record(owner, { id: "cc1", runKind: "chat", chatId: chat, provider: "gateway", model: "m", inputTokens: 1000, outputTokens: 200, cacheReadTokens: 800, cacheWriteTokens: 50, costMicroUsd: 12_000 });
 		await app.usage.record(owner, { id: "cc2", runKind: "chat", chatId: chat, provider: "gateway", model: "m", inputTokens: 10, outputTokens: 20, costMicroUsd: 3_000 });
 		const costed = (await call(ada, "GET", `/api/sessions/${chat}/cost`)).body;
-		expect(costed).toEqual({ total: 0.015, models: [{ provider: "gateway", model: "m", input: 1010, output: 220, cacheRead: 800, cacheWrite: 50, cost: 0.015 }] });
+		expect(costed).toEqual({ total: 0.015, cacheHitRatio: expect.closeTo(800 / 1860, 6), models: [{ provider: "gateway", model: "m", input: 1010, output: 220, cacheRead: 800, cacheWrite: 50, cost: 0.015 }] });
+		// The history lists each call newest first, with the cache tiers and a hit rate that is null where the provider reported no cache; another person's chat is not reachable.
+		await stack.admin.query("UPDATE pim_app.model_calls SET at = now() - interval '1 minute' WHERE id = 'cc1'");
+		const history = (await call(ada, "GET", `/api/sessions/${chat}/turns`)).body.turns;
+		expect(history.map((t: { id: string }) => t.id)).toEqual(["cc2", "cc1"]);
+		expect(history[0]).toMatchObject({ input: 10, output: 20, cacheRead: 0, cacheWrite: 0, hitRatio: null, cost: 0.003 });
+		expect(history[1]).toMatchObject({ input: 1000, cacheRead: 800, cacheWrite: 50, hitRatio: expect.closeTo(800 / 1850, 6) });
+		expect((await call(bob, "GET", `/api/sessions/${chat}/turns`)).status).toBe(404);
 		// A chat's activity is its latest turn, read from its transcript: calls the ledger has and the transcript has not are no steps of it.
 		expect((await call(ada, "GET", `/api/sessions/${chat}/activity`)).body).toMatchObject({ running: false, steps: [], current: [], stalls: [] });
 		await stack.admin.query("DELETE FROM pim_app.model_calls WHERE id IN ('cc1', 'cc2')");

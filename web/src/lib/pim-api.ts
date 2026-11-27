@@ -296,6 +296,8 @@ export type ShownWidget = {
 /** A chat's public link, as its owner sees it: `messages` counts what the copy holds, as of `sharedAt`. */
 export type SessionCost = {
   total: number;
+  /** The share of input tokens read from the prompt cache; null when nothing was cached or the provider reports no cache. */
+  cacheHitRatio: number | null;
   models: {
     provider: string;
     model: string;
@@ -305,6 +307,19 @@ export type SessionCost = {
     cacheWrite: number;
     cost: number;
   }[];
+};
+
+/** One model call of a chat (`GET /sessions/:id/turns`), newest first; `input` is the uncached input. */
+export type SessionTurn = {
+  id: string;
+  at: string;
+  model: string;
+  input: number;
+  cacheRead: number;
+  cacheWrite: number;
+  output: number;
+  hitRatio: number | null;
+  cost: number;
 };
 
 /** How full a chat's context is (`GET /sessions/:id/context`): the tokens it holds, as pi-durable counts them, out of what its model's context holds; null before an answer. */
@@ -2167,6 +2182,11 @@ export const pim = {
     call<{ deleted: boolean }>(`/sessions/${id}`, { method: "DELETE" }),
   /** What the model requests in a chat have cost, by model. */
   sessionCost: (id: string) => call<SessionCost>(`/sessions/${id}/cost`),
+  /** The chat's last model calls, newest first. */
+  sessionTurns: (id: string) =>
+    call<{ turns: SessionTurn[] }>(`/sessions/${id}/turns`).then(
+      (body) => body.turns,
+    ),
   sessionContext: (id: string) =>
     call<SessionContext>(`/sessions/${id}/context`).then(
       (body) => body.context,

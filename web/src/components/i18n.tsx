@@ -333,6 +333,14 @@ const translations = {
     sessionCostTotal: "Total: {amount}",
     sessionCostNone: "Nothing has been used in this chat yet.",
     sessionCostTokens: "{input} in, {output} out, {cached} cached",
+    sessionCostHitRate: "Cache hit rate: {percent}",
+    sessionCostHitRateUnknown: "Cache hit rate: not reported",
+    sessionCostTurns: "Turn history",
+    sessionCostTurnsNone: "No turns yet.",
+    sessionCostTurnsLoading: "Loading…",
+    sessionCostTurnsFailed: "Couldn't load the turn history.",
+    sessionCostTurnTokens:
+      "{input} new, {read} cache read, {write} cache write, {output} out",
     contextMeterUsed: "{percent} of the context used",
     contextMeterTokens:
       "{used} of {window} tokens, as of the last answer from {model}.",
@@ -2484,6 +2492,14 @@ const translations = {
     sessionCostNone: "Aún no se ha usado nada en este chat.",
     sessionCostTokens:
       "{input} de entrada, {output} de salida, {cached} en caché",
+    sessionCostHitRate: "Aciertos de caché: {percent}",
+    sessionCostHitRateUnknown: "Aciertos de caché: no informado",
+    sessionCostTurns: "Historial de turnos",
+    sessionCostTurnsNone: "Aún no hay turnos.",
+    sessionCostTurnsLoading: "Cargando…",
+    sessionCostTurnsFailed: "No se pudo cargar el historial de turnos.",
+    sessionCostTurnTokens:
+      "{input} nuevos, {read} leídos de caché, {write} escritos en caché, {output} de salida",
     contextMeterUsed: "{percent} del contexto usado",
     contextMeterTokens:
       "{used} de {window} tokens, según la última respuesta de {model}.",

@@ -18,6 +18,7 @@ import { ok, type Route, route } from "@pim/v2-app/http";
 import type { Principal } from "@pim/v2-contracts/identity";
 import { transcriptPage } from "@pim/v2-live/projections/snapshots";
 import { chatActivity } from "./activity.ts";
+import { cacheHitRatio, MAX_TURN_HISTORY, turnHistory } from "./cache-usage.ts";
 import { contextWindowOf } from "./model.ts";
 import { chatConversation, IMPROVE_PROMPT, runUtility, SUGGEST_PROMPTS, suggestionsIn, nameOneUntitled, SUMMARIZE_CHAT, titleChat } from "./utility.ts";
 
@@ -185,7 +186,22 @@ export function sessionRoutes(env: Record<string, string | undefined> = process.
 				[id],
 			)).rows);
 			const models = rows.map((r) => ({ provider: r.provider as string, model: r.model as string, input: Number(r.input), output: Number(r.output), cacheRead: Number(r.cache_read), cacheWrite: Number(r.cache_write), cost: Number(r.cost) / 1e6 }));
-			return ok({ total: models.reduce((sum, m) => sum + m.cost, 0), models });
+			const sum = (key: "input" | "cacheRead" | "cacheWrite") => models.reduce((n, m) => n + m[key], 0);
+			return ok({ total: models.reduce((n, m) => n + m.cost, 0), cacheHitRatio: cacheHitRatio({ input: sum("input"), cacheRead: sum("cacheRead"), cacheWrite: sum("cacheWrite") }), models });
+		}),
+		// The chat's last model calls, newest first, for the cost meter's history; read only when the person opens it.
+		route("GET", "/api/sessions/:id/turns", async ({ app, principal, params }) => {
+			const p = await principal();
+			await app.identity.authz.enforce(p, "api:read");
+			const id = chatId(params[0]!);
+			await sessionView(app, p, id);
+			const rows = await app.db.owner(p.ownerId, async (tx) => (await tx.query(
+				`${FAMILY} SELECT id, at, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_microusd
+				 FROM pim_app.model_calls WHERE public_chat_id IN (SELECT chat FROM family) AND input_tokens + output_tokens + cache_read_tokens + cache_write_tokens > 0
+				 ORDER BY at DESC, id DESC LIMIT ${MAX_TURN_HISTORY}`,
+				[id],
+			)).rows);
+			return ok({ turns: turnHistory(rows) });
 		}),
 		// How full the chat's context is: the tokens the runtime counted (pi-durable's own measure, projected with the chat's line), out of what its model's context holds. Null until the chat has an answer.
 		route("GET", "/api/sessions/:id/context", async ({ app, principal, params }) => {

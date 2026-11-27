@@ -5,7 +5,7 @@
  *   signed in, and `public` 600 a minute per address for what anyone may open (shared chats, bot links, published and hosted apps). Counted in PostgreSQL (`RateLimits`), so
  *   every Gate process shares one count. A deployment sets its own with `PIM_RATE_AUTH`, `PIM_RATE_API` and `PIM_RATE_PUBLIC` (a number that cannot be read becomes 0,
  *   so a mistake never lifts a limit); 0 refuses everything. The address is the one the proxy sets (`x-pim-client-ip`) when the ingress secret is configured, else the socket's.
- * - **A guest's allow-list.** A guest joined through a bot's link and only chats with that bot: what its account may call is chats, files, goals, schedules and notifications
+ * - **A guest's allow-list.** A guest joined through a bot's link and only chats with that bot: what its account may call is chats, files, schedules and notifications
  *   of its own, its agent, its settings and its account. Anything else is 403 whatever the route.
  * - **A guest's copy of its bot** follows the bot (`Guests.syncBot`) before the guest's next request is answered.
  * - **A guest's daily messages**, which the bot's host set, counted when a message is admitted.
@@ -34,7 +34,7 @@ const GUEST_ALLOWED: { methods: string[] | "all"; path: RegExp }[] = [
 	{ methods: ["GET", "DELETE"], path: /^\/api\/account$/ },
 	{ methods: ["GET", "PUT"], path: /^\/api\/settings$/ },
 	{ methods: ["POST"], path: /^\/api\/(prompts\/improve|app-actions\/.*|artifacts\/.*)$/ },
-	{ methods: "all", path: /^\/api\/(sessions(\/.*)?|approvals(\/.*)?|files(\/.*)?|notifications(\/.*)?|push(\/.*)?|goals(\/.*)?|schedules(\/.*)?|snapshot\/.*|chats(\/.*)?|tasks(\/.*)?|mcp(\/.*)?)$/ },
+	{ methods: "all", path: /^\/api\/(sessions(\/.*)?|approvals(\/.*)?|files(\/.*)?|notifications(\/.*)?|push(\/.*)?|schedules(\/.*)?|snapshot\/.*|chats(\/.*)?|tasks(\/.*)?|mcp(\/.*)?)$/ },
 ];
 const guestMayCall = (method: string, path: string) => GUEST_ALLOWED.some((a) => (a.methods === "all" || a.methods.includes(method)) && a.path.test(path));
 

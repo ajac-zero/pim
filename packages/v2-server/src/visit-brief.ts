@@ -1,7 +1,7 @@
 /**
  * What a circle member's visit knows of the host, as v1's host sent it in a brief (`src/visits.ts`): whose space the agent speaks for and to whom, the host's time zone, and
  * the host's memory in the scopes the circle may read. The visit runs on the visitor's own agent and model, and the Runner reads this from `pim_app.runner_visit_brief`
- * at each turn; the visitor's own goals, agents and memory are not in the prompt, and `recall` searches the host's scopes (`memory-tools.ts`).
+ * at each turn; the visitor's own agents and memory are not in the prompt, and `recall` searches the host's scopes (`memory-tools.ts`).
  */
 export type VisitBrief = { host: string | null; available: boolean; circle?: string; timeZone?: string | null; scopes?: string[]; memory?: { id: string; scope: string; title: string }[] | null };
 

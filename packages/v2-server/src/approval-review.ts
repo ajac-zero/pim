@@ -11,7 +11,7 @@ export type ReviewHost = {
 	/** One model call as the person's own models: the majordomo's instructions as the system prompt, the question as the user's message. */
 	ask(ownerId: string, chat: string | null, system: string, question: string, signal: AbortSignal): Promise<string>;
 	/** The majordomo's instructions and what it knows of the person, as the Runner builds a prompt from it. */
-	context(ownerId: string, chat: string | null): Promise<{ username: string | null; agent: { instructions: string } | null; goals: { title: string }[]; memories: { title: string }[] }>;
+	context(ownerId: string, chat: string | null): Promise<{ username: string | null; agent: { instructions: string } | null; memories: { title: string }[] }>;
 };
 
 export type ReviewOptions = { pool: Pool; app: App; host: ReviewHost; defaultPolicy: string; pollMs?: number; escalateMs?: number; reviewMs?: number; onError?: (error: unknown) => void };
@@ -39,7 +39,7 @@ export function startApprovalReviews(o: ReviewOptions): { stop(): Promise<void> 
 		try {
 			const c = await o.host.context(row.owner_id, null);
 			const system = `${c.agent?.instructions ?? `You are ${c.username ?? "the person"}'s majordomo.`}\n\n${RULES}`;
-			const question = [`The person: ${c.username ?? "unknown"}.`, c.goals.length ? `Their active goals: ${c.goals.map((g) => g.title).join("; ")}.` : "", c.memories.length ? `What you remember of them: ${c.memories.slice(0, 30).map((m) => m.title).join("; ")}.` : "", `The request: ${row.tool}\n${JSON.stringify({ ...shown, resource }, null, 1).slice(0, 4000)}`].filter(Boolean).join("\n\n");
+			const question = [`The person: ${c.username ?? "unknown"}.`, c.memories.length ? `What you remember of them: ${c.memories.slice(0, 30).map((m) => m.title).join("; ")}.` : "", `The request: ${row.tool}\n${JSON.stringify({ ...shown, resource }, null, 1).slice(0, 4000)}`].filter(Boolean).join("\n\n");
 			result = parseReview(await o.host.ask(row.owner_id, row.public_chat_id, system, question, AbortSignal.timeout(o.reviewMs ?? 90_000)));
 		} catch (error) {
 			result = { outcome: "escalate", note: `The review failed: ${error instanceof Error ? error.message : String(error)}`.slice(0, 300) };

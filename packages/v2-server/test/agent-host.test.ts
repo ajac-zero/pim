@@ -1,5 +1,5 @@
 // The default agent host on the real stack: a Runner started without any `harnessOptions` runs a real Pim agent. The only thing given to it is a model provider (pi-ai's
-// faux one, as a deployment's own provider would be) and the databases the tools write through. The agent keeps notes and goals, creates a note and an app, makes an
+// faux one, as a deployment's own provider would be) and the databases the tools write through. The agent keeps notes, creates a note and an app, makes an
 // HTTP request that is sent at once and only once, and starts a coding thread under an admin's grant; every model call lands in the cost ledger.
 import { createHash, randomBytes } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -128,12 +128,11 @@ real("the default agent host", () => {
 		await d?.stack.drop();
 	}, 60_000);
 
-	it("keeps memories, goals, notes and apps with the application's services, and puts them in the next prompt", async () => {
+	it("keeps memories, notes and apps with the application's services, and puts them in the next prompt", async () => {
 		await say(
-			"remember my tea, plan a 5k, and write it down",
+			"remember my tea and write it down",
 			toolUse(
 				fauxToolCall("note", { title: "Tea", body: "Anibal drinks black tea" }),
-				fauxToolCall("create_goal", { title: "Run a 5k", steps: ["Run 2k", "Run 4k"] }),
 				fauxToolCall("note_create", { title: "Plan", text: "Week one: run 2k" }),
 				fauxToolCall("app_create", { title: "Tracker", kind: "html", files: { "index.html": "<h1>5k</h1>" } }),
 			),
@@ -141,7 +140,6 @@ real("the default agent host", () => {
 		);
 		const rows = async (sql: string) => (await d.stack.admin.query(sql)).rows;
 		expect((await rows("SELECT scope, title FROM pim_app.memories")).map((r) => [r.scope, r.title])).toEqual([["everyone", "Tea"]]);
-		expect((await rows("SELECT g.title, count(s.*)::int AS steps FROM pim_app.goals g JOIN pim_app.goal_steps s ON s.goal_id = g.id GROUP BY g.title"))[0]).toMatchObject({ title: "Run a 5k", steps: 2 });
 		expect((await rows("SELECT title, version FROM pim_app.notes"))[0]).toMatchObject({ title: "Plan" });
 		expect((await rows("SELECT title, kind FROM pim_app.artifacts"))[0]).toMatchObject({ title: "Tracker", kind: "html" });
 		expect((await results("recall"))[0]).toContain("Tea");
@@ -149,7 +147,7 @@ real("the default agent host", () => {
 		expect(JSON.parse((await results("app_create"))[0]!).artifact).toMatchObject({ title: "Tracker", kind: "html", version: 1 });
 		// A note comes back as a markdown reference too, with its text's version, so the chat draws a card that opens it.
 		expect(JSON.parse((await results("note_create"))[0]!).artifact).toMatchObject({ title: "Plan", kind: "markdown", version: 1, size: "Week one: run 2k".length });
-		// The next turn's prompt carries what the agent knows: who it is, its goals, its memory.
+		// The next turn's prompt carries what the agent knows: who it is and its memory.
 		await say("what do you know?", seen(toolUse(fauxToolCall("current_time", {}))) as never);
 		expect(prompts).toHaveLength(1);
 		// Every chat runs at a low reasoning effort, as in v1.
@@ -159,7 +157,7 @@ real("the default agent host", () => {
 		// Every agent is told that only send_to_user reaches the person; without it models answer in plain text the chat never shows.
 		expect(shown).toMatch(/<agent>[\s\S]*only what you send with `send_to_user`/);
 		expect(shown).toContain("anibal");
-		expect(shown).toMatch(/<active_goals>[\s\S]*Run a 5k[\s\S]*Run 2k/);
+		expect(shown).not.toContain("<active_goals>");
 		expect(shown).toMatch(/<memory>[\s\S]*Tea/);
 		// Every model call is a row in the ledger, with its tokens.
 		const calls = await rows("SELECT provider, model, output_tokens FROM pim_app.model_calls");
@@ -198,7 +196,7 @@ real("the default agent host", () => {
 			toolUse(fauxToolCall("send_to_user", { message: 'Try:\n```ui\n{"type":"form","fields":[{"name":"a"}]}\n```' })),
 			toolUse(fauxToolCall("send_to_user", { message: 'Try:\n```ui\n<form id="f"><number name="a" answer={1}/></form>\n```', complete: false })),
 			toolUse(fauxToolCall("send_to_user", { message: "Here.", widgets: ["pim.nothing/here"] })),
-			toolUse(fauxToolCall("send_to_user", { message: "Here are your goals.", widgets: ["pim.goals/active"], complete: false })),
+			toolUse(fauxToolCall("send_to_user", { message: "Here is what I remember.", widgets: ["pim.memory/recent"], complete: false })),
 		);
 		const answered = (await results("send_to_user")).slice(before);
 		expect(answered[0]).toMatch(/^Not sent: a ```ui block .*gauge/);
@@ -206,9 +204,9 @@ real("the default agent host", () => {
 		// The message's id and its ui blocks' ids go back too, for ui_state and the route that keeps a block's state.
 		expect(JSON.parse(answered[2]!)).toMatchObject({ sent: "Sent.", message: expect.stringMatching(/^\d+$/), uiBlocks: [{ id: expect.stringMatching(/^[0-9a-f]{14}$/), label: expect.any(String) }] });
 		expect(answered[3]).toContain("pim.nothing/here isn't a widget you can show");
-		expect(answered[3]).toContain("pim.goals/active");
+		expect(answered[3]).toContain("pim.memory/recent");
 		// What the person was shown goes back to the model as the web app reads it: loaded once, as sent.
-		expect(JSON.parse(answered[4]!).widgets).toMatchObject([{ id: "pim.goals/active", kind: "progress", items: [{ title: "Run a 5k", value: 0, max: 2, detail: "Run 2k" }] }]);
+		expect(JSON.parse(answered[4]!).widgets).toMatchObject([{ id: "pim.memory/recent", kind: "list", items: [{ title: "Tea", detail: "Anibal drinks black tea" }] }]);
 	}, 120_000);
 
 	it("sends an HTTP request at once, and only once: a request whose outcome is unknown is never sent again", async () => {
@@ -1138,31 +1136,6 @@ const agentId = (await d.stack.admin.query("SELECT id FROM pim_app.agents WHERE 
 		expect(read(/from 6/)).toBe(`Note ${id} "Renamed plan", version 3 of 3, 24 characters, from 6:\nbeta GAMMA\n- delta`);
 		expect(read(/^No version 99/)).toBe(`No version 99 of note ${id}.`);
 		expect(await resultsIn(chat, "note_list")).toEqual(expect.arrayContaining([`- Renamed plan (id ${id}, version 3, 24 bytes)`, "No note's title has nothing and like and it."]));
-	}, 240_000);
-
-	it("tracks goals as v1 did: a plan of at least one step, several steps done at once by number, steps added, a progress note, and a list by status", async () => {
-		const chat = (await web.call("POST", "/api/sessions", { title: "Goals" })).json.id as string;
-		await turnWith(chat, [fauxToolCall("create_goal", { title: "Read a book", steps: [] }), fauxToolCall("create_goal", { title: "Read a book", steps: ["Pick it", "Read half", "Finish it"] })]);
-		const created = await resultsIn(chat, "create_goal");
-		expect(created.find((r) => r.includes("Validation failed"))).toContain("steps");
-		expect(created.find((r) => r.startsWith("Goal created."))).toMatch(/^Goal created\.\n- Read a book \(id g_\w+, 0\/3 steps done\)\n  1\. \[ \] Pick it\n  2\. \[ \] Read half\n  3\. \[ \] Finish it$/);
-		const goal = (await d.stack.admin.query("SELECT id FROM pim_app.goals WHERE title = 'Read a book'")).rows[0].id as string;
-		await turnWith(chat, [fauxToolCall("update_goal", { id: goal, complete_steps: [1, 3], add_steps: ["Review it"], note: "Halfway there" })]);
-		await turnWith(chat, [fauxToolCall("update_goal", { id: goal, complete_steps: [9] })]);
-		await turnWith(chat, [fauxToolCall("update_goal", { id: goal, status: "paused" })]);
-		await turnWith(chat, [fauxToolCall("list_goals", { status: "paused" }), fauxToolCall("list_goals", { status: "active" })]);
-		const updates = await resultsIn(chat, "update_goal");
-		expect(updates[0]).toBe(`Goal updated.\n- Read a book (id ${goal}, 2/4 steps done)\n  1. [x] Pick it\n  2. [ ] Read half\n  3. [x] Finish it\n  4. [ ] Review it\n  Latest note: Halfway there`);
-		expect(updates[1]).toBe(`Goal ${goal} has 4 steps; there is no step 9.`);
-		const lists = await resultsIn(chat, "list_goals");
-		const paused = JSON.parse(lists.find((r) => r.includes(goal))!);
-		expect(paused).toMatchObject([{ id: goal, status: "paused", notes: [{ text: "Halfway there" }], steps: [{ number: 1, done: true }, { number: 2, done: false }, { number: 3, done: true }, { number: 4, done: false }] }]);
-		expect(lists.filter((r) => r.includes(goal))).toHaveLength(1);
-		// An active goal's prompt section numbers its steps, which is what complete_steps takes, and shows its latest note.
-		await turnWith(chat, [fauxToolCall("update_goal", { id: goal, status: "active" })]);
-		await turnWith(chat, [fauxToolCall("current_time", {})]);
-		expect(await transcriptOf(chat)).toContain(`- Read a book (id ${goal}, 2/4 steps done)\\n  1. [x] Pick it\\n  2. [ ] Read half`);
-		expect(await transcriptOf(chat)).toContain("Latest note: Halfway there");
 	}, 240_000);
 
 	it("reads a web page as text with its images, follows redirects only to public addresses, clips long pages, and clips an HTTP answer", async () => {

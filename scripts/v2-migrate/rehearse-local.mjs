@@ -177,7 +177,6 @@ async function digestV1() {
 			agents: hash((await get("/agents")).agents.map((a) => [a.id, a.name, a.instructions, a.skills])),
 			skills: hash((await get("/skills")).skills.map((s) => [s.name, s.version])),
 			memory: hash((await get("/memory/log")).entries.map((m) => [m.id, m.text])),
-			goals: hash((await get("/goals")).goals.map((g) => [g.id, g.title, g.steps])),
 			artifacts: hash((await get("/artifacts")).artifacts.map((a) => [a.id, a.title, a.versions])),
 			approvals: hash((await get("/approvals?status=pending")).approvals.map((a) => a.id)),
 			schedules: hash((await get("/schedules")).schedules.filter((s) => s.label !== "Fence probe").map((s) => [s.id, s.label, s.next])),

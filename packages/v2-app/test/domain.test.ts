@@ -216,7 +216,7 @@ describe("withdrawing what hangs on a chat", () => {
 	});
 });
 
-describe("memories, skills and goals", () => {
+describe("memories and skills", () => {
 	it("recalls by regex within scopes, zooms into blocks, forgets and moves", async () => {
 		const a = await f.app.memories.remember(u.principal, "agent-1", "Coffee", "likes oat milk\nno sugar\nstrong");
 		await f.app.memories.remember(u.principal, "everyone", "Tea", "green tea");
@@ -228,21 +228,6 @@ describe("memories, skills and goals", () => {
 		expect((await f.app.memories.recall(u.principal, ["everyone"], "oat")).map((m) => m.id)).toEqual([a]);
 		await f.app.memories.forget(u.principal, a);
 		expect(await f.app.memories.recall(u.principal, ["everyone"], "oat")).toEqual([]);
-	});
-
-	it("finishes a goal with its last step", async () => {
-		const g = await f.app.memories.createGoal(u.principal, "Run a 5k", ["Run 2k", "Run 5k"]);
-		expect(await f.app.memories.completeStep(u.principal, g, 0)).toEqual({ goalDone: false });
-		expect(await f.app.memories.completeStep(u.principal, g, 1)).toEqual({ goalDone: true });
-	});
-
-	it("pauses a goal, keeps progress notes on it and adds steps to the end, as v1's goals did", async () => {
-		const g = await f.app.memories.createGoal(u.principal, "Learn Spanish", ["Buy a book"]);
-		const paused = await f.app.memories.updateGoal(u.principal, g, { status: "paused", note: "Waiting for the summer", addSteps: ["Find a tutor", "Book lessons"] });
-		expect(paused).toMatchObject({ status: "paused", notes: [{ text: "Waiting for the summer", at: expect.any(Number) }], steps: [{ position: 0, title: "Buy a book" }, { position: 1, title: "Find a tutor" }, { position: 2, title: "Book lessons" }] });
-		await f.app.memories.updateGoal(u.principal, g, { status: "abandoned", note: "Changed my mind" });
-		expect(await f.app.memories.getGoal(u.principal, g)).toMatchObject({ status: "dropped", notes: [{ text: "Waiting for the summer" }, { text: "Changed my mind" }] });
-		await expect(f.app.memories.updateGoal(u.principal, g, { status: "someday" })).rejects.toMatchObject({ status: 400 });
 	});
 });
 

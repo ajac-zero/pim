@@ -12,7 +12,7 @@ describe("the agent host's model catalog", () => {
 		const db = {
 			read: async (_owner: string, sql: string) => {
 				if (sql.includes("runner_providers")) return { rows: [{ p: [{ id: "pv_a", kind: "openai_compatible", config: { name: "A", url, models: [{ id: "m" }] }, secret: null }] }] };
-				if (sql.includes("runner_context")) return { rows: [{ c: { username: "ada", agent: null, skills: [], goals: [], memories: [], contacts: [], fallbacks: [] } }] };
+				if (sql.includes("runner_context")) return { rows: [{ c: { username: "ada", agent: null, skills: [], memories: [], contacts: [], fallbacks: [] } }] };
 				return { rows: [] };
 			},
 		} as unknown as RuntimeDb;

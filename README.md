@@ -11,7 +11,7 @@
   <img src="docs/images/chat.png" alt="Ada tells her majordomo, Jeeves, that she signed up for the Lisbon Half Marathon. Jeeves hands the training plan to her Coach agent and the trip to her Atlas agent, and tells her what they came back with." width="100%">
 </p>
 
-Pim is an open-source home for personal agents that you run yourself. Each person on it gets a space of their own, with agents that remember what matters to them, turn goals into plans, keep working in the background, and ask before acting on the world. Run one for yourself, your family, your friends or a small team; their conversations, memories and files stay on infrastructure you control.
+Pim is an open-source home for personal agents that you run yourself. Each person on it gets a space of their own, with agents that remember what matters to them, keep working in the background, and ask before acting on the world. Run one for yourself, your family, your friends or a small team; their conversations, memories and files stay on infrastructure you control.
 
 ## The name
 
@@ -25,7 +25,7 @@ Pim is [pi](https://github.com/earendil-works/pi), the agent harness it runs on,
 ## What your agents do
 
 - **Remember.** Long-term memory, after [OptMem](https://github.com/VictorTaelin/OptMem), in scopes: your majordomo knows everything, each other agent what you let it, and you can make any of it forget.
-- **Plan and follow up.** Goals with step-by-step plans, reminders and recurring work on a schedule.
+- **Follow up.** Reminders and recurring work on a schedule.
 - **Make things.** Notes you and your agents write together, live, with diagrams and drawings in them, and pages and small React apps, each kept with every version: Pim Apps.
 - **Use your connectors and your computer.** GitHub, Linear, Notion and more than 30 other connectors over MCP; commands and a browser on a machine of yours, or on an Ubuntu desktop Pim keeps for you, which you use from the app and take over from your agents at any time.
 - **Ask first.** Anything that acts on the world, such as a request, a command or a click, waits for your approval unless you allowed it.

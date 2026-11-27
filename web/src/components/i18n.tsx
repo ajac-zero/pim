@@ -597,7 +597,6 @@ const translations = {
     stepArtifact: "Working on an app",
     stepImage: "Making an image",
     stepMemory: "Going through its memory",
-    stepGoals: "Working on goals",
     stepSchedule: "Scheduling",
     stepApps: "Using your connectors",
     stepFiles: "Reading files",
@@ -1476,7 +1475,7 @@ const translations = {
       "Start connecting again from the app that sent you here.",
     deleteAccount: "Delete account",
     deleteAccountBody:
-      "Deletes {username}'s space: conversations, memories, goals, connectors, and passkeys. It can't be undone, and the username won't be available again.",
+      "Deletes {username}'s space: conversations, memories, connectors, and passkeys. It can't be undone, and the username won't be available again.",
     typeUsernameToConfirm: "Type {username} to confirm",
     deleteForever: "Delete forever",
     deleteAccountButton: "Delete my account…",
@@ -2780,7 +2779,6 @@ const translations = {
     stepArtifact: "Trabajando en una app",
     stepImage: "Creando una imagen",
     stepMemory: "Repasando su memoria",
-    stepGoals: "Trabajando en objetivos",
     stepSchedule: "Programando",
     stepApps: "Usando tus conectores",
     stepFiles: "Leyendo archivos",
@@ -3673,7 +3671,7 @@ const translations = {
     authorizeFailedBody: "Vuelve a conectar desde la app que te envió aquí.",
     deleteAccount: "Eliminar cuenta",
     deleteAccountBody:
-      "Elimina el espacio de {username}: conversaciones, memorias, metas, apps conectadas y llaves de acceso. No se puede deshacer y el nombre de usuario no volverá a estar disponible.",
+      "Elimina el espacio de {username}: conversaciones, memorias, apps conectadas y llaves de acceso. No se puede deshacer y el nombre de usuario no volverá a estar disponible.",
     typeUsernameToConfirm: "Escribe {username} para confirmar",
     deleteForever: "Eliminar para siempre",
     deleteAccountButton: "Eliminar mi cuenta…",

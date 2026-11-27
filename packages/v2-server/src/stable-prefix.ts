@@ -1,10 +1,10 @@
 // Providers reuse a cached prompt only up to the first byte that differs from an earlier request. pi-ai folds every system patch into the one system message that leads the request
-// (`resolveTranscript`), and the AI gateway hoists system messages the same way, so a memory or goal that changes mid-chat would rewrite the start of the request while the history after
+// (`resolveTranscript`), and the AI gateway hoists system messages the same way, so a memory that changes mid-chat would rewrite the start of the request while the history after
 // it is identical, and the whole prompt would be read again. Here the sections that change while a chat runs are held at what the system message said when the chat (or its last
 // compaction) began, and what has changed since goes after the history, as a message from the person's side. The harness stores nothing different: this is applied to each request.
 
 /** The prompt sections whose text changes while a chat runs; every other section is written once and left in the system message. */
-export const VOLATILE_SECTIONS = ["memory", "active_goals", "room"] as const;
+export const VOLATILE_SECTIONS = ["memory", "room"] as const;
 
 const volatile = new Set<string>(VOLATILE_SECTIONS);
 

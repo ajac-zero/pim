@@ -39,7 +39,6 @@ import { triggerTools } from "./trigger-tools.ts";
 import { copiedFiles, listPersonFolder, readPersonFile, savePersonFile } from "./app-from-files.ts";
 import { bytesOf, isBinary, sizeOfFile, typeOfFile } from "@pim/v2-app/app-files";
 import { noteTools } from "./note-tools.ts";
-import { goalTools } from "./goal-tools.ts";
 import { memoryTools } from "./memory-tools.ts";
 import { skillTools } from "./skill-tools.ts";
 import { clipText, webTools } from "./web-tools.ts";
@@ -415,7 +414,7 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 			return json({ utc: now.toISOString(), timeZone: zone, local: now.toLocaleString("en-US", { timeZone: zone, dateStyle: "full", timeStyle: "long" }) });
 		}, "safe"),
 
-		// Skills and goals.
+		// Skills.
 		read("read_skill", "Read a skill's instructions and the names of its files: one of the person's own, or one that comes with Pim, by its name alone; or one a connected connector publishes (listed under the connector in your prompt), by its name and the connector's.", Type.Object({ name: S(), connector: O(S({ description: "The connector that publishes the skill; leave out for one of your own or Pim's." })) }), async (app, call, a) => {
 			// A guest's chat, or a visit, works with none of the owner's connectors.
 			if (a.connector !== undefined && (await toolsAllowed(app, ownerId, call.chat)) !== null) return text("This chat works with none of its owner's connectors.", true);
@@ -549,11 +548,10 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 	tools.push(...roomTools({ ownerId, runtime, read }));
 	// Triggers, typed, with the person's grant for a computer source (`./trigger-tools.ts`).
 	tools.push(...triggerTools({ ownerId, runtime, read, write, now: deps.now, watch: watchOps({ ownerId, runtime, watch: () => (deps.app && deps.crypto ? { app: deps.app, crypto: deps.crypto, transport, publicUrl: process.env.PIM_PUBLIC_URL, now: deps.now } : undefined) }) }));
-	// Memory (`./memory-tools.ts`), goals (`./goal-tools.ts`), and reading, changing and listing notes (`./note-tools.ts`).
+	// Memory (`./memory-tools.ts`), and reading, changing and listing notes (`./note-tools.ts`).
 	tools.push(...webTools({ tool, fetch: deps.fetch, publicUrl }));
 	tools.push(...memoryTools({ ownerId, runtime, read, write }));
 	tools.push(...skillTools({ ownerId, runtime, read, copy: copied }));
-	tools.push(...goalTools({ read, write }));
 	tools.push(...noteTools({ ownerId, read, write, card: (app, id, note) => noteCard(app, ownerId, id, note) }));
 
 	// Coding: Forge, with the Authorizer deciding first whether this agent may.

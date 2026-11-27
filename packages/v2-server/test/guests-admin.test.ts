@@ -444,32 +444,33 @@ real("guests, circles and the admin's majordomo", () => {
 		expect(JSON.parse((await results(host, "pim_health")).at(-1)!)).toMatchObject({ status: 200, body: { counts: { active_accounts: expect.any(Number) } } });
 		expect(JSON.parse((await results(host, "pim_diagnostics")).at(-1)!).status).toBe(200);
 
-		const goal = (await host.web.call("POST", "/api/goals", { title: "Sail", steps: ["Buy a boat"] })).json;
+		const memory = (await host.web.call("POST", "/api/memory/log", { scope: "agent-sail", title: "Sail", body: "Buy a boat" })).json;
+		const inEveryone = async () => JSON.stringify((await host.web.call("GET", "/api/memory/log?scope=everyone")).json).includes("Sail");
 		await send(host, "look at the app", false,
-			toolUse(fauxToolCall("ui_routes", {})), toolUse(fauxToolCall("ui_read", { path: "/api/goals" })), toolUse(fauxToolCall("ui_read", { path: "/api/account/export" })), toolUse(fauxToolCall("ui_read", { path: "/api/admin/stats" })),
-			toolUse(fauxToolCall("ui_write", { method: "DELETE", path: `/api/goals/${goal.id}` })));
+			toolUse(fauxToolCall("ui_routes", {})), toolUse(fauxToolCall("ui_read", { path: "/api/memory/log?scope=agent-sail" })), toolUse(fauxToolCall("ui_read", { path: "/api/account/export" })), toolUse(fauxToolCall("ui_read", { path: "/api/admin/stats" })),
+			toolUse(fauxToolCall("ui_write", { method: "DELETE", path: `/api/memory/log/${memory.id}` })));
 		expect((await results(host, "ui_routes")).at(-1)).toContain('"class":"blocked"');
 		expect((await results(host, "ui_read"))[0]).toContain("Sail");
 		expect((await results(host, "ui_read"))[1]).toMatch(/not open to you/);
 		expect((await results(host, "ui_read"))[2]).toMatch(/not open to you/); // the admin API has its own tools
 		expect((await results(host, "ui_write")).at(-1)).toMatch(/use ui_write_destructive/);
 
-		await send(host, "rename the goal", false, toolUse(fauxToolCall("ui_write", { method: "PUT", path: `/api/goals/${goal.id}`, body: { title: "Sail far" } })));
-		expect((await host.web.call("GET", `/api/goals/${goal.id}`)).json).toMatchObject({ title: "Sail far" });
+		await send(host, "share the memory", false, toolUse(fauxToolCall("ui_write", { method: "PUT", path: `/api/memory/log/${memory.id}`, body: { scope: "everyone" } })));
+		expect(await inEveryone()).toBe(true);
 		// A delete asks the admin, with the exact request, and runs only on a yes.
-		await send(host, "drop the goal", true, toolUse(fauxToolCall("ui_write_destructive", { method: "DELETE", path: `/api/goals/${goal.id}` })));
+		await send(host, "drop the memory", true, toolUse(fauxToolCall("ui_write_destructive", { method: "DELETE", path: `/api/memory/log/${memory.id}` })));
 		const asked = await waitFor("the delete's approval", async () => (await d.stack.admin.query("SELECT id, args FROM pim_app.approvals WHERE tool = 'admin:write' AND state = 'waiting'")).rows[0], 60_000);
-		expect(asked.args).toMatchObject({ method: "DELETE", path: `/api/goals/${goal.id}` });
-		expect((await host.web.call("GET", `/api/goals/${goal.id}`)).status).toBe(200);
+		expect(asked.args).toMatchObject({ method: "DELETE", path: `/api/memory/log/${memory.id}` });
+		expect(await inEveryone()).toBe(true);
 		await host.web.call("POST", `/api/approvals/${asked.id}/approve`, {});
 		await finish(host);
-		expect((await host.web.call("GET", `/api/goals/${goal.id}`)).status).toBe(404);
+		expect(await inEveryone()).toBe(false);
 		await send(host, "what did you change?", false, toolUse(fauxToolCall("ui_audit", {})));
 		const kept = JSON.parse((await results(host, "ui_audit")).at(-1)!).writes as { tool: string; decision: string; keys: string[]; status: number }[];
 		expect(kept.map((w) => [w.tool, w.decision])).toEqual([["ui_write_destructive", "allowed"], ["ui_write_destructive", "approval_required"], ["ui_write", "allowed"]]);
-		expect(kept[2]).toMatchObject({ keys: ["title"], status: 200 });
+		expect(kept[2]).toMatchObject({ keys: ["scope"], status: 200 });
 		// A member's majordomo has none of them.
-		await send(bob, "use the app routes", false, toolUse(fauxToolCall("ui_read", { path: "/api/goals" })));
+		await send(bob, "use the app routes", false, toolUse(fauxToolCall("ui_read", { path: "/api/memory/log" })));
 		expect((await results(bob, "ui_read")).at(-1)).toMatch(/Only the admin/);
 	}, 240_000);
 

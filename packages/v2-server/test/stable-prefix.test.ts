@@ -15,12 +15,12 @@ const history = [
 	{ role: "assistant", content: [{ type: "toolCall", id: "t1", name: "send_to_user", arguments: { text: "hi" } }], api: "openai-completions", provider: "p", model: "m", usage, stopReason: "toolUse", timestamp: 3 },
 	{ role: "toolResult", toolCallId: "t1", toolName: "send_to_user", content: [{ type: "text", text: "sent" }], isError: false, timestamp: 4 },
 ];
-const first = system({ agent: tagged("agent", "You are Pim."), memory: tagged("memory", "- [1] likes tea"), active_goals: tagged("active_goals", "Run a 5k") }, { toolsAdded: [tool] });
+const first = system({ agent: tagged("agent", "You are Pim."), memory: tagged("memory", "- [1] likes tea"), room: tagged("room", "Run a 5k") }, { toolsAdded: [tool] });
 const memoryV2 = system({ memory: tagged("memory", "- [1] likes tea\n- [2] moved to Oslo") });
 const at = (messages: any[]) => ({ messages });
 const resolved = (context: { messages: any[] }): any[] => resolveTranscript(context as never, false).messages;
 
-describe("the start of a request when memory or goals change", () => {
+describe("the start of a request when memory or room change", () => {
 	it("is rewritten by pi's resolver on its own, which is what loses the cache", () => {
 		const before = resolved(at([first, ...history]));
 		const after = resolved(at([first, memoryV2, ...history]));
@@ -30,20 +30,20 @@ describe("the start of a request when memory or goals change", () => {
 	it("stays byte for byte the same, and the change follows the history", () => {
 		const request = (context: { messages: any[] }) => resolved(withStablePrefix(context as any));
 		const before = request(at([first, ...history]));
-		const after = request(at([first, memoryV2, system({ active_goals: null }), ...history]));
+		const after = request(at([first, memoryV2, system({ room: null }), ...history]));
 		// Everything the earlier request sent, the system message with its tools and the history, leads the later one unchanged.
 		expect(JSON.stringify(after.slice(0, before.length))).toBe(JSON.stringify(before));
 		expect(after).toHaveLength(before.length + 1);
 		const update = after[after.length - 1];
 		expect(update.role).toBe("user");
 		expect(update.content).toContain("- [2] moved to Oslo");
-		expect(update.content).toContain("<active_goals>\nNothing now.\n</active_goals>");
+		expect(update.content).toContain("<room>\nNothing now.\n</room>");
 		expect(update.content).not.toContain("Run a 5k");
 	});
 
 	it("tells of a section that first appears later, and starts afresh at a new baseline", () => {
 		const bare = system({ agent: tagged("agent", "You are Pim."), memory: tagged("memory", "none") }, { toolsAdded: [tool] });
-		const out = withStablePrefix(at([bare, system({ active_goals: tagged("active_goals", "Learn Norwegian") }), ...history]) as any).messages;
+		const out = withStablePrefix(at([bare, system({ room: tagged("room", "Learn Norwegian") }), ...history]) as any).messages;
 		expect(out[0].sections).toEqual(bare.sections);
 		expect(out[out.length - 1].content).toContain("Learn Norwegian");
 		// A compaction writes the current sections as the baseline of what follows, so nothing is left to tell.

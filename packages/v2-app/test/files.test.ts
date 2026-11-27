@@ -279,11 +279,10 @@ describe("Gate over HTTP", () => {
 		expect((await call("/api/account", asCookie)).status).toBe(401); // the copied cookie is dead
 	});
 
-	it("keeps ordinary chat, notes, goals and memories working with no computer, coding pool or connector", async () => {
+	it("keeps ordinary chat, notes and memories working with no computer, coding pool or connector", async () => {
 		const token = await f.app.identity.createSession(u.account.ownerId);
 		const note = (await (await call("/api/notes", { method: "POST", token, body: JSON.stringify({ title: "n", text: "hi" }) })).json()) as { id: string };
 		expect(((await (await call(`/api/notes/${note.id}`, { token })).json()) as { text: string }).text).toBe("hi");
-		expect((await call("/api/goals", { method: "POST", token, body: JSON.stringify({ title: "g", steps: ["a"] }) })).status).toBe(201);
 		expect((await call("/api/memory/log", { method: "POST", token, body: JSON.stringify({ title: "m", body: "b" }) })).status).toBe(201);
 		// Dependent tools say what is missing; nothing else is affected.
 		expect(() => f.app.relay.require(u.account.ownerId, "desktop_screenshot")).toThrowError(expect.objectContaining({ name: "CapabilityUnavailableError" }));

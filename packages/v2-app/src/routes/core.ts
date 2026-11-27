@@ -2,7 +2,7 @@ import { principalId } from "../authz.ts";
 import { CapabilityUnavailableError, NotFoundError } from "../errors.ts";
 import { ok, type Route, route } from "../http.ts";
 
-/** Health, account, tokens, admin, chats, approvals, memories, goals, schedules, notes and images. */
+/** Health, account, tokens, admin, chats, approvals, memories, schedules, notes and images. */
 export const coreRoutes: Route[] = [
 	route("GET", "/health", async () => ok({ ok: true })),
 	route("GET", "/health/ready", async ({ app }) => {
@@ -51,7 +51,7 @@ export const coreRoutes: Route[] = [
 		await app.approvals.decide(await principal(), params[0]!, (await json()).approve === true);
 		return ok({ ok: true });
 	}),
-	// ---- memories, goals, schedules, notes ----
+	// ---- memories, schedules, notes ----
 	route("POST", "/api/notes", async ({ app, principal, json }) => {
 		const b = await json();
 		const p = await principal();

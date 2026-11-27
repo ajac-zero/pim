@@ -130,7 +130,7 @@ for (const chat of expect.chats) {
 }
 check("each person lists only their own chats", !expect.chats.some((c) => (c.owner === "ada" ? bobChats : adaChats).has(c.id)));
 
-// ---- agents, skills, memories, goals ----
+// ---- agents, skills, memories ----
 const agentsOf = async (s) => (await s.get("/api/agents")).json?.agents ?? [];
 for (const a of expect.agents) {
 	const found = (await agentsOf(a.owner === "ada" ? ada : bob)).find((x) => x.id === a.id);
@@ -148,10 +148,6 @@ for (const k of expect.skills) {
 	for (const m of expect.memories.filter((x) => x.owner === "ada")) check(`memory "${m.text}" is ada's`, memories.has(m.text));
 	const bobs = new Set(memoriesOf(await bob.get("/api/memory/log")));
 	check("bob has his memory and none of ada's", expect.memories.filter((x) => x.owner === "bob").every((m) => bobs.has(m.text)) && !expect.memories.filter((x) => x.owner === "ada").some((m) => bobs.has(m.text)));
-}
-for (const g of expect.goals) {
-	const goal = ((await ada.get("/api/goals")).json?.goals ?? []).find((x) => x.title === g.title);
-	check(`goal "${g.title}" keeps its steps in order`, JSON.stringify(goal?.steps?.map((s) => s.title)) === JSON.stringify(g.steps), JSON.stringify(goal));
 }
 
 // ---- triggers: present, aimed at the right chat, and none fired ----

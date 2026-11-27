@@ -236,7 +236,7 @@ const PIM_TOOL = {
 	name: "pim",
 	title: "Message Pim",
 	description:
-		"Send a message to Pim, the person's majordomo, and get its reply. It knows them, their memory, goals, schedules and connectors, and hands bigger work to their other agents, whose answers come back to it. " +
+		"Send a message to Pim, the person's majordomo, and get its reply. It knows them, their memory, schedules and connectors, and hands bigger work to their other agents, whose answers come back to it. " +
 		"Each call starts a new conversation, which the person can also continue in Pim. Every reply names its conversation: pass it back as conversation to continue, for example to follow up or to hear how handed-off work went.",
 	inputSchema: { type: "object", properties: { message: { type: "string", minLength: 1, description: "What to say, in plain words." }, conversation: { type: "string", minLength: 1, description: "A conversation an earlier reply named, to continue it. Leave out to start a new one." } }, required: ["message"] },
 	outputSchema: { type: "object", properties: { conversation: { type: "string", description: "The conversation this happened in: pass it as conversation to continue." }, reply: { type: "string", description: "What Pim said." } }, required: ["conversation", "reply"] },

@@ -1,6 +1,6 @@
 # Running a Pim for several people
 
-A Pim is one server for everyone on it. Each person has their own space: their memory, connectors and agents, plus their own conversations, goals, schedules, ChatGPT sign-in, passkeys, linked accounts and API tokens, which are the rows of one owner in PostgreSQL, kept apart by row-level security. The person who sets it up is its admin: they invite the others, and help them back in when they lose every passkey. A Pim for one person is the same thing with one account.
+A Pim is one server for everyone on it. Each person has their own space: their memory, connectors and agents, plus their own conversations, schedules, ChatGPT sign-in, passkeys, linked accounts and API tokens, which are the rows of one owner in PostgreSQL, kept apart by row-level security. The person who sets it up is its admin: they invite the others, and help them back in when they lose every passkey. A Pim for one person is the same thing with one account.
 
 People on the same Pim can share with each other: circles let others message your agent from their own space (see [Sharing](reference.md#sharing)), and Discover lists the templates people published. Nothing crosses from one deployment to another.
 
@@ -107,7 +107,7 @@ The admin can't suspend or delete their own account from here; deleting it from 
 
 - **Signing in.** <http://localhost:8787/__dev/sign-in/ada> signs the browser in as `ada`, making the account if it's new (the first one is the admin), and `?returnTo=/settings` picks where it lands. It makes a passkey on the server, so it works in any browser and with `curl -c cookies`.
 - **Passkeys.** To try the passkey screens themselves: Chrome, Safari and Edge on a laptop or phone use their own. On a machine without one (a Linux desktop, a headless browser), start Chrome with `--remote-debugging-port=9222` and run `node scripts/virtual-authenticator.mjs 9222`: it gives every tab a virtual passkey that answers at once. Or use DevTools → More tools → WebAuthn.
-- **Models.** The preview answers with a stand-in model. It echoes what you say, and calls a tool when told to: `/tool create_goal {"title": "Run a 5k", "steps": ["Run 2k"]}`, or `/tool http_request {"method": "GET", "url": "https://example.com"}` for an approval. After a tool runs, it sends you the result. Connect a ChatGPT plan in Settings to chat with a real model.
+- **Models.** The preview answers with a stand-in model. It echoes what you say, and calls a tool when told to: `/tool note {"title": "Tea", "body": "Black tea"}`, or `/tool http_request {"method": "GET", "url": "https://example.com"}` for an approval. After a tool runs, it sends you the result. Connect a ChatGPT plan in Settings to chat with a real model.
 
 ## Known limits
 

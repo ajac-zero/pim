@@ -347,6 +347,16 @@ const translations = {
       "{used} of {window} tokens, as of the last answer from {model}.",
     contextMeterCompacts:
       "Past {compactAt} tokens, marked on the ring, the conversation is summarized to make room.",
+    compactChat: "Compact conversation: summarize its older messages",
+    compactingChat: "Compacting the conversation…",
+    compactBusy: "Compact conversation: not while the agent is working",
+    compactNothing: "Compact conversation: nothing to compact yet",
+    compactVisit:
+      "Compact conversation: not in a chat with someone else's agent",
+    compactDone: "Compacted: the context went from {before} to {after} tokens.",
+    compactUnchanged:
+      "Nothing was compacted: there isn't enough older history.",
+    compactFailed: "Couldn't compact the conversation: {error}",
     couldNotCopyChatId: "Couldn't copy the chat ID. Try again.",
     chatLink: "Public link",
     chatLinkOn: "Public link: on",
@@ -2516,6 +2526,16 @@ const translations = {
       "{used} de {window} tokens, según la última respuesta de {model}.",
     contextMeterCompacts:
       "Pasados {compactAt} tokens, marcados en el anillo, la conversación se resume para hacer espacio.",
+    compactChat: "Compactar conversación: resumir sus mensajes más antiguos",
+    compactingChat: "Compactando la conversación…",
+    compactBusy: "Compactar conversación: no mientras el agente trabaja",
+    compactNothing: "Compactar conversación: aún no hay nada que compactar",
+    compactVisit:
+      "Compactar conversación: no en un chat con el agente de otra persona",
+    compactDone: "Compactada: el contexto pasó de {before} a {after} tokens.",
+    compactUnchanged:
+      "No se compactó nada: no hay historial anterior suficiente.",
+    compactFailed: "No se pudo compactar la conversación: {error}",
     couldNotCopyChatId: "No se pudo copiar el ID del chat. Inténtalo de nuevo.",
     chatLink: "Enlace público",
     chatLinkOn: "Enlace público: activado",

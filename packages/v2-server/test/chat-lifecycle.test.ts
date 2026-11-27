@@ -162,6 +162,54 @@ real("a chat over its life", () => {
 		expect(JSON.stringify(await transcript(chat))).toContain("You sent alpha and beta words.");
 	}, 180_000);
 
+	it("compacts a chat when the person asks, once the agent is idle and the chat has something in it, and keeps every message in the transcript", async () => {
+		const chat = (await web.call("POST", "/api/sessions", { title: "Compact me" })).json.id;
+		const compact = (body: unknown = {}) => web.call("POST", `/api/sessions/${chat}/compact`, body);
+		const filler = Array.from({ length: 15_000 }, (_, i) => `gamma${i}`).join(" ");
+		// A chat with nothing said has nothing to summarise: the runtime has counted no context for it.
+		expect(await compact()).toMatchObject({ status: 409, json: { error: "nothing_to_compact" } });
+		await say(chat, `big: ${filler}`, reply("Noted."));
+		const before = (await contextOf(chat, (tokens) => tokens > 60_000)).tokens;
+		// Not the person's chat, not signed in, and a token that may only read are refused, whatever the chat holds.
+		expect((await web.call("POST", "/api/sessions/00000000-0000-4000-8000-000000000000/compact", {})).status).toBe(404);
+		expect((await new Client(web.base, d.ingressSecret).call("POST", `/api/sessions/${chat}/compact`, {})).status).toBe(401);
+		const invite = ((await web.call("POST", "/api/admin/invites", {})).json.links as string[])[0]!.split("#invite=")[1];
+		const bob = new Client(web.base, d.ingressSecret);
+		expect((await bob.call("POST", "/auth/register", { username: "bob", invite, session: true })).status).toBe(201);
+		expect((await bob.call("POST", `/api/sessions/${chat}/compact`, {})).status).toBe(404);
+		const principal = { kind: "user", ownerId, role: "member", sessionId: "test" } as never;
+		const reader = (await app.identity.createToken(principal, { name: "reader", scopes: ["api:read"] })).token;
+		expect((await new Client(web.base, d.ingressSecret).call("POST", `/api/sessions/${chat}/compact`, {}, { authorization: `Bearer ${reader}` })).status).toBe(403);
+		const background = async () => Number((await d.stack.admin.query("SELECT count(*) FROM pim_app.model_calls WHERE run_kind = 'background'")).rows[0].count);
+		const calls = await background();
+		// A chat at work is refused, and nothing is compacted.
+		let release!: () => void;
+		const held = new Promise<void>((resolve) => (release = resolve));
+		faux.setResponses([async () => (await held, toolUse(fauxToolCall("send_to_user", { message: "Slow." })))] as never);
+		expect((await web.call("POST", `/api/sessions/${chat}/messages`, { commandId: "compact-busy", text: "slowly" })).status).toBe(202);
+		expect(await compact()).toMatchObject({ status: 409, json: { error: "busy" } });
+		// The sidebar follows the runtime a little behind. Once it shows the chat at work, the idle it shows after the turn is the turn's end, not the idle from before it began.
+		await waitFor("the sidebar to show the chat at work", async () => ((await listed(chat)).busy === true ? true : undefined), 30_000);
+		release();
+		await waitFor("the slow turn to end", async () => (sentAndAnswered(await transcript(chat), "Slow.") ? true : undefined), 60_000);
+		expect((await transcript(chat)).some((e) => e.kind.includes("compaction"))).toBe(false);
+		await waitFor("the chat to be idle", async () => ((await listed(chat)).busy === false && (await web.call("GET", `/api/sessions/${chat}/pending`)).json.commands.every((c: { inboxAccepted: boolean }) => !c.inboxAccepted) ? true : undefined), 30_000);
+		// Idle, it is compacted: the model is asked to summarise, the summary is in the transcript, and the context is smaller.
+		faux.setResponses([(ctx: { messages?: unknown[] }) => (JSON.stringify(ctx.messages?.[0] ?? "").includes("context summarization assistant") ? fauxAssistantMessage("SUMMARY: gamma words and a slow turn.") : fauxAssistantMessage("unexpected"))] as never);
+		const accepted = await compact({ commandId: "compact-1" });
+		expect(accepted).toMatchObject({ status: 202, json: { session: chat, commandId: "compact-1", duplicate: false } });
+		await waitFor("the compaction", async () => ((await transcript(chat)).some((e) => e.kind.includes("compaction")) ? true : undefined), 60_000);
+		const after = (await contextOf(chat, (tokens) => tokens < before)).tokens;
+		expect(after).toBeLessThan(before);
+		await waitFor("the chat to be done compacting", async () => ((await listed(chat)).busy === false && (await d.stack.admin.query("SELECT summary FROM pim_projection.sidebar_session_projection WHERE chat_id = $1", [chat])).rows[0]?.summary.compacting === false ? true : undefined), 30_000);
+		// Nothing is deleted: every message is still in the transcript, and the summary's model call is in the usage ledger like an automatic compaction's.
+		expect(JSON.stringify(await transcript(chat))).toContain("gamma5000");
+		expect(await background()).toBe(calls + 1);
+		// The same command id again is the same compaction, not a second one.
+		expect(await compact({ commandId: "compact-1" })).toMatchObject({ status: 202, json: { duplicate: true } });
+		expect(await background()).toBe(calls + 1);
+	}, 180_000);
+
 	it("carries a chat on through a handoff: the summary starts a new chat, the old one is archived, and writing in the old one detaches them", async () => {
 		const old = (await web.call("POST", "/api/sessions", { title: "Trip planning" })).json.id;
 		await say(old, "we are planning a trip to Lisbon", reply("Lisbon it is."));

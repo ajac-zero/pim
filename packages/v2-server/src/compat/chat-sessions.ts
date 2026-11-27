@@ -221,7 +221,7 @@ export function sessionRoutes(env: Record<string, string | undefined> = process.
 			const window = await contextWindowOf(app, p, summary.contextModel);
 			// pi-durable compacts a conversation once its context passes the window less the room it keeps for the answer; Pim leaves that policy as it is.
 			const compactAt = window - DEFAULT_COMPACTION_POLICY.reserveTokens;
-			return ok({ context: { tokens: summary.contextTokens, window, compactAt: compactAt > 0 ? compactAt : null, model: summary.contextModel.id } });
+			return ok({ context: { tokens: summary.contextTokens, window, compactAt: compactAt > 0 ? compactAt : null, keepRecent: DEFAULT_COMPACTION_POLICY.keepRecentTokens, model: summary.contextModel.id } });
 		}),
 		// The summary is written by the utility model once the chat has something in it, and again only when more has been said since.
 		route("GET", "/api/sessions/:id/summary", async ({ app, principal, params }) => {
@@ -347,6 +347,32 @@ export function sessionRoutes(env: Record<string, string | undefined> = process.
 			summarized.delete(id);
 			suggested.delete(id);
 			return ok({ session: id }, 202);
+		}),
+		// Summarizes the older part of the chat's context now, as pi-durable does by itself near the end of the model's window (the `compact` command, `Conversation.compact`): the entries all
+		// stay in the transcript, and the model is sent the summary and the last ~20k tokens. Refused while the agent is at work or a compaction is under way, and when the context is no more than
+		// what a compaction keeps as it is. The summary's model call is recorded in the usage ledger like an automatic one. A command id sent again is answered with its first acceptance.
+		route("POST", "/api/sessions/:id/compact", async ({ app, principal, params, json }) => {
+			const p = await principal();
+			await app.identity.authz.enforce(p, "api:write");
+			const id = chatId(params[0]!);
+			const view = await sessionView(app, p, id);
+			const commandId = String(((await json().catch(() => ({}))) as Record<string, unknown>).commandId ?? `compact-${randomUUID()}`);
+			const state = await app.db.owner(p.ownerId, async (tx) => {
+				const known = (await tx.query("SELECT 1 FROM pim_app.accepted_commands WHERE command_id = $1", [commandId])).rowCount;
+				const chat = (await tx.query("SELECT kind FROM pim_app.conversations WHERE public_chat_id = $1 AND deleted_at IS NULL", [id])).rows[0];
+				const pending = (await tx.query("SELECT kind FROM pim_app.accepted_commands WHERE public_chat_id = $1 AND kind IN ('user_message', 'retry_from', 'compact') AND state = 'inbox_accepted'", [id])).rows;
+				const summary = (await tx.query("SELECT summary FROM pim_projection.sidebar_session_projection WHERE chat_id = $1", [id])).rows[0]?.summary as { contextTokens?: number; compacting?: boolean } | undefined;
+				return { known: known === 1, visit: chat.kind === "visit", pending: pending.map((r) => r.kind as string), tokens: summary?.contextTokens, compacting: summary?.compacting === true };
+			});
+			if (!state.known) {
+				if (state.visit) throw new BadRequestError("A chat with someone else's agent can't be compacted");
+				if (state.compacting || state.pending.includes("compact")) throw new ConflictError("This chat is already being compacted", "compacting");
+				if (view.busy || state.pending.length > 0) throw new ConflictError("The agent is at work in this chat; compact it when it has finished", "busy");
+				// pi-durable keeps the last `keepRecentTokens` as they are, so a context that fits in them has nothing older to summarize.
+				if (state.tokens === undefined || state.tokens <= DEFAULT_COMPACTION_POLICY.keepRecentTokens) throw new ConflictError("There isn't enough in this chat to compact yet", "nothing_to_compact");
+			}
+			const admission = await app.conversations.admit(p, { commandId, kind: "compact", chatId: id, payload: {} });
+			return ok({ session: id, commandId, tokens: state.tokens ?? null, duplicate: admission.duplicate }, 202);
 		}),
 		// Lists an archived chat again; the web sends no command id, so one is made here.
 		route("POST", "/api/sessions/:id/unarchive", async ({ app, principal, params }) => {

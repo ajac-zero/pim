@@ -6,6 +6,7 @@ import {
 } from "~/components/chat/activity-toggle";
 import { BoxSection } from "~/components/chat/box-section";
 import { ChatLinkMenu } from "~/components/chat/chat-link";
+import { CompactChat } from "~/components/chat/compact-chat";
 import { ContextMeter } from "~/components/chat/context-meter";
 import {
   CopyChatId,
@@ -99,6 +100,7 @@ export function ActivityBox({
                 <PinChat sessionId={sessionId} />
                 <CopyChatId sessionId={sessionId} />
                 <ChatLinkMenu sessionId={sessionId} />
+                <CompactChat sessionId={sessionId} />
                 <ContextMeter sessionId={sessionId} />
                 <SessionCostMenu sessionId={sessionId} />
               </span>

@@ -27,6 +27,9 @@ export type Session = {
   archived?: boolean;
   /** How many tokens the chat's context holds, as of its last answer; the sidebar's rows carry it so a meter follows the chat live. */
   contextTokens?: number;
+  /** A compaction of the chat's context is under way, and the error of the last one that failed. */
+  compacting?: boolean;
+  compactionFailure?: { task: number; error: string } | null;
   /** A conversation with someone else's space, shared with you; null for your own chats. */
   visit?: { username: string; available: boolean } | null;
   /** The agent of yours it talks with: the one it was started with, or your default one. Null in a visit. */
@@ -341,6 +344,8 @@ export type SessionContext = {
     window: number;
     /** The size past which pi-durable compacts the conversation; null when the window leaves no room for it. */
     compactAt: number | null;
+    /** What a compaction keeps as it is: a chat with no more context than this has nothing to compact. */
+    keepRecent: number;
     model: string;
   } | null;
 };
@@ -2298,6 +2303,15 @@ export const pim = {
       method: "POST",
       body: JSON.stringify({ commandId: crypto.randomUUID() }),
     }),
+  /** Summarizes the older part of the chat's context now; the answer says only that it was accepted, and the chat's sidebar row follows the compaction. */
+  compactSession: (session: string) =>
+    call<{ session: string; commandId: string; tokens: number | null }>(
+      `/sessions/${session}/compact`,
+      {
+        method: "POST",
+        body: JSON.stringify({ commandId: crypto.randomUUID() }),
+      },
+    ),
   /** Asks the model again in a chat held after a model error. */
   retry: (session: string) =>
     call<{ session: string }>(`/sessions/${session}/retry`, {

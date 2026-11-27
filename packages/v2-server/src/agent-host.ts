@@ -42,6 +42,7 @@ import { mentionedAgents } from "./rooms.ts";
 import { describeGoal } from "./goal-tools.ts";
 import { withStablePrefix } from "./stable-prefix.ts";
 import { agentsSection, ASSISTANT_INSTRUCTIONS, delegatesSection, identity, majordomoRole, MAX_TASK_DEPTH, pimbotRole, NO_CODING_SANDBOX_LINE, startedBySection, type Roster } from "./agent-prompts.ts";
+import { createFingerprinter } from "./request-fingerprint.ts";
 import { createFailover, failureKind, failureMessage } from "./provider-failover.ts";
 import { DESCRIBE_WORK, runUtility } from "./compat/utility.ts";
 import { Progress } from "./progress.ts";
@@ -389,6 +390,7 @@ export function createAgentHost(options: AgentHostOptions) {
 		cooldowns: options.cooldowns,
 		subscription: (ownerId, provider) => provider === "openai" && planOwners.has(ownerId),
 		stallMs: options.stallMs?.stream,
+		fingerprint: (ownerId) => createFingerprinter(env, ownerId),
 		// What an admin reading diagnostics would look for goes into the person's event log (`pim_app.diagnostic_events`).
 		event: (ownerId, kind, detail) => void db.read(ownerId, "SELECT pim_app.record_diagnostic_event($1, $2, $3)", [ownerId, kind, JSON.stringify(detail)]).catch(() => {}),
 		// Every Runner reads and writes the same cooldowns, so a model one of them found down is skipped by all.

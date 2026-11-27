@@ -16,8 +16,9 @@ import { redact, redactSecrets } from "@pim/shared/redact";
 import type { Principal } from "@pim/v2-contracts/identity";
 import { activityOf, chatTurns } from "./activity.ts";
 import { SLOW_CALL_MS } from "../call-details.ts";
+import { type CacheTrace, compareTraces } from "../request-fingerprint.ts";
 
-export const DIAGNOSTIC_KINDS = ["now", "stalls", "runs", "turns", "triggers", "model_calls", "provider_cooldowns", "coding", "connectors", "approvals", "events", "services"] as const;
+export const DIAGNOSTIC_KINDS = ["now", "stalls", "runs", "turns", "triggers", "model_calls", "prompt_cache", "provider_cooldowns", "coding", "connectors", "approvals", "events", "services"] as const;
 export type DiagnosticKind = (typeof DIAGNOSTIC_KINDS)[number];
 const SECRET_KEY = /pass(word)?|secret|token|api[_-]?key|authorization|credential|cookie|bearer/i;
 const TEXT_LENGTH = 300;
@@ -186,6 +187,35 @@ export async function diagnose(app: App, ownerId: string, query: DiagnosticQuery
 			return scrubValue({ ...base, connectors: await rows("SELECT id, kind, name, status, enabled_tools FROM pim_app.connectors ORDER BY created_at LIMIT $1", [limit]) });
 		case "approvals":
 			return scrubValue({ ...base, approvals: await rows("SELECT id, tool, state, public_chat_id AS chat, created_at, decided_at FROM pim_app.approvals WHERE created_at >= $1 ORDER BY created_at DESC LIMIT $2", [since, limit]) });
+		case "prompt_cache": {
+			if (!query.chat) throw new BadRequestError("prompt_cache needs chat: the chat whose model calls to compare");
+			// The chat's calls in the window, oldest first, each with what the provider's cache did with it (tokens read from and written to it) and how its request compares with the call before it
+			// (`../request-fingerprint.ts`). Hashes and counts only; they are not run through `scrubValue`, which takes long hex strings for secrets.
+			const calls = (await rows("SELECT id, provider, model, stop_reason, input_tokens AS input, cache_read_tokens AS cache_read, cache_write_tokens AS cache_write, cache_trace, at FROM pim_app.model_calls WHERE public_chat_id = $1 AND at >= $2 AND cache_trace IS NOT NULL AND id !~ '_f[0-9]+$' ORDER BY at DESC LIMIT $3", [query.chat, since, limit])).reverse();
+			const items = calls.map((call, i) => {
+				const trace = call.cache_trace as CacheTrace;
+				const { chain: _chain, ...summary } = trace;
+				const before = calls[i - 1];
+				return {
+					at: (call.at as Date).toISOString(),
+					provider: call.provider,
+					model: call.model,
+					stop_reason: call.stop_reason,
+					input_tokens: Number(call.input),
+					cache_read_tokens: Number(call.cache_read),
+					cache_write_tokens: Number(call.cache_write),
+					trace: summary,
+					...(before ? { since_previous: compareTraces(before.cache_trace as CacheTrace, trace), previous_model_differs: before.provider !== call.provider || before.model !== call.model } : {}),
+				};
+			});
+			return {
+				...(scrubValue(base) as object),
+				chat: query.chat,
+				count: items.length,
+				items,
+				note: "Each item's trace is what its request body looked like to the provider's cache, as keyed hashes and counts (never content): tools, system and settings hashed apart, messages chained, and the hash of everything up to each cache breakpoint. since_previous compares it with the call before: firstChange is the first section that differs (tools, system or messages; none means the call begins with everything the previous one had); sharedMessages is how many messages lead both, within window; settings names the settings that differ; and for each message breakpoint of the previous call, stillThere says whether the same messages still lead up to it, and false means something before that breakpoint changed or was removed, so what that call wrote cannot lead this one; null means the traces cannot tell (a thinned chain, or a breakpoint inside a message). true is about content only, not a cache hit, which also needs this call to have a breakpoint within 20 blocks after it, the same settings and an entry that has not expired. firstChange is also truncated (fewer messages than before) or unknown (nothing differs where the traces can see, but a long chat's last messages are not covered). Only answered calls are compared; an attempt that failed over to another model is a row of its own with its trace. Hashes are comparable only within one chat and one key (a deployment with no PIM_INGRESS_SECRET changes its key at a restart). cache_read_tokens and cache_write_tokens are the provider's.",
+			};
+		}
 		case "provider_cooldowns": {
 			const all = await rows("SELECT ref, until, reason FROM pim_app.owner_provider_cooldowns($1) ORDER BY until DESC", [ownerId]);
 			return scrubValue({ ...base, count: all.length, items: all.slice(0, limit).map((r) => ({ model: r.ref, active: new Date(r.until).getTime() > Date.now(), until: r.until, reason: r.reason })), note: "While a model cools down after a failure, requests go to the next model of the chat's list; a usage limit's cooldown lasts until it resets. A model's entry goes once it answers again." });

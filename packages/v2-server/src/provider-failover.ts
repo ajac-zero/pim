@@ -19,6 +19,7 @@ import type { AssistantMessage, AssistantMessageEvent } from "@earendil-works/pi
 import { isContextOverflow } from "@earendil-works/pi-ai/utils/overflow";
 import { isDeliveryReminder, MODEL_NOTICES, type ModelNotice } from "@pim/shared/transcript";
 import { isUsageLimitError, limitCooldown, type LimitState } from "./usage-limits.ts";
+import type { Fingerprinter } from "./request-fingerprint.ts";
 import { type CallDetail, type FailedAttempt, keepCall, SLOW_CALL_MS, trackAttempt } from "./call-details.ts";
 
 export type ModelRef = { provider: string; id: string };
@@ -79,7 +80,7 @@ export type CooldownStore = {
 	save(ownerId: string, provider: string, id: string, untilMs: number, reason: string): Promise<void>;
 };
 
-export function createFailover(options: { now?: (() => number) | undefined; cooldowns?: Partial<Cooldowns> | undefined; stallMs?: number | undefined; /** The pause before a stalled model is asked once more. */ stallRetryMs?: number | undefined; store?: CooldownStore | undefined; syncMs?: number | undefined; subscription?: ((ownerId: string, provider: string) => boolean) | undefined; /** Told what happened to a request that an admin reading diagnostics would want to find: a model that failed over, a cooldown, a request that failed for good or was slow. Never throws into the request. */ event?: ((ownerId: string, kind: string, detail: Record<string, unknown>) => void) | undefined } = {}) {
+export function createFailover(options: { now?: (() => number) | undefined; cooldowns?: Partial<Cooldowns> | undefined; stallMs?: number | undefined; /** The pause before a stalled model is asked once more. */ stallRetryMs?: number | undefined; store?: CooldownStore | undefined; syncMs?: number | undefined; subscription?: ((ownerId: string, provider: string) => boolean) | undefined; /** Told what happened to a request that an admin reading diagnostics would want to find: a model that failed over, a cooldown, a request that failed for good or was slow. Never throws into the request. */ event?: ((ownerId: string, kind: string, detail: Record<string, unknown>) => void) | undefined; /** Makes the owner's cache trace of each attempt's request body (`./request-fingerprint.ts`). */ fingerprint?: ((ownerId: string) => Fingerprinter) | undefined } = {}) {
 	const stallMs = options.stallMs ?? DEFAULT_STREAM_STALL_MS;
 	const stallRetryMs = options.stallRetryMs ?? DEFAULT_STALL_RETRY_MS;
 	/** The model that answered in place of the requested one, for the rest of the turn it was found in, by the provider's session of the conversation. */
@@ -237,7 +238,7 @@ export function createFailover(options: { now?: (() => number) | undefined; cool
 			const forward = () => inner.abort(signal?.reason);
 			if (signal?.aborted) forward();
 			else signal?.addEventListener("abort", forward, { once: true });
-			const attempt = trackAttempt(current, rest[0], rest[1], now);
+			const attempt = trackAttempt(current, rest[0], rest[1], now, options.fingerprint?.(ownerId));
 			const events = call(current, rest[0], { ...attempt.options, signal: inner.signal }, ...rest.slice(2));
 			const iterator = events[Symbol.asyncIterator]();
 			let stalled: AssistantMessage | undefined;

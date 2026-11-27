@@ -22,6 +22,7 @@ import { usageRoutes } from "../src/compat/usage.ts";
 import { modelRoutes } from "../src/compat/model.ts";
 import { snapshotRoutes } from "../src/gate-extras.ts";
 import { uiBlockIds } from "@pim/ui-lang";
+import { compareTraces, createFingerprinter } from "../src/request-fingerprint.ts";
 import { createStack, type Stack } from "./support/stack.ts";
 
 let stack: Stack;
@@ -436,6 +437,46 @@ describe("diagnostics", () => {
 		expect((await call(ada, "GET", "/api/admin/diagnostics?since=soon")).status).toBe(400);
 		expect((await call(bob, "GET", "/api/admin/diagnostics")).status).toBe(403);
 		expect((await call(ada, "GET", "/api/admin/health")).body.deployment).toMatchObject({ publicUrlSet: true, approvalPolicy: "majordomo" });
+	});
+
+	it("keeps the cache trace of every call, and compares a chat's consecutive calls from them without saying what was asked", async () => {
+		const owner = await ownerOf(ada);
+		const chat = (await call(ada, "POST", "/api/sessions", { agentId: agent, title: "Cache" })).body.id as string;
+		const fingerprint = createFingerprinter({ PIM_INGRESS_SECRET: "s" }, owner);
+		const history = [{ role: "user", content: "a private question" }, { role: "assistant", content: [{ type: "text", text: "a private answer" }] }];
+		const body = (messages: unknown[], marked: number) => ({ model: "m", system: [{ type: "text", text: "You are Pim.", cache_control: { type: "ephemeral" } }], messages: messages.map((m: any, i) => (i === marked ? { ...m, content: [{ type: "text", text: typeof m.content === "string" ? m.content : "x", cache_control: { type: "ephemeral" } }] } : m)) });
+		// The second call adds a tool round before the context update that ended the first.
+		const update = { role: "user", content: "[Context update] changed" };
+		const one = fingerprint(body([...history, update], 2))!;
+		const two = fingerprint(body([...history, { role: "assistant", content: "more" }, { role: "user", content: "result" }, update], 4))!;
+		const record = (id: string, trace: unknown, tokens: [number, number], at: number) =>
+			stack.admin.query("SELECT pim_app.record_model_call($1, $2, 'chat', $3, 'anthropic', 'm', $4, 5, 0, $5, $6, NULL, $7::jsonb)", [owner, id, chat, 4, tokens[0], tokens[1], JSON.stringify({ stopReason: "stop", latencyMs: 20, cacheTrace: trace })]).then(() => stack.admin.query("UPDATE pim_app.model_calls SET at = to_timestamp($2) WHERE id = $1", [id, at]));
+		await record("mc_cache_1", one, [60_000, 400_000], 1_900_000_000);
+		await record("mc_cache_2", two, [60_000, 401_500], 1_900_000_010);
+		// A call with no trace (a background one) is a row all the same, and a failed attempt's trace is kept under its own row.
+		await record("mc_cache_2_f0", one, [0, 0], 1_900_000_005);
+		await stack.admin.query("SELECT pim_app.record_model_call($1, 'mc_cache_none', 'chat', $2, 'anthropic', 'm', 1, 1, 0)", [owner, chat]);
+		expect((await stack.admin.query("SELECT id, cache_trace IS NOT NULL AS traced FROM pim_app.model_calls WHERE public_chat_id = $1 ORDER BY id", [chat])).rows).toEqual([
+			{ id: "mc_cache_1", traced: true },
+			{ id: "mc_cache_2", traced: true },
+			{ id: "mc_cache_2_f0", traced: true },
+			{ id: "mc_cache_none", traced: false },
+		]);
+		// Another person's ledger holds none of it.
+		expect((await app.db.owner(await ownerOf(bob), (tx) => tx.query("SELECT count(*)::int AS n FROM pim_app.model_calls WHERE cache_trace IS NOT NULL"))).rows[0].n).toBe(0);
+
+		const report = (await call(ada, "GET", `/api/admin/diagnostics?kind=prompt_cache&chat=${chat}&since=${new Date(1_800_000_000_000).toISOString()}`)).body;
+		expect(report.items).toHaveLength(2);
+		expect(report.items[0]).toMatchObject({ cache_read_tokens: 60_000, cache_write_tokens: 400_000, trace: { counts: { messages: 3 } } });
+		expect(report.items[0]).not.toHaveProperty("since_previous");
+		expect(report.items[1]).toMatchObject({ cache_write_tokens: 401_500, since_previous: compareTraces(one, two), previous_model_differs: false });
+		// The comparison says what happened: the history is shared up to the update, and the breakpoint on the update is not in the later call.
+		expect(report.items[1].since_previous).toMatchObject({ firstChange: "messages", sharedMessages: 2, breakpoints: [{ in: "system", stillThere: true }, { in: "messages", index: 2, stillThere: false }] });
+		const text = JSON.stringify(report);
+		expect(text).not.toMatch(/private|Pim\b|Context update/);
+		expect(text).toContain(one.messages);
+		expect((await call(ada, "GET", "/api/admin/diagnostics?kind=prompt_cache")).status).toBe(400);
+		expect((await call(bob, "GET", `/api/admin/diagnostics?kind=prompt_cache&chat=${chat}`)).status).toBe(403);
 	});
 });
 

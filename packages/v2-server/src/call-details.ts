@@ -9,6 +9,7 @@
 import { redactSecrets } from "@pim/shared/redact";
 import { isDeliveryReminder, NOTICE_PREFIXES } from "@pim/shared/transcript";
 import { CallPhases, type ModelPhases } from "./model-phases.ts";
+import type { CacheTrace, Fingerprinter } from "./request-fingerprint.ts";
 
 /** A call this slow is reported as unusual, and keeps its request and phases. */
 export const SLOW_CALL_MS = 60_000;
@@ -28,6 +29,8 @@ export type CallDetail = {
 	toolCount: number;
 	promptBytes: number;
 	runKind: RunKind;
+	/** What the request body looked like to the provider's prompt cache, as hashes (`./request-fingerprint.ts`); every attempt that built one has it, however fast it went. */
+	cacheTrace?: CacheTrace;
 };
 /** An attempt that failed and was tried again on the next model of the chat's list. */
 export type FailedAttempt = { provider: string; model: string; detail: CallDetail };
@@ -112,14 +115,17 @@ function shapeOf(context: { messages?: readonly any[] } | undefined): Pick<CallD
  * Watches one attempt of a request. `options` are the request's, with its `fetch`, the payload and the provider's stream events watched (a provider whose adapter refuses a `fetch` of its
  * own, Google's, has its first event's time and no more); `finish` says how it went once its answer is known.
  */
-export function trackAttempt(model: { api?: string }, context: { messages?: readonly any[] } | undefined, options: any, now: () => number) {
+export function trackAttempt(model: { api?: string }, context: { messages?: readonly any[] } | undefined, options: any, now: () => number, fingerprint?: Fingerprinter) {
 	const started = now();
 	const phases = new CallPhases(started, now);
 	let sent: Record<string, unknown> | undefined;
+	let cacheTrace: CacheTrace | undefined;
 	const watched = {
 		...options,
 		onPayload: async (payload: unknown, m: unknown) => {
 			sent = { ...requestShape(payload), ...payloadFacts(payload) };
+			// The adapter asks again when it sends a request over (a downgrade after a refused one), so the trace is of the body that went last.
+			cacheTrace = fingerprint?.(payload);
 			return options?.onPayload?.(payload, m);
 		},
 		...(model.api === "google-generative-ai" || model.api === "google-vertex" ? {} : { fetch: phases.fetch(options?.fetch) }),
@@ -141,6 +147,7 @@ export function trackAttempt(model: { api?: string }, context: { messages?: read
 				// A slow call keeps its request and phases too: they are what says where the time went.
 				...(failed || latencyMs >= SLOW_CALL_MS ? { request: { phases: phase, ...sent } } : {}),
 				...shapeOf(context),
+				...(cacheTrace ? { cacheTrace } : {}),
 			};
 		},
 	};

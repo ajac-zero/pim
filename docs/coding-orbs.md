@@ -50,7 +50,7 @@ Cancel goes over a short-lived outbound WebSocket (one attempt, ~10 s):
 
 ### Usage
 
-The internal API reports no cost, so usage is not supported and cost remains null, not zero. (The sealed `amp-http-m2m` vault entry from the earlier /api/v2 client is no longer read.) Costs and test outcomes remain the agent's word, not measurements Pim can enforce against a budget.
+The internal API has no usage call, so a thread's total is not asked for (`capabilities().usage` is false). What Amp reports per message is used instead: an assistant message in `getThreadTail` can carry `usage` with `credits` and its token counts, and each message that reports credits becomes one `model_call` of the thread (cursor `usage:msg:<message id>`, so a message read again counts once), with the model and the cache tiers. Credits are taken as US dollars one for one (`AMP_CREDIT_USD` in `amp-http.ts`; Amp's pricing page equates them and its `/api/v2` usage endpoint reports dollars), and Pim prices nothing itself. A message with no credits adds no cost, so a thread whose messages report none stays unmetered (`spentUsd` 0), not exact. Unverified until tried live: that the internal API's messages carry `usage` at all. Costs and test outcomes remain the agent's word, not measurements Pim can enforce against a budget.
 
 ## Images and suggested replies
 

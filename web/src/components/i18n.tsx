@@ -331,6 +331,7 @@ const translations = {
     couldNotCopyConversation: "Couldn't copy the conversation. Try again.",
     sessionCost: "Cost of this chat",
     sessionCostTotal: "Total: {amount}",
+    sessionCostCoding: "Coding threads, as the harness reports its spend",
     sessionCostNone: "Nothing has been used in this chat yet.",
     sessionCostTokens: "{input} in, {output} out, {cached} cached",
     sessionCostHitRate: "Cache hit rate: {percent}",
@@ -2495,6 +2496,8 @@ const translations = {
       "No se pudo copiar la conversación. Inténtalo de nuevo.",
     sessionCost: "Costo de este chat",
     sessionCostTotal: "Total: {amount}",
+    sessionCostCoding:
+      "Hilos de código, según el gasto que informa cada herramienta",
     sessionCostNone: "Aún no se ha usado nada en este chat.",
     sessionCostTokens:
       "{input} de entrada, {output} de salida, {cached} en caché",

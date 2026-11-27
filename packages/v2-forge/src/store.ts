@@ -102,6 +102,12 @@ export const toThread = (r: Row): ThreadRow => ({
 	lastSeenAt: r.last_seen_at ? new Date(r.last_seen_at).getTime() : null,
 });
 
+/** What a model_call event says about the call, for the ledger: the model and the cache tiers of its tokens, when the harness reported them. */
+function ledgerDetail(data: object | undefined): { model?: string; cacheReadTokens?: number; cacheWriteTokens?: number } {
+	const d = (data ?? {}) as Record<string, unknown>;
+	return { ...(typeof d.model === "string" ? { model: d.model } : {}), ...(typeof d.cacheReadTokens === "number" ? { cacheReadTokens: d.cacheReadTokens } : {}), ...(typeof d.cacheWriteTokens === "number" ? { cacheWriteTokens: d.cacheWriteTokens } : {}) };
+}
+
 export type EventInput = { kind: string; role?: string | null; data?: object; costUsd?: number; tokensIn?: number; tokensOut?: number; sourceCursor?: string | null };
 
 /** An inbox row is due unless it asks to wait (a turn's retry names the time, in ms since the epoch, in `notBefore`). */
@@ -226,7 +232,7 @@ export class ForgeStore {
 		if (!r.rowCount) return null;
 		if (e.costUsd) {
 			await q.query("update pim_forge.forge_threads set spent_usd = spent_usd + $2 where thread_id = $1", [threadId, e.costUsd]);
-			await this.emit(q, "cost_ledger", `cost:${threadId}:${seq}`, threadId, { run_kind: "coding_thread", threadId, costUsd: e.costUsd, tokensIn: e.tokensIn ?? 0, tokensOut: e.tokensOut ?? 0 });
+			await this.emit(q, "cost_ledger", `cost:${threadId}:${seq}`, threadId, { run_kind: "coding_thread", threadId, costUsd: e.costUsd, tokensIn: e.tokensIn ?? 0, tokensOut: e.tokensOut ?? 0, ...ledgerDetail(e.data) });
 		}
 		return seq;
 	}

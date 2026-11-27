@@ -9,7 +9,7 @@
 // agent. `cancel` is the real Stop: a short-lived WebSocket to Amp's rivet
 // gateway sending the JSON-RPC `client_cancel`. Only Authorization and content-type headers are sent;
 // the CLI's x-amp-* headers were not needed.
-import { OrbAuthError, OrbError, OrbLostError, OrbUnreachableError, OrbUnsupportedError, type OrbClient, type OrbMessage, type OrbPart, type OrbStart, type OrbStatus, type OrbThread, type OrbUsage } from "./types";
+import { OrbAuthError, OrbError, OrbLostError, OrbUnreachableError, OrbUnsupportedError, type OrbClient, type OrbMessage, type OrbMessageUsage, type OrbPart, type OrbStart, type OrbStatus, type OrbThread, type OrbUsage } from "./types";
 
 export const AMP_HTTP_UNSUPPORTED = "not supported by Amp: archiving may not halt a running agent";
 /**
@@ -103,16 +103,40 @@ function resultText(content: unknown, depth = 0): string {
 	return "";
 }
 
+/**
+ * Amp bills in credits, which its own pricing page equates with US dollars ("$2.50 deducted from your credits"). A message's `usage.credits` is therefore taken as dollars, unconverted and never priced by Pim.
+ * Unverified against a live thread: change this one factor if Amp's credits turn out to be another unit.
+ */
+export const AMP_CREDIT_USD = 1;
+const count = (value: unknown): number | undefined => typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.round(value) : undefined;
+
+/** What an assistant message's `usage` block says it cost: dollars only when Amp reports credits, with the tokens it counted. Null when it says nothing usable. */
+function messageUsage(value: unknown): OrbMessageUsage | null {
+	const u = object(value);
+	const credits = typeof u.credits === "number" && Number.isFinite(u.credits) && u.credits >= 0 ? u.credits : undefined;
+	const usage: { -readonly [K in keyof OrbMessageUsage]: OrbMessageUsage[K] } = {};
+	if (credits !== undefined) usage.usd = credits * AMP_CREDIT_USD;
+	if (typeof u.model === "string" && u.model) usage.model = u.model.slice(0, 100);
+	for (const [key, field] of [["input", "inputTokens"], ["output", "outputTokens"], ["cacheRead", "cacheReadInputTokens"], ["cacheWrite", "cacheCreationInputTokens"]] as const) {
+		const n = count(u[field]);
+		if (n !== undefined) usage[key] = n;
+	}
+	return Object.keys(usage).length ? usage : null;
+}
+
+const PENDING = new Set(["in-progress", "in_progress", "running", "queued", "pending"]);
 const FAILED = new Set(["error", "failed", "cancelled", "canceled", "rejected", "rejected-by-user"]);
 const present = (value: unknown): boolean => value !== undefined && value !== null && value !== false;
 const jsonText = (value: unknown): string => { try { return JSON.stringify(value) ?? ""; } catch { return ""; } };
 
 /** What a tool_result block answered, from its `content`, or Amp's `run: {status, result|error}`. */
-function toolResultPart(b: Record<string, unknown>, names: Map<string, string>): OrbPart | null {
+function toolResultPart(b: Record<string, unknown>, names: Map<string, string>): OrbPart | "pending" | null {
 	const id = [b.toolUseID, b.tool_use_id, b.toolUseId].find((each): each is string => typeof each === "string");
 	if (id === undefined) return null;
 	const run = object(b.run);
 	const status = typeof run.status === "string" ? run.status : "";
+	// A tool still running has not answered yet: its call shows without a result until it does.
+	if (PENDING.has(status)) return "pending";
 	const isError = b.is_error === true || b.isError === true || present(b.error) || present(run.error) || FAILED.has(status);
 	let text = resultText(b.content) || resultText(run.result) || resultText(run.output);
 	if (!text && isError) text = resultText(b.error) || resultText(run.error) || jsonText(b.error ?? run.error);
@@ -133,7 +157,8 @@ function messageContent(content: unknown, names: Map<string, string>): { text: s
 			parts.push({ type: "toolCall", id: b.id, name, arguments: toolArguments(b.input) });
 		} else if (b.type === "tool_result") {
 			const part = toolResultPart(b, names);
-			if (part) parts.push(part); else words.push("[tool_result]");
+			if (part === null) words.push("[tool_result]");
+			else if (part !== "pending") parts.push(part);
 		} else if (typeof b.type === "string" && b.type !== "thinking") words.push(`[${b.type.slice(0, 40)}]`);
 	}
 	return { text: cap(words.join("\n"), AMP_MAX_MESSAGE_CHARS), parts };
@@ -361,7 +386,8 @@ export class AmpHttpOrbClient implements OrbClient {
 			if (messageId === null || seen.has(messageId)) continue;
 			seen.add(messageId);
 			const { text, parts } = messageContent(message.content, names);
-			all.push({ id: messageId, role: message.role === "user" ? "user" : "assistant", at: timestamp(message.createdAt) ?? 0, text, ...(parts.some((part) => part.type !== "text") ? { parts } : {}) });
+			const usage = message.role === "user" ? null : messageUsage(message.usage);
+			all.push({ id: messageId, role: message.role === "user" ? "user" : "assistant", at: timestamp(message.createdAt) ?? 0, text, ...(parts.some((part) => part.type !== "text") ? { parts } : {}), ...(usage ? { usage } : {}) });
 		}
 		return { thread: tail!.thread, messages: all };
 	}

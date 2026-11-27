@@ -121,4 +121,37 @@ describe("@pim/v2-contracts", () => {
 		await w2.step(t2);
 		expect((await s.store.get(t2))!.spentUsd).toBe(0);
 	});
+	it("records each Amp message's own reported cost once, and shows its tool calls and results as the transcript's", async () => {
+		const orb = new FakeOrbClient({ capabilities: { usage: false } });
+		const { threadId } = await s.forge.start(ada, startReq("amp-msg-cost", { harness: "amp", task: "Fix the bug" }));
+		const w = s.worker({ orbs: () => orb });
+		await w.step(threadId);
+		const h = orb.started[0]!.threadId;
+		orb.say(h, "assistant", "Reading it.", [{ type: "text", text: "Reading it." }, { type: "toolCall", id: "toolu_1", name: "Read", arguments: { path: "a.ts" } }, { type: "toolCall", id: "toolu_2", name: "mystery_tool", arguments: { odd: [1, { x: 2 }] } }], { usd: 0.03, model: "claude-opus-4-5", input: 10, output: 220, cacheRead: 16000, cacheWrite: 900 });
+		// Amp hands tool results back in a user message with no words of its own.
+		orb.say(h, "user", "", [{ type: "toolResult", id: "toolu_1", name: "Read", text: "const a = 1;", isError: false }, { type: "toolResult", id: "toolu_2", name: "mystery_tool", text: "boom", isError: true }]);
+		// Tokens without credits: no cost is invented for it.
+		orb.say(h, "assistant", "Done.", undefined, { model: "gpt-x", input: 5, output: 6 });
+		for (let i = 0; i < 3; i++) await w.step(threadId);
+		const ledger = async () => (await s.pool.query("select payload from pim_forge.forge_outbox where topic = 'cost_ledger' and thread_id = $1 order by id", [threadId])).rows.map((r) => r.payload);
+		expect(await ledger()).toEqual([{ run_kind: "coding_thread", threadId, costUsd: 0.03, tokensIn: 10, tokensOut: 220, model: "claude-opus-4-5", cacheReadTokens: 16000, cacheWriteTokens: 900 }]);
+		expect((await s.store.get(threadId))!.spentUsd).toBeCloseTo(0.03, 9);
+		// A later message adds its own cost; the earlier ones, read again at each step, were counted once.
+		orb.say(h, "assistant", "More.", undefined, { usd: 0.01 });
+		await w.step(threadId);
+		expect((await ledger()).map((p) => p.costUsd)).toEqual([0.03, 0.01]);
+		const messages = await s.forge.transcriptMessages(ada, threadId);
+		expect(messages.map((m) => [m.role, m.parts.map((p) => p.type)])).toEqual([
+			["user", ["text"]],
+			["assistant", ["text", "tool-call", "tool-call"]],
+			["tool", ["tool-result"]],
+			["tool", ["tool-result"]],
+			["assistant", ["text"]],
+			["assistant", ["text"]],
+		]);
+		expect(messages[1]!.parts[2]).toMatchObject({ name: "mystery_tool", arguments: { odd: [1, { x: 2 }] } });
+		expect(messages[3]!.parts[0]).toMatchObject({ id: "toolu_2", name: "mystery_tool", error: true, content: [{ type: "text", text: "boom" }] });
+		// The results message is not a person steering the thread.
+		expect((await s.pool.query("select count(*)::int n from pim_forge.forge_events where thread_id = $1 and kind = 'thread.turn_started' and data ->> 'external' = 'true'", [threadId])).rows[0].n).toBe(0);
+	});
 });

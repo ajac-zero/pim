@@ -15,7 +15,7 @@ export type HarnessCapabilityDescriptor = {
 	readonly needsWorkspace: boolean;
 	/** How a stopped turn resumes. */
 	readonly resume: "pi-durable-state" | "vendor-session-id" | "remote-thread";
-	/** How cost reaches the thread's spend. `orb-reported-usd`: Amp's orb client reports dollars only when its `usage` call says so (`OrbCapabilities.usage`); otherwise the thread's spend stays 0 and unmetered. */
+	/** How cost reaches the thread's spend. `orb-reported-usd`: dollars the agent's cloud reports, as a thread total when its `usage` call says so (`OrbCapabilities.usage`) and per message when its messages carry them (Amp's do); a thread that reports none stays at 0 and unmetered. */
 	readonly cost: "per-call" | "usd-delta" | "tokens-only" | "reported-total" | "orb-reported-usd";
 	/** Whether Forge can stop the model before the budget is crossed, or only notice afterwards. */
 	readonly budgetEnforced: boolean;

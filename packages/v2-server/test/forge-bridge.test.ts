@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { FakeOrbClient } from "@pim/coding/orb/fake";
 import { projectEntries } from "@pim/shared/transcript";
@@ -8,9 +9,12 @@ import { MemoryObjects } from "@pim/v2-forge/ports";
 import { ForgeScheduler } from "@pim/v2-forge/scheduler";
 import { ForgeStore } from "@pim/v2-forge/store";
 import { Credentials } from "@pim/v2-forge/tokens";
+import { connect } from "@pim/v2-app/db";
+import { Usage } from "@pim/v2-app/usage";
 import { Projector } from "@pim/v2-live/projections/projector";
 import { sidebarPage, transcriptPage } from "@pim/v2-live/projections/snapshots";
 import { combineSources, forgeOutboxSource, forgePartitionId } from "../src/forge-source.ts";
+import { deliverCosts } from "../src/deliveries.ts";
 import { deliverForgeWakes } from "../src/forge-wakes.ts";
 import { runtimeOutboxSource } from "../src/runtime-source.ts";
 import { readTranscript, textOf, waitFor } from "../../v2-runtime/test/support/rig.ts";
@@ -102,6 +106,28 @@ describe("Forge's outbox joined to the runtime's inbox and to Live", () => {
 		// The cost row was left for the ledger's consumer.
 		expect((await stack.admin.query("SELECT count(*)::int AS n FROM pim_forge.forge_outbox WHERE topic = 'cost_ledger' AND delivered_at IS NULL")).rows[0].n).toBeGreaterThan(0);
 		expect(unroutable).toEqual([]);
+	});
+
+	it("keeps a coding thread's cost under the chat that started it, once, and projects tool steps recorded as an Amp thread's are", async () => {
+		const { threadId } = await forge.start(ada, { operationId: "op-amp", task: "Fix it", repo: REPO, chatId: chat });
+		await store.locked(threadId, async (q) => {
+			await store.appendEvent(q, threadId, { kind: "message", role: "assistant", sourceCursor: "orb:1", data: { text: "Reading.", parts: [{ type: "text", text: "Reading." }, { type: "toolCall", id: "toolu_1", name: "Read", arguments: { path: "a.ts" } }] } });
+			await store.appendEvent(q, threadId, { kind: "model_call", costUsd: 0.12, tokensIn: 7, tokensOut: 9, sourceCursor: "usage:msg:1", data: { via: "orb", model: "claude-opus-4-5", cacheReadTokens: 40 } });
+			await store.appendEvent(q, threadId, { kind: "message", role: "user", sourceCursor: "orb:2", data: { text: "", parts: [{ type: "toolResult", id: "toolu_1", name: "Read", text: "const a = 1;", isError: false }] } });
+		});
+		await projector.drainAll();
+		const projected = await transcriptPage(stack.live, ADA, threadId, { kind: "coding" });
+		expect(projected.messages.map((m) => [m.role, m.parts.map((p) => p.type)])).toEqual([["assistant", ["text", "tool-call"]], ["tool", ["tool-result"]]]);
+		await stack.admin.query("INSERT INTO pim_app.accounts (owner_id, username, role, status) VALUES ($1, 'ada', 'member', 'active') ON CONFLICT DO NOTHING", [ADA]);
+		const usage = new Usage(connect(stack.url("gate"), 2));
+		await deliverCosts({ forge, forgeDb: forgeDb(), usage });
+		await deliverCosts({ forge, forgeDb: forgeDb(), usage });
+		const rows = (await stack.admin.query("SELECT public_chat_id, run_kind, provider, model, input_tokens, output_tokens, cache_read_tokens, cost_microusd FROM pim_app.model_calls WHERE thread_id = $1", [threadId])).rows;
+		expect(rows).toEqual([{ public_chat_id: chat, run_kind: "coding_thread", provider: "pi", model: "claude-opus-4-5", input_tokens: "7", output_tokens: "9", cache_read_tokens: "40", cost_microusd: "120000" }]);
+		// A row recorded before cost carried its chat takes the thread's chat from migration 0718.
+		await stack.admin.query("UPDATE pim_app.model_calls SET public_chat_id = NULL, provider = NULL WHERE thread_id = $1", [threadId]);
+		await stack.admin.query(readFileSync(new URL("../migrations/0718_coding_cost_chat.sql", import.meta.url), "utf8"));
+		expect((await stack.admin.query("SELECT public_chat_id, provider FROM pim_app.model_calls WHERE thread_id = $1", [threadId])).rows).toEqual([{ public_chat_id: chat, provider: "pi" }]);
 	});
 
 	it("reports and drops a wake whose chat does not exist instead of retrying it forever", async () => {

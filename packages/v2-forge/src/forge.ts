@@ -16,6 +16,7 @@ import { type Credentials } from "./tokens";
 import { threadRef } from "./identity";
 import { refuseFollowedBranch, refuseOrbBranch } from "./orb-branch";
 import { StallSupervisor } from "./stall";
+import { eventMessages } from "./event-messages";
 import { MAX_DIFF_CHARS, autosaveWorkspace, checkpointWorkspace, ensureBase, gitIn, keepDiff, latestCheckpoint, makeDiff } from "./checkpoint";
 import { REPO_DIR } from "./git-checkout";
 import { type TestSummary, parseTestSummary } from "@pim/coding/tools/test-results";
@@ -395,16 +396,7 @@ export class Forge {
 	/** The thread's messages as the shared transcript shape: its events' ids are their sequence numbers. */
 	private async messages(threadId: string): Promise<TranscriptMessage[]> {
 		const rows = await this.c.store.events(threadId, { kind: "message" });
-		return rows.map((e) => {
-			const d = e.data ?? {};
-			const parts: TranscriptMessage["parts"][number][] = [];
-			if (e.role === "tool") parts.push({ type: "tool-result", id: String(d.toolCallId ?? ""), name: String(d.name ?? "tool"), content: [{ type: "text", text: String(d.text ?? "") }], error: d.isError === true });
-			else {
-				if (d.text) parts.push({ type: "text", text: String(d.text) });
-				for (const c of d.toolCalls ?? []) parts.push({ type: "tool-call", id: String(c.id), name: String(c.name), arguments: c.arguments ?? {} });
-			}
-			return { id: String(e.seq), role: (["user", "assistant", "tool", "notice"].includes(e.role) ? e.role : "notice") as TranscriptMessage["role"], parts, timestamp: new Date(e.at).getTime() };
-		});
+		return rows.flatMap((e) => eventMessages(e as never));
 	}
 
 	/** The checkpoint helpers' view of the config: where the checkout is, and what runs commands in it. */

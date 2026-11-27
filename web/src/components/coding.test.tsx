@@ -932,6 +932,118 @@ describe("a thread's page", () => {
     expect(screen.queryByRole("button", { name: "Archive" })).toBeNull();
   });
 
+  it("shows an Amp thread's tool steps, its own tool names and failures included, and a call still running without a result", async () => {
+    // As the server maps an Amp thread: the call on the assistant's message, each result a message of its own, no empty user message for them.
+    const { api } = fakeApi(view({ harness: "amp" }), [
+      {
+        id: "1",
+        role: "user",
+        parts: [{ type: "text", text: "Fix the parser" }],
+        timestamp: 1,
+      },
+      {
+        id: "2",
+        role: "assistant",
+        parts: [
+          { type: "text", text: "Reading it." },
+          {
+            type: "tool-call",
+            id: "toolu_1",
+            name: "Read",
+            arguments: { path: "src/parser.ts" },
+          },
+          {
+            type: "tool-call",
+            id: "toolu_2",
+            name: "edit_file",
+            arguments: { path: "src/parser.ts", old_str: "a", new_str: "b" },
+          },
+          {
+            type: "tool-call",
+            id: "toolu_3",
+            name: "mcp__linear__create_issue",
+            arguments: { odd: [1, { x: 2 }] },
+          },
+          {
+            type: "tool-call",
+            id: "toolu_4",
+            name: "Bash",
+            arguments: { cmd: "sleep 9" },
+          },
+        ],
+        timestamp: 2,
+      },
+      {
+        id: "3:toolu_1",
+        role: "tool",
+        parts: [
+          {
+            type: "tool-result",
+            id: "toolu_1",
+            name: "Read",
+            content: [{ type: "text", text: "export const parse = 1;" }],
+            error: false,
+          },
+        ],
+        timestamp: 3,
+      },
+      {
+        id: "3:toolu_2",
+        role: "tool",
+        parts: [
+          {
+            type: "tool-result",
+            id: "toolu_2",
+            name: "edit_file",
+            content: [{ type: "text", text: "old_str not found" }],
+            error: true,
+          },
+        ],
+        timestamp: 3,
+      },
+      {
+        id: "3:toolu_3",
+        role: "tool",
+        parts: [
+          {
+            type: "tool-result",
+            id: "toolu_3",
+            name: "mcp__linear__create_issue",
+            content: [{ type: "text", text: '{"id":"LIN-1"}' }],
+            error: false,
+          },
+        ],
+        timestamp: 3,
+      },
+    ]);
+    threadPage(api);
+    await waitFor(() =>
+      expect(
+        document.querySelectorAll("details[data-kind='tool']"),
+      ).toHaveLength(4),
+    );
+    const steps = [
+      ...document.querySelectorAll<HTMLDetailsElement>(
+        "details[data-kind='tool']",
+      ),
+    ];
+    // Each call shows its input, and its result when it has one.
+    expect(steps[0]?.textContent).toContain("src/parser.ts");
+    expect(steps[0]?.textContent).toContain("export const parse = 1;");
+    expect(steps[1]?.textContent).toContain("Failed");
+    expect(steps[1]?.textContent).toContain("old_str not found");
+    // A tool Pim has no word for is still a step, named after the tool, with its input as JSON.
+    expect(steps[2]?.querySelector("summary")?.textContent).toContain(
+      "mcp  linear  create issue",
+    );
+    expect(steps[2]?.querySelector("pre")?.textContent).toContain('"x": 2');
+    // A call with no result yet says so; the person's task is the only user message shown.
+    expect(steps[3]?.querySelector("summary")?.textContent).toContain(
+      "No result",
+    );
+    expect(screen.getAllByText("Fix the parser")).toHaveLength(1);
+  });
+
   it("folds tool calls by default and shows test runs apart", async () => {
     const { api } = fakeApi(view(), [
       {

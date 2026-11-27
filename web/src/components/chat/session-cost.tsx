@@ -11,6 +11,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "~/components/ui/dropdown-menu";
+import { type CodingHarness, HARNESS_NAMES } from "~/lib/coding";
 import {
   sessionCostQuery,
   sessionsQuery,
@@ -71,12 +72,12 @@ export function SessionCostMenu({ sessionId }: { sessionId: string }) {
         <DropdownMenuLabel className="font-medium text-sm">
           {cost ? t("sessionCostTotal", { amount: money(cost.total) }) : label}
         </DropdownMenuLabel>
-        {cost && cost.models.length === 0 && (
+        {cost && cost.models.length === 0 && cost.coding.length === 0 && (
           <DropdownMenuLabel className="font-normal text-muted-foreground text-xs">
             {t("sessionCostNone")}
           </DropdownMenuLabel>
         )}
-        {cost && cost.models.length > 0 && (
+        {cost && cost.models.length + cost.coding.length > 0 && (
           <DropdownMenuLabel className="font-normal text-muted-foreground text-xs">
             {cost.cacheHitRatio === null
               ? t("sessionCostHitRateUnknown")
@@ -103,6 +104,38 @@ export function SessionCostMenu({ sessionId }: { sessionId: string }) {
             </div>
           </DropdownMenuLabel>
         ))}
+        {cost && cost.coding.length > 0 && (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuLabel className="font-medium text-muted-foreground text-xs">
+              {t("sessionCostCoding")}
+            </DropdownMenuLabel>
+            {cost.coding.map((row) => (
+              <DropdownMenuLabel
+                key={`${row.harness}/${row.model}`}
+                className="font-normal"
+              >
+                <div className="flex justify-between gap-3 text-sm">
+                  <span className="truncate">
+                    {HARNESS_NAMES[row.harness as CodingHarness] ?? row.harness}
+                    {row.model && ` · ${row.model}`}
+                  </span>
+                  <span className="shrink-0">{money(row.cost)}</span>
+                </div>
+                {row.input + row.output + row.cacheRead + row.cacheWrite >
+                  0 && (
+                  <div className="text-muted-foreground text-xs leading-5">
+                    {t("sessionCostTokens", {
+                      input: formatNumber(row.input),
+                      output: formatNumber(row.output),
+                      cached: formatNumber(row.cacheRead + row.cacheWrite),
+                    })}
+                  </div>
+                )}
+              </DropdownMenuLabel>
+            ))}
+          </>
+        )}
         {cost && cost.models.length > 0 && (
           <>
             <DropdownMenuSeparator />

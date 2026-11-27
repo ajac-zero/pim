@@ -179,15 +179,22 @@ export function sessionRoutes(env: Record<string, string | undefined> = process.
 			await app.identity.authz.enforce(p, "api:read");
 			const id = chatId(params[0]!);
 			await sessionView(app, p, id);
+			// The chat's own model calls and, apart from them, its coding threads' spend (`run_kind = 'coding_thread'`, recorded under the chat that started the thread, `provider` being the harness). A coding row counts toward the
+			// cache hit rate only when its harness reported the cache tiers: one that reports tokens alone would read as a full miss.
 			const rows = await app.db.owner(p.ownerId, async (tx) => (await tx.query(
-				`${FAMILY} SELECT coalesce(provider, '') AS provider, coalesce(model, '') AS model, sum(input_tokens)::bigint AS input, sum(output_tokens)::bigint AS output,
-				        sum(cache_read_tokens)::bigint AS cache_read, sum(cache_write_tokens)::bigint AS cache_write, sum(cost_microusd)::bigint AS cost
-				 FROM pim_app.model_calls WHERE public_chat_id IN (SELECT chat FROM family) GROUP BY 1, 2 ORDER BY sum(cost_microusd) DESC, 1, 2`,
+				`${FAMILY} SELECT coalesce(provider, '') AS provider, coalesce(model, '') AS model, run_kind = 'coding_thread' AS coding, count(DISTINCT thread_id)::int AS threads,
+				        sum(input_tokens)::bigint AS input, sum(output_tokens)::bigint AS output, sum(cache_read_tokens)::bigint AS cache_read, sum(cache_write_tokens)::bigint AS cache_write, sum(cost_microusd)::bigint AS cost,
+				        coalesce(sum(input_tokens) FILTER (WHERE run_kind <> 'coding_thread' OR cache_read_tokens + cache_write_tokens > 0), 0)::bigint AS measured_input,
+				        coalesce(sum(cache_read_tokens) FILTER (WHERE run_kind <> 'coding_thread' OR cache_read_tokens + cache_write_tokens > 0), 0)::bigint AS measured_read,
+				        coalesce(sum(cache_write_tokens) FILTER (WHERE run_kind <> 'coding_thread' OR cache_read_tokens + cache_write_tokens > 0), 0)::bigint AS measured_write
+				 FROM pim_app.model_calls WHERE public_chat_id IN (SELECT chat FROM family) GROUP BY 1, 2, 3 ORDER BY sum(cost_microusd) DESC, 1, 2`,
 				[id],
 			)).rows);
-			const models = rows.map((r) => ({ provider: r.provider as string, model: r.model as string, input: Number(r.input), output: Number(r.output), cacheRead: Number(r.cache_read), cacheWrite: Number(r.cache_write), cost: Number(r.cost) / 1e6 }));
-			const sum = (key: "input" | "cacheRead" | "cacheWrite") => models.reduce((n, m) => n + m[key], 0);
-			return ok({ total: models.reduce((n, m) => n + m.cost, 0), cacheHitRatio: cacheHitRatio({ input: sum("input"), cacheRead: sum("cacheRead"), cacheWrite: sum("cacheWrite") }), models });
+			const line = (r: any) => ({ provider: r.provider as string, model: r.model as string, input: Number(r.input), output: Number(r.output), cacheRead: Number(r.cache_read), cacheWrite: Number(r.cache_write), cost: Number(r.cost) / 1e6 });
+			const models = rows.filter((r) => !r.coding).map(line);
+			const coding = rows.filter((r) => r.coding).map((r) => ({ ...line(r), harness: r.provider as string, threads: r.threads as number }));
+			const measured = (key: "measured_input" | "measured_read" | "measured_write") => rows.reduce((n, r) => n + Number(r[key]), 0);
+			return ok({ total: [...models, ...coding].reduce((n, m) => n + m.cost, 0), cacheHitRatio: cacheHitRatio({ input: measured("measured_input"), cacheRead: measured("measured_read"), cacheWrite: measured("measured_write") }), models, coding });
 		}),
 		// The chat's last model calls, newest first, for the cost meter's history; read only when the person opens it.
 		route("GET", "/api/sessions/:id/turns", async ({ app, principal, params }) => {

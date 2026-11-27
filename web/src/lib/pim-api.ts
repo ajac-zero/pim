@@ -307,6 +307,18 @@ export type SessionCost = {
     cacheWrite: number;
     cost: number;
   }[];
+  /** What the chat's coding threads spent, by harness and model, as the harness reported it; empty when none reported a cost. */
+  coding: {
+    /** The coding harness's id, such as `amp`. */
+    harness: string;
+    model: string;
+    threads: number;
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheWrite: number;
+    cost: number;
+  }[];
 };
 
 /** One model call of a chat (`GET /sessions/:id/turns`), newest first; `input` is the uncached input. */

@@ -5,6 +5,7 @@
  * are one stream, a pseudo-partition with a stable id, so the projector's watermark, cursors and rebuild work as for the runtime's.
  */
 import { createHash } from "node:crypto";
+import { eventMessages } from "@pim/v2-forge/event-messages";
 import type { TranscriptMessage } from "@pim/shared/transcript";
 import { OwnerId, type PartitionId, type PublicChatId } from "@pim/v2-contracts/identity";
 import type { RuntimeOutboxEvent } from "@pim/v2-contracts/runtime-seam";
@@ -19,17 +20,10 @@ export function forgePartitionId(ownerId: string): PartitionId {
 
 type FeedRow = { owner_seq: string; topic: string; payload: { type?: string; threadId?: string; seq?: number }; created_at: Date; thread_id: string | null; task: string | null; harness: string | null; state: string | null; updated_at: Date | null; role: string | null; data: Record<string, any> | null; event_at: Date | null };
 
-/** A thread's messages in the shared transcript shape, as Forge's own transcript reads them. */
-function messageOf(row: FeedRow): TranscriptMessage | undefined {
-	if (row.role === null || row.data === null) return undefined;
-	const d = row.data;
-	const parts: TranscriptMessage["parts"][number][] = [];
-	if (row.role === "tool") parts.push({ type: "tool-result", id: String(d.toolCallId ?? ""), name: String(d.name ?? "tool"), content: [{ type: "text", text: String(d.text ?? "") }], error: d.isError === true });
-	else {
-		if (d.text) parts.push({ type: "text", text: String(d.text) });
-		for (const c of d.toolCalls ?? []) parts.push({ type: "tool-call", id: String(c.id), name: String(c.name), arguments: c.arguments ?? {} });
-	}
-	return { id: String(row.payload.seq), role: (["user", "assistant", "tool", "notice"].includes(row.role) ? row.role : "notice") as TranscriptMessage["role"], parts, timestamp: (row.event_at ?? row.created_at).getTime() };
+/** A thread's messages in the shared transcript shape, as Forge's own transcript reads them: a message, and each tool result it carries. */
+function messagesOf(row: FeedRow): TranscriptMessage[] {
+	if (row.role === null || row.data === null) return [];
+	return eventMessages({ seq: row.payload.seq, role: row.role, data: row.data, at: row.event_at ?? row.created_at });
 }
 
 const firstLine = (task: string | null) => (task ?? "").split("\n", 1)[0]!.trim().slice(0, 120);
@@ -58,8 +52,7 @@ export function forgeOutboxSource(pool: Pool): OutboxSource {
 				if (row.topic === "projection" && row.thread_id !== null) {
 					const type = row.payload.type;
 					if (type === "coding.event") {
-						const message = messageOf(row);
-						if (message) events.push(event("chat.entry", { stream: "coding", threadId, message, position: Number(row.payload.seq) }));
+						for (const message of messagesOf(row)) events.push(event("chat.entry", { stream: "coding", threadId, message, position: Number(row.payload.seq) }));
 					} else if (type === "coding.created" || type === "coding.state" || type === "coding.archived") {
 						const state = type === "coding.archived" ? "archived" : (row.state ?? "idle");
 						events.push(event("coding.thread", { threadId, title: firstLine(row.task), harness: row.harness ?? undefined, state, running: state === "running", updatedAt: (row.updated_at ?? row.created_at).getTime() }));

@@ -10,8 +10,10 @@ const BUILTIN_NAMES: Record<string, string> = { anthropic: "Anthropic", openai: 
 
 export const isWebProviderInput = (body: Record<string, any>) => ["builtin", "url", "key", "models"].some((k) => k in body) && !("kind" in body) && !("apiKey" in body);
 
-type ListedModel = { id: string; name?: string; contextWindow?: number; maxTokens?: number; reasoning?: boolean; images?: boolean };
-type Overrides = Record<string, { contextWindow?: number; maxTokens?: number; images?: boolean; cost?: Record<"input" | "output" | "cacheRead" | "cacheWrite", number> }>;
+/** Prices in US dollars per million tokens. */
+type ModelCost = Record<"input" | "output" | "cacheRead" | "cacheWrite", number>;
+type ListedModel = { id: string; name?: string; contextWindow?: number; maxTokens?: number; reasoning?: boolean; images?: boolean; cost?: ModelCost };
+type Overrides = Record<string, { contextWindow?: number; maxTokens?: number; images?: boolean; cost?: ModelCost }>;
 
 /** What pi-ai's catalog knows of a model by its id. */
 export type KnownModel = { contextWindow: number; maxTokens: number; images: boolean; reasoning: boolean };
@@ -36,7 +38,7 @@ const count = (value: unknown): number | undefined => (Number.isSafeInteger(valu
 
 /**
  * The models the server at `url` lists, with what it says of each (v1's `describe`): OpenRouter's `context_length` and `top_provider`, vLLM's `max_model_len`, llama.cpp's `n_ctx`,
- * `max_completion_tokens` and `max_output_tokens` as gateways give them, Gemini's `outputTokenLimit`, the input modalities and the supported parameters. Throws with why it could not.
+ * `max_completion_tokens` and `max_output_tokens` as gateways give them, Gemini's `outputTokenLimit`, the input modalities, the supported parameters and OpenRouter's `pricing`. Throws with why it could not.
  */
 async function listed(url: string, key: string | undefined, api: unknown, fetcher: typeof fetch): Promise<{ models: ListedModel[]; url: string }> {
 	// Anthropic's Messages API lists models under `/v1` and takes its key as `x-api-key`; proxies often take only one of the two headers.
@@ -83,6 +85,21 @@ function discoveryUrls(url: string, anthropic: boolean): string[] {
 	return [...new Set(found)].slice(0, MAX_ATTEMPTS);
 }
 
+/** A price in dollars per token, as a number or a numeric string, in dollars per million tokens; rounded so "0.000003" is 3 and not 3.0000000000000004. */
+const perMillion = (value: unknown): number | undefined => {
+	const perToken = typeof value === "number" ? value : typeof value === "string" && value.trim() !== "" ? Number(value) : Number.NaN;
+	return Number.isFinite(perToken) && perToken >= 0 ? Math.round(perToken * 1e12) / 1e6 : undefined;
+};
+
+/** OpenRouter's `pricing`: dollars per token for `prompt` and `completion`, both needed, and optionally `input_cache_read` and `input_cache_write`, which count as free when missing or malformed. */
+const priceOf = (pricing: unknown): ModelCost | undefined => {
+	if (!isObject(pricing)) return undefined;
+	const input = perMillion(pricing.prompt);
+	const output = perMillion(pricing.completion);
+	if (input === undefined || output === undefined) return undefined;
+	return { input, output, cacheRead: perMillion(pricing.input_cache_read) ?? 0, cacheWrite: perMillion(pricing.input_cache_write) ?? 0 };
+};
+
 function describe(data: unknown[]): ListedModel[] {
 	return data.filter((entry): entry is Record<string, unknown> & { id: string } => isObject(entry) && typeof entry.id === "string" && MODEL_ID.test(entry.id)).map((entry) => {
 		const modalities = Array.isArray(isObject(entry.architecture) ? entry.architecture.input_modalities : undefined) ? ((entry.architecture as Record<string, unknown>).input_modalities as unknown[]) : undefined;
@@ -91,6 +108,7 @@ function describe(data: unknown[]): ListedModel[] {
 		const meta = isObject(entry.meta) ? entry.meta : undefined;
 		const contextWindow = count(entry.context_length) ?? count(entry.max_model_len) ?? count(meta?.n_ctx);
 		const maxTokens = count(top?.max_completion_tokens) ?? count(entry.max_completion_tokens) ?? count(entry.max_output_tokens) ?? count(entry.outputTokenLimit) ?? count(entry.max_tokens);
+		const cost = priceOf(entry.pricing);
 		return {
 			id: entry.id,
 			...(typeof entry.name === "string" && entry.name.trim() ? { name: entry.name.trim() } : {}),
@@ -98,6 +116,7 @@ function describe(data: unknown[]): ListedModel[] {
 			...(maxTokens ? { maxTokens } : {}),
 			...(modalities ? { images: modalities.includes("image") } : {}),
 			...(parameters ? { reasoning: parameters.includes("reasoning") } : {}),
+			...(cost ? { cost } : {}),
 		};
 	});
 }
@@ -220,7 +239,7 @@ export async function refreshModels(existing: Provider, key: string | null | und
 export function toWebProvider(p: Provider) {
 	const c = p.config as Record<string, any>;
 	// What a card says of a model: what the person set, then what the server listed, then what pi-ai's catalog knows of that id, then the defaults of a text-only model.
-	const stored = ((c.models ?? (c.builtin && Array.isArray(c.chosen) ? c.chosen.map((id: string) => ({ id })) : [])) as (ListedModel & { cost?: unknown })[]);
+	const stored = ((c.models ?? (c.builtin && Array.isArray(c.chosen) ? c.chosen.map((id: string) => ({ id })) : [])) as ListedModel[]);
 	const models = stored.map((m) => {
 		const known = providerCatalog.known?.(m.id);
 		const contextWindow = m.contextWindow ?? known?.contextWindow ?? 128_000;

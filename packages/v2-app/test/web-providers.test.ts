@@ -80,6 +80,42 @@ describe("a provider's form", () => {
 		}
 	});
 
+	it("reads OpenRouter-style pricing as dollars per million tokens, and lets a person's prices come first", async () => {
+		const listing = [
+			{ id: "paid", pricing: { prompt: "0.000003", completion: "0.000015", input_cache_read: "0.0000003", input_cache_write: "0.00000375" } },
+			{ id: "cheap", pricing: { prompt: "0.00000015", completion: 0.0000006, input_cache_read: null } },
+			{ id: "free", pricing: { prompt: "0", completion: 0 } },
+			{ id: "bad-cache", pricing: { prompt: "0.000001", completion: "0.000002", input_cache_read: "-1", input_cache_write: "x" } },
+			{ id: "negative", pricing: { prompt: "-1", completion: "0.000002" } },
+			{ id: "nan", pricing: { prompt: "abc", completion: "0.000002" } },
+			{ id: "infinite", pricing: { prompt: "Infinity", completion: "0.000002" } },
+			{ id: "missing", pricing: { prompt: "0.000001" } },
+			{ id: "empty", pricing: { prompt: "", completion: "" } },
+			{ id: "not-object", pricing: "free" },
+			{ id: "none" },
+		];
+		const fetcher = lists(listing);
+		const made = await toServiceInput({ name: "Gw", url: "http://gw.test/v1", key: "k" }, undefined, { fetcher });
+		const models = made.config.models as any[];
+		const cost = (id: string) => models.find((m) => m.id === id).cost;
+		expect(cost("paid")).toEqual({ input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 });
+		expect(cost("cheap")).toEqual({ input: 0.15, output: 0.6, cacheRead: 0, cacheWrite: 0 });
+		expect(cost("free")).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+		expect(cost("bad-cache")).toEqual({ input: 1, output: 2, cacheRead: 0, cacheWrite: 0 });
+		for (const id of ["negative", "nan", "infinite", "missing", "empty", "not-object", "none"]) expect(models.find((m) => m.id === id)).not.toHaveProperty("cost");
+		// The listing's price reaches the card, and a person's own comes first without becoming an override.
+		expect(toWebProvider(stored(made.config)).models[0]).toMatchObject({ id: "paid", cost: { input: 3, output: 15 } });
+		const set = await toServiceInput({ overrides: { paid: { cost: { input: 1, output: 2 } } } }, stored(made.config), { existingKey: "k", fetcher });
+		expect((set.config.models as any[])[0].cost).toEqual({ input: 1, output: 2, cacheRead: 0, cacheWrite: 0 });
+		expect(Object.keys(set.config.overrides as object)).toEqual(["paid"]);
+		expect(Object.keys((made.config as any).overrides)).toEqual([]);
+		// Reading the models again takes the listing's new price, under the person's.
+		const existing = stored({ baseUrl: "https://gw.test/v1", models: [{ id: "paid", cost: { input: 9, output: 9, cacheRead: 9, cacheWrite: 9 } }, { id: "cheap", cost: { input: 9, output: 9, cacheRead: 0, cacheWrite: 0 } }], overrides: { paid: { cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 } } } });
+		const refreshed = await refreshModels(existing, "k", fetcher);
+		expect((refreshed.config.models as any[]).map((m) => m.cost)).toEqual([{ input: 1, output: 2, cacheRead: 0, cacheWrite: 0 }, { input: 0.15, output: 0.6, cacheRead: 0, cacheWrite: 0 }]);
+		expect(refreshed.config.overrides).toEqual(existing.config.overrides);
+	});
+
 	describe("reading a server's models", () => {
 		const gateway = (urls: string[]) => (async (url: string) => (urls.push(url), url === "https://gw.test/v1/models" ? new Response(JSON.stringify({ object: "list", data: [{ id: "claude", context_length: 5_000 }, { id: "other" }] })) : new Response("{}", { status: 400 }))) as unknown as typeof fetch;
 

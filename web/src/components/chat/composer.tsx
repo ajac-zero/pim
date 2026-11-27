@@ -97,6 +97,14 @@ export interface ComposerProps {
    * chat not yet started has none, and no picker.
    */
   session?: string;
+  /**
+   * For a chat not yet started: the model it will begin on, chosen in the
+   * picker (`useDraftModel`), in place of the chat's own.
+   */
+  draftModel?: Pick<
+    ReturnType<typeof useSessionModel>,
+    "settings" | "current" | "pinned" | "fallback"
+  > & { choose: ModelChoice };
   /** The agents in the chat, which an @ offers to mention. */
   mentions?: readonly Agent[];
   /**
@@ -294,6 +302,7 @@ function ComposerInner({
   mentions,
   agent,
   session,
+  draftModel,
   controls,
   uploads = false,
   hideAttach = false,
@@ -318,10 +327,9 @@ function ComposerInner({
     if (text) drafts.set(draftKey, text);
     else drafts.delete(draftKey);
   }, [draftKey, text]);
-  const { settings, current, pinned, fallback, choose } = useSessionModel(
-    session ?? "",
-    agent?.id,
-  );
+  const sessionModel = useSessionModel(session ?? "", agent?.id);
+  const { settings, current, pinned, fallback, choose } =
+    draftModel ?? sessionModel;
   const model = current;
   const seesImages = model?.images ?? false;
   const { data: computer } = useQuery({ ...computerQuery(), enabled: uploads });
@@ -883,16 +891,20 @@ function ComposerInner({
                 )}
               </Button>
             )}
-            {settings && current && fallback && agent && session && (
-              <ModelPicker
-                settings={settings}
-                current={current}
-                pinned={pinned}
-                fallback={fallback}
-                choose={choose}
-                agent={agent}
-              />
-            )}
+            {settings &&
+              current &&
+              fallback &&
+              agent &&
+              (session || draftModel) && (
+                <ModelPicker
+                  settings={settings}
+                  current={current}
+                  pinned={pinned}
+                  fallback={fallback}
+                  choose={choose}
+                  agent={agent}
+                />
+              )}
             {voice.supported && !hasContent && !showStop && !preparing ? (
               <Button
                 type="button"
@@ -942,6 +954,12 @@ function ComposerInner({
   );
 }
 
+/** What the picker chooses with: a mutation, or for a chat not yet started, setting its draft. */
+type ModelChoice = {
+  mutate: (model: Pick<ModelInfo, "provider" | "id"> | null) => void;
+  isPending: boolean;
+};
+
 /**
  * The chat's model, as its logo beside Send, with its name on hover. Choosing
  * here sets the model of this chat alone; "Default" has it follow its agent's
@@ -962,7 +980,7 @@ function ModelPicker({
   pinned: boolean;
   /** The agent's model, which "Default" goes back to. */
   fallback: ModelInfo;
-  choose: ReturnType<typeof useSessionModel>["choose"];
+  choose: ModelChoice;
   agent: Pick<Agent, "id" | "name">;
 }) {
   const { t } = useI18n();

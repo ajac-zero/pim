@@ -3,7 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { afterEach, expect, it, vi } from "vitest";
-import { useSessionModel } from "~/components/chat/model-menu";
+import { useDraftModel, useSessionModel } from "~/components/chat/model-menu";
 import { type ModelInfo, pim } from "~/lib/pim-api";
 import { agentsQuery, modelQuery, sessionsQuery } from "~/lib/queries";
 
@@ -88,4 +88,58 @@ it("chooses another agent's model in a group chat for that chat's seat, never fo
   );
   expect(chat).not.toHaveBeenCalled();
   expect(agent).not.toHaveBeenCalled();
+});
+
+it("drafts a new chat's model: the agent's own to start with, kept across agents, dropped once no longer offered", async () => {
+  const wrapper = setup();
+  const chat = vi.spyOn(pim, "chooseSessionModel");
+  const { result, rerender } = renderHook(({ agent }) => useDraftModel(agent), {
+    wrapper,
+    initialProps: { agent: "p_buddy" },
+  });
+  // Nothing chosen: the agent's model, which "Default" goes back to.
+  expect(result.current.current).toEqual(vision);
+  expect(result.current.fallback).toEqual(vision);
+  expect(result.current.pinned).toBe(false);
+  expect(result.current.model).toBeNull();
+  act(() => result.current.choose.mutate(own));
+  expect(result.current.current).toEqual(own);
+  expect(result.current.pinned).toBe(true);
+  expect(result.current.model).toEqual({ provider: own.provider, id: own.id });
+  // Another agent keeps the choice and has its own default.
+  rerender({ agent: "p_host" });
+  expect(result.current.current).toEqual(own);
+  expect(result.current.fallback).toEqual(base);
+  act(() => result.current.choose.mutate(null));
+  expect(result.current.current).toEqual(base);
+  expect(result.current.model).toBeNull();
+  expect(chat).not.toHaveBeenCalled();
+});
+
+it("drops a drafted model that is no longer one of the choices", async () => {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: Infinity } },
+  });
+  const settings = { model: base, choices: [base, vision], providers: [] };
+  client.setQueryData(modelQuery().queryKey, settings as never);
+  client.setQueryData(agentsQuery().queryKey, [
+    { id: "a", model: null },
+  ] as never);
+  const wrapper = ({ children }: { children: ReactNode }) => (
+    <QueryClientProvider client={client}>{children}</QueryClientProvider>
+  );
+  const { result } = renderHook(() => useDraftModel("a"), { wrapper });
+  act(() => result.current.choose.mutate(vision));
+  expect(result.current.model).toEqual({
+    provider: vision.provider,
+    id: vision.id,
+  });
+  act(() =>
+    client.setQueryData(modelQuery().queryKey, {
+      ...settings,
+      choices: [base],
+    } as never),
+  );
+  await waitFor(() => expect(result.current.model).toBeNull());
+  expect(result.current.current).toEqual(base);
 });

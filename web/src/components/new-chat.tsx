@@ -1,8 +1,10 @@
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { Dialog } from "radix-ui";
+import { useEffect } from "react";
 import { AgentIcon } from "~/components/agent-icon";
 import { Composer } from "~/components/chat/composer";
+import { useDraftModel } from "~/components/chat/model-menu";
 import { useI18n } from "~/components/i18n";
 import { ChevronDown, X } from "~/components/icons";
 import {
@@ -43,7 +45,13 @@ export function NewChatDialog({
     agents?.find((choice) => choice.id === asked) ??
     agents?.find((choice) => choice.id === chatAgent) ??
     agents?.find((choice) => choice.majordomo);
-  const { start, starting } = useStartChat(agent?.id);
+  const draftModel = useDraftModel(agent?.id);
+  const { start, starting } = useStartChat(agent?.id, draftModel.model);
+  // The model is for this chat alone: the next New chat starts from the default again.
+  const { reset } = draftModel;
+  useEffect(() => {
+    if (!open) reset();
+  }, [open, reset]);
   const choose = (id: string) =>
     navigate({
       to: ".",
@@ -100,6 +108,7 @@ export function NewChatDialog({
               disabled={starting}
               placeholder={t("messageAgent", { name: agent.name })}
               agent={agent}
+              draftModel={draftModel}
               uploads
             />
           )}

@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { useI18n } from "~/components/i18n";
 import { Check } from "~/components/icons";
@@ -105,6 +106,54 @@ export function useSessionModel(
     pinned: shown?.override ?? false,
     fallback: find(own) ?? settings?.model,
     choose,
+  };
+}
+
+/**
+ * The model a chat not yet started will begin on, chosen from its prompt
+ * input: nothing chosen follows the agent's model, else the default model.
+ * The choice is kept when the person picks another agent, since every agent
+ * runs on the same choices; one no longer offered is dropped, with a note.
+ * It has the shape of `useSessionModel`'s, so the same picker shows it;
+ * `model` is what to give the chat once it exists, and `reset` forgets it.
+ */
+export function useDraftModel(agentId: string | undefined) {
+  const { t } = useI18n();
+  const { data: settings } = useQuery(modelQuery());
+  const { data: agents } = useQuery(agentsQuery());
+  const [picked, setPicked] = useState<Pick<
+    ModelInfo,
+    "provider" | "id"
+  > | null>(null);
+  const find = (
+    model: Pick<ModelInfo, "provider" | "id"> | undefined | null,
+  ) =>
+    model
+      ? settings?.choices.find(
+          (choice) =>
+            choice.provider === model.provider && choice.id === model.id,
+        )
+      : undefined;
+  const chosen = find(picked);
+  const stale = Boolean(picked && settings && !chosen);
+  useEffect(() => {
+    if (!stale) return;
+    setPicked(null);
+    toast.info(t("modelNoLongerOffered"));
+  }, [stale, t]);
+  const own = find(agents?.find((agent) => agent.id === agentId)?.model);
+  return {
+    settings,
+    current: chosen ?? own ?? settings?.model,
+    pinned: Boolean(chosen),
+    fallback: own ?? settings?.model,
+    choose: {
+      mutate: (model: Pick<ModelInfo, "provider" | "id"> | null) =>
+        setPicked(model && { provider: model.provider, id: model.id }),
+      isPending: false,
+    },
+    model: chosen ? { provider: chosen.provider, id: chosen.id } : null,
+    reset: () => setPicked(null),
   };
 }
 

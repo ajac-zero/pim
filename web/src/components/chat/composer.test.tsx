@@ -54,3 +54,37 @@ it("hides the attach buttons only when asked", () => {
     client.clear();
   }
 });
+
+it("offers the model picker on a chat not yet started, from its draft model", () => {
+  const client = new QueryClient();
+  vi.stubGlobal("window", { matchMedia: () => ({ matches: false }) });
+  const model = { provider: "p", id: "m", name: "Draft Model", images: false };
+  const render = (withDraft: boolean) =>
+    renderToStaticMarkup(
+      <QueryClientProvider client={client}>
+        <Composer
+          busy={false}
+          onSend={() => {}}
+          agent={{ id: "a", name: "Ada" }}
+          draftModel={
+            withDraft
+              ? {
+                  settings: { model, choices: [model], providers: [] } as never,
+                  current: model,
+                  pinned: false,
+                  fallback: model,
+                  choose: { mutate: () => {}, isPending: false },
+                }
+              : undefined
+          }
+        />
+      </QueryClientProvider>,
+    );
+  try {
+    expect(render(true)).toContain('aria-label="Model: Draft Model"');
+    expect(render(false)).not.toMatch(/aria-label="Model:/);
+  } finally {
+    vi.unstubAllGlobals();
+    client.clear();
+  }
+});

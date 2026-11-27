@@ -658,6 +658,8 @@ const translations = {
     moveFallbackDown: "Move {model} down",
     defaultModelTag: "Default",
     moreModels: "More models",
+    modelNoLongerOffered:
+      "That model is no longer offered, so the agent's own is used.",
     utilityModel: "Utility model",
     utilityModelHint:
       "A quick model for small jobs: naming chats, improving prompts, summarizing chats and suggesting messages. Only models that can answer in a JSON schema are offered.",
@@ -2829,6 +2831,8 @@ const translations = {
     moveFallbackDown: "Bajar {model}",
     defaultModelTag: "Predeterminado",
     moreModels: "Más modelos",
+    modelNoLongerOffered:
+      "Ese modelo ya no está disponible; se usa el del agente.",
     utilityModel: "Modelo de utilidades",
     utilityModelHint:
       "Un modelo rápido para tareas pequeñas: nombrar chats, mejorar mensajes, resumir chats y sugerir mensajes. Solo se ofrecen modelos que pueden responder con un esquema JSON.",

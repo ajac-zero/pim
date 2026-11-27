@@ -125,7 +125,8 @@ function describe(op: HostOpView): Result {
 	return text(clip(body ? `${head}\n${body}` : head), op.state !== "succeeded");
 }
 
-export const HOSTOPS_TOOL_NAMES = HOST_OPS.map((o) => `hostops_${o}`);
+/** Every tool of the extension: one for each operation, and the three that only read the host (`hostops_status`, `hostops_audit`, `hostops_op`). */
+export const HOSTOPS_TOOL_NAMES = [...HOST_OPS.map((o) => `hostops_${o}`), "hostops_status", "hostops_audit", "hostops_op"];
 
 /** The tools as an extension, for the admin's partitions only; null for anyone else, or where this Runner has no application database. */
 export async function hostopsExtension(deps: HostOpsToolDeps) {

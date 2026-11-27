@@ -1219,7 +1219,6 @@ const TOOL_STEPS: ReadonlyArray<[RegExp, TranslationKey, LucideIcon]> = [
   [/^(app|artifact)_/, "stepArtifact", Shapes],
   [/^generate_image$/, "stepImage", ImageIcon],
   [/^(note|recall|zoom|forget|optmem)$/, "stepMemory", Brain],
-  [/_goals?$/, "stepGoals", ListChecks],
   [/scheduled?_task/, "stepSchedule", CalendarClock],
   [/^(mcp_call|(list|connect|find)_(connectors?|apps?))$/, "stepApps", Blocks],
   [/^file_/, "stepFiles", Folder],

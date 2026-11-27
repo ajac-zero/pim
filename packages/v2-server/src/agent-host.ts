@@ -5,7 +5,7 @@
  *   gateway (`PIM_AI_GATEWAY_URL`, `PIM_AI_GATEWAY_KEY`, `PIM_AI_GATEWAY_MODELS`), and the owner's own providers (`pim_app.providers`, their keys opened with the deployment's
  *   key ring); every model call is metered into `pim_app.model_calls`;
  * - the agent a chat answers as (`runner_context`, a narrow read in migration 0604), and the prompt context built from it afresh for every request: the agent, its skills,
- *   the owner's active goals, the memories of its scopes, and the agents it may delegate to;
+ *   the memories of its scopes, and the agents it may delegate to;
  * - the tool registry (`./agent-tools.ts`), built for the partition's owner.
  *
  * The Runner connects as `pim_runtime`, which has no grant on `pim_app`: what the host reads from the application goes through the definer functions of 0604. What the tools write
@@ -39,8 +39,7 @@ import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 import { chatgptCredentialStore, chatgptProvider, type ChatGPTRunnerOptions, type CredentialDb } from "./chatgpt-auth.ts";
 import type { ForgeParts } from "./forge-assembly.ts";
 import { mentionedAgents } from "./rooms.ts";
-import { describeGoal } from "./goal-tools.ts";
-import { markHistoryBeforeUpdate, withStablePrefix } from "./stable-prefix.ts";
+import { withStablePrefix } from "./stable-prefix.ts";
 import { agentsSection, ASSISTANT_INSTRUCTIONS, delegatesSection, identity, majordomoRole, MAX_TASK_DEPTH, pimbotRole, NO_CODING_SANDBOX_LINE, startedBySection, type Roster } from "./agent-prompts.ts";
 import { createFingerprinter } from "./request-fingerprint.ts";
 import { createFailover, failureKind, failureMessage } from "./provider-failover.ts";
@@ -62,7 +61,6 @@ export type RunnerContext = {
 	username: string | null;
 	agent: { id: string; name: string; instructions: string; config: Record<string, any>; /** The person's majordomo, which reads every scope. */ majordomo?: boolean } | null;
 	skills: { name: string; description: string }[];
-	goals: { id: string; title: string; steps: { title: string; done: boolean }[] }[];
 	memories: { id: string; scope: string; title: string }[];
 	contacts: { id: string; name: string; about: string }[];
 	fallbacks: ModelRef[];
@@ -298,14 +296,7 @@ const asBlocks = (content: string | any[]) => (typeof content === "string" ? [{ 
 /** A provider whose requests are built from a history with `withoutEmptyAssistants` applied, whichever API it speaks. */
 function withCleanHistory(provider: Provider): Provider {
 	const wrap = (stream: (model: any, context: any, options?: any) => any) => (model: any, context: any, options?: any) => {
-		const stable = withStablePrefix(context);
-		// A request that ends in the context update has its cache breakpoint put on the end of the history instead (`markHistoryBeforeUpdate`), whichever Anthropic endpoint it goes to.
-		const update = stable !== context && stable.messages.length > context.messages.length && model.api === "anthropic-messages";
-		const marked = update ? { ...options, onPayload: async (body: any, m: unknown) => {
-				const moved = markHistoryBeforeUpdate(body);
-				return (await options?.onPayload?.(moved ?? body, m)) ?? moved;
-			} } : options;
-		return stream(model, withoutEmptyAssistants(stable), marked);
+		return stream(model, withoutEmptyAssistants(withStablePrefix(context)), options);
 	};
 	return new Proxy(provider, {
 		get(target, property) {
@@ -700,14 +691,6 @@ export function createAgentHost(options: AgentHostOptions) {
 				// The person's own skills first; a built-in one is listed unless they have written one of the same name.
 				const skills = [...c.skills, ...BUILTIN_SKILLS.filter((b) => !c.skills.some((s) => s.name === b.name)).map(({ name, description }) => ({ name, description }))];
 				return `Skills you can load with read_skill:\n${skills.map((s) => `- ${s.name}: ${s.description}`).join("\n")}`;
-			}),
-			section("active_goals", async (input) => {
-				if (await visitOf(input.conversationId)) return undefined;
-				const c = await ctx(input.conversationId);
-				if (c.goals.length === 0) return undefined;
-				// Each goal with its steps numbered from 1, which is what update_goal's complete_steps takes, and its latest progress note.
-				const notes = (await db.read<{ n: Record<string, string> }>(ownerId, "SELECT pim_app.runner_goal_notes($1) AS n", [ownerId]).catch(() => ({ rows: [] as { n: Record<string, string> }[] }))).rows[0]?.n ?? {};
-				return c.goals.map((g) => describeGoal(g, notes[g.id])).join("\n");
 			}),
 			section("memory", async (input) => {
 				const visit = await visitOf(input.conversationId);

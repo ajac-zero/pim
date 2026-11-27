@@ -6,7 +6,7 @@ const int = (v: string | null, fallback: number) => (v === null ? fallback : Num
 const none = (): Reply => ({ status: 200, body: { ok: true } });
 
 /**
- * The `/api/*` surface over the domain services: agents and skills, memory, goals, schedules, triggers, providers, connectors, usage, apps,
+ * The `/api/*` surface over the domain services: agents and skills, memory, schedules, triggers, providers, connectors, usage, apps,
  * circles and sharing, people, templates, and account export and deletion. Every handler is one bounded service call.
  */
 export const domainRoutes: Route[] = [
@@ -67,7 +67,7 @@ export const domainRoutes: Route[] = [
 	}),
 	route("POST", "/api/skills/:name/restore", async ({ app, principal, params, json }) => ok(await app.agents.restoreSkill(await principal(), params[0]!, Number((await json()).version)))),
 
-	// ---- memory, goals, schedules ----
+	// ---- memory, schedules ----
 	route("GET", "/api/memory/log", async ({ app, principal, url }) => {
 		const p = await principal();
 		const scopes = url.searchParams.get("scope")?.split(",");
@@ -81,15 +81,6 @@ export const domainRoutes: Route[] = [
 	route("PUT", "/api/memory/log/:id", async ({ app, principal, params, json }) => (await app.memories.move(await principal(), params[0]!, String((await json()).scope ?? "")), none())),
 	route("DELETE", "/api/memory/log/:id", async ({ app, principal, params }) => (await app.memories.forget(await principal(), params[0]!), none())),
 	route("GET", "/api/memory/tree/:scope/:block", async ({ app, principal, params, url }) => ok(await app.memories.zoom(await principal(), params[1]!, int(url.searchParams.get("start"), 1), int(url.searchParams.get("count"), 40)))),
-	route("GET", "/api/goals", async ({ app, principal }) => ok({ goals: await app.memories.listGoals(await principal()) })),
-	route("POST", "/api/goals", async ({ app, principal, json }) => {
-		const b = await json();
-		return ok({ id: await app.memories.createGoal(await principal(), String(b.title ?? ""), (b.steps ?? []).map(String)) }, 201);
-	}),
-	route("GET", "/api/goals/:id", async ({ app, principal, params }) => ok(await app.memories.getGoal(await principal(), params[0]!))),
-	route("PUT", "/api/goals/:id", async ({ app, principal, params, json }) => ok(await app.memories.updateGoal(await principal(), params[0]!, (await json()) as never))),
-	route("POST", "/api/goals/:id/steps/:position/done", async ({ app, principal, params }) => ok(await app.memories.completeStep(await principal(), params[0]!, int(params[1]!, -1)))),
-	route("DELETE", "/api/goals/:id", async ({ app, principal, params }) => (await app.memories.deleteGoal(await principal(), params[0]!), none())),
 	route("GET", "/api/schedules", async ({ app, principal }) => ok({ schedules: await app.schedules.list(await principal()) })),
 	route("POST", "/api/schedules", async ({ app, principal, json }) => ok({ id: await app.schedules.create(await principal(), (await json()) as never) }, 201)),
 	route("DELETE", "/api/schedules/:id", async ({ app, principal, params }) => (await app.schedules.remove(await principal(), params[0]!), none())),

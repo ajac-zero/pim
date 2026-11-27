@@ -6,7 +6,7 @@ import type { Principal } from "@pim/v2-contracts/identity";
 
 const MAX_NAMED_SCOPES = 20;
 
-/** Memories (scopes: agent-<id>, everyone, or a custom shared scope), skills and goals. */
+/** Memories (scopes: agent-<id>, everyone, or a custom shared scope) and skills. */
 export class Memories {
 	constructor(private readonly db: Db, private readonly authz = new Authorizer(db)) {}
 
@@ -74,67 +74,5 @@ export class Memories {
 	async list(p: Principal, scopes?: string[]): Promise<{ id: string; scope: string; title: string; body: string; updatedAt: Date }[]> {
 		await this.authz.enforce(p, "api:read");
 		return this.db.owner(p.ownerId, async (tx) => (await tx.query("SELECT id, scope, title, body, updated_at FROM pim_app.memories WHERE deleted_at IS NULL AND ($1::text[] IS NULL OR scope = ANY($1)) ORDER BY updated_at DESC LIMIT 500", [scopes ?? null])).rows.map((r) => ({ id: r.id, scope: r.scope, title: r.title, body: r.body, updatedAt: r.updated_at })));
-	}
-
-	async createGoal(p: Principal, title: string, steps: string[]): Promise<string> {
-		await this.authz.enforce(p, "api:write");
-		const id = newId("g");
-		await this.db.owner(p.ownerId, async (tx) => {
-			await tx.query("INSERT INTO pim_app.goals (id, owner_id, title) VALUES ($1, $2, $3)", [id, p.ownerId, title]);
-			for (const [i, step] of steps.entries()) await tx.query("INSERT INTO pim_app.goal_steps (goal_id, owner_id, position, title) VALUES ($1, $2, $3, $4)", [id, p.ownerId, i, step]);
-		});
-		return id;
-	}
-
-	async listGoals(p: Principal) {
-		await this.authz.enforce(p, "api:read");
-		return this.db.owner(p.ownerId, async (tx) => (await tx.query("SELECT g.id, g.title, g.status, g.notes, (SELECT coalesce(jsonb_agg(jsonb_build_object('position', s.position, 'title', s.title, 'done', s.done) ORDER BY s.position), '[]') FROM pim_app.goal_steps s WHERE s.goal_id = g.id) AS steps FROM pim_app.goals g ORDER BY g.created_at DESC")).rows.map((r) => ({ id: r.id as string, title: r.title as string, status: r.status as string, notes: r.notes as { at: number; text: string }[], steps: r.steps as { position: number; title: string; done: boolean }[] })));
-	}
-
-	async getGoal(p: Principal, id: string) {
-		const goal = (await this.listGoals(p)).find((g) => g.id === id);
-		if (!goal) throw new NotFoundError("No such goal");
-		return goal;
-	}
-
-	/**
-	 * `update_goal`: the title, the status (active, paused, done or dropped, which v1 called abandoned), the steps (replaced as a list; a step that keeps its title keeps its done mark),
-	 * steps added to the end, and a progress note, which is kept with when it was written.
-	 */
-	async updateGoal(p: Principal, id: string, input: { title?: string; status?: string; steps?: string[]; addSteps?: string[]; note?: string }) {
-		await this.authz.enforce(p, "api:write");
-		const status = input.status === "abandoned" ? "dropped" : input.status;
-		if (status !== undefined && !["active", "paused", "done", "dropped"].includes(status)) throw new BadRequestError("status is active, paused, done or dropped");
-		await this.db.owner(p.ownerId, async (tx) => {
-			const note = input.note?.trim() ? JSON.stringify([{ at: Date.now(), text: input.note.trim().slice(0, 2000) }]) : "[]";
-			if (!(await tx.query("UPDATE pim_app.goals SET title = coalesce($2, title), status = coalesce($3, status), notes = notes || $4::jsonb WHERE id = $1", [id, input.title ?? null, status ?? null, note])).rowCount) throw new NotFoundError("No such goal");
-			if (input.addSteps?.length) {
-				const next = (await tx.query("SELECT coalesce(max(position) + 1, 0)::int AS n FROM pim_app.goal_steps WHERE goal_id = $1", [id])).rows[0].n as number;
-				for (const [i, title] of input.addSteps.entries()) await tx.query("INSERT INTO pim_app.goal_steps (goal_id, owner_id, position, title) VALUES ($1,$2,$3,$4)", [id, p.ownerId, next + i, title]);
-			}
-			if (input.steps) {
-				const old = new Map((await tx.query("SELECT title, done FROM pim_app.goal_steps WHERE goal_id = $1", [id])).rows.map((r) => [r.title as string, r.done as boolean]));
-				await tx.query("DELETE FROM pim_app.goal_steps WHERE goal_id = $1", [id]);
-				for (const [i, title] of input.steps.entries()) await tx.query("INSERT INTO pim_app.goal_steps (goal_id, owner_id, position, title, done) VALUES ($1,$2,$3,$4,$5)", [id, p.ownerId, i, title, old.get(title) ?? false]);
-			}
-		});
-		return this.getGoal(p, id);
-	}
-
-	async deleteGoal(p: Principal, id: string): Promise<void> {
-		await this.authz.enforce(p, "api:write");
-		if (!(await this.db.owner(p.ownerId, async (tx) => (await tx.query("DELETE FROM pim_app.goals WHERE id = $1", [id])).rowCount))) throw new NotFoundError("No such goal");
-	}
-
-	/** Marks a step done; the goal is done when its last step is. */
-	async completeStep(p: Principal, goalId: string, position: number): Promise<{ goalDone: boolean }> {
-		await this.authz.enforce(p, "api:write");
-		return this.db.owner(p.ownerId, async (tx) => {
-			const n = (await tx.query("UPDATE pim_app.goal_steps SET done = true WHERE goal_id = $1 AND position = $2", [goalId, position])).rowCount;
-			if (!n) throw new NotFoundError("No such step");
-			const left = (await tx.query("SELECT count(*)::int AS n FROM pim_app.goal_steps WHERE goal_id = $1 AND NOT done", [goalId])).rows[0].n;
-			if (left === 0) await tx.query("UPDATE pim_app.goals SET status = 'done' WHERE id = $1", [goalId]);
-			return { goalDone: left === 0 };
-		});
 	}
 }

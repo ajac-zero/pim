@@ -1,5 +1,5 @@
 /**
- * What `send_to_user` shows under a message besides its text: widgets, cards the web app draws from data (`web/src/components/widgets.tsx`). Pim's own are the goals in progress,
+ * What `send_to_user` shows under a message besides its text: widgets, cards the web app draws from data (`web/src/components/widgets.tsx`). Pim's own are
  * what is scheduled and the newest memories; each is loaded once, as the message is sent, and goes back to the model in the tool's result so it knows what the person saw.
  * A ```ui block in the message is checked by the `ui` language's compiler (`@pim/ui-lang`) first, and a block that cannot be drawn refuses the message, with what to fix.
  */
@@ -13,15 +13,6 @@ type Item = { title: string; detail?: string; time?: string; value?: number; max
 export type ShownWidget = { id: string; title: Text; empty: Text } & ({ kind: "list" | "progress"; items: Item[] } | { failed: true });
 
 export const WIDGETS: Record<string, { title: Text; empty: Text; description: string; load(app: App, p: Principal, agentId: string | null): Promise<{ kind: "list" | "progress"; items: Item[] }> }> = {
-	"pim.goals/active": {
-		title: { en: "Goals", es: "Metas" },
-		empty: { en: "No goals yet. Ask to start tracking one.", es: "Aún no hay metas. Pide empezar a seguir una." },
-		description: "The active goals in this space, each with its progress and next step.",
-		async load(app, p) {
-			const goals = (await app.memories.listGoals(p)).filter((g) => g.status === "active").slice(0, 5);
-			return { kind: "progress", items: goals.map((g) => ({ title: g.title, value: g.steps.filter((s) => s.done).length, max: g.steps.length, ...(g.steps.find((s) => !s.done) ? { detail: g.steps.find((s) => !s.done)!.title } : {}) })) };
-		},
-	},
 	"pim.schedule/upcoming": {
 		title: { en: "Coming up", es: "Próximamente" },
 		empty: { en: "Nothing scheduled. Ask for a reminder or a recurring check-in.", es: "Nada programado. Pide un recordatorio o un seguimiento periódico." },
@@ -44,7 +35,6 @@ export const WIDGETS: Record<string, { title: Text; empty: Text; description: st
 
 /** Pim's own extensions, the ones that bring the widgets above, as `GET /api/extensions` lists them. */
 const OWN_EXTENSIONS: Record<string, { name: string; description: string }> = {
-	"pim.goals": { name: "Goals", description: "Goals with step-by-step plans that Pim keeps moving." },
 	"pim.schedule": { name: "Schedules", description: "Work Pim does later, once or on a schedule." },
 	"pim.memory": { name: "Memory", description: "What Pim remembers about you, in every chat." },
 };

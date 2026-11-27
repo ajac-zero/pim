@@ -9,7 +9,7 @@ The Cloudflare version of Pim let a deployment add *extensions* in code (a `pim.
 | Layer | What it is | Where |
 | --- | --- | --- |
 | Core | How every space works: talking through `send_to_user`, approvals, honesty, time. No space's instructions change it | The core preamble in [`packages/v2-server/src/agent-prompts.ts`](../packages/v2-server/src/agent-prompts.ts) |
-| Abilities | Tools, prompt sections and background work every space has: goals, schedules and triggers, memory, apps, tasks, the web, the computer, coding, connectors; and actions that ask first | `packages/v2-server/src/*-tools.ts`, registered by [`agent-host.ts`](../packages/v2-server/src/agent-host.ts) |
+| Abilities | Tools, prompt sections and background work every space has: schedules and triggers, memory, apps, tasks, the web, the computer, coding, connectors; and actions that ask first | `packages/v2-server/src/*-tools.ts`, registered by [`agent-host.ts`](../packages/v2-server/src/agent-host.ts) |
 | Agents | What a person talks with: a name and their own instructions and connectors on top of how Pim's assistant works. Stored data, made in the app or by the agent | Your agents |
 
 At every request an agent's chats get the core preamble, then an `agent` section with the agent's name, how Pim's assistant works, and the person's own instructions, which win. They also get every ability the agent is offered. Edits to an ability reach every agent at the next update: they aren't copies.
@@ -53,7 +53,7 @@ A widget is data of a kind the web app knows how to draw ([`agent-widgets.ts`](.
 | `list` | `{ title, detail?, time?, link? }` | Rows. `time` is ISO 8601, shown in the person's language and time zone |
 | `progress` | `{ title, value, max, detail?, link? }` | A bar with `value/max`, and the detail under it |
 
-A `link` is `{ chat }` or `{ artifact }`: the item opens it. `{ artifact, chat }` opens the app beside that chat. (`artifact` is still the key's name in the code.) The built-in widgets are `pim.schedule/upcoming`, `pim.goals/active` and `pim.memory/recent`. Each shows what belongs to the chat's agent: `pim.memory/recent` shows the newest memories of the [scopes](reference.md#scopes) it reads, so the majordomo's shows all of them. A widget that throws shows as failed, with the error logged; the message's other widgets still load.
+A `link` is `{ chat }` or `{ artifact }`: the item opens it. `{ artifact, chat }` opens the app beside that chat. (`artifact` is still the key's name in the code.) The built-in widgets are `pim.schedule/upcoming` and `pim.memory/recent`. Each shows what belongs to the chat's agent: `pim.memory/recent` shows the newest memories of the [scopes](reference.md#scopes) it reads, so the majordomo's shows all of them. A widget that throws shows as failed, with the error logged; the message's other widgets still load.
 
 The model reads a `widgets` section listing the ones the chat can show, each with its description. It names them in `send_to_user`'s `widgets`, up to four, instead of retyping what they show.
 
@@ -94,9 +94,9 @@ People pick a theme in Settings → General, under Appearance; previews show its
 ## Not built yet
 
 - **Extensions a deployment writes in code**, as the Cloudflare version had: a deployment changes the server itself, and people bring tools through MCP connectors.
-- **Choosing Pim's own abilities per space**: memory, goals and the rest are every space's.
+- **Choosing Pim's own abilities per space**: memory and the rest are every space's.
 - **Widget actions** beyond opening a chat or an app, and more kinds.
 - **Theme-specific shapes and spacing**, and translated theme names.
-- **Widgets with arguments** in chat, such as one goal.
+- **Widgets with arguments** in chat, such as one memory.
 - **Widgets from MCP connectors' results**, and interfaces connectors ship themselves ([MCP Apps](https://modelcontextprotocol.io/extensions/apps)).
 - **More than one account** of a connector per person, such as two banks.

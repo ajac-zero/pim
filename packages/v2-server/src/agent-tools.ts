@@ -31,7 +31,8 @@ import { connectorAdminTools } from "./connector-admin-tools.ts";
 import { builtinSkill } from "./builtin-skills.ts";
 import { readSkillFolder, readSkillFromFiles } from "./skill-sources.ts";
 import { resolveWriter } from "./skill-tools.ts";
-import { adminTools } from "./admin-tools.ts";
+import { ADMIN_TOOL_NAMES, adminTools, operatorRefusal } from "./admin-tools.ts";
+import { HOSTOPS_TOOL_NAMES } from "./hostops/tools.ts";
 import { rosterOf, teamTools } from "./agent-team-tools.ts";
 import { recordResult } from "./tool-approval.ts";
 import { roomTools } from "./room-tools.ts";
@@ -39,7 +40,6 @@ import { triggerTools } from "./trigger-tools.ts";
 import { copiedFiles, listPersonFolder, readPersonFile, savePersonFile } from "./app-from-files.ts";
 import { bytesOf, isBinary, sizeOfFile, typeOfFile } from "@pim/v2-app/app-files";
 import { noteTools } from "./note-tools.ts";
-import { goalTools } from "./goal-tools.ts";
 import { memoryTools } from "./memory-tools.ts";
 import { skillTools } from "./skill-tools.ts";
 import { clipText, webTools } from "./web-tools.ts";
@@ -186,13 +186,15 @@ export function stoppable(tool: ToolRegistration, timeoutMs = 600_000): ToolRegi
 /** What a guest's agent, and a bot's visitor's chat in the host's space, may use: its own memory and the clock, and a guest's calls to the host's shared tools. */
 const GUEST_TOOLS = new Set(["send_to_user", "current_time", "note", "recall", "zoom", "forget", "move_memory", "read_skill", "read_skill_file", "guest_tools", "guest_call"]);
 const VISIT_TOOLS = new Set(["send_to_user", "current_time"]);
+/** What a guest's agent uses to reach the host's shared tools; no other agent has them. */
+const GUEST_CALL_TOOLS = ["guest_tools", "guest_call"];
 /**
  * What an agent that was handed a task (a chat of kind `task`) never has: it does the work it was given with the person's tools, and does not set up triggers or schedules of its own, hand
  * its work on, or make and change agents. The model is not offered these (`chatToolLimits` reaches the Runner through `chatAgent`), and a call that gets here anyway is refused.
  */
 export const WORKER_HIDDEN: readonly string[] = ["trigger", "trigger_computer_grant", "delegate", "archive_task_chats", "create_agent", "update_agent"];
 const kinds = new Map<string, { at: number; limits: ToolLimits }>();
-type ToolLimits = { /** The only tools the chat has, or null when it has all of its owner's. */ allowed: Set<string> | null; /** Tools it never has. */ hidden: readonly string[] };
+type ToolLimits = { /** The only tools the chat has, or null when it has all of its owner's. */ allowed: Set<string> | null; /** Tools the model is never offered in it (they stay registered, and a call that gets here anyway is refused where the tool decides). */ hidden: readonly string[] };
 
 /** The tools a chat is limited to, or has none of. Read fresh each half minute, so a role change or a deleted chat takes effect soon. */
 export async function chatToolLimits(app: App, ownerId: string, chat: string | null): Promise<ToolLimits> {
@@ -201,9 +203,13 @@ export async function chatToolLimits(app: App, ownerId: string, chat: string | n
 	if (held && Date.now() - held.at < 30_000) return held.limits;
 	const row = await app.db.owner(ownerId, async (tx) => ({
 		role: (await tx.query("SELECT role FROM pim_app.accounts WHERE owner_id = $1", [ownerId])).rows[0]?.role as string | undefined,
-		kind: chat ? ((await tx.query("SELECT kind FROM pim_app.conversations WHERE public_chat_id = $1", [chat])).rows[0]?.kind as string | undefined) : undefined,
+		chat: chat ? (await tx.query("SELECT kind, agent_id, EXISTS (SELECT 1 FROM pim_app.tasks WHERE task_chat = $1) AS task, EXISTS (SELECT 1 FROM pim_app.visit_links WHERE chat = $1) AS visiting FROM pim_app.conversations WHERE public_chat_id = $1", [chat])).rows[0] as { kind: string; agent_id: string | null; task: boolean; visiting: boolean } | undefined : undefined,
 	}));
-	const limits: ToolLimits = { allowed: row.role === "guest" ? GUEST_TOOLS : row.kind === "visit" ? VISIT_TOOLS : null, hidden: row.kind === "task" ? WORKER_HIDDEN : [] };
+	const kind = row.chat?.kind;
+	// The deployment's tools are offered to the admin's majordomo and Pimbot alone (`operatorRefusal`, which also refuses the calls of anyone else), and the guest's tools to a guest and to a chat that is a visit to someone's space.
+	const operator = !row.chat?.task && (await operatorRefusal(app, ownerId, { kind: "agent", ownerId: OwnerId.parse(ownerId), agentId: row.chat?.agent_id ?? "pim" })) === null;
+	const hidden = [...(kind === "task" ? WORKER_HIDDEN : []), ...(operator ? [] : [...ADMIN_TOOL_NAMES, ...HOSTOPS_TOOL_NAMES]), ...(row.role === "guest" || kind === "visit" || row.chat?.visiting ? [] : GUEST_CALL_TOOLS)];
+	const limits: ToolLimits = { allowed: row.role === "guest" ? GUEST_TOOLS : kind === "visit" ? VISIT_TOOLS : null, hidden };
 	if (kinds.size > 5000) kinds.clear();
 	kinds.set(key, { at: Date.now(), limits });
 	return limits;
@@ -415,7 +421,7 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 			return json({ utc: now.toISOString(), timeZone: zone, local: now.toLocaleString("en-US", { timeZone: zone, dateStyle: "full", timeStyle: "long" }) });
 		}, "safe"),
 
-		// Skills and goals.
+		// Skills.
 		read("read_skill", "Read a skill's instructions and the names of its files: one of the person's own, or one that comes with Pim, by its name alone; or one a connected connector publishes (listed under the connector in your prompt), by its name and the connector's.", Type.Object({ name: S(), connector: O(S({ description: "The connector that publishes the skill; leave out for one of your own or Pim's." })) }), async (app, call, a) => {
 			// A guest's chat, or a visit, works with none of the owner's connectors.
 			if (a.connector !== undefined && (await toolsAllowed(app, ownerId, call.chat)) !== null) return text("This chat works with none of its owner's connectors.", true);
@@ -549,11 +555,10 @@ export function pimExtension(deps: ToolDeps, sections: PromptSection[]) {
 	tools.push(...roomTools({ ownerId, runtime, read }));
 	// Triggers, typed, with the person's grant for a computer source (`./trigger-tools.ts`).
 	tools.push(...triggerTools({ ownerId, runtime, read, write, now: deps.now, watch: watchOps({ ownerId, runtime, watch: () => (deps.app && deps.crypto ? { app: deps.app, crypto: deps.crypto, transport, publicUrl: process.env.PIM_PUBLIC_URL, now: deps.now } : undefined) }) }));
-	// Memory (`./memory-tools.ts`), goals (`./goal-tools.ts`), and reading, changing and listing notes (`./note-tools.ts`).
+	// Memory (`./memory-tools.ts`), and reading, changing and listing notes (`./note-tools.ts`).
 	tools.push(...webTools({ tool, fetch: deps.fetch, publicUrl }));
 	tools.push(...memoryTools({ ownerId, runtime, read, write }));
 	tools.push(...skillTools({ ownerId, runtime, read, copy: copied }));
-	tools.push(...goalTools({ read, write }));
 	tools.push(...noteTools({ ownerId, read, write, card: (app, id, note) => noteCard(app, ownerId, id, note) }));
 
 	// Coding: Forge, with the Authorizer deciding first whether this agent may.

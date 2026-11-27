@@ -96,21 +96,25 @@ export type AdminToolsDeps = {
 	runtime: { read<R = unknown>(ownerId: string, text: string, values?: unknown[]): Promise<{ rows: R[] }> };
 };
 
+/** The majordomo or Pimbot of an active admin: the agent a chat answers as when none is chosen, or the one the person's settings name as their majordomo (or v1 marked as the default), or the admin's Pimbot (not another agent, not a delegate), on an account that is an admin and active. */
+export async function operatorRefusal(app: App, ownerId: string, p: Principal): Promise<string | null> {
+	const operators = p.kind === "agent" && p.agentId !== "pim"
+		? await app.db.owner(ownerId, async (tx) => (await tx.query("SELECT pim_app.majordomo_id() AS majordomo, (SELECT value #>> '{}' FROM pim_app.owner_settings WHERE key = 'pimbot') AS pimbot")).rows[0] as { majordomo: string | null; pimbot: string | null })
+		: undefined;
+	if (p.kind !== "agent" || (p.agentId !== "pim" && p.agentId !== operators?.majordomo && p.agentId !== operators?.pimbot)) return "Only your majordomo or Pimbot run the deployment: another agent, or a delegate, may not.";
+	const account = await app.identity.authz.account(ownerId);
+	if (!account || account.status !== "active" || account.role !== "admin") return "Only the admin of this Pim runs it.";
+	return null;
+}
+
+/** The tools that only the admin's majordomo or Pimbot are offered: the admin API, the app's own routes, and what looks into how the deployment runs. */
+export const ADMIN_TOOL_NAMES = ["admin_read", "admin_write", "admin_write_approved", "admin_audit", "pim_diagnostics", "pim_health", "ui_routes", "ui_read", "ui_write", "ui_write_destructive", "ui_audit"] as const;
+
 export function adminTools(deps: AdminToolsDeps): ToolRegistration[] {
 	const { ownerId } = deps;
 	const admin: Principal = { kind: "user", ownerId: OwnerId.parse(ownerId), role: "admin", sessionId: "majordomo" };
 
-	/** The majordomo or Pimbot of an active admin: the agent a chat answers as when none is chosen, or the one the person's settings name as their majordomo (or v1 marked as the default), or the admin's Pimbot (not another agent, not a delegate), on an account that is an admin and active. */
-	const allowed = async (app: App, chat: string | null): Promise<string | null> => {
-		const p = await deps.principalOf(app, chat);
-		const operators = p.kind === "agent" && p.agentId !== "pim"
-			? await app.db.owner(ownerId, async (tx) => (await tx.query("SELECT pim_app.majordomo_id() AS majordomo, (SELECT value #>> '{}' FROM pim_app.owner_settings WHERE key = 'pimbot') AS pimbot")).rows[0] as { majordomo: string | null; pimbot: string | null })
-			: undefined;
-		if (p.kind !== "agent" || (p.agentId !== "pim" && p.agentId !== operators?.majordomo && p.agentId !== operators?.pimbot)) return "Only your majordomo or Pimbot run the deployment: another agent, or a delegate, may not.";
-		const account = await app.identity.authz.account(ownerId);
-		if (!account || account.status !== "active" || account.role !== "admin") return "Only the admin of this Pim runs it.";
-		return null;
-	};
+	const allowed = async (app: App, chat: string | null): Promise<string | null> => operatorRefusal(app, ownerId, await deps.principalOf(app, chat));
 	const audit = (app: App, tool: string, method: string, path: string, decision: string, keys: string[] = [], status?: number) =>
 		app.db.owner(ownerId, (tx) => tx.query("INSERT INTO pim_app.audit_log (owner_id, actor, action, resource, decision, detail) VALUES ($1,'agent:majordomo',$2,$3,$4,$5)", [ownerId, tool, JSON.stringify({ method, path }), decision, JSON.stringify({ keys, ...(status !== undefined ? { status } : {}) })])).catch(() => undefined);
 
@@ -214,7 +218,7 @@ export function adminTools(deps: AdminToolsDeps): ToolRegistration[] {
 		guarded("pim_diagnostics", "What went wrong in this Pim lately, read only: chats at work now and what each waits on, how long turns took and where the time went (turns), failed runs and tasks, triggers' health, model call errors, prompt cache (give chat: how each model call's request compares with the one before it, as hashes, to see why a cache was not reused), provider cooldowns, connectors that aren't ready, approvals waiting, an event log, and whether the services it needs (PostgreSQL, NATS, the object store, the sandbox manager) answer (services). Give kind to read one kind, since (an ISO time, or 90m, 6h, 2d) and limit; give chat (a chat's id) with kind turns to read that chat's turns step by step.", Type.Object({ since: Type.Optional(Type.String()), kind: Type.Optional(Type.String()), chat: Type.Optional(Type.String()), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 200 })) }), through("GET", (a) => { const u = new URL("/api/admin/diagnostics", "http://admin.invalid"); for (const k of ["since", "kind", "chat", "limit"]) if (a[k] !== undefined) u.searchParams.set(k, String(a[k])); return u; }, async () => diagnosticsRoutes(deps.env))),
 		guarded("pim_health", "How this Pim is doing, read only: how many accounts are active, being erased, how many approvals wait, and how the deployment is set (without addresses or keys).", Type.Object({}), through("GET", () => new URL("/api/admin/health", "http://admin.invalid"), async () => diagnosticsRoutes(deps.env))),
 		guarded("ui_routes", "Every route of the app you can use through ui_read and ui_write, with its class: read, write, destructive (ui_write_destructive, which asks the admin) or blocked (never open to you).", Type.Object({}), async () => text(JSON.stringify({ routes: (await appRoutes()).map((r) => ({ method: r.method, path: readable(r) })).filter((r) => r.path.startsWith("/api/")).map((r) => ({ ...r, class: classOf(r.method, r.path.replace(/:id/g, "x").replace(/\*/g, "x")) })) }))),
-		guarded("ui_read", "Read anything the app reads, through its own route (a GET), such as /api/sessions or /api/goals. Answers JSON as it is, cut at 100,000 characters; give a query to ask for less.", Type.Object({ path: Type.String({ description: "A route of the app, starting /api/, with any query." }) }), async (app, a: { path: string }) => {
+		guarded("ui_read", "Read anything the app reads, through its own route (a GET), such as /api/sessions. Answers JSON as it is, cut at 100,000 characters; give a query to ask for less.", Type.Object({ path: Type.String({ description: "A route of the app, starting /api/, with any query." }) }), async (app, a: { path: string }) => {
 			const url = normaliseUi(a.path);
 			if (classOf("GET", url.pathname) === "blocked") return text(`GET ${url.pathname} is not open to you.`, true);
 			const reply = await dispatch(app, admin, deps.env, "GET", url, {}, await appRoutes());

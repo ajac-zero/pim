@@ -1,10 +1,11 @@
-// A memory or goal that changes mid-chat must not rewrite the start of the next model request, or the provider's prompt cache is lost for the whole history. These use pi-ai's own
+// A memory that changes mid-chat must not rewrite the start of the next model request, or the provider's prompt cache is lost for the whole history, and the change must be sent once and then
+// stay in the history the provider has cached. These use pi-ai's own
 // resolver and the request body the OpenAI-compatible path really sends.
 import { describe, expect, it } from "vitest";
 import { resolveTranscript } from "@earendil-works/pi-ai/utils/transcript";
 import type { Db as RuntimeDb } from "@pim/v2-runtime/db";
 import { createAgentHost } from "../src/agent-host.ts";
-import { markHistoryBeforeUpdate, withStablePrefix } from "../src/stable-prefix.ts";
+import { withStablePrefix } from "../src/stable-prefix.ts";
 
 const tool = { name: "send_to_user", description: "Say something.", parameters: { type: "object", properties: { text: { type: "string" } } } };
 const tagged = (key: string, text: string) => `<${key}>\n${text}\n</${key}>`;
@@ -15,44 +16,100 @@ const history = [
 	{ role: "assistant", content: [{ type: "toolCall", id: "t1", name: "send_to_user", arguments: { text: "hi" } }], api: "openai-completions", provider: "p", model: "m", usage, stopReason: "toolUse", timestamp: 3 },
 	{ role: "toolResult", toolCallId: "t1", toolName: "send_to_user", content: [{ type: "text", text: "sent" }], isError: false, timestamp: 4 },
 ];
-const first = system({ agent: tagged("agent", "You are Pim."), memory: tagged("memory", "- [1] likes tea"), active_goals: tagged("active_goals", "Run a 5k") }, { toolsAdded: [tool] });
+const first = system({ agent: tagged("agent", "You are Pim."), memory: tagged("memory", "- [1] likes tea"), room: tagged("room", "Run a 5k") }, { toolsAdded: [tool] });
 const memoryV2 = system({ memory: tagged("memory", "- [1] likes tea\n- [2] moved to Oslo") });
 const at = (messages: any[]) => ({ messages });
 const resolved = (context: { messages: any[] }): any[] => resolveTranscript(context as never, false).messages;
+const request = (messages: any[]) => resolved(withStablePrefix(at(messages) as any));
+const round = (n: number) => [
+	{ role: "assistant", content: [{ type: "toolCall", id: `r${n}`, name: "send_to_user", arguments: { text: `round ${n}` } }], api: "openai-completions", provider: "p", model: "m", usage, stopReason: "toolUse", timestamp: 10 * n },
+	{ role: "toolResult", toolCallId: `r${n}`, toolName: "send_to_user", content: [{ type: "text", text: `sent ${n}` }], isError: false, timestamp: 10 * n + 1 },
+];
+const updates = (messages: any[]) => messages.filter((m) => typeof m.content === "string" && m.content.startsWith("[Context update]"));
+const memoryV3 = system({ memory: tagged("memory", "- [1] likes tea\n- [2] moved to Oslo\n- [3] has a dog") }, { timestamp: 7 });
 
-describe("the start of a request when memory or goals change", () => {
+describe("the start of a request when memory changes", () => {
 	it("is rewritten by pi's resolver on its own, which is what loses the cache", () => {
 		const before = resolved(at([first, ...history]));
 		const after = resolved(at([first, memoryV2, ...history]));
 		expect(JSON.stringify(after[0])).not.toBe(JSON.stringify(before[0]));
 	});
 
-	it("stays byte for byte the same, and the change follows the history", () => {
-		const request = (context: { messages: any[] }) => resolved(withStablePrefix(context as any));
-		const before = request(at([first, ...history]));
-		const after = request(at([first, memoryV2, system({ active_goals: null }), ...history]));
-		// Everything the earlier request sent, the system message with its tools and the history, leads the later one unchanged.
+	it("leaves the system message as it was and puts the change where the harness stored it, once", () => {
+		const before = request([first, ...history]);
+		// The harness writes the patch after the tool result the next model call answers, and the model's next answer follows it.
+		const after = request([first, ...history, memoryV2, system({ room: null })]);
 		expect(JSON.stringify(after.slice(0, before.length))).toBe(JSON.stringify(before));
 		expect(after).toHaveLength(before.length + 1);
 		const update = after[after.length - 1];
 		expect(update.role).toBe("user");
 		expect(update.content).toContain("- [2] moved to Oslo");
-		expect(update.content).toContain("<active_goals>\nNothing now.\n</active_goals>");
-		expect(update.content).not.toContain("Run a 5k");
+		expect(update.content).toContain("<room>\nNothing now.\n</room>");
+		expect(update.content).not.toContain("likes tea\n</memory>\n\n<room>");
 	});
 
-	it("tells of a section that first appears later, and starts afresh at a new baseline", () => {
+	it("shares the whole earlier request, the update included, with every request after it", () => {
+		const two = request([first, ...history, memoryV2]);
+		const three = request([first, ...history, memoryV2, ...round(2)]);
+		const four = request([first, ...history, memoryV2, ...round(2), ...round(3)]);
+		expect(JSON.stringify(three.slice(0, two.length))).toBe(JSON.stringify(two));
+		expect(JSON.stringify(four.slice(0, three.length))).toBe(JSON.stringify(three));
+		// The update is sent once per change, not once per call, and what follows it is only what is new.
+		for (const sent of [two, three, four]) expect(updates(sent)).toHaveLength(1);
+		expect(three.length - two.length).toBe(2);
+		expect(JSON.stringify(four)).toContain("sent 3");
+	});
+
+	it("adds only what changed when it changes again, and leaves the earlier update where it was", () => {
+		const two = request([first, ...history, memoryV2]);
+		const four = request([first, ...history, memoryV2, ...round(2), memoryV3]);
+		expect(JSON.stringify(four.slice(0, two.length))).toBe(JSON.stringify(two));
+		const [older, newer] = updates(four);
+		expect(updates(four)).toHaveLength(2);
+		expect(older.content).toContain("moved to Oslo");
+		expect(newer.content).toContain("has a dog");
+		// The room did not change after the first update, so the second does not carry it.
+		expect(newer.content).not.toContain("<room>");
+		expect(four.indexOf(newer)).toBe(four.length - 1);
+	});
+
+	it("says what changed back to what the chat began with, because the model has been told otherwise since", () => {
+		const out = updates(request([first, ...history, memoryV2, ...round(2), system({ memory: first.sections.memory! })]));
+		expect(out).toHaveLength(2);
+		expect(out[1].content).toContain("- [1] likes tea\n</memory>");
+		// Setting a section to the text already shown tells nothing.
+		expect(updates(request([first, ...history, system({ memory: first.sections.memory! })]))).toHaveLength(0);
+	});
+
+	it("keeps an update from coming between a tool call and its result", () => {
+		const parallel = [
+			{ ...round(2)[0], content: [{ type: "toolCall", id: "a", name: "send_to_user", arguments: {} }, { type: "toolCall", id: "b", name: "send_to_user", arguments: {} }] },
+			{ ...round(2)[1], toolCallId: "a" },
+			memoryV2,
+			{ ...round(2)[1], toolCallId: "b" },
+		];
+		const out = request([first, ...history, ...parallel]);
+		expect(out.map((m) => m.role)).toEqual(["system", "user", "assistant", "toolResult", "assistant", "toolResult", "toolResult", "user"]);
+	});
+
+	it("starts afresh at a compaction, which writes the current sections as the baseline of what follows", () => {
+		const rebased = system({ ...first.sections, memory: memoryV2.sections.memory ?? null }, { toolsAdded: [tool] });
+		const out = withStablePrefix(at([rebased, ...history]) as any).messages;
+		expect(out).toHaveLength(history.length + 1);
+		expect(updates(out)).toHaveLength(0);
+		// A change after it is told once, against the new baseline.
+		expect(updates(request([rebased, ...history, memoryV3]))).toHaveLength(1);
+	});
+
+	it("tells of a section that first appears later", () => {
 		const bare = system({ agent: tagged("agent", "You are Pim."), memory: tagged("memory", "none") }, { toolsAdded: [tool] });
-		const out = withStablePrefix(at([bare, system({ active_goals: tagged("active_goals", "Learn Norwegian") }), ...history]) as any).messages;
+		const out = withStablePrefix(at([bare, ...history, system({ room: tagged("room", "Learn Norwegian") })]) as any).messages;
 		expect(out[0].sections).toEqual(bare.sections);
 		expect(out[out.length - 1].content).toContain("Learn Norwegian");
-		// A compaction writes the current sections as the baseline of what follows, so nothing is left to tell.
-		const rebased = system({ ...first.sections, memory: memoryV2.sections.memory ?? null }, { toolsAdded: [tool] });
-		expect(withStablePrefix(at([rebased, ...history]) as any).messages).toHaveLength(history.length + 1);
 	});
 
-	it("changes nothing in a request whose volatile sections do not change", () => {
-		const context = at([first, system({ agent: tagged("agent", "You are Pim, again.") }), ...history]);
+	it("leaves a patch of other sections in the system message, and changes nothing in a request whose volatile sections do not change", () => {
+		const context = at([first, ...history, system({ agent: tagged("agent", "You are Pim, again.") })]);
 		expect(withStablePrefix(context as any)).toBe(context);
 	});
 });
@@ -60,7 +117,7 @@ describe("the start of a request when memory or goals change", () => {
 describe("a request sent to an OpenAI-compatible endpoint", () => {
 	const db = { read: async (_owner: string, sql: string) => (sql.includes("runner_providers") ? { rows: [{ p: [{ id: "pv", kind: "openai_compatible", config: { name: "C", url: "http://127.0.0.1:1/v1", models: [{ id: "m-chat" }] }, secret: null }] }] } : { rows: [] }) } as unknown as RuntimeDb;
 
-	it("keeps its first bytes across a memory change and still carries the new memory", async () => {
+	it("keeps its first bytes across a memory change, carries the new memory once, and keeps it where it was", async () => {
 		const host = createAgentHost({ db, env: {} });
 		const models = (await host.harnessOptions({ ownerId: "o_ada", partitionId: "p1" } as never)).models as any;
 		const model = models.getModel("pv", "m-chat");
@@ -75,64 +132,15 @@ describe("a request sent to an OpenAI-compatible endpoint", () => {
 			}
 			return bodies[0];
 		};
-		const user = { role: "user", content: "and now?", timestamp: 5 };
-		const one = await send([first, ...history, user]);
-		const two = await send([first, memoryV2, ...history, user]);
+		const one = await send([first, ...history]);
+		const two = await send([first, ...history, memoryV2]);
+		const three = await send([first, ...history, memoryV2, ...round(2)]);
 		expect(one.messages.length).toBeGreaterThan(3);
-		expect(JSON.stringify(two.tools)).toBe(JSON.stringify(one.tools));
+		for (const sent of [two, three]) expect(JSON.stringify(sent.tools)).toBe(JSON.stringify(one.tools));
 		expect(JSON.stringify(two.messages.slice(0, one.messages.length))).toBe(JSON.stringify(one.messages));
 		expect(JSON.stringify(two.messages.slice(one.messages.length))).toContain("moved to Oslo");
 		expect(JSON.stringify(one)).not.toContain("moved to Oslo");
-	});
-});
-
-describe("the cache breakpoint of a request that ends in the context update", () => {
-	const marker = { type: "ephemeral" };
-	const update = { type: "text", text: "[Context update] These sections changed after the system prompt above was written. Each replaces", cache_control: marker };
-	const body = (messages: any[]) => ({ model: "m", messages });
-	const result = { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "sent", is_error: false }] };
-
-	it("moves from the update to the end of the history before it, and changes nothing else", () => {
-		const input = body([{ role: "user", content: "hi" }, { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "x", input: {} }] }, result, { role: "user", content: [update] }]);
-		const before = JSON.stringify(input);
-		const out = markHistoryBeforeUpdate(input);
-		expect(out.messages[2].content[0].cache_control).toEqual(marker);
-		expect(out.messages[3].content).toEqual([{ type: "text", text: update.text }]);
-		// The request the adapter built is left as it was, and the rest is shared.
-		expect(JSON.stringify(input)).toBe(before);
-		expect(out.messages[0]).toBe(input.messages[0]);
-		expect(JSON.stringify(out).split('"cache_control"').length - 1).toBe(1);
-	});
-
-	it("marks the earlier block of the same message when an update was joined to a message, and a string message becomes a block", () => {
-		const joined = markHistoryBeforeUpdate(body([{ role: "user", content: [{ type: "text", text: "a" }, update] }]));
-		expect(joined.messages[0].content).toEqual([{ type: "text", text: "a", cache_control: marker }, { type: "text", text: update.text }]);
-		const plain = markHistoryBeforeUpdate(body([{ role: "user", content: "hello" }, { role: "user", content: [update] }]));
-		expect(plain.messages[0].content).toEqual([{ type: "text", text: "hello", cache_control: marker }]);
-	});
-
-	it("leaves a request alone that has no update, no marker on it, or nothing before it that can carry one", () => {
-		expect(markHistoryBeforeUpdate(body([result]))).toBeUndefined();
-		expect(markHistoryBeforeUpdate(body([result, { role: "user", content: [{ type: "text", text: update.text }] }]))).toBeUndefined();
-		expect(markHistoryBeforeUpdate(body([{ role: "user", content: [update] }]))).toBeUndefined();
-		expect(markHistoryBeforeUpdate(body([{ role: "assistant", content: [{ type: "thinking", thinking: "t", signature: "s" }] }, { role: "user", content: [update] }]))).toBeUndefined();
-		expect(markHistoryBeforeUpdate({})).toBeUndefined();
-		expect(markHistoryBeforeUpdate(null)).toBeUndefined();
-	});
-
-	it("takes only the trailing update: text that merely begins like one is left alone, wherever it is", () => {
-		const real = { type: "text", text: "[Context update] These sections changed after the system prompt above was written. Each replaces", cache_control: marker };
-		// A person's message that begins with the same words, marked as the last block, is not the update.
-		expect(markHistoryBeforeUpdate(body([result, { role: "user", content: [{ type: "text", text: "[Context update] my own words", cache_control: marker }] }]))).toBeUndefined();
-		// The update must be the last block: one with something after it is not the trailing one.
-		expect(markHistoryBeforeUpdate(body([result, { role: "user", content: [real, { type: "text", text: "and then" }] }]))).toBeUndefined();
-		expect(markHistoryBeforeUpdate(body([result, { role: "user", content: [real] }]))).toBeDefined();
-	});
-
-	it("takes the last update when an earlier message happens to begin the same way", () => {
-		const earlier = { role: "user", content: [{ type: "text", text: "[Context update] typed by a person" }] };
-		const out = markHistoryBeforeUpdate(body([result, earlier, result, { role: "user", content: [update] }]));
-		expect(out.messages[2].content[0].cache_control).toEqual(marker);
-		expect(out.messages[1]).toBe(earlier);
+		expect(JSON.stringify(three.messages.slice(0, two.messages.length))).toBe(JSON.stringify(two.messages));
+		expect(JSON.stringify(three).split("moved to Oslo").length - 1).toBe(1);
 	});
 });

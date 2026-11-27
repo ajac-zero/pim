@@ -21,7 +21,7 @@
  */
 import { createHmac, randomBytes } from "node:crypto";
 
-export const CACHE_TRACE_VERSION = 1;
+export const CACHE_TRACE_VERSION = 2;
 /** Message boundaries kept in `chain` before it is thinned. */
 const MAX_BOUNDARIES = 1024;
 const MAX_BREAKPOINTS = 8;
@@ -68,6 +68,11 @@ const SYSTEM_FIELDS = ["system", "instructions", "systemInstruction"];
 
 const withoutMarkers = (key: string, value: unknown) => (key === "cache_control" ? undefined : value);
 const canonical = (value: unknown) => JSON.stringify(value, withoutMarkers) ?? "";
+/**
+ * A message whose content is a plain string, as one with that one text block. The adapter writes the last user message as blocks, to carry the breakpoint, and the same message as a string once
+ * more follows it; the provider reads the two as the same prompt, so the trace must too, or the breakpoint on such a message would be reported lost the next time.
+ */
+const normal = (message: unknown) => (typeof (message as { content?: unknown } | null)?.content === "string" ? { ...(message as object), content: [{ type: "text", text: (message as { content: string }).content }] } : message);
 const marked = (value: unknown): boolean => typeof value === "object" && value !== null && "cache_control" in value;
 const roleLetter = (message: unknown) => {
 	const role = (message as { role?: unknown } | null)?.role;
@@ -118,7 +123,7 @@ function trace(payload: unknown, hash: (data: string) => string, key: string): C
 	let value = head;
 	let blocks = 0;
 	for (const message of messages) {
-		const leaf = hash(canonical(message));
+		const leaf = hash(canonical(normal(message)));
 		leaves.push(leaf);
 		full.push((value = hash(value + leaf)));
 		const content = (message as { content?: unknown } | null)?.content;
@@ -136,11 +141,11 @@ function trace(payload: unknown, hash: (data: string) => string, key: string): C
 	tools.forEach((tool, index) => marked(tool) && add({ in: "tools", index, prefix: toolChain[index]! }));
 	systemBlocks.forEach((block, index) => marked(block) && add({ in: "system", index, prefix: systemChain[index]! }));
 	messages.forEach((message, index) => {
-		const content = (message as { content?: unknown } | null)?.content;
+		const content = (normal(message) as { content?: unknown } | null)?.content;
 		if (!Array.isArray(content)) return;
 		content.forEach((block, at) => {
 			if (!marked(block)) return;
-			const cut = { ...(message as object), content: content.slice(0, at + 1) };
+			const cut = { ...(normal(message) as object), content: content.slice(0, at + 1) };
 			add({ in: "messages", index, block: at, last: at === content.length - 1, prefix: hash((index === 0 ? head : full[index - 1]!) + hash(canonical(cut))) });
 		});
 	});

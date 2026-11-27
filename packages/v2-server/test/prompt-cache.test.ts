@@ -25,7 +25,8 @@ const round = (n: number, api = "anthropic-messages", provider = "anthropic", mo
 	{ role: "assistant", content: [{ type: "toolCall", id: `t${n}`, name: "send_to_user", arguments: { text: `round ${n}` } }], api, provider, model, providerThinkingLevel: "high", usage, stopReason: "toolUse", timestamp: 100 + n },
 	{ role: "toolResult", toolCallId: `t${n}`, toolName: "send_to_user", content: [{ type: "text", text: `sent ${n}` }], isError: false, timestamp: 200 + n },
 ];
-const chat = (rounds: number, ...patches: object[]) => [first, ...patches, person, ...Array.from({ length: rounds }, (_, i) => round(i + 1)).flat()];
+/** The harness writes a change of a section after the tool result the next request answers (here the first round's), so the patches sit there and the rounds after them follow. */
+const chat = (rounds: number, ...patches: object[]) => [first, person, ...round(1), ...patches, ...Array.from({ length: rounds - 1 }, (_, i) => round(i + 2)).flat()];
 
 const sse = (events: [string, object][]) => new Response(events.map(([name, data]) => `event: ${name}\ndata: ${JSON.stringify(data)}\n\n`).join(""), { headers: { "content-type": "text/event-stream" } });
 const answer = (id: string) =>
@@ -69,7 +70,7 @@ async function rig(provider: string, id: string, env: NodeJS.ProcessEnv = {}, re
 /**
  * Anthropic's prompt cache as its documentation states it, applied to a request body: a prefix is written at each cache breakpoint (the tools, then the system prompt, then the messages,
  * each block in order, `cache_control` not part of what is cached), and a request reads the longest earlier-written prefix that ends within 20 blocks before one of its own breakpoints.
- * Returns how many leading blocks were read, how many the request has, and how many lead up to its last breakpoint. Independent of the fingerprint: it works on the wire body alone.
+ * Returns how many leading blocks were read, how many the request has, how many lead up to its last breakpoint, and how many bytes follow the blocks read. Independent of the fingerprint: it works on the wire body alone.
  */
 function cacheModel() {
 	const written = new Set<string>();
@@ -93,7 +94,9 @@ function cacheModel() {
 			for (let q = at; q >= Math.max(0, at - 19); q--) if (written.has(prefix[q]!)) return void (read = Math.max(read, q + 1));
 		});
 		blocks.forEach((block, at) => block.marked && written.add(prefix[at]!));
-		return { read, total: blocks.length, marked: blocks.findLastIndex((block) => block.marked) + 1 };
+		// What the provider bills at the full input rate: the bytes of the blocks after the ones it read.
+		const uncachedBytes = blocks.slice(read).reduce((n, block) => n + block.text.length, 0);
+		return { read, total: blocks.length, marked: blocks.findLastIndex((block) => block.marked) + 1, uncachedBytes };
 	};
 }
 
@@ -102,7 +105,7 @@ describe("what is recorded of a request", () => {
 		const r = await rig("anthropic", "claude-sonnet-5-5");
 		const image = { role: "user", content: [{ type: "text", text: "see this" }, { type: "image", data: "AAAASECRETIMAGEBYTES", mimeType: "image/png" }], timestamp: 3 };
 		const { body, trace } = await r.send([...chat(2), image]);
-		expect(trace).toMatchObject({ v: 1, counts: { tools: 2, system: 1, messages: body.messages.length }, breakpoints: [{ in: "tools", index: 0 }, { in: "system", index: 0 }, { in: "messages" }] });
+		expect(trace).toMatchObject({ v: 2, counts: { tools: 2, system: 1, messages: body.messages.length }, breakpoints: [{ in: "tools", index: 0 }, { in: "system", index: 0 }, { in: "messages" }] });
 		expect(trace.tail.roles).toMatch(/^[uats]+$/);
 		// Nothing a person or an agent wrote, no key and no signature, is in it: only hex, counts, role letters and the names of the request's settings.
 		const text = JSON.stringify(trace);
@@ -115,7 +118,7 @@ describe("what is recorded of a request", () => {
 		const ok = await rig("anthropic", "claude-sonnet-5-5");
 		const fast = await ok.send(chat(1));
 		expect(fast.message.stopReason).toBe("stop");
-		expect(fast.trace).toMatchObject({ v: 1, counts: { messages: expect.any(Number) } });
+		expect(fast.trace).toMatchObject({ v: 2, counts: { messages: expect.any(Number) } });
 		const bad = await rig("anthropic", "claude-sonnet-5-5", {}, () => new Response("{}", { status: 400 }));
 		const failed = await bad.send(chat(1));
 		expect(failed.message.stopReason).toBe("error");
@@ -314,18 +317,18 @@ describe("the cache across the tool rounds of one chat", () => {
 		});
 
 		it(`reads the earlier history on ${provider}/${id} when a memory has changed, as when nothing has`, async () => {
-			// The context update that the stable prefix puts last is never marked: the end of the history before it is, so each request's write is what the next one starts with.
+			// The context update is part of the history from where it was stored, so each request's write, the last message included, is what the next one starts with.
 			const calls = await run(provider, id, [memoryV2]);
 			for (const [i, call] of calls.entries()) {
 				const wire = JSON.stringify(call.body.messages);
-				expect(wire).toContain("[Context update]");
-				expect(wire.indexOf('"cache_control"')).toBeLessThan(wire.indexOf("[Context update]"));
-				expect(call.body.messages.flatMap((m: any) => m.content).filter((b: any) => b.text?.startsWith("[Context update]") && b.cache_control)).toEqual([]);
+				expect(wire.split("[Context update]").length - 1).toBe(1);
 				expect(JSON.stringify(call.body).split('"cache_control"').length - 1).toBeLessThanOrEqual(4);
+				// The last breakpoint is on the last block of the history (only the empty effort marker follows it): the newest message, however long ago the update was.
+				expect(call.total - call.marked).toBeLessThanOrEqual(1);
 				if (i > 0) expect(call.read).toBe(calls[i - 1]!.marked);
 			}
 			const [one, two] = calls;
-			// The whole history of the first request is the shared prefix, and its breakpoint lies on the second.
+			// The whole first request, the update in it, is the shared prefix, and its breakpoint lies on the second.
 			expect(compareTraces(one!.trace, two!.trace)).toMatchObject({ breakpoints: [{ stillThere: true }, { stillThere: true }, { in: "messages", stillThere: true }] });
 		});
 
@@ -334,13 +337,44 @@ describe("the cache across the tool rounds of one chat", () => {
 			const cache = cacheModel();
 			const memoryV3 = system({ memory: tagged("memory", "- [1] likes tea\n- [3] has a dog") });
 			let before: ReturnType<typeof cache> | undefined;
-			for (const [n, patches] of [[1, [memoryV2]], [2, [memoryV2]], [3, [memoryV2, memoryV3]], [4, [memoryV2, memoryV3]]] as const) {
-				const now = cache((await r.send(chat(n, ...patches))).body);
+			// Each change is stored where it was first seen: the first after round 1, the second after round 2.
+			const history = (n: number) => [first, person, ...round(1), memoryV2, ...round(2), ...(n >= 3 ? [memoryV3, ...round(3)] : []), ...(n >= 4 ? round(4) : [])];
+			for (const n of [2, 3, 4]) {
+				const now = cache((await r.send(history(n))).body);
 				if (before) expect(now.read).toBe(before.marked);
 				before = now;
 			}
 		});
 	}
+
+	it("bills only the new messages of each call, with sections as large as a real chat's changing mid-chat", async () => {
+		const r = await rig("anthropic", "claude-sonnet-5-5");
+		const cache = cacheModel();
+		// About 24 KB of memory and 32 KB of room, the size the sections reach in a long-lived space; the room changes with the memory.
+		const lines = (label: string, n: number) => Array.from({ length: n }, (_, i) => `- [${i}] ${label} ${"x".repeat(150)}`).join("\n");
+		const big = (n: number) => system({ memory: tagged("memory", lines("memory", 150 + n)), room: tagged("room", lines("room", 200 + n)) });
+		const section = big(0).sections.memory!.length + big(0).sections.room!.length;
+		const base = [system({ agent: tagged("agent", "You are Pim."), memory: tagged("memory", lines("memory", 150)), room: tagged("room", lines("room", 200)) }, { toolsAdded: [tool] }), person, ...round(1)];
+		// Round 1 is answered with the sections as they began; a change lands before round 2 and another before round 4.
+		const calls = [
+			base,
+			[...base, big(1), ...round(2)],
+			[...base, big(1), ...round(2), ...round(3)],
+			[...base, big(1), ...round(2), ...round(3), big(2), ...round(4)],
+			[...base, big(1), ...round(2), ...round(3), big(2), ...round(4), ...round(5)],
+		];
+		const bills: number[] = [];
+		for (const messages of calls) bills.push(cache((await r.send(messages)).body).uncachedBytes);
+		// A call's uncached tail is the messages added since the one before (a tool round, and a change when one landed), never the sections again.
+		const [, afterFirstChange, nextRound, afterSecondChange, lastRound] = bills as [number, number, number, number, number];
+		expect(section).toBeGreaterThan(50_000);
+		expect(afterFirstChange).toBeGreaterThan(section);
+		expect(afterFirstChange).toBeLessThan(section + 2_000);
+		expect(nextRound).toBeLessThan(1_000);
+		expect(afterSecondChange).toBeGreaterThan(section);
+		expect(afterSecondChange).toBeLessThan(section + 2_000);
+		expect(lastRound).toBeLessThan(1_000);
+	});
 
 	it("does not depend on the effort a request asks for", async () => {
 		const r = await rig("anthropic", "claude-sonnet-5-5");

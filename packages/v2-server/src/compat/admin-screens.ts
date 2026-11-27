@@ -7,7 +7,7 @@ import type { App } from "@pim/v2-app/app";
 import { BadRequestError, NotFoundError, RefusedError } from "@pim/v2-app/errors";
 import { route, type Reply, type Route } from "@pim/v2-app/http";
 import type { Bundle } from "@pim/v2-app/bundles";
-import { toServiceInput } from "@pim/v2-app/web-providers";
+import { refreshModels, toServiceInput } from "@pim/v2-app/web-providers";
 import { configuredProviders, PROVIDER_IDS, providerName, providerSecrets } from "@pim/v2-app/oauth";
 import type { Principal } from "@pim/v2-contracts/identity";
 import type { IncomingMessage } from "node:http";
@@ -138,6 +138,14 @@ export function screenRoutes(env: Env): Route[] {
 			if (!existing) throw new NotFoundError("No such shared provider");
 			const input = await toServiceInput(await json(), existing, { existingKey: existing.hasKey ? await app.providers.reveal(p.ownerId, existing.id).catch(() => null) : null });
 			return ok({ provider: saved(await app.providers.update(p, params[0]!, input)) });
+		}),
+		route("POST", "/api/admin/providers/:id/refresh-models", async ({ app, principal, params }) => {
+			const p = await principal();
+			await admin(app, p, "admin:providers");
+			const existing = (await app.providers.list(p)).find((r) => r.id === params[0] && r.config.shared === true);
+			if (!existing) throw new NotFoundError("No such shared provider");
+			const { config, available, url } = await refreshModels(existing, existing.hasKey ? await app.providers.reveal(p.ownerId, existing.id).catch(() => null) : null);
+			return ok({ provider: saved(await app.providers.update(p, existing.id, { config })), available, url });
 		}),
 		route("DELETE", "/api/admin/providers/:id", async ({ app, principal, params }) => {
 			const p = await principal();

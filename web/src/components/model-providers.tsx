@@ -22,6 +22,7 @@ import {
   type ModelSettings,
   type ProviderInput,
   pim,
+  type RefreshedModels,
 } from "~/lib/pim-api";
 import { modelName } from "~/lib/utils";
 
@@ -143,6 +144,8 @@ function CustomProvider({
   const queryClient = useQueryClient();
   const [editing, setEditing] = useState(false);
   const [addingModel, setAddingModel] = useState(false);
+  const [refreshed, setRefreshed] = useState<RefreshedModels | null>(null);
+  const [refreshError, setRefreshError] = useState<string | null>(null);
   const editable = !provider.shared || admin;
   const remove = useMutation({
     mutationFn: () =>
@@ -152,6 +155,47 @@ function CustomProvider({
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["model"] });
       toast.success(t("providerRemoved", { name: provider.name }));
+    },
+    onError: (error) => toast.error(error.message),
+  });
+  const refresh = useMutation({
+    mutationFn: () =>
+      provider.shared
+        ? adminApi.refreshProviderModels(provider.id)
+        : pim.refreshProviderModels(provider.id),
+    onSuccess: (result) => {
+      setRefreshError(null);
+      setRefreshed(result);
+      queryClient.invalidateQueries({ queryKey: ["model"] });
+    },
+    onError: (error) => {
+      setRefreshed(null);
+      setRefreshError(error.message);
+    },
+  });
+  const addListed = useMutation({
+    mutationFn: (id: string) => {
+      const named = refreshed?.provider.chosen ?? provider.chosen;
+      const input: ProviderInput = {
+        models: [
+          ...new Set([...(named ?? provider.models.map((m) => m.id)), id]),
+        ],
+      };
+      return provider.shared
+        ? adminApi.updateProvider(provider.id, input)
+        : pim.updateProvider(provider.id, input);
+    },
+    onSuccess: ({ provider: saved }, id) => {
+      setRefreshed(
+        (r) =>
+          r && {
+            ...r,
+            provider: saved,
+            available: r.available.filter((a) => a !== id),
+          },
+      );
+      queryClient.invalidateQueries({ queryKey: ["model"] });
+      toast.success(t("providerSaved", { name: saved.name }));
     },
     onError: (error) => toast.error(error.message),
   });
@@ -182,6 +226,16 @@ function CustomProvider({
             <Button
               variant="ghost"
               size="sm"
+              onClick={() => refresh.mutate()}
+              disabled={refresh.isPending}
+              aria-label={t("refreshModelsNamed", { name: provider.name })}
+            >
+              {refresh.isPending && <Loader2 className="size-4 animate-spin" />}
+              {t("refreshModels")}
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
               onClick={() => setEditing(true)}
               aria-label={t("editProviderNamed", { name: provider.name })}
             >
@@ -206,6 +260,38 @@ function CustomProvider({
           provider={provider}
           onDone={() => setEditing(false)}
         />
+      )}
+      {refreshError && (
+        <p role="alert" className="mt-3 text-sm text-destructive">
+          {t("refreshModelsFailed", { error: refreshError })}
+        </p>
+      )}
+      {refreshed && (
+        <div className="mt-3 text-sm" role="status">
+          <p className="text-muted-foreground">
+            {t(
+              refreshed.available.length
+                ? "refreshModelsNew"
+                : "refreshModelsNone",
+              { url: refreshed.url },
+            )}
+          </p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            {refreshed.available.map((id) => (
+              <Button
+                key={id}
+                variant="outline"
+                size="sm"
+                onClick={() => addListed.mutate(id)}
+                disabled={addListed.isPending}
+                aria-label={t("addNamedModel", { id })}
+              >
+                <Plus className="size-4" />
+                {id}
+              </Button>
+            ))}
+          </div>
+        </div>
       )}
       {addingModel && !editing && (
         <AddModelForm

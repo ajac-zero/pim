@@ -38,20 +38,52 @@ const count = (value: unknown): number | undefined => (Number.isSafeInteger(valu
  * The models the server at `url` lists, with what it says of each (v1's `describe`): OpenRouter's `context_length` and `top_provider`, vLLM's `max_model_len`, llama.cpp's `n_ctx`,
  * `max_completion_tokens` and `max_output_tokens` as gateways give them, Gemini's `outputTokenLimit`, the input modalities and the supported parameters. Throws with why it could not.
  */
-async function listed(url: string, key: string | undefined, api: unknown, fetcher: typeof fetch): Promise<ListedModel[]> {
-	let response: Response;
-	try {
-		// Anthropic's Messages API lists models under `/v1` and takes its key as `x-api-key`; proxies often take only one of the two headers.
-		const headers: Record<string, string> = key ? { authorization: `Bearer ${key}`, ...(api ? { "x-api-key": key } : {}) } : {};
-		if (api) headers["anthropic-version"] = "2023-06-01";
-		response = await fetcher(api ? `${url}/v1/models` : `${url}/models`, { headers, signal: AbortSignal.timeout(10_000) });
-	} catch (error) {
-		throw new Error(error instanceof Error && error.name === "TimeoutError" ? "it didn't answer in 10 seconds" : "it couldn't be reached");
+async function listed(url: string, key: string | undefined, api: unknown, fetcher: typeof fetch): Promise<{ models: ListedModel[]; url: string }> {
+	// Anthropic's Messages API lists models under `/v1` and takes its key as `x-api-key`; proxies often take only one of the two headers.
+	const headers: Record<string, string> = key ? { authorization: `Bearer ${key}`, ...(api ? { "x-api-key": key } : {}) } : {};
+	if (api) headers["anthropic-version"] = "2023-06-01";
+	// A gateway often serves the list at its root while the endpoint sits under a path, so the address is tried, then each parent of it, at most `MAX_ATTEMPTS` in all and 10 seconds together.
+	const candidates = discoveryUrls(url, !!api);
+	const signal = AbortSignal.timeout(10_000);
+	const tried: string[] = [];
+	for (const candidate of candidates) {
+		let why: string;
+		try {
+			const response = await fetcher(candidate, { headers, signal });
+			if (!response.ok) why = `it answered ${response.status}`;
+			else {
+				const body: unknown = await response.json().catch(() => null);
+				const data = isObject(body) && Array.isArray(body.data) ? body.data : Array.isArray(body) ? body : null;
+				if (data) return { models: describe(data), url: candidate };
+				why = "its answer isn't a list of models";
+			}
+		} catch (error) {
+			why = signal.aborted || (error instanceof Error && error.name === "TimeoutError") ? "it didn't answer in 10 seconds" : "it couldn't be reached";
+		}
+		tried.push(`${candidate}: ${why}`);
+		if (signal.aborted) break;
 	}
-	if (!response.ok) throw new Error(`it answered ${response.status}`);
-	const body: unknown = await response.json().catch(() => null);
-	const data = isObject(body) && Array.isArray(body.data) ? body.data : Array.isArray(body) ? body : null;
-	if (!data) throw new Error("its answer isn't a list of models");
+	throw new Error(tried.join("; "));
+}
+
+const MAX_ATTEMPTS = 4;
+
+/** Where a server's model list may be: for Anthropic's API `<url>/v1/models` and the same under each parent path; otherwise `<url>/models`, then the origin's `/v1/models`. */
+function discoveryUrls(url: string, anthropic: boolean): string[] {
+	const found: string[] = [];
+	if (anthropic) {
+		let base = url.replace(/\/+$/, "");
+		const origin = new URL(url).origin;
+		for (;;) {
+			found.push(`${base}/v1/models`);
+			if (base === origin || base.length <= origin.length) break;
+			base = base.slice(0, base.lastIndexOf("/"));
+		}
+	} else found.push(`${url}/models`, `${new URL(url).origin}/v1/models`);
+	return [...new Set(found)].slice(0, MAX_ATTEMPTS);
+}
+
+function describe(data: unknown[]): ListedModel[] {
 	return data.filter((entry): entry is Record<string, unknown> & { id: string } => isObject(entry) && typeof entry.id === "string" && MODEL_ID.test(entry.id)).map((entry) => {
 		const modalities = Array.isArray(isObject(entry.architecture) ? entry.architecture.input_modalities : undefined) ? ((entry.architecture as Record<string, unknown>).input_modalities as unknown[]) : undefined;
 		const parameters = Array.isArray(entry.supported_parameters) ? entry.supported_parameters : undefined;
@@ -142,7 +174,7 @@ export async function toServiceInput(body: Record<string, any>, existing?: Provi
 		let found: ListedModel[] | null = null;
 		let unlisted = "";
 		try {
-			found = await listed(address, key, api === "anthropic-messages" ? api : undefined, fetcher);
+			found = (await listed(address, key, api === "anthropic-messages" ? api : undefined, fetcher)).models;
 		} catch (error) {
 			unlisted = error instanceof Error ? error.message : String(error);
 		}
@@ -163,6 +195,25 @@ export async function toServiceInput(body: Record<string, any>, existing?: Provi
 		config.overrides = Object.fromEntries(models.flatMap((m) => (overrides[m.id] ? [[m.id, overrides[m.id]]] : [])));
 	}
 	return { kind: builtin ?? "openai_compatible", ...(body.name ? { name: String(body.name) } : {}), ...(given === undefined ? {} : { apiKey: given === "" ? null : given }), config };
+}
+
+/**
+ * Asks a custom endpoint's server for its models again. The models already stored get what the server now says of them (a person's overrides stay on top, and a model the server no longer lists is kept as it was),
+ * and the ids the server lists that are not stored are returned as `available`, for the person to add; none is added or removed here. `url` is the address that answered.
+ */
+export async function refreshModels(existing: Provider, key: string | null | undefined, fetcher: typeof fetch = fetch): Promise<{ config: Record<string, unknown>; available: string[]; url: string }> {
+	const address = (existing.config.baseUrl ?? existing.config.url) as string | undefined;
+	if (existing.config.builtin || typeof address !== "string") throw new BadRequestError("Only a custom endpoint's models can be refreshed");
+	let found: { models: ListedModel[]; url: string };
+	try {
+		found = await listed(address, key ?? undefined, existing.config.api === "anthropic-messages" ? "anthropic-messages" : undefined, fetcher);
+	} catch (error) {
+		throw new BadRequestError(`Pim couldn't read the models at ${address}: ${error instanceof Error ? error.message : String(error)}`);
+	}
+	const overrides = (existing.config.overrides ?? {}) as Overrides;
+	const before = (existing.config.models ?? []) as ListedModel[];
+	const models = before.map((old) => ({ ...(found.models.find((m) => m.id === old.id) ?? old), ...overrides[old.id] }));
+	return { config: { ...existing.config, models }, available: found.models.filter((m) => !before.some((old) => old.id === m.id)).map((m) => m.id), url: found.url };
 }
 
 /** What the card shows of a provider: never its key. */

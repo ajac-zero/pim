@@ -1,6 +1,6 @@
 import { BadRequestError, NotFoundError } from "../errors.ts";
 import { clearCookie, ok, type Reply, route, type Route, sessionCookieName } from "../http.ts";
-import { isWebProviderInput, toServiceInput, toWebProvider } from "../web-providers.ts";
+import { isWebProviderInput, refreshModels, toServiceInput, toWebProvider } from "../web-providers.ts";
 
 const int = (v: string | null, fallback: number) => (v === null ? fallback : Number.isInteger(Number(v)) ? Number(v) : fallback);
 const none = (): Reply => ({ status: 200, body: { ok: true } });
@@ -120,6 +120,15 @@ export const domainRoutes: Route[] = [
 		const existing = (await app.providers.list(p)).find((x) => x.id === params[0]!);
 		const input = await toServiceInput(body, existing, { existingKey: existing?.hasKey ? await app.providers.reveal(p.ownerId, params[0]!).catch(() => null) : null });
 		return ok({ provider: toWebProvider(await app.providers.update(p, params[0]!, { ...(input.name ? { name: input.name } : {}), config: input.config, ...(input.apiKey !== undefined ? { apiKey: input.apiKey } : {}) })) });
+	}),
+	// Reads the endpoint's models again: what is stored of the chosen ones is brought up to date, and the ids not chosen yet are answered as `available`.
+	route("POST", "/api/providers/:id/refresh-models", async ({ app, principal, params }) => {
+		const p = await principal();
+		const existing = (await app.providers.list(p)).find((x) => x.id === params[0]!);
+		if (!existing) throw new NotFoundError("No such provider");
+		const key = existing.hasKey ? await app.providers.reveal(p.ownerId, existing.id).catch(() => null) : null;
+		const { config, available, url } = await refreshModels(existing, key);
+		return ok({ provider: toWebProvider(await app.providers.update(p, existing.id, { config })), available, url });
 	}),
 	route("DELETE", "/api/providers/:id", async ({ app, principal, params }) => (await app.providers.remove(await principal(), params[0]!), none())),
 	route("GET", "/api/model/fallbacks", async ({ app, principal }) => ok({ models: await app.providers.fallbacks(await principal()) })),

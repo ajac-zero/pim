@@ -74,11 +74,11 @@ describe("the start of a request when memory changes", () => {
 	});
 
 	it("says what changed back to what the chat began with, because the model has been told otherwise since", () => {
-		const out = updates(request([first, ...history, memoryV2, ...round(2), system({ memory: first.sections.memory })]));
+		const out = updates(request([first, ...history, memoryV2, ...round(2), system({ memory: first.sections.memory! })]));
 		expect(out).toHaveLength(2);
 		expect(out[1].content).toContain("- [1] likes tea\n</memory>");
 		// Setting a section to the text already shown tells nothing.
-		expect(updates(request([first, ...history, system({ memory: first.sections.memory })]))).toHaveLength(0);
+		expect(updates(request([first, ...history, system({ memory: first.sections.memory! })]))).toHaveLength(0);
 	});
 
 	it("keeps an update from coming between a tool call and its result", () => {

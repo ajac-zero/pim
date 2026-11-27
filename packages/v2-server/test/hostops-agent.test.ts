@@ -1,6 +1,6 @@
 // The admin's majordomo on host operations, end to end: a Gate and a Runner (separate process roles) over a real PostgreSQL and NATS, the real `sandbox-manager/hostopsd` daemon dialling out to the
 // Gate with its own credential, and the model scripted. A command waits in Approvals and runs on the host only after the person approves exactly it, as the daemon's unprivileged user; a declined one
-// never reaches the queue; another agent of the admin is refused and the refusal is kept; and a member's partition is not offered the tools at all.
+// never reaches the queue; another agent of the admin is not offered the tools; and a member's partition is not offered the tools at all.
 import { type ChildProcess, spawn } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
@@ -123,7 +123,7 @@ real("host operations through the admin's majordomo", () => {
 		expect((await d.stack.admin.query("SELECT count(*)::int AS n FROM pim_app.approvals WHERE tool LIKE 'hostops_%'")).rows[0].n).toBe(before);
 	}, 180_000);
 
-	it("queues nothing when the person declines, and refuses an agent that is not the majordomo", async () => {
+	it("queues nothing when the person declines, and does not offer another agent of the admin the tools", async () => {
 		const queued = async () => (await d.stack.admin.query("SELECT count(*)::int AS n FROM pim_app.hostops_ops")).rows[0].n as number;
 		const before = await queued();
 		const end = await ask(web, chatId, ownerId, "restart the gate", toolUse(fauxToolCall("hostops_restart", { service: "gate" })));
@@ -134,14 +134,13 @@ real("host operations through the admin's majordomo", () => {
 		expect((await resultsOf(chatId, ownerId, "hostops_restart"))[0]).toMatch(/did not approve/);
 		expect(await queued()).toBe(before);
 
-		// Another agent of the admin's has the tools in its partition, but the service refuses it, before anyone is asked, and keeps the refusal.
+		// Another agent of the admin's has the tools in its partition but is not offered them, so a call to one is answered by the harness and reaches nothing (the service would refuse it too, and keep the refusal).
 		const agent = (await web.call("POST", "/api/agents", { name: "Helper", instructions: "" })).json;
 		const other = (await web.call("POST", "/api/sessions", { title: "Other", agentId: agent.id })).json.id;
 		const end2 = await ask(web, other, ownerId, "look at the host", toolUse(fauxToolCall("hostops_stats", {})));
 		await end2();
-		expect((await resultsOf(other, ownerId, "hostops_stats"))[0]).toMatch(/Only the admin's majordomo/);
+		expect((await resultsOf(other, ownerId, "hostops_stats"))[0]).toMatch(/Tool hostops_stats is not available/);
 		expect((await d.stack.admin.query("SELECT count(*)::int AS n FROM pim_app.approvals WHERE state = 'waiting'")).rows[0].n).toBe(0);
-		expect((await audit()).some((r) => r.action === "request" && r.outcome === "rejected" && r.actorKind === "agent")).toBe(true);
 	}, 180_000);
 
 	it("does not offer a member's agents the tools at all", async () => {

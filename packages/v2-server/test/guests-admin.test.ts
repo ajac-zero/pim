@@ -10,6 +10,9 @@ import { connect as connectApp } from "@pim/v2-app/db";
 import { MemoryObjectStore } from "@pim/v2-app/objects";
 import type { Process } from "../src/main.ts";
 import { readTranscript, waitFor } from "../../v2-runtime/test/support/rig.ts";
+import { ADMIN_TOOL_NAMES, operatorRefusal } from "../src/admin-tools.ts";
+import { chatToolLimits } from "../src/agent-tools.ts";
+import { HOSTOPS_TOOL_NAMES } from "../src/hostops/tools.ts";
 import { Client } from "./support/client.ts";
 import { type Deployment, base, start, startS3 } from "./support/processes.ts";
 import { createStack, describeWith, freePort, hasNats, startNats, sentAndAnswered } from "./support/stack.ts";
@@ -385,10 +388,10 @@ real("guests, circles and the admin's majordomo", () => {
 
 		// Neither a member's majordomo nor another agent of the admin's has them, and the last admin cannot be suspended through them.
 		await send(bob, "run the pim", false, toolUse(fauxToolCall("admin_read", { path: "/api/admin/stats" })));
-		expect((await results(bob, "admin_read")).at(-1)).toMatch(/Only the admin/);
+		expect((await results(bob, "admin_read")).at(-1)).toMatch(/Tool admin_read is not available/);
 		const other: Person = { ...host, chat: (await host.web.call("POST", "/api/sessions", { title: "Helper", agentId })).json.id };
 		await send(other, "run the pim", false, toolUse(fauxToolCall("admin_read", { path: "/api/admin/stats" })));
-		expect((await results(other, "admin_read")).at(-1)).toMatch(/Only your majordomo/);
+		expect((await results(other, "admin_read")).at(-1)).toMatch(/Tool admin_read is not available/);
 		await send(host, "suspend me", true, toolUse(fauxToolCall("admin_write_approved", { method: "POST", path: "/api/admin/accounts/anibal/suspend" })));
 		const self = await waitFor("an approval to suspend", async () => (await d.stack.admin.query("SELECT id FROM pim_app.approvals WHERE tool = 'admin:write' AND state = 'waiting'")).rows[0], 60_000);
 		await host.web.call("POST", `/api/approvals/${self.id}/approve`, {});
@@ -444,10 +447,10 @@ real("guests, circles and the admin's majordomo", () => {
 		expect(JSON.parse((await results(host, "pim_health")).at(-1)!)).toMatchObject({ status: 200, body: { counts: { active_accounts: expect.any(Number) } } });
 		expect(JSON.parse((await results(host, "pim_diagnostics")).at(-1)!).status).toBe(200);
 
-		const memory = (await host.web.call("POST", "/api/memory/log", { scope: "agent-sail", title: "Sail", body: "Buy a boat" })).json;
+		const memory = (await host.web.call("POST", "/api/memory/log", { scope: "private", text: "Sail: buy a boat" })).json;
 		const inEveryone = async () => JSON.stringify((await host.web.call("GET", "/api/memory/log?scope=everyone")).json).includes("Sail");
 		await send(host, "look at the app", false,
-			toolUse(fauxToolCall("ui_routes", {})), toolUse(fauxToolCall("ui_read", { path: "/api/memory/log?scope=agent-sail" })), toolUse(fauxToolCall("ui_read", { path: "/api/account/export" })), toolUse(fauxToolCall("ui_read", { path: "/api/admin/stats" })),
+			toolUse(fauxToolCall("ui_routes", {})), toolUse(fauxToolCall("ui_read", { path: "/api/memory/log?scope=private" })), toolUse(fauxToolCall("ui_read", { path: "/api/account/export" })), toolUse(fauxToolCall("ui_read", { path: "/api/admin/stats" })),
 			toolUse(fauxToolCall("ui_write", { method: "DELETE", path: `/api/memory/log/${memory.id}` })));
 		expect((await results(host, "ui_routes")).at(-1)).toContain('"class":"blocked"');
 		expect((await results(host, "ui_read"))[0]).toContain("Sail");
@@ -471,7 +474,54 @@ real("guests, circles and the admin's majordomo", () => {
 		expect(kept[2]).toMatchObject({ keys: ["scope"], status: 200 });
 		// A member's majordomo has none of them.
 		await send(bob, "use the app routes", false, toolUse(fauxToolCall("ui_read", { path: "/api/memory/log" })));
-		expect((await results(bob, "ui_read")).at(-1)).toMatch(/Only the admin/);
+		// The model is not offered the tool, and the harness refuses a call to one it was not.
+		expect((await results(bob, "ui_read")).at(-1)).toMatch(/Tool ui_read is not available/);
+	}, 240_000);
+
+	it("offers the deployment's tools only to the admin's majordomo and Pimbot, and the guest's tools only to a guest", async () => {
+		// The tools a request offers are what its system messages add and remove, in order.
+		const offeredTo = async (who: Person) => {
+			let offered: string[] = [];
+			await send(who, "what can you do?", false, ((ctx: { messages: { role: string; toolsAdded?: { name: string }[]; toolsRemoved?: { name: string }[] }[] }) => {
+				const tools = new Set<string>();
+				for (const m of ctx.messages) if (m.role === "system") for (const t of m.toolsAdded ?? []) tools.add(t.name);
+				for (const m of ctx.messages) if (m.role === "system") for (const t of m.toolsRemoved ?? []) tools.delete(t.name);
+				offered = [...tools];
+				return toolUse(fauxToolCall("current_time", {}));
+			}) as never);
+			return offered;
+		};
+		const deployment = [...ADMIN_TOOL_NAMES, ...HOSTOPS_TOOL_NAMES];
+		const pimbot = ((await host.web.call("GET", "/api/agents")).json.agents as { id: string; system: string | null }[]).find((a) => a.system === "pimbot")!;
+		const asPimbot: Person = { ...host, chat: (await host.web.call("POST", "/api/sessions", { title: "Tools", agentId: pimbot.id })).json.id };
+		const asHelper: Person = { ...host, chat: (await host.web.call("POST", "/api/sessions", { title: "Helper tools", agentId })).json.id };
+		const majordomo = await offeredTo(host);
+		const bots = await offeredTo(asPimbot);
+		const helper = await offeredTo(asHelper);
+		const member = await offeredTo(bob);
+		for (const kept of [majordomo, bots]) expect(kept).toEqual(expect.arrayContaining(["send_to_user", "note", ...deployment]));
+		// Another agent of the same admin, and a member's majordomo, keep everything else and none of the deployment's.
+		for (const other of [helper, member]) {
+			expect(other).toEqual(expect.arrayContaining(["send_to_user", "note", "fetch_url"]));
+			for (const name of deployment) expect(other).not.toContain(name);
+		}
+		// The guest's tools belong to a guest alone, and a guest's own agent has them as before.
+		for (const other of [majordomo, bots, helper, member]) for (const name of ["guest_tools", "guest_call"]) expect(other).not.toContain(name);
+		const hiddenFrom = async (who: Person) => (await chatToolLimits(app, who.ownerId, who.chat)).hidden;
+		expect(await hiddenFrom(guest)).not.toEqual(expect.arrayContaining(["guest_tools"]));
+		expect(await hiddenFrom(guest)).toEqual(expect.arrayContaining(deployment));
+		expect(await hiddenFrom(host)).toEqual(expect.arrayContaining(["guest_tools", "guest_call"]));
+		// The list a chat is offered does not change from one message to the next.
+		expect(await offeredTo(asHelper)).toEqual(helper);
+		// The tools still decide for themselves who may call them, for a call that reaches them some other way.
+		const agentOf = (owner: string, id: string) => ({ kind: "agent", ownerId: owner, agentId: id }) as never;
+		expect(await operatorRefusal(app, host.ownerId, agentOf(host.ownerId, "pim"))).toBeNull();
+		expect(await operatorRefusal(app, host.ownerId, agentOf(host.ownerId, pimbot.id))).toBeNull();
+		expect(await operatorRefusal(app, host.ownerId, agentOf(host.ownerId, agentId))).toMatch(/Only your majordomo or Pimbot/);
+		expect(await operatorRefusal(app, bob.ownerId, agentOf(bob.ownerId, "pim"))).toMatch(/Only the admin/);
+		// A call to a tool it was not offered is refused.
+		await send(asHelper, "try it anyway", false, toolUse(fauxToolCall("pim_health", {})));
+		expect((await results(asHelper, "pim_health")).at(-1)).toMatch(/Tool pim_health is not available/);
 	}, 240_000);
 
 	it("has a development sign-in only where PIM_DEV_SIGN_IN is on, which makes the account, gives it the default agent and joins a bot's guests", async () => {

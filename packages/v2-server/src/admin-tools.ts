@@ -96,21 +96,25 @@ export type AdminToolsDeps = {
 	runtime: { read<R = unknown>(ownerId: string, text: string, values?: unknown[]): Promise<{ rows: R[] }> };
 };
 
+/** The majordomo or Pimbot of an active admin: the agent a chat answers as when none is chosen, or the one the person's settings name as their majordomo (or v1 marked as the default), or the admin's Pimbot (not another agent, not a delegate), on an account that is an admin and active. */
+export async function operatorRefusal(app: App, ownerId: string, p: Principal): Promise<string | null> {
+	const operators = p.kind === "agent" && p.agentId !== "pim"
+		? await app.db.owner(ownerId, async (tx) => (await tx.query("SELECT pim_app.majordomo_id() AS majordomo, (SELECT value #>> '{}' FROM pim_app.owner_settings WHERE key = 'pimbot') AS pimbot")).rows[0] as { majordomo: string | null; pimbot: string | null })
+		: undefined;
+	if (p.kind !== "agent" || (p.agentId !== "pim" && p.agentId !== operators?.majordomo && p.agentId !== operators?.pimbot)) return "Only your majordomo or Pimbot run the deployment: another agent, or a delegate, may not.";
+	const account = await app.identity.authz.account(ownerId);
+	if (!account || account.status !== "active" || account.role !== "admin") return "Only the admin of this Pim runs it.";
+	return null;
+}
+
+/** The tools that only the admin's majordomo or Pimbot are offered: the admin API, the app's own routes, and what looks into how the deployment runs. */
+export const ADMIN_TOOL_NAMES = ["admin_read", "admin_write", "admin_write_approved", "admin_audit", "pim_diagnostics", "pim_health", "ui_routes", "ui_read", "ui_write", "ui_write_destructive", "ui_audit"] as const;
+
 export function adminTools(deps: AdminToolsDeps): ToolRegistration[] {
 	const { ownerId } = deps;
 	const admin: Principal = { kind: "user", ownerId: OwnerId.parse(ownerId), role: "admin", sessionId: "majordomo" };
 
-	/** The majordomo or Pimbot of an active admin: the agent a chat answers as when none is chosen, or the one the person's settings name as their majordomo (or v1 marked as the default), or the admin's Pimbot (not another agent, not a delegate), on an account that is an admin and active. */
-	const allowed = async (app: App, chat: string | null): Promise<string | null> => {
-		const p = await deps.principalOf(app, chat);
-		const operators = p.kind === "agent" && p.agentId !== "pim"
-			? await app.db.owner(ownerId, async (tx) => (await tx.query("SELECT pim_app.majordomo_id() AS majordomo, (SELECT value #>> '{}' FROM pim_app.owner_settings WHERE key = 'pimbot') AS pimbot")).rows[0] as { majordomo: string | null; pimbot: string | null })
-			: undefined;
-		if (p.kind !== "agent" || (p.agentId !== "pim" && p.agentId !== operators?.majordomo && p.agentId !== operators?.pimbot)) return "Only your majordomo or Pimbot run the deployment: another agent, or a delegate, may not.";
-		const account = await app.identity.authz.account(ownerId);
-		if (!account || account.status !== "active" || account.role !== "admin") return "Only the admin of this Pim runs it.";
-		return null;
-	};
+	const allowed = async (app: App, chat: string | null): Promise<string | null> => operatorRefusal(app, ownerId, await deps.principalOf(app, chat));
 	const audit = (app: App, tool: string, method: string, path: string, decision: string, keys: string[] = [], status?: number) =>
 		app.db.owner(ownerId, (tx) => tx.query("INSERT INTO pim_app.audit_log (owner_id, actor, action, resource, decision, detail) VALUES ($1,'agent:majordomo',$2,$3,$4,$5)", [ownerId, tool, JSON.stringify({ method, path }), decision, JSON.stringify({ keys, ...(status !== undefined ? { status } : {}) })])).catch(() => undefined);
 

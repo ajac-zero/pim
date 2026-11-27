@@ -40,7 +40,7 @@ import { chatgptCredentialStore, chatgptProvider, type ChatGPTRunnerOptions, typ
 import type { ForgeParts } from "./forge-assembly.ts";
 import { mentionedAgents } from "./rooms.ts";
 import { describeGoal } from "./goal-tools.ts";
-import { withStablePrefix } from "./stable-prefix.ts";
+import { markHistoryBeforeUpdate, withStablePrefix } from "./stable-prefix.ts";
 import { agentsSection, ASSISTANT_INSTRUCTIONS, delegatesSection, identity, majordomoRole, MAX_TASK_DEPTH, pimbotRole, NO_CODING_SANDBOX_LINE, startedBySection, type Roster } from "./agent-prompts.ts";
 import { createFingerprinter } from "./request-fingerprint.ts";
 import { createFailover, failureKind, failureMessage } from "./provider-failover.ts";
@@ -297,7 +297,16 @@ const asBlocks = (content: string | any[]) => (typeof content === "string" ? [{ 
 
 /** A provider whose requests are built from a history with `withoutEmptyAssistants` applied, whichever API it speaks. */
 function withCleanHistory(provider: Provider): Provider {
-	const wrap = (stream: (model: any, context: any, options?: any) => any) => (model: any, context: any, options?: any) => stream(model, withoutEmptyAssistants(withStablePrefix(context)), options);
+	const wrap = (stream: (model: any, context: any, options?: any) => any) => (model: any, context: any, options?: any) => {
+		const stable = withStablePrefix(context);
+		// A request that ends in the context update has its cache breakpoint put on the end of the history instead (`markHistoryBeforeUpdate`), whichever Anthropic endpoint it goes to.
+		const update = stable !== context && stable.messages.length > context.messages.length && model.api === "anthropic-messages";
+		const marked = update ? { ...options, onPayload: async (body: any, m: unknown) => {
+				const moved = markHistoryBeforeUpdate(body);
+				return (await options?.onPayload?.(moved ?? body, m)) ?? moved;
+			} } : options;
+		return stream(model, withoutEmptyAssistants(stable), marked);
+	};
 	return new Proxy(provider, {
 		get(target, property) {
 			const value = Reflect.get(target, property, target) as unknown;

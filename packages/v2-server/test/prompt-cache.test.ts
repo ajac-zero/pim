@@ -313,14 +313,32 @@ describe("the cache across the tool rounds of one chat", () => {
 			for (const [i, call] of calls.entries()) if (i > 0) expect(call.read).toBe(calls[i - 1]!.marked);
 		});
 
-		it(`reads only the tools and the system prompt on ${provider}/${id} once a memory has changed`, async () => {
-			// This is the defect: the update that the stable prefix puts last is the only thing the request marks, and the next request has more history before its own copy of it.
+		it(`reads the earlier history on ${provider}/${id} when a memory has changed, as when nothing has`, async () => {
+			// The context update that the stable prefix puts last is never marked: the end of the history before it is, so each request's write is what the next one starts with.
 			const calls = await run(provider, id, [memoryV2]);
-			expect(JSON.stringify(calls[0]!.body.messages)).toContain("[Context update]");
-			for (const call of calls.slice(1)) expect(call.read).toBe(headOf(call.body));
-			// The traces say the same: the message breakpoint of each request is not among the earlier request's messages any more.
+			for (const [i, call] of calls.entries()) {
+				const wire = JSON.stringify(call.body.messages);
+				expect(wire).toContain("[Context update]");
+				expect(wire.indexOf('"cache_control"')).toBeLessThan(wire.indexOf("[Context update]"));
+				expect(call.body.messages.flatMap((m: any) => m.content).filter((b: any) => b.text?.startsWith("[Context update]") && b.cache_control)).toEqual([]);
+				expect(JSON.stringify(call.body).split('"cache_control"').length - 1).toBeLessThanOrEqual(4);
+				if (i > 0) expect(call.read).toBe(calls[i - 1]!.marked);
+			}
 			const [one, two] = calls;
-			expect(compareTraces(one!.trace, two!.trace)).toMatchObject({ firstChange: "messages", breakpoints: [{ stillThere: true }, { stillThere: true }, { in: "messages", stillThere: false }] });
+			// The whole history of the first request is the shared prefix, and its breakpoint lies on the second.
+			expect(compareTraces(one!.trace, two!.trace)).toMatchObject({ breakpoints: [{ stillThere: true }, { stillThere: true }, { in: "messages", stillThere: true }] });
+		});
+
+		it(`still reads it on ${provider}/${id} when the update itself changes between requests`, async () => {
+			const r = await rig(provider, id);
+			const cache = cacheModel();
+			const memoryV3 = system({ memory: tagged("memory", "- [1] likes tea\n- [3] has a dog") });
+			let before: ReturnType<typeof cache> | undefined;
+			for (const [n, patches] of [[1, [memoryV2]], [2, [memoryV2]], [3, [memoryV2, memoryV3]], [4, [memoryV2, memoryV3]]] as const) {
+				const now = cache((await r.send(chat(n, ...patches))).body);
+				if (before) expect(now.read).toBe(before.marked);
+				before = now;
+			}
 		});
 	}
 

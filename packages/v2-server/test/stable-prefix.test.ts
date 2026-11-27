@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { resolveTranscript } from "@earendil-works/pi-ai/utils/transcript";
 import type { Db as RuntimeDb } from "@pim/v2-runtime/db";
 import { createAgentHost } from "../src/agent-host.ts";
-import { withStablePrefix } from "../src/stable-prefix.ts";
+import { markHistoryBeforeUpdate, withStablePrefix } from "../src/stable-prefix.ts";
 
 const tool = { name: "send_to_user", description: "Say something.", parameters: { type: "object", properties: { text: { type: "string" } } } };
 const tagged = (key: string, text: string) => `<${key}>\n${text}\n</${key}>`;
@@ -83,5 +83,56 @@ describe("a request sent to an OpenAI-compatible endpoint", () => {
 		expect(JSON.stringify(two.messages.slice(0, one.messages.length))).toBe(JSON.stringify(one.messages));
 		expect(JSON.stringify(two.messages.slice(one.messages.length))).toContain("moved to Oslo");
 		expect(JSON.stringify(one)).not.toContain("moved to Oslo");
+	});
+});
+
+describe("the cache breakpoint of a request that ends in the context update", () => {
+	const marker = { type: "ephemeral" };
+	const update = { type: "text", text: "[Context update] These sections changed after the system prompt above was written. Each replaces", cache_control: marker };
+	const body = (messages: any[]) => ({ model: "m", messages });
+	const result = { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "sent", is_error: false }] };
+
+	it("moves from the update to the end of the history before it, and changes nothing else", () => {
+		const input = body([{ role: "user", content: "hi" }, { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "x", input: {} }] }, result, { role: "user", content: [update] }]);
+		const before = JSON.stringify(input);
+		const out = markHistoryBeforeUpdate(input);
+		expect(out.messages[2].content[0].cache_control).toEqual(marker);
+		expect(out.messages[3].content).toEqual([{ type: "text", text: update.text }]);
+		// The request the adapter built is left as it was, and the rest is shared.
+		expect(JSON.stringify(input)).toBe(before);
+		expect(out.messages[0]).toBe(input.messages[0]);
+		expect(JSON.stringify(out).split('"cache_control"').length - 1).toBe(1);
+	});
+
+	it("marks the earlier block of the same message when an update was joined to a message, and a string message becomes a block", () => {
+		const joined = markHistoryBeforeUpdate(body([{ role: "user", content: [{ type: "text", text: "a" }, update] }]));
+		expect(joined.messages[0].content).toEqual([{ type: "text", text: "a", cache_control: marker }, { type: "text", text: update.text }]);
+		const plain = markHistoryBeforeUpdate(body([{ role: "user", content: "hello" }, { role: "user", content: [update] }]));
+		expect(plain.messages[0].content).toEqual([{ type: "text", text: "hello", cache_control: marker }]);
+	});
+
+	it("leaves a request alone that has no update, no marker on it, or nothing before it that can carry one", () => {
+		expect(markHistoryBeforeUpdate(body([result]))).toBeUndefined();
+		expect(markHistoryBeforeUpdate(body([result, { role: "user", content: [{ type: "text", text: update.text }] }]))).toBeUndefined();
+		expect(markHistoryBeforeUpdate(body([{ role: "user", content: [update] }]))).toBeUndefined();
+		expect(markHistoryBeforeUpdate(body([{ role: "assistant", content: [{ type: "thinking", thinking: "t", signature: "s" }] }, { role: "user", content: [update] }]))).toBeUndefined();
+		expect(markHistoryBeforeUpdate({})).toBeUndefined();
+		expect(markHistoryBeforeUpdate(null)).toBeUndefined();
+	});
+
+	it("takes only the trailing update: text that merely begins like one is left alone, wherever it is", () => {
+		const real = { type: "text", text: "[Context update] These sections changed after the system prompt above was written. Each replaces", cache_control: marker };
+		// A person's message that begins with the same words, marked as the last block, is not the update.
+		expect(markHistoryBeforeUpdate(body([result, { role: "user", content: [{ type: "text", text: "[Context update] my own words", cache_control: marker }] }]))).toBeUndefined();
+		// The update must be the last block: one with something after it is not the trailing one.
+		expect(markHistoryBeforeUpdate(body([result, { role: "user", content: [real, { type: "text", text: "and then" }] }]))).toBeUndefined();
+		expect(markHistoryBeforeUpdate(body([result, { role: "user", content: [real] }]))).toBeDefined();
+	});
+
+	it("takes the last update when an earlier message happens to begin the same way", () => {
+		const earlier = { role: "user", content: [{ type: "text", text: "[Context update] typed by a person" }] };
+		const out = markHistoryBeforeUpdate(body([result, earlier, result, { role: "user", content: [update] }]));
+		expect(out.messages[2].content[0].cache_control).toEqual(marker);
+		expect(out.messages[1]).toBe(earlier);
 	});
 });
